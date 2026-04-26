@@ -35,6 +35,13 @@ if [[ -n "$HB_SRC" ]]; then
         exit 1
     fi
     echo ">> rsyncing $HB_SRC -> $HB_SRC_DIR"
+    # Reject any HB_SRC tree that itself has a `lapee-baremetal/'
+    # subtree. That subtree is the migration source — round-tripping
+    # it through the HB build container risks leaking operator
+    # secrets (`secureboot/*.key', `wifi.conf' with the PSK in
+    # plaintext) into a directory that gets mounted at /src and
+    # potentially redistributed in build artefacts. The HB checkout
+    # consumed by `rebar3 as lapee release' should be plain HB.
     rsync -a \
         --exclude='_build/' --exclude='.git/' \
         --exclude='logs/' --exclude='metrics/' \
@@ -45,9 +52,7 @@ if [[ -n "$HB_SRC" ]]; then
         --exclude='native/lib/secp256k1/build/' \
         --exclude='*.o' --exclude='*.so' --exclude='*.dylib' \
         --exclude='*.cargo/' \
-        --exclude='lapee-baremetal/build-hyperbeam/' \
-        --exclude='lapee-baremetal/work/' \
-        --exclude='lapee-baremetal/out/' \
+        --exclude='lapee-baremetal/' \
         "$HB_SRC/" "$HB_SRC_DIR/"
     # Initialise the secp256k1 submodule against the source so
     # the build container sees a populated tree (the rebar3
