@@ -43,7 +43,21 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO="$(cd "$ROOT/.." && pwd)"
+# REPO points at a HyperBEAM checkout for `rebar3 as test compile'
+# + the dev_tpm_interpret module's compiled .beam files. Pre-
+# migration the lapee-baremetal/ tree lived under HB and `$ROOT/..'
+# was that HB root; in the standalone lapee repo, the HB clone we
+# need is `build-hyperbeam/src-edge' (populated by `make hb-fetch').
+# Allow REPO=path override for operators iterating on a sibling
+# HB worktree. Bail loudly if no rebar.config is reachable.
+REPO="${REPO:-$ROOT/build-hyperbeam/src-edge}"
+if [[ ! -f "$REPO/rebar.config" ]]; then
+    echo "interpret-local-capture: REPO=$REPO has no rebar.config." >&2
+    echo "Either run 'make hb-fetch' to populate" \
+         "$ROOT/build-hyperbeam/src-edge,"                          >&2
+    echo "or set REPO=path/to/HyperBEAM and re-run."                >&2
+    exit 1
+fi
 
 LABEL="Local capture"
 IMA_LOG=""

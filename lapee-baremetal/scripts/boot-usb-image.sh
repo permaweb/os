@@ -39,10 +39,33 @@ done
 
 [[ -f "$IMG" ]] || { echo "no $IMG (run: make hb-usb-image)" >&2; exit 1; }
 
-OVMF_CODE=/opt/homebrew/opt/qemu/share/qemu/edk2-x86_64-code.fd
-OVMF_VARS_TEMPLATE=/opt/homebrew/opt/qemu/share/qemu/edk2-i386-vars.fd
+# OVMF firmware is shipped by the host's QEMU package. The path
+# varies across distros + Homebrew prefixes; search the usual
+# spots and let the operator override by exporting
+# OVMF_CODE / OVMF_VARS_TEMPLATE before running.
+find_ovmf() {
+    local _name=$1; shift
+    for _p in "$@"; do
+        [[ -f "$_p" ]] && { echo "$_p"; return 0; }
+    done
+    return 1
+}
+OVMF_CODE=${OVMF_CODE:-$(find_ovmf code \
+    /opt/homebrew/opt/qemu/share/qemu/edk2-x86_64-code.fd \
+    /usr/local/share/qemu/edk2-x86_64-code.fd \
+    /usr/share/qemu/edk2-x86_64-code.fd \
+    /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/edk2/x64/OVMF_CODE.fd) || true}
+OVMF_VARS_TEMPLATE=${OVMF_VARS_TEMPLATE:-$(find_ovmf vars \
+    /opt/homebrew/opt/qemu/share/qemu/edk2-i386-vars.fd \
+    /usr/local/share/qemu/edk2-i386-vars.fd \
+    /usr/share/qemu/edk2-i386-vars.fd \
+    /usr/share/OVMF/OVMF_VARS_4M.fd \
+    /usr/share/OVMF/OVMF_VARS.fd \
+    /usr/share/edk2/x64/OVMF_VARS.fd) || true}
 for f in "$OVMF_CODE" "$OVMF_VARS_TEMPLATE"; do
-    [[ -f "$f" ]] || { echo "missing OVMF firmware: $f" >&2; exit 1; }
+    [[ -f "$f" ]] || { echo "missing OVMF firmware (set OVMF_CODE/OVMF_VARS_TEMPLATE if installed at a non-standard path): $f" >&2; exit 1; }
 done
 
 # Scratch copies so we don't mutate the source image or NVRAM.

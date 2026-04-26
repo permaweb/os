@@ -26,8 +26,12 @@ help:
 
 all: baremetal paper
 
+# Bare-metal: run the full production chain in lapee-baremetal.
+# `make -C lapee-baremetal' alone would invoke `help' (the first
+# target there) and exit 0 without building anything — silently
+# misleading. Be explicit.
 baremetal:
-	$(MAKE) -C lapee-baremetal
+	$(MAKE) -C lapee-baremetal all
 
 paper:
 	$(MAKE) -C lapee-paper

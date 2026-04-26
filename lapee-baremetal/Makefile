@@ -102,13 +102,19 @@ export DOCKER_PLATFORM
 
 # ----- HyperBEAM source provisioning --------------------------
 # `make hb-fetch' clones HB at HB_COMMIT into HB_SRC_DIR. Set
-# HB_SRC=path to use an existing local checkout instead.
+# HB_SRC=path to rsync from an existing local checkout instead.
+#
+# HB_COMMIT pin: a specific 40-char SHA so a fresh build six
+# months from now produces the same release as today's. Leaving
+# this on a branch ref (e.g. `edge') reintroduces the floating-
+# tag class of failure this repo was set up to avoid. Bump the
+# pin deliberately; never leave it auto-tracking a branch.
 HB_REPO    ?= https://github.com/permaweb/HyperBEAM.git
 HB_COMMIT  ?= edge
 HB_SRC_DIR  = build-hyperbeam/src-edge
 export HB_REPO HB_COMMIT HB_SRC_DIR
 
-.PHONY: help toolchain builders hb-fetch \
+.PHONY: help all toolchain builders hb-fetch \
         kernel buildroot buildroot-shell buildroot-clean \
         hb-release hb-initramfs hb-usb-image hb-usb-write \
         hb-usb-qemu hb-usb-qemu-gui hb-wifi-apply hb-sb-apply \
@@ -117,6 +123,12 @@ export HB_REPO HB_COMMIT HB_SRC_DIR
 help:
 	@awk '/^# =+$$/{flag=!flag;if(!flag)exit;next} \
 	      flag{sub(/^# ?/,"");print}' $(firstword $(MAKEFILE_LIST))
+
+# `make all' walks the full production chain, in the order the
+# README documents. Each step caches its result, so re-running is
+# fast unless an upstream dependency actually changed.
+all: toolchain hb-fetch kernel hb-release hb-initramfs hb-usb-image
+	@echo ">> work/lapee-usb.img is the bootable artefact."
 
 # ------------------------------------------------------------
 # Toolchain — pulls pinned upstream Docker bases + builds the

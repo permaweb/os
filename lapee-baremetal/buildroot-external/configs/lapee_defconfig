@@ -22,9 +22,13 @@ BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_X86_64_MUSL_STABLE=y
 # initramfs-hb/, not a Buildroot-provided PID 1.
 BR2_INIT_NONE=y
 
-# Kernel.
+# Kernel — pin to a specific 6.6 LTS point release. Bumping is
+# a one-line change; floating to LATEST_VERSION is not, because a
+# Buildroot 2024.02.x point release can silently swap in a newer
+# kernel and change PCR 11 (the UKI / kernel measurement).
 BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_LATEST_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.51"
 BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/linux-m1-fragment.config"
 BR2_LINUX_KERNEL_BZIMAGE=y

@@ -83,4 +83,18 @@ else
     git -C "$HB_SRC_DIR" submodule update --init --depth=10 \
         native/lib/secp256k1
 fi
-echo ">> HB source ready at $HB_SRC_DIR ($(git -C "$HB_SRC_DIR" rev-parse --short HEAD))"
+_full_sha=$(git -C "$HB_SRC_DIR" rev-parse HEAD)
+echo ">> HB source ready at $HB_SRC_DIR"
+echo "   commit: $_full_sha"
+# Stash the resolved SHA for downstream consumers (build script,
+# UKI metadata) so the attestation envelope can record exactly
+# which HB went into a given build.
+echo "$_full_sha" > "$HB_SRC_DIR/.lapee-hb-commit"
+case "$HB_COMMIT" in
+    *[!a-f0-9]*|"")
+        echo ""
+        echo "   NOTE: HB_COMMIT='$HB_COMMIT' is a branch / tag, not a"
+        echo "   40-char SHA. For a reproducible build, copy the commit"
+        echo "   above into the Makefile's HB_COMMIT pin and commit."
+        ;;
+esac
