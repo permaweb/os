@@ -4,8 +4,11 @@ build-kernel/
 build-hyperbeam/
 buildroot/
 
-# Attestation + key artefacts (per-run, not source).
-out/attestation.json
+# Attestation + key artefacts (per-run, not source). Use a wide
+# net so any per-run JSON / cert / key / scratch directory is
+# automatically gitignored; the explicit `!out/evidence/' rule
+# below opts specific committed evidence back in.
+out/*.json
 out/*.crt
 out/*.csr*
 out/*.key
@@ -13,6 +16,7 @@ out/*.pem
 out/*.srl
 out/local-capture/
 out/qemu-usb-test/
+out/qemu-evidence/
 
 # sb-setup.sh writes operator Secure Boot keys here; never commit.
 /secureboot/
