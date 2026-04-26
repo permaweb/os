@@ -1,0 +1,44 @@
+# Build outputs (regenerate via make).
+work/
+build-kernel/
+build-hyperbeam/
+buildroot/
+
+# Attestation + key artefacts (per-run, not source).
+out/attestation.json
+out/*.crt
+out/*.csr*
+out/*.key
+out/*.pem
+out/*.srl
+out/local-capture/
+out/qemu-usb-test/
+
+# sb-setup.sh writes operator Secure Boot keys here; never commit.
+/secureboot/
+
+# Operator WiFi credentials for the `make hb-wifi-apply' /
+# build-usb-image.sh auto-stage path. Never commit -- even if the
+# SSID is public, the PSK must never leave this host. The file is
+# operator-owned and per-machine; see README.md for the format.
+/wifi.conf
+
+# Misc.
+*.aux
+*.log
+*.out
+*.pyc
+__pycache__/
+
+# Evidence bundles under out/evidence/ are kept. Ordered LAST so
+# these un-ignore rules override the `*.log' etc. patterns above
+# (gitignore applies patterns in source order, last matching rule
+# wins). Add new evidence extensions here if the blanket ignores
+# above would swallow them.
+!out/evidence/
+!out/evidence/*.json
+!out/evidence/*.crt
+!out/evidence/*.flat
+!out/evidence/*.txt
+!out/evidence/*.md
+!out/evidence/*.log

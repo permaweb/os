@@ -1,0 +1,45 @@
+# lapee_defconfig — minimal bootable LapEE kernel build.
+#
+# Cross-toolchain: Bootlin's pre-built x86_64 musl stable.
+# Buildroot fetches the tarball on first build (~60 MB) and caches
+# it in the docker volume; no host gcc build, no manual install.
+#
+# Kernel: Buildroot's latest LTS (currently 6.6.x), x86_64
+# defconfig + the LapEE fragment merged on top.
+# Userspace: busybox (we only really use the kernel; the runtime
+# initramfs is assembled separately by build-initramfs-hb.sh).
+
+# Architecture
+BR2_x86_64=y
+BR2_x86_core2=y
+
+# Pre-built cross-toolchain (Bootlin).
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_X86_64_MUSL_STABLE=y
+
+# Init — the production initramfs uses a shell init from
+# initramfs-hb/, not a Buildroot-provided PID 1.
+BR2_INIT_NONE=y
+
+# Kernel.
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_LATEST_VERSION=y
+BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/linux-m1-fragment.config"
+BR2_LINUX_KERNEL_BZIMAGE=y
+BR2_LINUX_KERNEL_INSTALL_TARGET=y
+
+# Filesystem — cpio for the QEMU smoke-boot path; the production
+# initramfs is built by build-initramfs-hb.sh and is independent.
+BR2_TARGET_ROOTFS_CPIO=y
+BR2_TARGET_ROOTFS_CPIO_GZIP=y
+
+# Runtime userspace (only used by the smoke-boot rootfs).
+BR2_PACKAGE_BUSYBOX=y
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+
+# Build hygiene.
+BR2_REPRODUCIBLE=y
+BR2_ENABLE_DEBUG=n
+BR2_STRIP_strip=y

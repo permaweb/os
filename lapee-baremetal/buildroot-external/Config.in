@@ -1,0 +1,6 @@
+# LapEE BR2_EXTERNAL — no extra packages.
+#
+# The kernel + initramfs are assembled directly by the scripts in
+# ../scripts (kernel via Buildroot, initramfs via the
+# lapee-hyperbeam-builder image). Buildroot's only job is to
+# produce build-kernel/vmlinuz-lapee.

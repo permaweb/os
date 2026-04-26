@@ -1,0 +1,13 @@
+# Top-level gitignore. Subdirectories carry their own (lapee-
+# baremetal/, lapee-paper/) for build outputs. Keep this file
+# small — only patterns that span the whole repo.
+
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Editor / IDE.
+.idea/
+.vscode/
+.claude/
