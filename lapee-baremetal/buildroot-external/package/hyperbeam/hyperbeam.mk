@@ -50,8 +50,18 @@ endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
 # Cross-compile environment for rebar3 + cargo. rebar3's
-# port_specs honors CC/CFLAGS/LDFLAGS; rebar3_cargo passes the
+# port_specs honours CC/CFLAGS/LDFLAGS; rebar3_cargo passes the
 # full env through to cargo.
+#
+# Note on Rust: in REFERENCE=1 mode the build container is
+# linux/amd64, so the host arch == target arch (x86_64-linux-gnu)
+# and Cargo defaults to native compilation. We therefore do NOT
+# set CARGO_BUILD_TARGET — doing so makes Cargo output to
+# target/<triple>/release/ instead of target/release/, which
+# rebar3_cargo's post-build copy doesn't follow. In future when
+# we want fast-mode (linux/arm64 container) builds to also work,
+# we'll need a rebar3_cargo patch that respects the target
+# triple, or a custom post-cargo hook.
 HYPERBEAM_BUILD_ENV = \
 	PATH=$(HOST_DIR)/bin:/root/.cargo/bin:$(BR_PATH) \
 	CC="$(TARGET_CC)" \
@@ -59,10 +69,7 @@ HYPERBEAM_BUILD_ENV = \
 	AR="$(TARGET_AR)" \
 	CFLAGS="$(TARGET_CFLAGS) -I$(STAGING_DIR)/usr/include/tss2 -I$(STAGING_DIR)/usr/include" \
 	LDFLAGS="$(TARGET_LDFLAGS) -L$(STAGING_DIR)/usr/lib -Wl,-rpath,/usr/lib" \
-	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib" \
-	CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu \
-	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(TARGET_CC)" \
-	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$(STAGING_DIR)"
+	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib"
 
 define HYPERBEAM_BUILD_CMDS
 	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 as lapee compile
