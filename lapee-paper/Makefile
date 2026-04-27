@@ -1,46 +1,58 @@
-# Makefile for the LapEE paper.
+# Makefile for the LapEE paper + companion design notes.
 #
 # Requirements:
 #   - TeX Live 2020 or newer (tlmgr install: latex, latex-bin, tikz,
 #     biblatex, biber, amsmath, geometry, hyperref, booktabs, microtype,
-#     enumitem, xcolor).
+#     enumitem, xcolor, listings).
 #   - biber (shipped with modern TeX Live).
 #
 # Targets:
-#   make            Build main.pdf via pdflatex + biber + pdflatex + pdflatex.
-#   make quick      Build once with pdflatex (for fast iteration; bibliography
-#                   will be stale if refs changed).
+#   make            Build all PDFs (main + companion design notes).
+#   make main       Build main.pdf only.
+#   make notes      Build all *-note.tex / beam-tagged-mac.tex companions.
+#   make quick      Single-pass build of main.pdf (no biber).
 #   make clean      Remove intermediate build artifacts.
-#   make distclean  Also remove the output PDF.
-#   make watch      Rebuild on save (requires latexmk).
+#   make distclean  Also remove output PDFs.
+#   make watch      Rebuild main.pdf on save (requires latexmk).
 
-PAPER   := main
 TEX     := pdflatex
 TEXOPTS := -interaction=nonstopmode -halt-on-error -file-line-error
 BIBER   := biber
 LATEXMK := latexmk
 
-.PHONY: all quick clean distclean watch
+# main.tex uses biber for the bibliography; companion notes typically
+# don't carry references and build with a single pdflatex pass.
+NOTES   := beam-tagged-mac.pdf
+ALL_PDFS := main.pdf $(NOTES)
 
-all: $(PAPER).pdf
+.PHONY: all main notes quick clean distclean watch
 
-$(PAPER).pdf: $(PAPER).tex references.bib
-	$(TEX) $(TEXOPTS) $(PAPER).tex
-	$(BIBER) $(PAPER) || true
-	$(TEX) $(TEXOPTS) $(PAPER).tex
-	$(TEX) $(TEXOPTS) $(PAPER).tex
+all: $(ALL_PDFS)
+
+main: main.pdf
+
+notes: $(NOTES)
+
+main.pdf: main.tex references.bib
+	$(TEX) $(TEXOPTS) main.tex
+	$(BIBER) main || true
+	$(TEX) $(TEXOPTS) main.tex
+	$(TEX) $(TEXOPTS) main.tex
+
+# Companion design notes — single pdflatex pass, no biber.
+%.pdf: %.tex
+	$(TEX) $(TEXOPTS) $<
+	$(TEX) $(TEXOPTS) $<
 
 quick:
-	$(TEX) $(TEXOPTS) $(PAPER).tex
+	$(TEX) $(TEXOPTS) main.tex
 
 watch:
-	$(LATEXMK) -pdf -pvc -interaction=nonstopmode -halt-on-error $(PAPER).tex
+	$(LATEXMK) -pdf -pvc -interaction=nonstopmode -halt-on-error main.tex
 
 clean:
-	rm -f $(PAPER).aux $(PAPER).log $(PAPER).out $(PAPER).toc \
-	      $(PAPER).bbl $(PAPER).blg $(PAPER).bcf $(PAPER).run.xml \
-	      $(PAPER).fls $(PAPER).fdb_latexmk $(PAPER).synctex.gz \
-	      $(PAPER).nav $(PAPER).snm $(PAPER).vrb
+	rm -f *.aux *.log *.out *.toc *.bbl *.blg *.bcf *.run.xml \
+	      *.fls *.fdb_latexmk *.synctex.gz *.nav *.snm *.vrb
 
 distclean: clean
-	rm -f $(PAPER).pdf
+	rm -f $(ALL_PDFS)
