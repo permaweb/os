@@ -46,6 +46,8 @@ BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/rootfs-overlay"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.51"
+# (kernel pin matches Buildroot 2026.02.1's tested kernel set;
+# bump in lockstep with Buildroot if the LTS series shifts)
 BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/linux-m1-fragment.config"
 BR2_LINUX_KERNEL_BZIMAGE=y

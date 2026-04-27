@@ -29,9 +29,9 @@ DEFCONFIG=${DEFCONFIG:-lapee_defconfig}
 
 # Buildroot 2024.02 LTS sources. Pinned tarball URL + sha256 so
 # a corrupted/moved upstream is caught at fetch time.
-BUILDROOT_VER=${BUILDROOT_VER:-2024.02.7}
+BUILDROOT_VER=${BUILDROOT_VER:-2026.02.1}
 BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
-BUILDROOT_SHA256=${BUILDROOT_SHA256:-5032773427d97ccb08ef125f98e288c0042562e3340e07b5c3978dc8698d5d22}
+BUILDROOT_SHA256=${BUILDROOT_SHA256:-e296791039f806294a4e3e8d708d6b95631ca9fbca2e76a83d6058acaca459b5}
 
 # Ensure the docker volume exists. Wipe its config marker if the
 # defconfig file's mtime is newer than what the volume saw last
