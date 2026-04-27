@@ -33,6 +33,12 @@ BR2_TOOLCHAIN_BUILDROOT=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_TOOLCHAIN_BUILDROOT_VENDOR="lapee"
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# Kernel headers need to match (or trail) the running kernel
+# version. Without this, Buildroot defaults to 2.6.x headers,
+# silently rejects the glibc choice (glibc requires recent
+# headers), and falls back to uclibc.
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_KERNEL_HEADERS_LATEST=y
 
 # ----- init / rootfs structure -------------------------------
 # Init: the LapEE shell init lives in the rootfs overlay at
