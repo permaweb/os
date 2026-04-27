@@ -87,15 +87,18 @@ RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh \
     rm /tmp/rustup-init.sh
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Buildroot refuses to run as root; set up an unprivileged builder
-# user that the build-buildroot.sh wrapper switches into. The
-# rust toolchain installed under /root/.cargo above needs to be
-# accessible to `builder' too — add a per-user copy.
+# Buildroot refuses to run as root (host-tar's configure also
+# fails with "you should not run configure as root"); set up an
+# unprivileged builder user that the build-buildroot.sh wrapper
+# switches into. The Rust toolchain installed under /root/.cargo
+# above needs to be accessible to `builder' too — add a per-user
+# copy.
 RUN useradd -m -s /bin/bash builder && \
     mkdir -p /home/builder/.cargo /home/builder/.rustup && \
     cp -a /root/.cargo/bin /home/builder/.cargo/ && \
     cp -a /root/.rustup/. /home/builder/.rustup/ && \
     chown -R builder:builder /home/builder
 ENV PATH="/home/builder/.cargo/bin:${PATH}"
+USER builder
 WORKDIR /lapee
 CMD ["/bin/bash"]
