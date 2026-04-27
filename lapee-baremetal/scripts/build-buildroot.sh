@@ -81,11 +81,19 @@ if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
 fi
 
 # Run the build to completion.
+#
+# JOBS controls per-package parallelism. Buildroot itself
+# serialises packages (it has to — package B may depend on
+# package A's headers); within a package's `make' the JOBS value
+# is the -j level. Default to the host CPU count; override with
+# JOBS=N if needed (e.g. on a memory-constrained host).
+JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
 docker rm -f lapee-br-build 2>/dev/null || true
-echo "=== Buildroot build (foreground; logs streamed) ==="
+echo "=== Buildroot build (foreground; logs streamed; -j$JOBS) ==="
 docker run --rm --name lapee-br-build $DOCKER_PLATFORM \
     -v $VOLUME:/build \
-    $IMAGE bash -c "cd /build/out && date && make 2>&1 | tee /build/out/build.log"
+    -e BR2_JLEVEL="$JOBS" \
+    $IMAGE bash -c "cd /build/out && date && make -j$JOBS 2>&1 | tee /build/out/build.log"
 
 # Collect artefacts.
 mkdir -p build-kernel work
