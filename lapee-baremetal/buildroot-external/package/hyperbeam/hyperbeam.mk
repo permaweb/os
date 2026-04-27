@@ -49,6 +49,19 @@ define HYPERBEAM_DOWNLOAD_REBAR3
 endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
+# LapEE doesn't use AMD SEV-SNP attestation (we're a TPM-based
+# laptop appliance); dev_snp_nif's Rust crate uses x86 SEV-SNP-
+# specific machinery that fails to compile under Rosetta and
+# isn't part of the LapEE trust chain anyway. Strip it before
+# rebar3_cargo's enumeration walks `native/' looking for Cargo
+# manifests. The Erlang `dev_snp_nif' module is not in the LapEE
+# preloaded_devices list (lapee.json) so it's never dispatched
+# at runtime; load_failed on the .beam at startup is benign.
+define HYPERBEAM_STRIP_DEV_SNP_NIF
+	rm -rf $(@D)/native/dev_snp_nif
+endef
+HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_STRIP_DEV_SNP_NIF
+
 # Cross-compile environment for rebar3 + cargo. rebar3's
 # port_specs honours CC/CFLAGS/LDFLAGS; rebar3_cargo passes the
 # full env through to cargo.
