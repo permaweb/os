@@ -377,11 +377,18 @@ def main():
                     help="path to a LapEE attestation envelope JSON "
                          "(either /attestation-json or the bundled "
                          "/attestation form -- both are accepted)")
-    ap.add_argument("--roots-dir", required=True,
+    # Default to the directory that ships with this repo (the
+    # `fetch-ek-root-cas.sh' script populates it from keylime's
+    # tpm_cert_store). Override on the cmdline if you maintain a
+    # separate trust bundle.
+    _default_roots = pathlib.Path(__file__).resolve().parent / "root-cas"
+    ap.add_argument("--roots-dir",
+                    default=str(_default_roots),
                     help="directory of candidate root-CA PEMs. Only "
                          "self-signed certificates are treated as trust "
                          "anchors; all others become untrusted "
-                         "intermediates.")
+                         "intermediates. (default: ./root-cas next to "
+                         "verifier_hb.py)")
     args = ap.parse_args()
 
     raw = json.loads(pathlib.Path(args.envelope).read_text())
