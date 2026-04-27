@@ -1,0 +1,18 @@
+config BR2_PACKAGE_HYPERBEAM
+	bool "hyperbeam"
+	default y
+	depends on BR2_PACKAGE_ERLANG
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_TPM2_TSS
+	help
+	  HyperBEAM decentralized compute node, packaged for LapEE.
+
+	  Cross-compiles the HyperBEAM relx release inside Buildroot:
+	  every Erlang module via Buildroot's host-erlang driving
+	  rebar3, every NIF via Buildroot's cross-toolchain against
+	  Buildroot's libtss2 and OpenSSL. The release is staged into
+	  /usr/lib/hyperbeam in the target rootfs and started by the
+	  LapEE init script as PID 2.
+
+	  Source: https://github.com/permaweb/HyperBEAM.git, pinned
+	  by HYPERBEAM_VERSION in package/hyperbeam/hyperbeam.mk.

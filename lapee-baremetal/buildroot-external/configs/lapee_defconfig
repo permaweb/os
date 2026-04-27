@@ -1,31 +1,48 @@
-# lapee_defconfig — minimal bootable LapEE kernel build.
+# lapee_defconfig — full from-source LapEE appliance build.
 #
-# Cross-toolchain: Bootlin's pre-built x86_64 musl stable.
-# Buildroot fetches the tarball on first build (~60 MB) and caches
-# it in the docker volume; no host gcc build, no manual install.
+# Buildroot bootstraps its own cross-toolchain from source on
+# every build (BR2_TOOLCHAIN_BUILDROOT=y); the cross-compiler
+# itself is therefore from-source. The userspace (Erlang/OTP,
+# OpenSSL, libtss2, busybox, wpa_supplicant, iproute2, iw) is
+# Buildroot-cross-compiled from upstream tarballs Buildroot
+# fetches with sha256 verification. HyperBEAM is built by the
+# custom `hyperbeam' package in this BR2_EXTERNAL tree.
 #
-# Kernel: Buildroot's latest LTS (currently 6.6.x), x86_64
-# defconfig + the LapEE fragment merged on top.
-# Userspace: busybox (we only really use the kernel; the runtime
-# initramfs is assembled separately by build-initramfs-hb.sh).
+# The output is a single rootfs.cpio.zst that becomes the
+# initramfs of the LapEE UKI. The only upstream binaries in the
+# trust chain are non-free WiFi firmware blobs (Intel iwlwifi /
+# MediaTek MT7922) — no source release exists for those; their
+# hashes are measured into PCR 9 by the kernel firmware loader.
 
 # Architecture
 BR2_x86_64=y
 BR2_x86_core2=y
 
-# Pre-built cross-toolchain (Bootlin).
-BR2_TOOLCHAIN_EXTERNAL=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_X86_64_MUSL_STABLE=y
+# ----- toolchain: bootstrap from source ----------------------
+# Buildroot builds gcc / glibc / binutils from source on every
+# fresh build. No Bootlin dependency; no pre-built binaries in
+# the toolchain trust chain. The bootstrap runs natively on
+# whatever host arch the build container is at, producing a
+# cross-compiler that targets x86_64-linux-glibc.
+#
+# glibc rather than musl: Erlang/OTP runs cleanly on glibc out
+# of the box; musl needs stack-size patches that Alpine carries
+# and OTP doesn't have upstream consensus on. The image-size
+# saving from musl (~5 MB) doesn't matter for a 1 GB USB stick.
+BR2_TOOLCHAIN_BUILDROOT=y
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_VENDOR="lapee"
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
 
-# Init — the production initramfs uses a shell init from
-# initramfs-hb/, not a Buildroot-provided PID 1.
+# ----- init / rootfs structure -------------------------------
+# Init: the LapEE shell init lives in the rootfs overlay at
+# /init; the kernel boots straight to it via rdinit=/init.
+# BR2_INIT_NONE means Buildroot doesn't install a PID-1 of its
+# own (no sysvinit, no systemd).
 BR2_INIT_NONE=y
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/rootfs-overlay"
 
-# Kernel — pin to a specific 6.6 LTS point release. Bumping is
-# a one-line change; floating to LATEST_VERSION is not, because a
-# Buildroot 2024.02.x point release can silently swap in a newer
-# kernel and change PCR 11 (the UKI / kernel measurement).
+# ----- kernel ------------------------------------------------
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.51"
@@ -34,16 +51,69 @@ BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/l
 BR2_LINUX_KERNEL_BZIMAGE=y
 BR2_LINUX_KERNEL_INSTALL_TARGET=y
 
-# Filesystem — cpio for the QEMU smoke-boot path; the production
-# initramfs is built by build-initramfs-hb.sh and is independent.
+# ----- filesystem -------------------------------------------
+# Primary is cpio.zst (smaller, faster init; kernel
+# CONFIG_RD_ZSTD=y in our fragment); .gz alongside as a
+# fallback for any consumer that doesn't speak zstd.
 BR2_TARGET_ROOTFS_CPIO=y
 BR2_TARGET_ROOTFS_CPIO_GZIP=y
+BR2_TARGET_ROOTFS_CPIO_ZSTD=y
 
-# Runtime userspace (only used by the smoke-boot rootfs).
+# ----- userspace --------------------------------------------
+# busybox: the operator shell + most coreutils. Already on.
 BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 
-# Build hygiene.
+# Erlang/OTP: target runtime. Buildroot version pinning is
+# handled in `package/erlang-version-override' (hyperbeam.mk
+# depends on it); the upstream Buildroot package's default OTP
+# version may lag, so we override.
+BR2_PACKAGE_ERLANG=y
+
+# OpenSSL: BEAM crypto NIFs link against this. libtss2's TPM
+# auth-session encryption also uses libcrypto.
+BR2_PACKAGE_OPENSSL=y
+
+# tpm2-tss: the user-space TPM 2.0 stack. Provides
+# libtss2-esys.so.0 (Esys API), libtss2-mu.so.0 (TPMS_*
+# marshalling), libtss2-tctildr (TCTI loader), and friends.
+# dev_tpm2's lapee_tpm_nif links against -ltss2-esys -ltss2-mu
+# -ltss2-tctildr.
+BR2_PACKAGE_TPM2_TSS=y
+
+# WiFi userspace.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_CTRL_IFACE=y
+BR2_PACKAGE_IW=y
+
+# ip / ss / network setup.
+BR2_PACKAGE_IPROUTE2=y
+
+# WiFi firmware. Intel iwlwifi for AX210/AX211, MediaTek
+# MT7922. These are the only non-source binaries in the chain;
+# their measurements are extended into PCR 9 by the kernel
+# firmware loader, so a verifier can chain-validate against a
+# known-good list.
+BR2_PACKAGE_LINUX_FIRMWARE=y
+BR2_PACKAGE_LINUX_FIRMWARE_INTEL_AX200=y
+BR2_PACKAGE_LINUX_FIRMWARE_INTEL_AX210=y
+BR2_PACKAGE_LINUX_FIRMWARE_RADIO_MEDIATEK_MT7922=y
+
+# zstd: needed at runtime by the kernel's CONFIG_RD_ZSTD path
+# (initramfs decompression) and by any operator-side tooling.
+BR2_PACKAGE_ZSTD=y
+
+# ----- LapEE custom packages --------------------------------
+# Cross-compiles HyperBEAM (Erlang code + lapee_tpm_nif) inside
+# Buildroot, against Buildroot's OTP and libtss2. Installs the
+# relx release into /usr/lib/hyperbeam in the target rootfs.
+BR2_PACKAGE_HYPERBEAM=y
+
+# ----- build hygiene ----------------------------------------
 BR2_REPRODUCIBLE=y
+# A fixed SOURCE_DATE_EPOCH so timestamps embedded in built
+# binaries are deterministic across runs. Set to 2026-01-01
+# 00:00:00 UTC. Bump on a new release tag.
+BR2_REPRODUCIBLE_SOURCE_DATE_EPOCH=1735689600
 BR2_ENABLE_DEBUG=n
 BR2_STRIP_strip=y

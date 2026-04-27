@@ -1,6 +1,10 @@
-# LapEE BR2_EXTERNAL — no extra packages.
+# LapEE BR2_EXTERNAL — custom packages.
 #
-# The kernel + initramfs are assembled directly by the scripts in
-# ../scripts (kernel via Buildroot, initramfs via the
-# lapee-hyperbeam-builder image). Buildroot's only job is to
-# produce build-kernel/vmlinuz-lapee.
+# Buildroot owns the entire userspace: kernel, OTP, OpenSSL,
+# libtss2, busybox, wpa_supplicant, etc. The custom package
+# below sits on top and cross-compiles HyperBEAM against
+# Buildroot's OTP + libtss2.
+
+menu "LapEE packages"
+	source "$BR2_EXTERNAL_LAPEE_PATH/package/hyperbeam/Config.in"
+endmenu
