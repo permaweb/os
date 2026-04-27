@@ -34,12 +34,11 @@ HYPERBEAM_LICENSE_FILES = LICENSE.md
 HYPERBEAM_DEPENDENCIES = host-erlang erlang openssl tpm2-tss
 
 # rebar3 is not shipped in the HyperBEAM repo. Bootstrap from
-# the canonical rebar3 distribution (a self-contained escript).
-# Pinning by version + sha256 is desirable but the upstream
-# rebar3 binary changes per-release; for now use the GitHub
-# release for a specific version. Bumping = update the version.
-HYPERBEAM_REBAR3_VERSION = 3.24.1
-HYPERBEAM_REBAR3_URL = https://github.com/erlang/rebar3/releases/download/$(HYPERBEAM_REBAR3_VERSION)/rebar3
+# the canonical S3-hosted self-contained escript that the
+# rebar3 project publishes. (GitHub-release URLs are flaky
+# across versions; the S3 bucket has been the documented
+# install method for years.)
+HYPERBEAM_REBAR3_URL = https://s3.amazonaws.com/rebar3/rebar3
 
 define HYPERBEAM_DOWNLOAD_REBAR3
 	if [ ! -x $(@D)/rebar3 ]; then \
