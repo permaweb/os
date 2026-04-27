@@ -29,7 +29,7 @@
 #   - sbsigntool's efi-updatevar / cert-to-efi-sig-list / sign-efi-sig-list
 #
 # On macOS: the SB tooling was pulled from Homebrew, so we ship
-# `lapee-tools:local' (docker/Dockerfile.tools) with sbsigntool +
+# `lapee-build:local' (docker/Dockerfile) with sbsigntool +
 # efitools preinstalled. `make toolchain' builds it; this script
 # transparently falls back to `docker run' when sbsign / etc. are
 # missing from the host PATH. On Linux: `apt install sbsigntool
@@ -52,14 +52,14 @@ BUILD_UKI="$LAPEE/work/usb-build/lapee.efi"
 SIGNED_UKI="$LAPEE/work/lapee.signed.efi"
 USB_IMAGE="$LAPEE/work/lapee-usb.img"
 
-# Honor the Makefile's TOOLS_IMAGE if exported, fall back to the
+# Honor the Makefile's BUILD_IMAGE if exported, fall back to the
 # local-build default.
-TOOLS_IMAGE="${TOOLS_IMAGE:-lapee-tools:local}"
+BUILD_IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 
 # run_tool TOOL [ARGS...]
 # If TOOL is on the host PATH, run it natively. Otherwise run it
-# inside the lapee-tools container, with $LAPEE mounted at /work.
+# inside the lapee-build container, with $LAPEE mounted at /work.
 # Any arg that starts with $LAPEE/ is rewritten to the container's
 # /work/ path so the tool sees the same file. Relies on paths
 # already being absolute; relative paths are passed through, so
@@ -75,8 +75,8 @@ run_tool() {
         echo "       Install Docker Desktop, or on Linux: apt install sbsigntool efitools" >&2
         return 2
     fi
-    if ! docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
-        echo "[fail] $_tool not on PATH and $TOOLS_IMAGE image is absent." >&2
+    if ! docker image inspect "$BUILD_IMAGE" >/dev/null 2>&1; then
+        echo "[fail] $_tool not on PATH and $BUILD_IMAGE image is absent." >&2
         echo "       Run: make toolchain" >&2
         return 2
     fi
@@ -95,7 +95,7 @@ run_tool() {
     docker run --rm $DOCKER_PLATFORM \
         -v "$LAPEE":/work \
         -w "$_workdir" \
-        "$TOOLS_IMAGE" \
+        "$BUILD_IMAGE" \
         "$_tool" "${_args[@]}"
 }
 
@@ -144,12 +144,12 @@ if [ "$cmd" = "tools" ]; then
             printf "  [ok native]  %-24s -> %s\n" "$t" "$(command -v "$t")"
         else
             printf "  [container]  %-24s -> %s\n" "$t" \
-                "via $TOOLS_IMAGE"
+                "via $BUILD_IMAGE"
         fi
     done
     echo ""
     printf "  lapee-tools image: "
-    if have_tool docker && docker image inspect "$TOOLS_IMAGE" \
+    if have_tool docker && docker image inspect "$BUILD_IMAGE" \
             >/dev/null 2>&1; then
         echo "present"
     else
@@ -157,8 +157,8 @@ if [ "$cmd" = "tools" ]; then
     fi
     cat <<'NOTE'
 
-Tools shown as "[container]" will run inside lapee-tools:local
-(docker/Dockerfile.tools) automatically. The container ships
+Tools shown as "[container]" will run inside lapee-build:local
+(docker/Dockerfile) automatically. The container ships
 sbsigntool, efitools, openssl, uuid-runtime. If it isn't built
 yet, run `make toolchain' once.
 
@@ -191,7 +191,7 @@ if [ "$cmd" = "check" ]; then
                 && sbverify --cert "$SB_DIR/db.crt" "$BUILD_UKI" \
                     >/dev/null 2>&1; then
             _sig=" [signed]"
-        elif docker image inspect "$TOOLS_IMAGE" \
+        elif docker image inspect "$BUILD_IMAGE" \
                 >/dev/null 2>&1 \
                 && run_tool sbverify --cert "$SB_DIR/db.crt" \
                     "$BUILD_UKI" >/dev/null 2>&1; then

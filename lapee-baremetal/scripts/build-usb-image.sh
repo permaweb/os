@@ -30,14 +30,14 @@
 #                              /dev/sdX). Prompts before writing.
 #
 # Tool wrapping: every Linux-only step (parted, mkfs.vfat, mtools,
-# ukify) runs inside the lapee-tools container. Override the
-# image with TOOLS_IMAGE=<tag>; the Makefile sets that to a
+# ukify) runs inside the lapee-build container. Override the
+# image with BUILD_IMAGE=<tag>; the Makefile sets that to a
 # pinned-digest local layer.
 
 set -euo pipefail
 
 LAPEE_ROOT="${LAPEE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-TOOLS_IMAGE="${TOOLS_IMAGE:-lapee-tools:local}"
+BUILD_IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 WORK="${LAPEE_ROOT}/work"
 
@@ -114,7 +114,7 @@ EOF
     docker run --rm $DOCKER_PLATFORM \
         -v "${LAPEE_ROOT}/work":/work \
         -w /work/usb-build \
-        "$TOOLS_IMAGE" \
+        "$BUILD_IMAGE" \
         bash -euo pipefail -c "
             if command -v ukify >/dev/null 2>&1; then
                 ukify build \\
@@ -178,7 +178,7 @@ IMG_IN_WORK="usb-build/disk.img"
 docker run --rm $DOCKER_PLATFORM \
     -v "${LAPEE_ROOT}/work":/work \
     -w /work \
-    "$TOOLS_IMAGE" \
+    "$BUILD_IMAGE" \
     bash -euo pipefail -c "
         truncate -s ${SIZE_MIB}M /work/${IMG_IN_WORK}
 

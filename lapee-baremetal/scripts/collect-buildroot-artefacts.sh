@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VOLUME=lapee-buildroot
-IMAGE="${BUILDER_IMAGE:-lapee-builder:local}"
+IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 
 # Sanity-check that outputs actually exist in the volume.

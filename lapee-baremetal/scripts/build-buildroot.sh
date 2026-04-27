@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 LAPEE_ROOT="$(pwd)"
 VOLUME=lapee-buildroot
-IMAGE="${BUILDER_IMAGE:-lapee-builder:local}"
+IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 DEFCONFIG=${DEFCONFIG:-lapee_defconfig}
 

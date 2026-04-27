@@ -180,7 +180,7 @@ echo "=== extracting writeback artefacts ==="
 mkdir -p out/qemu-usb-test
 docker run --rm ${DOCKER_PLATFORM:-} \
     -v "$(pwd)":/w \
-    "${TOOLS_IMAGE:-lapee-tools:local}" \
+    "${BUILD_IMAGE:-lapee-build:local}" \
     bash -euo pipefail -c '
         # Extract ESP partition bytes from the disk image.
         START=$(parted --script --machine /w/work/qemu-usb/scratch.img \
