@@ -40,7 +40,9 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         bison \
         build-essential \
         ca-certificates \
+        cmake \
         cpio \
+        curl \
         dosfstools \
         efitools \
         file \
@@ -52,6 +54,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         libelf-dev \
         libncurses-dev \
         libssl-dev \
+        m4 \
         mtools \
         openssl \
         parted \
@@ -69,8 +72,30 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         zstd \
     && rm -rf /var/lib/apt/lists/*
 
+# Rust toolchain for rebar3_cargo Rust NIFs (hb_keccak and
+# friends). Pinned to a specific version + cross target so a
+# Rust-stable bump doesn't silently change build outputs.
+# x86_64-unknown-linux-gnu target lets cargo cross-compile from
+# any host arch to the LapEE x86_64 Linux target.
+ARG RUST_VERSION=1.91.0
+RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh \
+        https://sh.rustup.rs && \
+    sh /tmp/rustup-init.sh -y \
+        --default-toolchain ${RUST_VERSION} \
+        --profile minimal \
+        --target x86_64-unknown-linux-gnu && \
+    rm /tmp/rustup-init.sh
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Buildroot refuses to run as root; set up an unprivileged builder
-# user that the build-buildroot.sh wrapper switches into.
-RUN useradd -m -s /bin/bash builder
+# user that the build-buildroot.sh wrapper switches into. The
+# rust toolchain installed under /root/.cargo above needs to be
+# accessible to `builder' too — add a per-user copy.
+RUN useradd -m -s /bin/bash builder && \
+    mkdir -p /home/builder/.cargo /home/builder/.rustup && \
+    cp -a /root/.cargo/bin /home/builder/.cargo/ && \
+    cp -a /root/.rustup/. /home/builder/.rustup/ && \
+    chown -R builder:builder /home/builder
+ENV PATH="/home/builder/.cargo/bin:${PATH}"
 WORKDIR /lapee
 CMD ["/bin/bash"]
