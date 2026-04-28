@@ -19,15 +19,25 @@ set -eu
 PRIMARY=/run/lapee/primary-net
 mkdir -p /run/lapee
 
+log_net() {
+    _msg="$*"
+    echo "$_msg"
+    if [ "${LAPEE_DEBUG:-0}" = "1" ]; then
+        printf '%s\n' "$_msg" > /dev/console 2>/dev/null || true
+        printf '<6>[lapee-dhcp] %s\n' "$_msg" > /dev/kmsg 2>/dev/null || true
+    fi
+}
+
 case "${1:-unknown}" in
     deconfig)
         ip -4 addr flush dev "$interface" 2>/dev/null || true
         ip link set "$interface" up 2>/dev/null || true
+        log_net "[net] $interface: deconfig"
         ;;
 
     bound|renew)
         if [ -z "${ip:-}" ]; then
-            echo "[net] $interface: bound event without ip= -- skipping"
+            log_net "[net] $interface: bound event without ip= -- skipping"
             exit 0
         fi
         mask=${subnet:-255.255.255.0}
@@ -46,8 +56,8 @@ case "${1:-unknown}" in
             # that the lease is ip-only (useful data for
             # diagnostics, not promoted to primary).
             if [ -z "${router:-}" ]; then
-                echo "[net] $interface: bound ip=$ip" \
-                     "NO-GATEWAY (ip-only; not promoting to primary)"
+                log_net "[net] $interface: bound ip=$ip" \
+                        "NO-GATEWAY (ip-only; not promoting to primary)"
             else
                 for gw in ${router:-}; do
                     ip -4 route replace default via "$gw" \
@@ -62,22 +72,22 @@ case "${1:-unknown}" in
                 printf "iface=%s\nip=%s\ngw=%s\ndns=%s\n" \
                     "$interface" "$ip" "${router:-}" \
                     "${dns:-}" > "$PRIMARY"
-                echo "[net] $interface: bound ip=$ip" \
-                     "gw=${router:-} dns=${dns:-none}  (primary)"
+                log_net "[net] $interface: bound ip=$ip" \
+                        "gw=${router:-} dns=${dns:-none}  (primary)"
                 # No console-side banner. The BEAM splash polls
                 # /run/lapee/primary-net for the IP and the dev_tpm2
                 # /info endpoint for HB readiness; it owns the
                 # phase machine itself.
             fi
         else
-            echo "[net] $interface: bound ip=$ip  (secondary;" \
-                 "keeping default route from $(cat "$PRIMARY" \
-                    | sed -n 's/^iface=//p'))"
+            log_net "[net] $interface: bound ip=$ip  (secondary;" \
+                    "keeping default route from $(cat "$PRIMARY" \
+                        | sed -n 's/^iface=//p'))"
         fi
         ;;
 
     nak|leasefail)
-        echo "[net] $interface: $1 (no lease)"
+        log_net "[net] $interface: $1 (no lease)"
         ;;
 
     *)

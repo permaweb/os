@@ -61,8 +61,8 @@ log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 
 splash_layout() ->
     case os:getenv("LAPEE_SPLASH_LAYOUT") of
-        false -> qr;
-        ""    -> qr;
+        false -> blue;
+        ""    -> blue;
         Str ->
             case string:lowercase(Str) of
                 "qr"      -> qr;
@@ -75,7 +75,7 @@ splash_layout() ->
                 "matrix"  -> matrix;
                 "plaque"  -> plaque;
                 "classic" -> classic;
-                _         -> qr
+                _         -> blue
             end
     end.
 
@@ -661,20 +661,22 @@ render_sigil_grid(W, H, Yaw, Lid, Footer, Frame) ->
     Grid6 = draw_progress(Grid5, W, H, 4, H - 4, W - 8, Frame, Footer),
     overlay_text(Grid6, W, H, 4, H - 2, Footer).
 
-render_blue_grid(W, H, Yaw, Lid, Footer, Frame) ->
-    Grid0 = blue_noise(#{}, W, H, Frame),
+render_blue_grid(W, H, Yaw, Lid, Footer, _Frame) ->
+    Grid0 = #{},
     Grid1 = overlay_lines(Grid0, W, H, 6, 5,
         [" :)",
          "",
-         "Your decentralized compute gadget is starting up",
-         "and collecting measured boot proof.",
+         "LapEE is starting a measured HyperBEAM node.",
          "",
-         "We are measuring the firmware, replaying PCRs,",
-         "binding the node key, and waking HyperBEAM."]),
+         "firmware measured",
+         "PCR replay armed",
+         "AK bound to node identity",
+         "HyperBEAM waking"]),
     Grid2 = draw_laptop(Grid1, W, H, Yaw, Lid,
                         W * 0.72, H * 0.43,
                         max(5.0, min(W / 14.0, H / 3.3))),
-    Grid3 = draw_progress(Grid2, W, H, 7, H - 8, min(72, W - 14), Frame, Footer),
+    Grid3 = draw_progress(Grid2, W, H, 7, H - 8, min(72, W - 14),
+                          _Frame, Footer),
     Grid4 = overlay_lines(Grid3, W, H, 7, H - 5,
         ["status: " ++ status_word(Footer),
          "smile code: LAPEE_PROOF_IN_PROGRESS"]),
@@ -748,8 +750,8 @@ theme_prefix(deck, ready, _)    -> <<"\e[1;35m">>;
 theme_prefix(deck, _, _)        -> <<"\e[0;35m">>;
 theme_prefix(sigil, ready, _)   -> <<"\e[1;33m">>;
 theme_prefix(sigil, _, _)       -> <<"\e[0;33m">>;
-theme_prefix(blue, ready, _)    -> <<"\e[1;34m">>;
-theme_prefix(blue, _, _)        -> <<"\e[0;34m">>;
+theme_prefix(blue, ready, _)    -> blue_theme_prefix();
+theme_prefix(blue, _, _)        -> blue_theme_prefix();
 theme_prefix(orbit, ready, _)   -> <<"\e[1;36m">>;
 theme_prefix(orbit, _, _)       -> <<"\e[0;36m">>;
 theme_prefix(matrix, ready, _)  -> <<"\e[1;32m">>;
@@ -758,6 +760,13 @@ theme_prefix(plaque, ready, _)  -> <<"\e[1;37m">>;
 theme_prefix(plaque, _, _)      -> <<"\e[0;37m">>;
 theme_prefix(classic, ready, _) -> <<"\e[1;37m">>;
 theme_prefix(classic, _, _)     -> <<"\e[0;37m">>.
+
+blue_theme_prefix() ->
+    %% Linux fbcon supports a 16-colour palette, not true per-cell RGB.
+    %% Remap slot 4 (blue background) to a dark indigo/purple and slot
+    %% 15 (bright white foreground) to a clean white, then draw every
+    %% full-width row as bright white text on that blue block colour.
+    <<"\e]P415123a\e]Pff8fbff\e[1;37;44m">>.
 
 draw_laptop(Grid0, W, H, Yaw, Lid, Xc, Yc, Scale) ->
     Edges = laptop_edges(Lid),
@@ -848,22 +857,6 @@ sigil_dark(Seed, Rows, Cols, R, C) ->
     Mid = (R =:= Rows div 2) orelse (C =:= HalfC),
     V = (Seed + R * 1103 + C1 * 1973 + R * C1 * 89) rem 31,
     Mid orelse V < 11.
-
-blue_noise(Grid, W, H, Frame) ->
-    lists:foldl(
-      fun(R, G0) ->
-          lists:foldl(
-            fun(C, G) ->
-                case ((R * 7 + C * 13 + Frame) rem 41) of
-                    0 -> plot(G, W, H, C, R, $.);
-                    _ -> G
-                end
-            end,
-            G0,
-            lists:seq(1, W))
-      end,
-      Grid,
-      lists:seq(1, H)).
 
 draw_orbit(Grid0, W, H, Xc, Yc, Rx, Ry, Frame, Ch) ->
     Angles = lists:seq(0, 354, 6),

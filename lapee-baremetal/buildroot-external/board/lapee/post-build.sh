@@ -43,7 +43,11 @@ fi
 for f in /init /etc/lapee/lapee-enforced.flat \
          /usr/lib/hyperbeam/bin/hb \
          /usr/local/lib/lapee-splash/lapee_splash.beam \
-         /lib/firmware/regulatory.db; do
+         /lib/firmware/regulatory.db \
+         /lib/firmware/intel/iwlwifi/iwlwifi-ty-a0-gf-a0.pnvm \
+         /lib/firmware/intel/iwlwifi/iwlwifi-gl-c0-fm-c0.pnvm \
+         /lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin \
+         /lib/firmware/rtl_nic/rtl8156b-2.fw; do
     if [ ! -e "$TARGET_DIR$f" ]; then
         echo "!! post-build: missing $TARGET_DIR$f" >&2
         exit 1

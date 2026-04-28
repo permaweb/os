@@ -194,10 +194,11 @@ capture_layout() {
     cleanup_one "$qpid" "$tpm_pid"
     trap - RETURN
 
-    if grep -q "LAPEE-WRITEBACK-OK" "$serial" 2>/dev/null; then
-        echo "writeback: ok" > "$layout_out/status.txt"
+    if ls "$layout_out"/"$layout"-*s.png >/dev/null 2>&1 || \
+       ls "$layout_out"/"$layout"-*s.ppm >/dev/null 2>&1; then
+        echo "capture: ok" > "$layout_out/status.txt"
     else
-        echo "writeback: not-observed" > "$layout_out/status.txt"
+        echo "capture: no-frame" > "$layout_out/status.txt"
     fi
 }
 

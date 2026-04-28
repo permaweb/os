@@ -4,12 +4,11 @@
 # Framework native boot; booting it in QEMU gives us high-
 # confidence validation that the image is correct (UEFI +
 # FAT32 ESP + \EFI\Boot\BootX64.efi + UKI + kernel + init +
-# writeback logic) before we hand it to hardware.
+# network attestation path) before we hand it to hardware.
 #
-# The image is copied to a scratch path first so the run-time
-# writeback does not mutate the original. When the guest's init
-# emits LAPEE-WRITEBACK-OK we consider the boot successful and
-# copy the written attestation JSON out of the scratch image.
+# The image is copied to a scratch path first so test runs never
+# mutate the original. Success is defined by fetching the live
+# attestation envelope through QEMU's forwarded HTTP port.
 #
 # Usage:
 #   ./scripts/boot-usb-image.sh
@@ -38,6 +37,7 @@ while (($# > 0)); do
 done
 
 [[ -f "$IMG" ]] || { echo "no $IMG (run: make hb-usb-image)" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "missing curl" >&2; exit 1; }
 
 # OVMF firmware is shipped by the host's QEMU package. The path
 # varies across distros + Homebrew prefixes; search the usual
@@ -115,10 +115,8 @@ COMMON_ARGS=(
     -device virtio-net-pci,netdev=net0
 )
 
-# Truncate the serial log up front. Otherwise a previous boot's
-# `LAPEE-WRITEBACK-OK' marker is still in the file and the wait
-# loop below matches immediately, killing QEMU before the new
-# boot has even started.
+# Truncate the serial log up front so a failure report only shows
+# the current run.
 : > "$LOGFILE"
 
 if (( GUI )); then
@@ -138,83 +136,76 @@ trap 'kill $QEMUPID 2>/dev/null || true; kill $(cat work/tpm-qemu/swtpm.pid 2>/d
 
 if (( GUI )); then
     # GUI mode: hand control to the QEMU window. Do not poll the
-    # serial log or auto-kill on writeback -- the operator wants to
+    # network port or auto-kill -- the operator wants to
     # watch the splash + interact. Wait for QEMU to exit on its own
-    # (window close, Ctrl-C, guest poweroff). Skip the writeback-
-    # extract step because there's no scripted "this run succeeded"
-    # signal from a human-driven session.
+    # (window close, Ctrl-C, guest poweroff).
     echo "    waiting for QEMU to exit (close window or Ctrl-C)..."
     wait $QEMUPID 2>/dev/null || true
     kill "$(cat work/tpm-qemu/swtpm.pid 2>/dev/null)" 2>/dev/null || true
     exit 0
 fi
 
-# Poll for the writeback success marker (or QEMU exit).
+# Poll the forwarded HTTP port until HB answers. The cheap /info
+# endpoint is readiness; /attestation is the actual end-to-end proof.
+BASE_URL=http://127.0.0.1:18734
+OUTDIR=out/qemu-network-test
+mkdir -p "$OUTDIR"
+INFO_OUT="$OUTDIR/info.json"
+ATT_OUT="$OUTDIR/attestation.json"
+
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
-    if grep -q "LAPEE-WRITEBACK-OK" "$LOGFILE" 2>/dev/null; then
-        echo ">> LAPEE-WRITEBACK-OK detected in serial log"
+    if curl -fsSL \
+            -H "accept: application/json@1.0" \
+            -H "accept-bundle: true" \
+            "$BASE_URL/~tpm2@2.0a/info" \
+            -o "$INFO_OUT" 2>/dev/null && [[ -s "$INFO_OUT" ]]; then
+        echo ">> HB /info answered on $BASE_URL"
         break
     fi
     if ! kill -0 $QEMUPID 2>/dev/null; then
-        echo "!! qemu exited before writeback completed" >&2
+        echo "!! qemu exited before network attestation became reachable" >&2
         tail -60 "$LOGFILE"
         exit 1
     fi
     sleep 2
 done
 
-if ! grep -q "LAPEE-WRITEBACK-OK" "$LOGFILE" 2>/dev/null; then
-    echo "!! timeout waiting for LAPEE-WRITEBACK-OK" >&2
+if [[ ! -s "$INFO_OUT" ]]; then
+    echo "!! timeout waiting for HB /info on $BASE_URL" >&2
     echo "!! last 80 lines of serial log:" >&2
     tail -80 "$LOGFILE" >&2
     exit 1
 fi
 
-# Give HB a couple more seconds to settle, then terminate QEMU
-# and extract the writeback artefacts from the scratch image.
-sleep 2
+echo ">> fetching full attestation envelope"
+if ! curl -fsSL \
+        -H "accept: application/json@1.0" \
+        -H "accept-bundle: true" \
+        "$BASE_URL/~tpm2@2.0a/attestation" \
+        -o "$ATT_OUT"; then
+    echo "!! attestation fetch failed from $BASE_URL" >&2
+    echo "!! last 80 lines of serial log:" >&2
+    tail -80 "$LOGFILE" >&2
+    exit 1
+fi
+if [[ ! -s "$ATT_OUT" ]]; then
+    echo "!! empty attestation envelope from $BASE_URL" >&2
+    exit 1
+fi
+
 kill $QEMUPID 2>/dev/null || true
 wait $QEMUPID 2>/dev/null || true
 kill "$(cat work/tpm-qemu/swtpm.pid 2>/dev/null)" 2>/dev/null || true
 
-# Pull the ESP contents back out (without needing to mount on
-# macOS host). mtools inside the tools container knows FAT32.
-echo "=== extracting writeback artefacts ==="
-mkdir -p out/qemu-usb-test
-docker run --rm ${DOCKER_PLATFORM:-} \
-    -v "$(pwd)":/w \
-    "${BUILD_IMAGE:-lapee-build:local}" \
-    bash -euo pipefail -c '
-        # Extract ESP partition bytes from the disk image.
-        START=$(parted --script --machine /w/work/qemu-usb/scratch.img \
-            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$2); print \$2}")
-        SECTORS=$(parted --script --machine /w/work/qemu-usb/scratch.img \
-            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$4); print \$4}")
-        dd if=/w/work/qemu-usb/scratch.img \
-           of=/w/work/qemu-usb/esp.img \
-           bs=512 skip=$START count=$SECTORS status=none
-        # List everything on the ESP so we can see writeback artefacts.
-        echo ">> ESP contents after boot:"
-        mdir -i /w/work/qemu-usb/esp.img ::
-        # Copy writeback payload out.
-        mcopy -i /w/work/qemu-usb/esp.img \
-            ::/attestation-latest.json \
-            /w/out/qemu-usb-test/ 2>/dev/null || \
-            echo "   (attestation-latest.json not present)"
-        mcopy -i /w/work/qemu-usb/esp.img \
-            ::/tpm-ca.crt \
-            /w/out/qemu-usb-test/ 2>/dev/null || true
-        mcopy -i /w/work/qemu-usb/esp.img \
-            ::/README-VALIDATOR.txt \
-            /w/out/qemu-usb-test/ 2>/dev/null || true
-    '
-
 echo ""
 echo "=== QEMU boot test PASSED ==="
-ls -lh out/qemu-usb-test/
+ls -lh "$OUTDIR"/
 echo ""
-echo "Interpret on verifier side:"
+echo "Interpret the saved QEMU envelope (fetched over the network):"
 echo "  ./scripts/interpret-local-capture.sh \\"
 echo "      --label 'QEMU USB image self-test' \\"
-echo "      out/qemu-usb-test/attestation-latest.json"
+echo "      $ATT_OUT"
+echo ""
+echo "For physical hardware, prefer the live network path:"
+echo "  ./scripts/interpret-local-capture.sh --url http://NODE-IP:8734 --label LABEL"

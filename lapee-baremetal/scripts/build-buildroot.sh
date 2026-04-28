@@ -102,6 +102,12 @@ HYPERBEAM_RECIPE_SHA=$(
         | shasum -a 256 \
         | awk '{print $1}'
 )
+FIRMWARE_SELECTION_SHA=$(
+    grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "buildroot-external/configs/$DEFCONFIG" \
+        | LC_ALL=C sort \
+        | shasum -a 256 \
+        | awk '{print $1}'
+)
 CONFIG_NEEDS_REFRESH=0
 if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
         bash -c "test -f /build/out/.config" 2>/dev/null; then
@@ -117,6 +123,26 @@ if [ "$CONFIG_NEEDS_REFRESH" = "1" ]; then
 	    bash -c "mkdir -p /build/out && cd /build/buildroot && \
 	             make O=/build/out BR2_EXTERNAL=/build/buildroot-external $DEFCONFIG && \
 	             echo '$DEFCONFIG_SHA' > /build/out/.lapee-defconfig.sha256"
+fi
+
+# Buildroot tracks package state with stamps, so a defconfig refresh that
+# enables additional firmware can leave linux-firmware marked installed from
+# the previous selection. Force just that package to rebuild when our firmware
+# selection changes; keep the wireless regulatory database owned by its own
+# package intact.
+if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test \"\$(cat /build/out/.lapee-firmware-selection.sha256 2>/dev/null)\" = '$FIRMWARE_SELECTION_SHA'" 2>/dev/null; then
+    echo "=== Firmware selection changed or untracked; cleaning linux-firmware ==="
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -euo pipefail -c "
+            cd /build/out
+            make linux-firmware-dirclean || true
+            rm -rf /build/out/target/lib/firmware/intel/iwlwifi \
+                   /build/out/target/lib/firmware/mediatek \
+                   /build/out/target/lib/firmware/rtl_nic \
+                   /build/out/target/lib/firmware/rtw89
+            echo '$FIRMWARE_SELECTION_SHA' > /build/out/.lapee-firmware-selection.sha256
+        "
 fi
 
 # Rebuild Erlang and HyperBEAM when the pinned OTP version changes; the

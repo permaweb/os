@@ -67,24 +67,35 @@ make hb-usb-image        # wraps kernel + initramfs into a UEFI-
                          #   bootable USB image at work/lapee-usb.img
 
 # Write to a physical USB. Use `diskutil list' (macOS) to find diskN.
+# The write target gathers WiFi credentials first if wifi.conf is absent;
+# use WIFI=0 to skip that prompt.
 make hb-usb-write DEV=/dev/diskN
 
-# Optional: enable WiFi for this particular boot.
-#   Create /EFI/boot/wifi.conf on the written stick with EXACTLY:
+# To diagnose boot/network failures on a real laptop, use a measured
+# debug-console image. This adds `lapee.debug=1' to the UKI cmdline,
+# disables the splash, prints hardware/network/init stages on the
+# laptop panel, and routes HyperBEAM startup output to the console.
+make hb-usb-debug-write DEV=/dev/diskN
+
+# Optional: gather or replace WiFi credentials before building/writing.
+make gather-wifi-creds
+
+# WiFi credential format on the ESP is EXACTLY:
 #
 #     SSID
 #     PASSWORD
 #
-#   (two lines, nothing else). Then append `lapee.wifi=enabled' to
-#   the next boot's cmdline in the BIOS boot manager, or re-build
-#   the image with the flag baked in (see Makefile CMDLINE).
+#   (two lines, nothing else). The default Makefile cmdline already
+#   includes `lapee.wifi=enabled'; use WIFI=0 on hb-usb-write to build
+#   a stick without gathering/staging wifi.conf.
 
 # Plug the USB into the target laptop. Power on. Select USB boot from
 # the firmware menu (F2 / F12 / Esc depending on vendor). The boot
 # splash spins a 3D wireframe laptop with a status line beneath:
 #   "starting LapEE..." -> "network up; starting HyperBEAM..." ->
 #   "starting HyperBEAM... <IP> (Ns)" -> "Running at http://<IP>:8734/"
-# The measured cmdline selector `lapee.splash=' chooses the layout:
+# The measured cmdline selector `lapee.splash=' chooses the layout.
+# The Makefile default is `SPLASH=blue`; override it for experiments:
 #   qr      right-side HyperBEAM console + QR-style node mark
 #   max     full-frame green laptop
 #   deck    magenta boot-deck telemetry rail
@@ -95,17 +106,14 @@ make hb-usb-write DEV=/dev/diskN
 #   plaque  bookshelf/display-object identity card
 #   classic original centered wireframe laptop
 #
-# Pull the dashboard either from the live node over LAN, or from the
-# stick after pulling it back to the Mac (writeback path):
+# The USB stick is input-only at runtime. Init mounts the ESP
+# read-only just long enough to read optional wifi.conf, unmounts it,
+# then detaches the parent block device before network/HB startup
+# where the kernel exposes a delete hook. The attestation path is
+# over the network:
 
-# Live LAN -- recommended:
 ./scripts/interpret-local-capture.sh --url http://<node-ip>:8734 \
     --label 'my laptop'
-
-# Or, USB roundtrip (the stick contains attestation-latest.json):
-./scripts/interpret-local-capture.sh \
-    --label 'my laptop' \
-    /Volumes/LAPEE_ESP/attestation-latest.json
 
 # A browser tab opens with the dashboard. verdict=trusted means
 # every paper-committed property resolved cleanly; =warnings means

@@ -160,7 +160,7 @@ render_one() {
         halt(0).
     ' >/dev/null
 
-    perl -pe 's/\e\[[0-9;?]*[[:alpha:]]//g; s/\r//g' "$ansi" > "$text"
+    perl -pe 's/\e\]P[0-9A-Fa-f][0-9A-Fa-f]{6}//g; s/\e\[[0-9;?]*[[:alpha:]]//g; s/\r//g' "$ansi" > "$text"
     printf '%s\n' "$ansi"
     printf '%s\n' "$text"
 }

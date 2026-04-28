@@ -42,10 +42,17 @@
 #                             + build the lapee-build image for
 #                             the selected mode.
 #   make hb-usb-write DEV=  — flash work/lapee-usb.img to a USB.
+#   make hb-usb-debug-write DEV=
+#                           — flash a measured debug-console image
+#                             with lapee.debug=1 on the cmdline.
+#   make gather-wifi-creds  — prompt locally for wifi.conf.
 #   make hb-usb-qemu        — boot work/lapee-usb.img under
-#                             QEMU+OVMF+swtpm (smoke test).
+#                             QEMU+OVMF+swtpm and fetch attestation
+#                             over the forwarded network port.
 #   make hb-usb-qemu-gui    — same with a Cocoa window so the
 #                             operator can watch the splash.
+#   make hb-fetch           — populate build-hyperbeam/src-edge
+#                             with the pinned verifier source.
 #   make hb-wifi-apply      — inject host-side wifi.conf into the
 #                             ESP without re-signing.
 #   make hb-sb-apply        — inject Secure Boot enrolment bundle.
@@ -61,6 +68,7 @@ export LAPEE_ROOT
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS   := $(shell uname -s)
+HOME_DIR  := $(shell printf '%s' "$$HOME")
 
 # ----- pinned upstream Docker base ----------------------------
 # Bumping = update this line. Same digest in docker/Dockerfile.
@@ -86,15 +94,22 @@ KERNEL    ?= build-kernel/vmlinuz-lapee
 INITRAMFS ?= work/initramfs-lapee.cpio.zst
 SIZE_MIB  ?= 1024
 OUT       ?= work/lapee-usb.img
+WIFI      ?= 1
+SPLASH    ?= blue
+DEBUG     ?= 0
+HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
+HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
+HYPERBEAM_SRC ?= build-hyperbeam/src-edge
+DEBUG_CMDLINE = $(if $(filter 1,$(DEBUG)),lapee.debug=1,)
 
 CMDLINE   ?= console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
              fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
-             LAPEE_WRITEBACK=1 lapee.wifi=enabled lapee.splash=qr
+             lapee.wifi=enabled lapee.splash=$(SPLASH) $(DEBUG_CMDLINE)
 
 .PHONY: help all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
-        hb-usb-image hb-usb-write \
-        hb-usb-qemu hb-usb-qemu-gui hb-wifi-apply hb-sb-apply \
+        hb-usb-image hb-usb-write hb-usb-debug-image hb-usb-debug-write \
+        hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
         clean
 
 help:
@@ -178,7 +193,7 @@ buildroot-clean:
 # ------------------------------------------------------------
 
 hb-usb-image:
-	./scripts/build-usb-image.sh \
+	WIFI="$(WIFI)" ./scripts/build-usb-image.sh \
 	    --kernel    "$(KERNEL)" \
 	    --initramfs "$(INITRAMFS)" \
 	    --cmdline   "$(CMDLINE)" \
@@ -188,12 +203,24 @@ hb-usb-image:
 hb-usb-write:
 	@test -n "$(DEV)" || { \
 	    echo "usage: make hb-usb-write DEV=/dev/diskN"; exit 1; }
-	./scripts/build-usb-image.sh \
+	@if [ "$(WIFI)" != "0" ]; then \
+	    ./scripts/gather-wifi-creds.sh --if-missing; \
+	else \
+	    echo ">> skipping wifi credential gather (WIFI=0)"; \
+	fi
+	WIFI="$(WIFI)" ./scripts/build-usb-image.sh \
 	    --kernel    "$(KERNEL)" \
 	    --initramfs "$(INITRAMFS)" \
 	    --cmdline   "$(CMDLINE)" \
 	    --size      "$(SIZE_MIB)" \
 	    --device    "$(DEV)"
+
+hb-usb-debug-image: DEBUG=1
+hb-usb-debug-image: OUT=work/lapee-usb-debug.img
+hb-usb-debug-image: hb-usb-image
+
+hb-usb-debug-write: DEBUG=1
+hb-usb-debug-write: hb-usb-write
 
 hb-usb-qemu:
 	./scripts/boot-usb-image.sh
@@ -201,9 +228,31 @@ hb-usb-qemu:
 hb-usb-qemu-gui:
 	./scripts/boot-usb-image.sh --gui
 
+hb-fetch:
+	@test -n "$(HYPERBEAM_VERSION)" || { \
+	    echo "could not read HYPERBEAM_VERSION from buildroot-external/package/hyperbeam/hyperbeam.mk" >&2; \
+	    exit 1; }
+	@mkdir -p "$(dir $(HYPERBEAM_SRC))"
+	@if [ -f "$(HYPERBEAM_SRC)/rebar.config" ]; then \
+	    echo ">> HyperBEAM verifier source already present: $(HYPERBEAM_SRC)"; \
+	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
+	elif [ -d "$(HOME_DIR)/src/hyperbeam/.git" ] && \
+	     git -C "$(HOME_DIR)/src/hyperbeam" cat-file -e "$(HYPERBEAM_VERSION)^{commit}" 2>/dev/null; then \
+	    echo ">> creating verifier worktree from $(HOME_DIR)/src/hyperbeam"; \
+	    git -C "$(HOME_DIR)/src/hyperbeam" worktree add --detach \
+	        "$(abspath $(HYPERBEAM_SRC))" "$(HYPERBEAM_VERSION)"; \
+	else \
+	    echo ">> cloning verifier source from $(HYPERBEAM_REPO)"; \
+	    git clone "$(HYPERBEAM_REPO)" "$(HYPERBEAM_SRC)"; \
+	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
+	fi
+
 # ------------------------------------------------------------
 # ESP injection helpers (operator-side, no UKI re-sign).
 # ------------------------------------------------------------
+
+gather-wifi-creds:
+	./scripts/gather-wifi-creds.sh --force
 
 hb-wifi-apply:
 	@test -f wifi.conf || { \
