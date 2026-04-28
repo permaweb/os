@@ -80,10 +80,10 @@ trace() {
 #   bounded by whitespace (or start / end of line). Anchored
 #   token extraction -- same idiom as the `lapee.wifi=' gate --
 #   so a different option containing the substring (e.g.
-#   `X_LAPEE_TRACE=1foo') cannot accidentally satisfy the check.
+#   `X_LAPEE_WRITEBACK=1foo') cannot accidentally satisfy the check.
 #   Use for every on/off toggle the operator sets on the cmdline:
 #       LAPEE_NO_NET, LAPEE_HB_VERBOSE, LAPEE_HB_DIAG,
-#       LAPEE_WRITEBACK, LAPEE_TRACE.
+#       LAPEE_WRITEBACK.
 cmdline_flag_set() {
     _flag="$1"
     _v=$(tr ' ' '\n' < /proc/cmdline \
@@ -348,11 +348,10 @@ parse_wifi_conf() {
 
     WIFI_SSID="$_ssid"
     WIFI_PSK="$_psk"
-    # Redact SSID in traces -- it reaches /dev/kmsg + serial +
-    # lapee-hb-tail.log via the early boot path. Operators posting
-    # dmesg to support tickets should not be unknowingly leaking
-    # the network name. Full SSID goes into wpa_supplicant.conf
-    # only (chmod 600, never persisted to ESP).
+    # Redact SSID in traces. Operators posting dmesg or serial logs
+    # to support tickets should not be unknowingly leaking the network
+    # name. Full SSID goes into wpa_supplicant.conf only (chmod 600,
+    # never persisted to ESP by init).
     trace "wifi: wifi.conf accepted (ssid len=${#_ssid}, PSK len=${#_psk}; both redacted)"
     return 0
 }
@@ -756,29 +755,6 @@ if cmdline_flag_set LAPEE_WRITEBACK; then
                 if [ "$ATT_OK" = "1" ] && [ -s "$OUT" ]; then
                     rm -f "$LINK"
                     cp "$OUT" "$LINK"
-                    # Optional diagnostic logs, gated on LAPEE_TRACE=1
-                    # because they leak operator-sensitive context:
-                    #   - lapee-wpa.log carries SSID strings in the
-                    #     clear (`Trying to associate with SSID...').
-                    #   - lapee-hb-tail.log carries peer URLs, request
-                    #     paths, node-message details.
-                    # Default OFF so an operator sharing the ESP for
-                    # attestation review doesn't unknowingly ship
-                    # network identity + HB internals.
-                    if cmdline_flag_set LAPEE_TRACE; then
-                        [ -f /run/lapee/wpa.log ] && \
-                            cp /run/lapee/wpa.log \
-                                /mnt/esp/lapee-wpa.log 2>/dev/null
-                        [ -f /run/lapee/hb.log ] && \
-                            tail -c 65536 /run/lapee/hb.log \
-                                > /mnt/esp/lapee-hb-tail.log 2>/dev/null
-                    fi
-                    # splash.log is copied unconditionally: phase
-                    # transitions + the IP already shown on screen +
-                    # probe error reasons. No PSK/SSID/wallet.
-                    [ -f /run/lapee/splash.log ] && \
-                        cp /run/lapee/splash.log \
-                            /mnt/esp/lapee-splash.log 2>/dev/null
                     cat > /mnt/esp/README-VALIDATOR.txt <<RV
 LapEE attestation written on boot $STAMP.
 

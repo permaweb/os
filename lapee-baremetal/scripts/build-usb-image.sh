@@ -127,7 +127,9 @@ EOF
                 STUB=\$(find /usr/lib /lib -name 'linuxx64.efi.stub' \\
                         -print -quit 2>/dev/null)
                 : \${STUB:?systemd-stub not found}
-                objcopy \\
+                OBJCOPY=\$(command -v x86_64-w64-mingw32-objcopy || \\
+                          command -v objcopy)
+                \"\$OBJCOPY\" \\
                     --add-section .osrel=/work/usb-build/os-release \\
                     --change-section-vma .osrel=0x20000 \\
                     --add-section .cmdline=/work/usb-build/cmdline.txt \\

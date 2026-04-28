@@ -500,12 +500,10 @@ nth(N, L) -> lists:nth(N, L).
 %% ============================================================
 %% Diagnostic log -- /run/lapee/splash.log
 %% ============================================================
-%% Append-only, per-event. init copies this to the ESP at writeback
-%% time so an operator can post-mortem the boot from the stick. The
-%% log records phase transitions, the IP (already on screen) and
-%% probe error reasons -- no PSK, no SSID, no wallet material. All
-%% errors swallowed: best-effort diagnostic, must never kill the
-%% splash itself.
+%% Append-only, per-event, and kept on tmpfs. The log records phase
+%% transitions, the IP (already on screen) and probe error reasons --
+%% no PSK, no SSID, no wallet material. All errors swallowed:
+%% best-effort diagnostic, must never kill the splash itself.
 log_start() ->
     catch file:write_file(log_path(),
         io_lib:format("[lapee-splash] started pid=~p t=~p~n",
