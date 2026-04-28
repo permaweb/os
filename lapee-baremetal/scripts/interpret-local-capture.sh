@@ -88,7 +88,7 @@ if [[ -n "$URL" && -z "$INPUT" ]]; then
     TMP="$(mktemp -t fw-attestation.XXXXXX)"
     echo ">> fetching ${URL}/~tpm2@2.0a/attestation"
     if ! curl -fsSL "${URL}/~tpm2@2.0a/attestation" \
-           -H "accept: application/json@1.0" \
+           -H "accept: application/json" \
            -H "accept-bundle: true" \
            -o "$TMP.json"; then
         echo "error: fetch from ${URL} failed" >&2

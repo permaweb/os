@@ -156,7 +156,7 @@ ATT_OUT="$OUTDIR/attestation.json"
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
     if curl -fsSL \
-            -H "accept: application/json@1.0" \
+            -H "accept: application/json" \
             -H "accept-bundle: true" \
             "$BASE_URL/~tpm2@2.0a/info" \
             -o "$INFO_OUT" 2>/dev/null && [[ -s "$INFO_OUT" ]]; then
@@ -180,7 +180,7 @@ fi
 
 echo ">> fetching full attestation envelope"
 if ! curl -fsSL \
-        -H "accept: application/json@1.0" \
+        -H "accept: application/json" \
         -H "accept-bundle: true" \
         "$BASE_URL/~tpm2@2.0a/attestation" \
         -o "$ATT_OUT"; then
