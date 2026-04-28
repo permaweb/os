@@ -50,7 +50,7 @@ SPLASH_LAYOUT=$(tr ' ' '\n' < /proc/cmdline \
     | sed -n 's/^lapee\.splash=\(.*\)$/\1/p' \
     | head -1)
 case "$SPLASH_LAYOUT" in
-    qr|max|full|deck|classic)
+    qr|max|full|deck|sigil|blue|orbit|matrix|plaque|classic)
         export LAPEE_SPLASH_LAYOUT="$SPLASH_LAYOUT"
         ;;
 esac

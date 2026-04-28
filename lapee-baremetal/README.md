@@ -88,6 +88,12 @@ make hb-usb-write DEV=/dev/diskN
 #   qr      right-side HyperBEAM console + QR-style node mark
 #   max     full-frame green laptop
 #   deck    magenta boot-deck telemetry rail
+#   sigil   public-key-inspired machine sigil and constellation field
+#   blue    friendly blue-screen boot receipt
+#   orbit   orbital proof field around the laptop
+#   matrix  green measured-boot stream
+#   plaque  bookshelf/display-object identity card
+#   classic original centered wireframe laptop
 #
 # Pull the dashboard either from the live node over LAN, or from the
 # stick after pulling it back to the Mac (writeback path):
