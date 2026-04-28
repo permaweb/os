@@ -49,7 +49,8 @@ cmdline_value() {
 #   True iff /proc/cmdline contains the exact token `FLAGNAME=1'
 #   bounded by whitespace (or start / end of line).
 #   Use for every on/off toggle the operator sets on the cmdline:
-#       lapee.debug, LAPEE_NO_NET, LAPEE_HB_VERBOSE, LAPEE_HB_DIAG.
+#       lapee.debug, LAPEE_NO_NET, LAPEE_HB_VERBOSE, LAPEE_HB_DIAG,
+#       LAPEE_HB_CONSOLE.
 cmdline_flag_set() {
     _v=$(cmdline_value "$1" || true)
     [ "$_v" = "1" ]
@@ -232,6 +233,56 @@ debug_dump_network_state() {
             done || true
     fi
     debug_log "--- LAPEE DEBUG: end network snapshot ---"
+}
+
+debug_dump_wifi_state() {
+    [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
+
+    debug_log "--- LAPEE DEBUG: wifi snapshot ---"
+    if command -v iw >/dev/null 2>&1; then
+        iw dev 2>&1 | while IFS= read -r _l; do
+            debug_log "  $_l"
+        done || true
+        for _w in /sys/class/net/wl*; do
+            [ -e "$_w" ] || continue
+            _name=$(basename "$_w")
+            debug_log "[debug] iw link $_name:"
+            iw dev "$_name" link 2>&1 | while IFS= read -r _l; do
+                debug_log "  $_l"
+            done || true
+        done
+    else
+        debug_log "[debug] iw command missing"
+    fi
+
+    for _r in /sys/class/rfkill/rfkill*; do
+        [ -e "$_r" ] || continue
+        _type=$(cat "$_r/type" 2>/dev/null || true)
+        [ "$_type" = "wlan" ] || continue
+        _name=$(cat "$_r/name" 2>/dev/null || echo '?')
+        _soft=$(cat "$_r/soft" 2>/dev/null || echo '?')
+        _hard=$(cat "$_r/hard" 2>/dev/null || echo '?')
+        debug_log "[debug] rfkill $_name: soft=$_soft hard=$_hard"
+    done
+
+    if [ -s /run/lapee/wpa.log ]; then
+        debug_log "[debug] recent wpa_supplicant log:"
+        tail -40 /run/lapee/wpa.log 2>/dev/null \
+            | while IFS= read -r _l; do
+                debug_log "  $_l"
+            done || true
+    else
+        debug_log "[debug] no /run/lapee/wpa.log"
+    fi
+
+    debug_log "[debug] recent kernel wifi lines:"
+    dmesg 2>/dev/null \
+        | grep -Ei 'iwlwifi|wlan|cfg80211|firmware|80211|mt792|rtw89|rfkill|deauth|auth|assoc|dhcp' \
+        | tail -60 \
+        | while IFS= read -r _l; do
+            debug_log "  $_l"
+        done || true
+    debug_log "--- LAPEE DEBUG: end wifi snapshot ---"
 }
 
 trace "init: started; kernel=$(uname -r 2>/dev/null || echo ?)"
@@ -769,6 +820,7 @@ if [ "$LAPEE_DEBUG" = "1" ] && ! cmdline_flag_set LAPEE_NO_NET; then
     if [ ! -s /run/lapee/primary-net ]; then
         trace "net: no primary lease after debug wait; continuing to HyperBEAM"
         debug_dump_network_state
+        debug_dump_wifi_state
     fi
 fi
 
@@ -903,8 +955,8 @@ cd /usr/lib/hyperbeam
 echo "[init] exec hyperbeam"
 echo "-----------------------------------------------"
 trace "hyperbeam: exec foreground"
-if [ "$LAPEE_DEBUG" = "1" ]; then
-    trace "hyperbeam: stdout/stderr -> /dev/console (lapee.debug=1)"
+if cmdline_flag_set LAPEE_HB_CONSOLE; then
+    trace "hyperbeam: stdout/stderr -> /dev/console (LAPEE_HB_CONSOLE=1)"
     exec >/dev/console 2>&1
 elif cmdline_flag_set LAPEE_HB_SERIAL; then
     trace "hyperbeam: stdout/stderr -> /dev/ttyS0 (LAPEE_HB_SERIAL=1)"
