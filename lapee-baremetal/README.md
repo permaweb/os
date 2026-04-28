@@ -18,6 +18,9 @@ The target is an x86_64 laptop image:
 
 - Linux 6.6.51 with EFI stub, TPM, lockdown, WiFi, framebuffer, and
   common laptop networking support.
+- A production kernel profile with local keyboard, mouse, touchpad,
+  HID, Bluetooth, sound, USB4/Thunderbolt, SysRq, debugfs, `/dev/mem`,
+  kexec, hibernation, and suspend support disabled.
 - A Buildroot-generated initramfs with busybox, glibc, Erlang/OTP 27,
   OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, and HyperBEAM.
 - A custom Buildroot `hyperbeam` package that fetches the pinned
@@ -143,7 +146,8 @@ make hb-usb-debug-write DEV=/dev/diskN
 
 Debug mode adds `lapee.debug=1` to the measured kernel command line,
 disables the splash, and prints hardware, network, DHCP, WiFi, and
-HyperBEAM startup stages on the laptop display.
+HyperBEAM startup stages on the laptop display. It intentionally keeps
+the old visible console and USB host behavior for diagnosis.
 
 ## Run On A Laptop
 
@@ -219,13 +223,27 @@ an invalid quote signature or missing required TPM proof is critical.
 
 ## Runtime Storage Posture
 
-The USB stick is not a writeback store. Init mounts the ESP read-only
-long enough to read optional `wifi.conf`, unmounts it, and then detaches
-the parent block device before network and HyperBEAM startup. Production
-verification is over the network attestation endpoint.
+The USB stick is not a writeback store. Init marks the candidate parent
+block device read-only before probing, mounts the ESP read-only with
+`nosuid,nodev,noexec`, reads optional `wifi.conf`, unmounts it, and then
+detaches the parent block device before network and HyperBEAM startup.
+Production verification is over the network attestation endpoint.
 
 This is intentional: if HyperBEAM were compromised at runtime, it
 should not inherit a writable USB path for exfiltrating keys or logs.
+
+Production also sets USB authorization defaults to off early so newly
+plugged devices are refused while the already-enumerated boot ESP can
+still be read. After the ESP read, it deauthorizes already-enumerated
+USB devices and unbinds xHCI host controllers where the kernel exposes
+that control. HyperBEAM runs with stdin/stdout/stderr on `/dev/null`;
+the splash is the only intended local output.
+
+The current WiFi provisioning model still requires Linux to enumerate
+the boot USB storage briefly after firmware loads the UKI. Eliminating
+even that temporary read path means moving WiFi credentials into a
+measured UKI/initramfs at build time, or carrying a kernel-side policy
+patch that forces all USB mass-storage devices read-only from probe.
 
 ## Secure Boot
 

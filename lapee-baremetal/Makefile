@@ -100,11 +100,15 @@ DEBUG     ?= 0
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= build-hyperbeam/src-edge
-DEBUG_CMDLINE = $(if $(filter 1,$(DEBUG)),lapee.debug=1,)
+PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
+                rdinit=/init lapee.mode=prod lapee.wifi=enabled \
+                lapee.splash=$(SPLASH)
+DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
+                fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
+                lapee.mode=debug lapee.debug=1 lapee.wifi=enabled \
+                lapee.splash=$(SPLASH)
 
-CMDLINE   ?= console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
-             fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
-             lapee.wifi=enabled lapee.splash=$(SPLASH) $(DEBUG_CMDLINE)
+CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
 
 .PHONY: help all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
