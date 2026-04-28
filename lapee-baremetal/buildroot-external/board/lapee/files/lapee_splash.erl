@@ -474,9 +474,16 @@ bres_step(Grid, W, H, X, Y, X1, Y1, Dx, Dy, Sx, Sy, Err, Ch) ->
 
 plot(Grid, W, H, X, Y, Ch) ->
     case X >= 1 andalso X =< W andalso Y >= 1 andalso Y =< H of
-        true  -> Grid#{{Y, X} => Ch};
+        true  -> Grid#{{Y, X} => cell(Ch)};
         false -> Grid
     end.
+
+cell(Ch) when is_integer(Ch), Ch >= 0, Ch =< 255 ->
+    Ch;
+cell(Ch) when is_integer(Ch) ->
+    unicode:characters_to_binary([Ch]);
+cell(Ch) ->
+    Ch.
 
 %% ============================================================
 %% Frame composition + ANSI emission
@@ -492,7 +499,7 @@ render(#{cols := W, rows := H, layout := Layout, frame := Frame,
         {_, max}        -> render_max_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, deck}       -> render_deck_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, sigil}      -> render_sigil_grid(W, H, Yaw, Lid, Footer, Frame);
-        {_, blue}       -> render_blue_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, blue}       -> render_blue_grid(W, H, Yaw, Lid, Footer, Frame, Ip);
         {_, orbit}      -> render_orbit_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, matrix}     -> render_matrix_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, plaque}     -> render_plaque_grid(W, H, Yaw, Lid, Footer, Frame);
@@ -661,26 +668,383 @@ render_sigil_grid(W, H, Yaw, Lid, Footer, Frame) ->
     Grid6 = draw_progress(Grid5, W, H, 4, H - 4, W - 8, Frame, Footer),
     overlay_text(Grid6, W, H, 4, H - 2, Footer).
 
-render_blue_grid(W, H, Yaw, Lid, Footer, _Frame) ->
+render_blue_grid(W, H, Yaw, Lid, Footer, _Frame, Ip) ->
     Grid0 = #{},
-    Grid1 = overlay_lines(Grid0, W, H, 6, 5,
-        [" :)",
-         "",
-         "LapEE is starting a measured HyperBEAM node.",
-         "",
-         "firmware measured",
-         "PCR replay armed",
-         "AK bound to node identity",
-         "HyperBEAM waking"]),
-    Grid2 = draw_laptop(Grid1, W, H, Yaw, Lid,
-                        W * 0.72, H * 0.43,
-                        max(5.0, min(W / 14.0, H / 3.3))),
-    Grid3 = draw_progress(Grid2, W, H, 7, H - 8, min(72, W - 14),
-                          _Frame, Footer),
-    Grid4 = overlay_lines(Grid3, W, H, 7, H - 5,
-        ["status: " ++ status_word(Footer),
-         "smile code: LAPEE_PROOF_IN_PROGRESS"]),
-    overlay_text(Grid4, W, H, 7, H - 2, Footer).
+    LeftW = max(70, min(80, W div 2)),
+    Gap = 3,
+    RightX = LeftW + Gap,
+    RightW = max(34, W - RightX - 2),
+    Url = node_url(Ip),
+    Scale = max(8.0, min(RightW / 4.05, (H - 4) / 1.9)),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        RightX + RightW * 0.58 - 5, H * 0.69, Scale),
+    Grid2 = overlay_lines(Grid1, W, H, 6, 3, blue_left_top_lines(LeftW)),
+    draw_blue_qr_panel(Grid2, W, H, 6, 17, LeftW - 4, Url, Footer, Ip).
+
+blue_left_top_lines(LeftW) ->
+    Max = max(12, LeftW - 3),
+    [fit_text(Line, Max) || Line <- hyperbeam_greeter_lines()].
+
+hyperbeam_greeter_lines() ->
+    %% Mirrors hb_http_server:print_greeter/2 without the operator,
+    %% config, border, and version rows that do not belong on splash.
+    ["██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗",
+     "██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗",
+     "███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝",
+     "██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗",
+     "██║  ██║   ██║   ██║     ███████╗██║  ██║",
+     "╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝",
+     "██████╗ ███████╗ █████╗ ███╗   ███╗",
+     "██╔══██╗██╔════╝██╔══██╗████╗ ████║",
+     "██████╔╝█████╗  ███████║██╔████╔██║",
+     "██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║ EAT GLASS,",
+     "██████╔╝███████╗██║  ██║██║ ╚═╝ ██║ BUILD THE",
+     "╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝ FUTURE."].
+
+node_url(undefined) ->
+    "http://<node>:8734/";
+node_url(Ip) ->
+    "http://" ++ Ip ++ ":8734/".
+
+fit_text(Text, Max) when length(Text) =< Max ->
+    Text;
+fit_text(_Text, Max) when Max =< 1 ->
+    "";
+fit_text(Text, Max) ->
+    lists:sublist(Text, Max - 1) ++ "~".
+
+draw_blue_qr_panel(Grid, W, H, X, Y, _ColW, Url, Footer, Ip) ->
+    Rows = qr_display_rows_for_url(Url),
+    QrMods = length(hd(Rows)),
+    QrW = QrMods * 2,
+    QrH = length(Rows),
+    QrX = X,
+    Grid1 = fill_rect(Grid, W, H, QrX, Y, QrW, QrH),
+    case {status_word(Footer), Ip} of
+        {"READY", _} when Ip =/= undefined ->
+            draw_qr_double_rows(Grid1, W, H, QrX, Y, Rows);
+        _ ->
+            draw_qr_placeholder(Grid1, W, H, QrX, Y, QrMods, QrH, Footer)
+    end.
+
+qr_display_rows_for_url(Url) ->
+    qr_crop_quiet_zone(qr_rows_for_url(Url), 4).
+
+qr_crop_quiet_zone(Rows, Quiet) ->
+    InnerH = length(Rows) - Quiet * 2,
+    InnerRows = lists:sublist(lists:nthtail(Quiet, Rows), InnerH),
+    [lists:sublist(lists:nthtail(Quiet, Row), length(Row) - Quiet * 2) ||
+        Row <- InnerRows].
+
+qr_rows_for_url(Url) ->
+    Bin = unicode:characters_to_binary(Url),
+    case byte_size(Bin) =< 32 of
+        true  -> qr_v2_l_rows(Bin);
+        false -> qr_v2_l_rows(<<"http://node-too-long/">>)
+    end.
+
+qr_v2_l_rows(Data) ->
+    Size = 25,
+    DataCodewords = qr_data_codewords(Data, 34),
+    EccCodewords = rs_remainder(DataCodewords, 10),
+    Bits = lists:append([bits_int(Cw, 8) || Cw <- DataCodewords ++ EccCodewords]),
+    {Base, Reserved} = qr_base_v2(Size),
+    WithData = qr_place_bits(Base, Reserved, Size, Bits),
+    WithFormat = qr_apply_format_l_mask0(WithData, Size),
+    qr_add_quiet_zone(WithFormat, Size, 4).
+
+qr_data_codewords(Data, Target) ->
+    Bits0 = [0, 1, 0, 0] ++ bits_int(byte_size(Data), 8) ++ binary_bits(Data),
+    MaxBits = Target * 8,
+    Terminator = lists:duplicate(max(0, min(4, MaxBits - length(Bits0))), 0),
+    Bits1 = pad_bits_to_byte(Bits0 ++ Terminator),
+    pad_codewords(bits_to_codewords(Bits1), Target, 16#EC).
+
+binary_bits(Bin) ->
+    lists:append([bits_int(Byte, 8) || <<Byte:8>> <= Bin]).
+
+bits_int(N, Width) ->
+    [(N bsr Shift) band 1 || Shift <- lists:seq(Width - 1, 0, -1)].
+
+pad_bits_to_byte(Bits) ->
+    case length(Bits) rem 8 of
+        0 -> Bits;
+        Rem -> Bits ++ lists:duplicate(8 - Rem, 0)
+    end.
+
+bits_to_codewords([]) ->
+    [];
+bits_to_codewords(Bits) ->
+    {ByteBits, Rest} = lists:split(8, Bits),
+    [bits_to_int(ByteBits) | bits_to_codewords(Rest)].
+
+bits_to_int(Bits) ->
+    lists:foldl(fun(Bit, Acc) -> (Acc bsl 1) bor Bit end, 0, Bits).
+
+pad_codewords(Codewords, Target, _Next) when length(Codewords) >= Target ->
+    lists:sublist(Codewords, Target);
+pad_codewords(Codewords, Target, Next) ->
+    Following = case Next of
+        16#EC -> 16#11;
+        _     -> 16#EC
+    end,
+    pad_codewords(Codewords ++ [Next], Target, Following).
+
+rs_remainder(Data, EccLen) ->
+    Generator = rs_generator(EccLen),
+    GenTail = tl(Generator),
+    Rem0 = lists:duplicate(EccLen, 0),
+    lists:foldl(
+      fun(Byte, Rem) ->
+          Factor = Byte bxor hd(Rem),
+          Shifted = tl(Rem) ++ [0],
+          [R bxor gf_mul(Factor, G) || {R, G} <- lists:zip(Shifted, GenTail)]
+      end,
+      Rem0,
+      Data).
+
+rs_generator(Degree) ->
+    lists:foldl(
+      fun(I, Poly) ->
+          poly_mul_high(Poly, [1, gf_pow2(I)])
+      end,
+      [1],
+      lists:seq(0, Degree - 1)).
+
+poly_mul_high(P, Q) ->
+    PLen = length(P),
+    QLen = length(Q),
+    [poly_mul_coeff(P, Q, PLen, QLen, K) ||
+        K <- lists:seq(0, PLen + QLen - 2)].
+
+poly_mul_coeff(P, Q, PLen, QLen, K) ->
+    lists:foldl(
+      fun(I, Acc) ->
+          J = K - I,
+          case I >= 0 andalso I < PLen andalso J >= 0 andalso J < QLen of
+              true ->
+                  Acc bxor gf_mul(nth0(I, P), nth0(J, Q));
+              false ->
+                  Acc
+          end
+      end,
+      0,
+      lists:seq(0, K)).
+
+nth0(I, List) ->
+    lists:nth(I + 1, List).
+
+gf_pow2(0) ->
+    1;
+gf_pow2(N) ->
+    lists:foldl(fun(_, Acc) -> gf_mul(Acc, 2) end, 1, lists:seq(1, N)).
+
+gf_mul(A, B) ->
+    gf_mul(A, B, 0).
+
+gf_mul(_A, 0, Acc) ->
+    Acc;
+gf_mul(A, B, Acc) ->
+    Acc1 = case B band 1 of
+        1 -> Acc bxor A;
+        _ -> Acc
+    end,
+    A0 = A bsl 1,
+    A1 = case A0 band 16#100 of
+        0 -> A0 band 16#FF;
+        _ -> (A0 bxor 16#11D) band 16#FF
+    end,
+    gf_mul(A1, B bsr 1, Acc1).
+
+qr_base_v2(Size) ->
+    S0 = {#{}, #{}},
+    S1 = qr_draw_finder(S0, Size, 0, 0),
+    S2 = qr_draw_finder(S1, Size, 0, Size - 7),
+    S3 = qr_draw_finder(S2, Size, Size - 7, 0),
+    S4 = qr_draw_alignment(S3, Size, 18, 18),
+    S5 = qr_draw_timing(S4, Size),
+    S6 = qr_put(S5, Size, 4 * 2 + 9, 8, true, true),
+    qr_reserve_format(S6, Size).
+
+qr_draw_finder(State, Size, R0, C0) ->
+    lists:foldl(
+      fun(R, SRow) ->
+          lists:foldl(
+            fun(C, S) ->
+                Row = R0 + R,
+                Col = C0 + C,
+                Separator = R =:= -1 orelse R =:= 7 orelse
+                            C =:= -1 orelse C =:= 7,
+                Dark = (not Separator) andalso
+                       (R =:= 0 orelse R =:= 6 orelse
+                        C =:= 0 orelse C =:= 6 orelse
+                        (R >= 2 andalso R =< 4 andalso
+                         C >= 2 andalso C =< 4)),
+                qr_put(S, Size, Row, Col, Dark, true)
+            end,
+            SRow,
+            lists:seq(-1, 7))
+      end,
+      State,
+      lists:seq(-1, 7)).
+
+qr_draw_alignment(State, Size, R0, C0) ->
+    lists:foldl(
+      fun(R, SRow) ->
+          lists:foldl(
+            fun(C, S) ->
+                Dark = abs(R) =:= 2 orelse abs(C) =:= 2 orelse
+                       (R =:= 0 andalso C =:= 0),
+                qr_put(S, Size, R0 + R, C0 + C, Dark, true)
+            end,
+            SRow,
+            lists:seq(-2, 2))
+      end,
+      State,
+      lists:seq(-2, 2)).
+
+qr_draw_timing(State, Size) ->
+    lists:foldl(
+      fun(I, S0) ->
+          Dark = I rem 2 =:= 0,
+          S1 = qr_put(S0, Size, 6, I, Dark, true),
+          qr_put(S1, Size, I, 6, Dark, true)
+      end,
+      State,
+      lists:seq(8, Size - 9)).
+
+qr_reserve_format(State, Size) ->
+    lists:foldl(
+      fun({R, C}, S) -> qr_put(S, Size, R, C, false, true) end,
+      State,
+      qr_format_coords(Size)).
+
+qr_put({Modules, Reserved}, Size, Row, Col, Dark, Reserve) ->
+    case Row >= 0 andalso Row < Size andalso Col >= 0 andalso Col < Size of
+        true ->
+            R1 = case Reserve of
+                true  -> Reserved#{{Row, Col} => true};
+                false -> Reserved
+            end,
+            {Modules#{{Row, Col} => Dark}, R1};
+        false ->
+            {Modules, Reserved}
+    end.
+
+qr_place_bits(Modules0, Reserved, Size, Bits0) ->
+    Positions = qr_data_positions(Size, Reserved),
+    {Modules, _Bits} = lists:foldl(
+      fun({Row, Col}, {M, Bits}) ->
+          {Bit, Rest} = case Bits of
+              [B | Bs] -> {B, Bs};
+              []       -> {0, []}
+          end,
+          Mask = (Row + Col) rem 2 =:= 0,
+          Dark = (Bit =:= 1) =/= Mask,
+          {M#{{Row, Col} => Dark}, Rest}
+      end,
+      {Modules0, Bits0},
+      Positions),
+    Modules.
+
+qr_data_positions(Size, Reserved) ->
+    {Positions, _Dir} = lists:foldl(
+      fun(Col, {Acc, Dir}) ->
+          Rows = case Dir of
+              up   -> lists:seq(Size - 1, 0, -1);
+              down -> lists:seq(0, Size - 1)
+          end,
+          Pair = [{R, C} || R <- Rows,
+                            C <- [Col, Col - 1],
+                            not maps:is_key({R, C}, Reserved)],
+          {Acc ++ Pair, flip_dir(Dir)}
+      end,
+      {[], up},
+      qr_column_starts(Size - 1)),
+    Positions.
+
+qr_column_starts(Col) when Col =< 0 ->
+    [];
+qr_column_starts(6) ->
+    qr_column_starts(5);
+qr_column_starts(Col) ->
+    [Col | qr_column_starts(Col - 2)].
+
+flip_dir(up) -> down;
+flip_dir(down) -> up.
+
+qr_apply_format_l_mask0(Modules, Size) ->
+    Bits = [(16#77C4 bsr I) band 1 || I <- lists:seq(0, 14)],
+    lists:foldl(
+      fun({Bit, Coord}, M) ->
+          M#{Coord => Bit =:= 1}
+      end,
+      Modules,
+      lists:zip(Bits ++ Bits, qr_format_coords(Size))).
+
+qr_format_coords(Size) ->
+    [{0, 8}, {1, 8}, {2, 8}, {3, 8}, {4, 8}, {5, 8}, {7, 8},
+     {8, 8}, {8, 7}, {8, 5}, {8, 4}, {8, 3}, {8, 2}, {8, 1},
+     {8, 0},
+     {8, Size - 1}, {8, Size - 2}, {8, Size - 3}, {8, Size - 4},
+     {8, Size - 5}, {8, Size - 6}, {8, Size - 7}, {8, Size - 8},
+     {Size - 7, 8}, {Size - 6, 8}, {Size - 5, 8}, {Size - 4, 8},
+     {Size - 3, 8}, {Size - 2, 8}, {Size - 1, 8}].
+
+qr_add_quiet_zone(Modules, Size, Quiet) ->
+    Total = Size + Quiet * 2,
+    [[qr_quiet_module(Modules, Size, Quiet, R, C) ||
+        C <- lists:seq(0, Total - 1)] ||
+        R <- lists:seq(0, Total - 1)].
+
+qr_quiet_module(Modules, Size, Quiet, R, C) ->
+    InnerR = R - Quiet,
+    InnerC = C - Quiet,
+    case InnerR >= 0 andalso InnerR < Size andalso
+         InnerC >= 0 andalso InnerC < Size of
+        true  -> maps:get({InnerR, InnerC}, Modules, false);
+        false -> false
+    end.
+
+draw_qr_double_rows(Grid, W, H, X, Y, Rows) ->
+    lists:foldl(
+      fun({R, Row}, G0) ->
+          lists:foldl(
+            fun({C, true}, G) ->
+                    draw_qr_tile(G, W, H, X + C * 2, Y + R);
+               ({_C, false}, G) ->
+                    G
+            end,
+            G0,
+            lists:zip(lists:seq(0, length(Row) - 1), Row))
+      end,
+      Grid,
+      lists:zip(lists:seq(0, length(Rows) - 1), Rows)).
+
+draw_qr_placeholder(Grid, W, H, X, Y, ModsW, ModsH, Footer) ->
+    G1 = lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) ->
+                case R =:= 0 orelse R =:= ModsH - 1 orelse
+                     C =:= 0 orelse C =:= ModsW - 1 of
+                    true  -> draw_qr_tile(G, W, H, X + C * 2, Y + R);
+                    false -> G
+                end
+            end,
+            G0,
+            lists:seq(0, ModsW - 1))
+      end,
+      Grid,
+      lists:seq(0, ModsH - 1)),
+    Text = fit_text(Footer, ModsW * 2 - 4),
+    TextX = X + max(2, (ModsW * 2 - length(Text)) div 2),
+    TextY = Y + ModsH div 2,
+    overlay_text(G1, W, H, TextX, TextY, Text).
+
+draw_qr_tile(Grid, W, H, X, Y) ->
+    Block = <<226, 150, 136>>,
+    plot(plot(Grid, W, H, X, Y, Block), W, H, X + 1, Y, Block).
 
 render_orbit_grid(W, H, Yaw, Lid, Footer, Frame) ->
     Seed = machine_seed(),

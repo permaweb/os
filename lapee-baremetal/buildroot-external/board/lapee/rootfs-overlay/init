@@ -12,6 +12,8 @@
 # This script is deliberately tiny — all key generation, PCR extension,
 # and attestation logic lives in dev_tpm2 via the on.start hook.
 set -eu
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
 
 # Wire init's stdio to /dev/console so any trace lands on the screen
 # + serial. Kernel exec of rdinit=/init doesn't auto-wire stdio --
@@ -698,12 +700,15 @@ detach_boot_media
 # parse, bring up WiFi. If the gate was CLOSED, the preceding
 # block was skipped entirely, so WIFI_SSID/WIFI_PSK are still
 # empty and this branch is dead.
-if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ] && \
-   [ -x /sbin/wpa_supplicant ]; then
+WIFI_IFACE=""
+WIFI_DHCP_READY=""
+if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
+    WPA_SUPPLICANT=$(command -v wpa_supplicant 2>/dev/null || true)
+    IW_BIN=$(command -v iw 2>/dev/null || true)
+
     # Wait up to 15 s for the wlan iface to appear. iwlwifi / mt76
     # PCI probe runs asynchronously; may land after userspace
     # starts.
-    WIFI_IFACE=""
     for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         for _i in /sys/class/net/wl*; do
             [ -e "$_i/device" ] || continue
@@ -714,6 +719,10 @@ if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ] && \
     done
     if [ -z "$WIFI_IFACE" ]; then
         trace "wifi: no wlan interface after 15s (card absent or driver probe failed)"
+    elif [ -z "$WPA_SUPPLICANT" ]; then
+        trace "wifi: credentials accepted but wpa_supplicant not found in PATH=$PATH"
+    elif [ -z "$IW_BIN" ]; then
+        trace "wifi: credentials accepted but iw not found in PATH=$PATH"
     else
         trace "wifi: iface=$WIFI_IFACE bringing up (SSID redacted)"
         ip link set "$WIFI_IFACE" up 2>/dev/null || true
@@ -736,23 +745,39 @@ network={
 }
 WPACFG
         chmod 600 /etc/wpa_supplicant.conf
-        /sbin/wpa_supplicant -B \
-            -i "$WIFI_IFACE" \
-            -c /etc/wpa_supplicant.conf \
-            -f /run/lapee/wpa.log \
-            2>/dev/null \
-            || trace "wifi: wpa_supplicant launch failed; /run/lapee/wpa.log for details"
-        trace "wifi: wpa_supplicant backgrounded on $WIFI_IFACE"
-        if [ "$LAPEE_DEBUG" = "1" ]; then
-            for _assoc_try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                if iw dev "$WIFI_IFACE" link 2>/dev/null \
+        WPA_STARTED=""
+        if "$WPA_SUPPLICANT" -B \
+                -i "$WIFI_IFACE" \
+                -c /etc/wpa_supplicant.conf \
+                -f /run/lapee/wpa.log \
+                2>/dev/null; then
+            WPA_STARTED=1
+            trace "wifi: wpa_supplicant backgrounded on $WIFI_IFACE"
+        else
+            trace "wifi: wpa_supplicant launch failed; /run/lapee/wpa.log for details"
+        fi
+
+        # Do not race DHCP ahead of WiFi association. Without this,
+        # udhcpc can produce endless lease failures that obscure the
+        # real problem: no authenticated link yet.
+        if [ "$WPA_STARTED" = "1" ]; then
+            for _assoc_try in 1 2 3 4 5 6 7 8 9 10 \
+                              11 12 13 14 15 16 17 18 19 20 \
+                              21 22 23 24 25 26 27 28 29 30; do
+                if "$IW_BIN" dev "$WIFI_IFACE" link 2>/dev/null \
                         | grep -q '^Connected'; then
+                    WIFI_DHCP_READY=1
                     trace "wifi: $WIFI_IFACE associated (SSID redacted)"
                     break
                 fi
-                trace "wifi: waiting for association on $WIFI_IFACE ($_assoc_try/15)"
+                if [ "$LAPEE_DEBUG" = "1" ]; then
+                    trace "wifi: waiting for association on $WIFI_IFACE ($_assoc_try/30)"
+                fi
                 sleep 1
             done
+        fi
+        if [ "$WIFI_DHCP_READY" != "1" ]; then
+            trace "wifi: no association after 30s; skipping DHCP on $WIFI_IFACE"
         fi
     fi
 fi
@@ -793,6 +818,12 @@ else
             lo|bonding_masters|bonding|ip6tnl0|tunl0|sit0) continue ;;
         esac
         [ -e "$iface/device" ] || continue
+        if [ -d "$iface/wireless" ] || [ "${name#wl}" != "$name" ]; then
+            if [ "$name" != "$WIFI_IFACE" ] || [ "$WIFI_DHCP_READY" != "1" ]; then
+                trace "net: skip $name (wifi not associated)"
+                continue
+            fi
+        fi
         echo "[init] net: up $name"
         trace "net: up $name"
         ip link set "$name" up 2>/dev/null || true
