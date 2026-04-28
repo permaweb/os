@@ -46,6 +46,14 @@ dmesg -n 1 2>/dev/null || true
 # `start_clean' (kernel + stdlib) and add HB's lib/ ebin paths so
 # the splash can resolve any runtime modules it needs.
 mkdir -p /run/lapee
+SPLASH_LAYOUT=$(tr ' ' '\n' < /proc/cmdline \
+    | sed -n 's/^lapee\.splash=\(.*\)$/\1/p' \
+    | head -1)
+case "$SPLASH_LAYOUT" in
+    qr|max|full|deck|classic)
+        export LAPEE_SPLASH_LAYOUT="$SPLASH_LAYOUT"
+        ;;
+esac
 ERL=$(ls -1 /usr/lib/hyperbeam/erts-*/bin/erl 2>/dev/null | head -1)
 HB_BOOT=$(ls -1 /usr/lib/hyperbeam/releases/*/start_clean.boot 2>/dev/null | head -1)
 HB_BOOT=${HB_BOOT%.boot}

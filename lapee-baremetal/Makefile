@@ -89,7 +89,7 @@ OUT       ?= work/lapee-usb.img
 
 CMDLINE   ?= console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
              fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
-             LAPEE_WRITEBACK=1 lapee.wifi=enabled
+             LAPEE_WRITEBACK=1 lapee.wifi=enabled lapee.splash=qr
 
 .PHONY: help all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \

@@ -59,6 +59,21 @@ probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
 probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm2@2.0a/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 
+splash_layout() ->
+    case os:getenv("LAPEE_SPLASH_LAYOUT") of
+        false -> qr;
+        ""    -> qr;
+        Str ->
+            case string:lowercase(Str) of
+                "qr"      -> qr;
+                "max"     -> max;
+                "full"    -> max;
+                "deck"    -> deck;
+                "classic" -> classic;
+                _         -> qr
+            end
+    end.
+
 %% Terminal dimensions detected at startup via `stty size'. On the
 %% iron framebuffer console with -vga std + 8x16 font that's
 %% typically 128x48, not 80x24. Hard-coding 80x24 leaves the splash
@@ -66,7 +81,7 @@ log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 detect_dims() ->
     Cmd = io_lib:format("stty -F ~s size 2>/dev/null", [console_path()]),
     Out = string:trim(os:cmd(lists:flatten(Cmd))),
-    case string:tokens(Out, " ") of
+    SttyDims = case string:tokens(Out, " ") of
         [RowsStr, ColsStr] ->
             try
                 Rows = list_to_integer(RowsStr),
@@ -75,6 +90,30 @@ detect_dims() ->
             catch _:_ -> {?MIN_W, ?MIN_H}
             end;
         _ -> {?MIN_W, ?MIN_H}
+    end,
+    fb_dims(SttyDims).
+
+fb_dims(Default = {SttyW, SttyH}) ->
+    case file:read_file("/sys/class/graphics/fb0/virtual_size") of
+        {ok, Bin} ->
+            case string:tokens(string:trim(binary_to_list(Bin)), ",") of
+                [PxWStr, PxHStr] ->
+                    try
+                        PxW = list_to_integer(PxWStr),
+                        PxH = list_to_integer(PxHStr),
+                        %% fbcon usually uses an 8x16 font with
+                        %% simpledrm/efifb. Some firmware paths leave
+                        %% `stty size' stuck at 80x25, which makes the
+                        %% splash occupy only the upper-left quadrant.
+                        %% Prefer the larger inferred grid, while never
+                        %% shrinking below the TTY-reported dimensions.
+                        {max(SttyW, PxW div 8),
+                         max(SttyH, PxH div 16)}
+                    catch _:_ -> Default
+                    end;
+                _ -> Default
+            end;
+        _ -> Default
     end.
 
 %% ============================================================
@@ -97,11 +136,13 @@ main(_Args) ->
 
     %% Monotonic clock for the hb-wait elapsed-seconds counter.
     T0 = erlang:monotonic_time(millisecond),
+    Layout = splash_layout(),
 
     State0 = #{
         out         => Out,
         cols        => Cols,
         rows        => Rows,
+        layout      => Layout,
         frame       => 0,
         yaw         => 0.0,
         lid         => 0.0,
@@ -110,7 +151,7 @@ main(_Args) ->
         t0_ms       => T0,
         hb_wait_t0  => undefined
     },
-    log_event("phase=boot"),
+    log_event(io_lib:format("phase=boot layout=~p", [Layout])),
     process_flag(trap_exit, true),
     try
         loop(State0)
@@ -379,12 +420,12 @@ splash_status_row(H) ->
 
 %% Project a 3D point to a 2D grid cell.
 %% Orthographic projection with a Y-axis tilt for the 3/4 view.
-project({X, Y, Z}, W, H, Scale, Lift) ->
+project_at({X, Y, Z}, Xc, Yc, Scale) ->
     Tilt = 0.45,                                  %% radians, look-down
     Yt = Y * math:cos(Tilt) - Z * math:sin(Tilt),
     %% Char cells are roughly 2:1 tall:wide; scale Y by half.
-    Cx = W / 2.0 + X * Scale,
-    Cy = H / 2.0 - Yt * Scale * 0.5 - Lift,
+    Cx = Xc + X * Scale,
+    Cy = Yc - Yt * Scale * 0.5,
     {round(Cx), round(Cy)}.
 
 %% ============================================================
@@ -435,31 +476,123 @@ plot(Grid, W, H, X, Y, Ch) ->
 %% ============================================================
 %% Frame composition + ANSI emission
 %% ============================================================
-render(#{cols := W, rows := H, yaw := Yaw, lid := Lid,
-         phase := Phase, ip := Ip, hb_wait_t0 := HbT0}) ->
+render(#{cols := W, rows := H, layout := Layout, frame := Frame,
+         yaw := Yaw, lid := Lid, phase := Phase, ip := Ip,
+         hb_wait_t0 := HbT0}) ->
+    Footer = footer_text(Phase, Ip, HbT0),
+    Grid = case Layout of
+        classic -> render_classic_grid(W, H, Yaw, Lid, Footer);
+        max     -> render_max_grid(W, H, Yaw, Lid, Footer, Frame);
+        deck    -> render_deck_grid(W, H, Yaw, Lid, Footer, Frame);
+        _       -> render_qr_grid(W, H, Yaw, Lid, Footer, Frame, Ip)
+    end,
+    %% Emit: cursor home, theme colour, then row by row separated
+    %% by CRLF. Every row is full-width, so old frame cells are
+    %% overwritten without needing a full clear at 12 fps.
+    Rows = [emit_row(Grid, W, R) || R <- lists:seq(1, H)],
+    [<<"\e[H">>, theme_prefix(Layout, Phase, Frame),
+     lists:join(<<"\r\n">>, Rows), <<"\e[0m">>].
+
+render_classic_grid(W, H, Yaw, Lid, Footer) ->
     Scale = splash_scale(W, H),
     Lift  = splash_lift(H, Scale),
+    Grid0 = draw_laptop(#{}, W, H, Yaw, Lid,
+                        W / 2.0, H / 2.0 - Lift, Scale),
+    overlay_centered(Grid0, W, splash_status_row(H), Footer).
+
+render_max_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Scale = max_scale(W, H),
+    Grid0 = scan_background(#{}, W, H, Frame, 17),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W / 2.0, H * 0.50, Scale),
+    Grid2 = draw_box(Grid1, W, H, 2, 2, W - 2, H - 2),
+    Grid3 = overlay_text(Grid2, W, H, 4, 3,
+                         "LAPEE // HYPERBEAM TRUST MACHINE"),
+    Grid4 = overlay_centered(Grid3, W, 5,
+                             "[ TPM QUOTE | PCR REPLAY | AK BIND | NODE MESSAGE ]"),
+    Grid5 = draw_progress(Grid4, W, H, 6, H - 4, W - 12, Frame),
+    overlay_centered(Grid5, W, H - 2, Footer).
+
+render_qr_grid(W, H, Yaw, Lid, Footer, Frame, Ip) ->
+    Mods = qr_modules(W, H),
+    QrW = Mods * 2 + 2,
+    QrH = Mods + 2,
+    QrX = max(2, W - QrW - 2),
+    QrY = max(3, H - QrH - 1),
+    PanelW = min(42, max(28, W - QrX + 2)),
+    PanelX = max(2, W - PanelW - 2),
+    WorkRight = max(36, min(W - 4, PanelX - 3)),
+    Scale = max(5.0, min(WorkRight / 5.5, (H - 8) / 2.15)),
+    Grid0 = scan_background(#{}, W, H, Frame, 23),
+    PanelH = max(9, QrY - 5),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        WorkRight / 2.0 + 1, H * 0.47, Scale),
+    Grid2 = overlay_text(Grid1, W, H, 3, 2,
+                         "LapEE / live attestation console"),
+    Grid3 = draw_box(fill_rect(Grid2, W, H, PanelX + 1, 4,
+                               PanelW - 2, PanelH - 2),
+                     W, H, PanelX, 3, PanelW, PanelH),
+    Url = case Ip of
+        undefined -> "http://<node>:8734/";
+        _         -> "http://" ++ Ip ++ ":8734/"
+    end,
+    Lines = ["HYPERBEAM BOOT",
+             "> load dev_tpm2",
+             "> quote PCR[0,2,4,8,15]",
+             "> bind node message",
+             "> serve " ++ Url,
+             "> " ++ status_word(Footer)],
+    Grid4 = overlay_lines(Grid3, W, H, PanelX + 2, 5, Lines),
+    Grid5 = draw_qr(Grid4, W, H, QrX, QrY, Mods),
+    Grid6 = overlay_text(Grid5, W, H, QrX, max(1, QrY - 1),
+                         "SCAN NODE"),
+    overlay_text(Grid6, W, H, 3, H - 2, Footer).
+
+render_deck_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    RailW = min(32, max(24, W div 4)),
+    Grid0 = scan_background(#{}, W, H, Frame, 11),
+    Scale = max(5.0, min((W - RailW - 8) / 5.2, (H - 7) / 2.2)),
+    Xc = RailW + (W - RailW) / 2.0,
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid, Xc, H * 0.48, Scale),
+    Grid2 = draw_box(fill_rect(Grid1, W, H, 3, 3, RailW - 2, H - 5),
+                     W, H, 2, 2, RailW, H - 3),
+    Grid3 = overlay_lines(Grid2, W, H, 4, 4,
+        ["BOOT DECK",
+         "01 kernel     locked",
+         "02 initramfs  sealed",
+         "03 tpm quote  live",
+         "04 pcr replay armed",
+         "05 hyperbeam  waking",
+         "",
+         "mode: LAPEE",
+         "net : dhcp -> node",
+         "out : attestation only"]),
+    Grid4 = overlay_text(Grid3, W, H, RailW + 4, 3,
+                         "HYPERBEAM NODE ONLINE PATH"),
+    Grid5 = draw_progress(Grid4, W, H, RailW + 4, H - 5,
+                          W - RailW - 8, Frame),
+    overlay_text(Grid5, W, H, RailW + 4, H - 3, Footer).
+
+theme_prefix(qr, ready, _)      -> <<"\e[1;36m">>;
+theme_prefix(qr, _, _)          -> <<"\e[0;36m">>;
+theme_prefix(max, ready, _)     -> <<"\e[1;32m">>;
+theme_prefix(max, _, _)         -> <<"\e[0;32m">>;
+theme_prefix(deck, ready, _)    -> <<"\e[1;35m">>;
+theme_prefix(deck, _, _)        -> <<"\e[0;35m">>;
+theme_prefix(classic, ready, _) -> <<"\e[1;37m">>;
+theme_prefix(classic, _, _)     -> <<"\e[0;37m">>.
+
+draw_laptop(Grid0, W, H, Yaw, Lid, Xc, Yc, Scale) ->
     Edges = laptop_edges(Lid),
-    %% Apply yaw rotation around Y axis to every point.
     Edges1 = [{rotate_y(P, Yaw), rotate_y(Q, Yaw)} || {P, Q} <- Edges],
-    %% Project to 2D using the dynamic scale + lift.
-    Edges2 = [{project(P, W, H, Scale, Lift),
-               project(Q, W, H, Scale, Lift)}
+    Edges2 = [{project_at(P, Xc, Yc, Scale),
+               project_at(Q, Xc, Yc, Scale)}
               || {P, Q} <- Edges1],
-    %% Rasterise.
-    Grid0 = #{},
-    Grid1 = lists:foldl(
-              fun({P1, P2}, G) -> draw_line(G, W, H, P1, P2) end,
-              Grid0, Edges2),
-    %% Single status line under the laptop. Spin continues during
-    %% the `ready' phase with the URL underneath -- no face-on lock.
-    Footer = footer_text(Phase, Ip, HbT0),
-    StatusRow = splash_status_row(H),
-    Grid2 = overlay_centered(Grid1, W, StatusRow, Footer),
-    %% Emit: cursor home, then row by row separated by \r\n.
-    Rows = [emit_row(Grid2, W, R) || R <- lists:seq(1, H)],
-    [<<"\e[H">> |
-     lists:join(<<"\r\n">>, Rows)].
+    lists:foldl(fun({P1, P2}, G) -> draw_line(G, W, H, P1, P2) end,
+                Grid0, Edges2).
+
+max_scale(W, H) ->
+    max(6.0, min(W / 5.3, (H - 6) / 2.05)).
 
 emit_row(Grid, W, Row) ->
     [maps:get({Row, Col}, Grid, $\s) || Col <- lists:seq(1, W)].
@@ -472,6 +605,144 @@ overlay_centered(Grid, W, Row, Text) ->
       end,
       Grid,
       lists:zip(lists:seq(0, length(Text) - 1), Text)).
+
+overlay_text(Grid, W, H, X, Y, Text) ->
+    case Y >= 1 andalso Y =< H of
+        true ->
+            lists:foldl(
+              fun({I, Ch}, G) ->
+                  plot(G, W, H, X + I, Y, Ch)
+              end,
+              Grid,
+              lists:zip(lists:seq(0, length(Text) - 1), Text));
+        false ->
+            Grid
+    end.
+
+overlay_lines(Grid, W, H, X, Y, Lines) ->
+    lists:foldl(
+      fun({I, Line}, G) -> overlay_text(G, W, H, X, Y + I, Line) end,
+      Grid,
+      lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
+
+draw_box(Grid, W, H, X, Y, BW, BH) when BW >= 2, BH >= 2 ->
+    X2 = X + BW - 1,
+    Y2 = Y + BH - 1,
+    G1 = draw_hline(Grid, W, H, X + 1, X2 - 1, Y, $-),
+    G2 = draw_hline(G1, W, H, X + 1, X2 - 1, Y2, $-),
+    G3 = draw_vline(G2, W, H, X, Y + 1, Y2 - 1, $|),
+    G4 = draw_vline(G3, W, H, X2, Y + 1, Y2 - 1, $|),
+    plot(plot(plot(plot(G4, W, H, X, Y, $+), W, H, X2, Y, $+),
+              W, H, X, Y2, $+), W, H, X2, Y2, $+);
+draw_box(Grid, _, _, _, _, _, _) ->
+    Grid.
+
+fill_rect(Grid, W, H, X, Y, BW, BH) when BW > 0, BH > 0 ->
+    lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) -> plot(G, W, H, C, R, $\s) end,
+            G0,
+            lists:seq(X, X + BW - 1))
+      end,
+      Grid,
+      lists:seq(Y, Y + BH - 1));
+fill_rect(Grid, _, _, _, _, _, _) ->
+    Grid.
+
+draw_hline(Grid, W, H, X1, X2, Y, Ch) ->
+    lists:foldl(fun(X, G) -> plot(G, W, H, X, Y, Ch) end,
+                Grid, lists:seq(min(X1, X2), max(X1, X2))).
+
+draw_vline(Grid, W, H, X, Y1, Y2, Ch) ->
+    lists:foldl(fun(Y, G) -> plot(G, W, H, X, Y, Ch) end,
+                Grid, lists:seq(min(Y1, Y2), max(Y1, Y2))).
+
+draw_progress(Grid, W, H, X, Y, Len0, Frame) ->
+    Len = max(8, Len0),
+    G1 = overlay_text(Grid, W, H, X, Y, "["),
+    G2 = overlay_text(G1, W, H, X + Len + 1, Y, "]"),
+    Pos = Frame rem Len,
+    lists:foldl(
+      fun(I, G) ->
+          Ch = case I of
+              Pos -> $>;
+              _ when I < Pos -> $=;
+              _ -> $.
+          end,
+          plot(G, W, H, X + I + 1, Y, Ch)
+      end,
+      G2,
+      lists:seq(0, Len - 1)).
+
+scan_background(Grid, W, H, Frame, Step) ->
+    lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) ->
+                case ((R * 3 + C * 5 + Frame) rem Step) of
+                    0 -> plot(G, W, H, C, R, $.);
+                    _ -> G
+                end
+            end,
+            G0,
+            lists:seq(1, W))
+      end,
+      Grid,
+      lists:seq(1, H)).
+
+qr_modules(W, H) ->
+    if
+        W >= 118 andalso H >= 42 -> 21;
+        W >= 96  andalso H >= 34 -> 17;
+        true -> 13
+    end.
+
+draw_qr(Grid0, W, H, X, Y, Mods) ->
+    G0 = fill_rect(Grid0, W, H, X + 1, Y + 1, Mods * 2, Mods),
+    G1 = draw_box(G0, W, H, X, Y, Mods * 2 + 2, Mods + 2),
+    Cells = [{R, C} || R <- lists:seq(0, Mods - 1),
+                       C <- lists:seq(0, Mods - 1),
+                       qr_dark(Mods, R, C)],
+    lists:foldl(
+      fun({R, C}, G) ->
+          X0 = X + 1 + C * 2,
+          Y0 = Y + 1 + R,
+          plot(plot(G, W, H, X0, Y0, $#), W, H, X0 + 1, Y0, $#)
+      end,
+      G1,
+      Cells).
+
+qr_dark(Mods, R, C) ->
+    case finder_pos(Mods, R, C) of
+        {true, FR, FC} ->
+            finder_dark(FR, FC);
+        false ->
+            A = (R * 11 + C * 7 + R * C) rem 17,
+            B = (R + C * 3) rem 5,
+            A < 7 orelse B =:= 0
+    end.
+
+finder_pos(_Mods, R, C) when R < 7, C < 7 ->
+    {true, R, C};
+finder_pos(Mods, R, C) when R < 7, C >= Mods - 7 ->
+    {true, R, C - (Mods - 7)};
+finder_pos(Mods, R, C) when R >= Mods - 7, C < 7 ->
+    {true, R - (Mods - 7), C};
+finder_pos(_, _, _) ->
+    false.
+
+finder_dark(R, C) ->
+    R =:= 0 orelse R =:= 6 orelse C =:= 0 orelse C =:= 6 orelse
+    (R >= 2 andalso R =< 4 andalso C >= 2 andalso C =< 4).
+
+status_word(Text) ->
+    case Text of
+        "Running" ++ _ -> "READY";
+        "starting HyperBEAM" ++ _ -> "HB STARTING";
+        "network up" ++ _ -> "NETWORK UP";
+        _ -> "BOOTING"
+    end.
 
 %% Status line texts -- the only words the operator sees on screen
 %% during boot. In `hb-wait' we surface the IP + an elapsed-seconds

@@ -84,6 +84,10 @@ make hb-usb-write DEV=/dev/diskN
 # splash spins a 3D wireframe laptop with a status line beneath:
 #   "starting LapEE..." -> "network up; starting HyperBEAM..." ->
 #   "starting HyperBEAM... <IP> (Ns)" -> "Running at http://<IP>:8734/"
+# The measured cmdline selector `lapee.splash=' chooses the layout:
+#   qr      right-side HyperBEAM console + QR-style node mark
+#   max     full-frame green laptop
+#   deck    magenta boot-deck telemetry rail
 #
 # Pull the dashboard either from the live node over LAN, or from the
 # stick after pulling it back to the Mac (writeback path):
@@ -163,4 +167,3 @@ it in the peer `/attestation` call, rejects with
 `nonce_freshness: mismatch` BEFORE any crypto if the response's
 quote nonce doesn't match. This is what makes an attestation
 envelope un-replayable.
-
