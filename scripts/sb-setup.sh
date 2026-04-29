@@ -274,7 +274,7 @@ if [ "$cmd" = "sign" ]; then
     echo "Signed USB image ready: $USB_IMAGE"
     echo ""
     echo "Next: flash it with"
-    echo "    make hb-usb-write DEV=/dev/diskN"
+    echo "    make hb-image-write DEV=/dev/diskN"
     exit 0
 fi
 
@@ -327,7 +327,7 @@ Enrolment procedure on the Framework 13:
      `enrol' picks up the newly-produced files; running `sign'
      before `enrol' is also fine -- rerun `sign' once `enrol'
      lands them.)
-  2. Flash with `make hb-usb-write DEV=/dev/diskN' and plug the
+  2. Flash with `make hb-image-write DEV=/dev/diskN' and plug the
      stick into the Framework.
   3. Power on, F2 to enter BIOS.
   4. Security -> Secure Boot -> Enter Setup Mode (clears factory

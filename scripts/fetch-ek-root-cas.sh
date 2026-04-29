@@ -31,14 +31,14 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 # DEST is the root-CA directory the secondary external verifier
-# (lapee-baremetal/secondary-external-verifier/verifier_hb.py)
+# (secondary-external-verifier/verifier_hb.py)
 # reads at run time. Pre-migration this lived under HyperBEAM's
 # `priv/tpm-interpret/root-cas/'; in the standalone LapEE repo
 # we ship the trust anchors next to the verifier itself so a
 # fresh clone has everything it needs.
-DEST="lapee-baremetal/secondary-external-verifier/root-cas"
+DEST="secondary-external-verifier/root-cas"
 mkdir -p "$DEST"
 
 MODE="${1:-fetch}"

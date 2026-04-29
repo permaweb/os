@@ -1,4 +1,4 @@
-# lapee_defconfig — full from-source LapEE appliance build.
+# lapee_defconfig — source-built LapEE target userspace.
 #
 # Buildroot bootstraps its own cross-toolchain from source on
 # every build (BR2_TOOLCHAIN_BUILDROOT=y); the cross-compiler
@@ -9,10 +9,10 @@
 # custom `hyperbeam' package in this BR2_EXTERNAL tree.
 #
 # The output is a single rootfs.cpio.zst that becomes the
-# initramfs of the LapEE UKI. The only upstream binaries in the
-# trust chain are non-free WiFi firmware blobs (Intel iwlwifi /
-# MediaTek MT7922) — no source release exists for those; their
-# hashes are measured into PCR 9 by the kernel firmware loader.
+# initramfs of the LapEE UKI. Remaining prebuilt bytes in the
+# final boot image are documented in README.md: Debian's x64
+# systemd EFI stub for the UKI, and vendor firmware blobs where
+# no source release exists.
 
 # Architecture
 BR2_x86_64=y
