@@ -1,7 +1,7 @@
 # LapEE — operating notes for Claude
 
 This file auto-loads when Claude is working anywhere under
-`lapee-baremetal/`. It exists because two failure modes recur on
+this repo. It exists because two failure modes recur on
 this project. The test of this document is not whether it reads
 well; it is whether the next session's behaviour changes.
 

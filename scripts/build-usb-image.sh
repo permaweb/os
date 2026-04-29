@@ -213,7 +213,7 @@ docker run --rm $DOCKER_PLATFORM \
             /work/usb-build/lapee.efi ::/EFI/Boot/BootX64.efi
         echo 'LapEE UEFI-bootable USB. UKI at /EFI/Boot/BootX64.efi.' \\
             > /work/usb-build/README.TXT
-        echo 'lapee-baremetal-esp-v1' > /work/usb-build/LAPEE.MARKER
+        echo 'lapee-esp-v1' > /work/usb-build/LAPEE.MARKER
         mcopy -i /work/usb-build/esp.img \\
             /work/usb-build/README.TXT ::/README.TXT
         mcopy -i /work/usb-build/esp.img \\

@@ -3,11 +3,12 @@
 #
 # Buildroot bootstraps a cross-toolchain from source on first
 # build (BR2_TOOLCHAIN_BUILDROOT=y in lapee_defconfig) and uses
-# it to compile every binary in the boot chain — kernel, libc,
-# OpenSSL, libtss2, busybox, wpa_supplicant, Erlang/OTP, and
-# (via the custom hyperbeam package) HyperBEAM itself. The only
-# upstream binaries left are non-free WiFi firmware blobs, which
-# are documented in the README.
+# it to compile the kernel, libc, OpenSSL, libtss2, busybox,
+# wpa_supplicant, Erlang/OTP, and (via the custom hyperbeam
+# package) HyperBEAM itself. The shipped boot path still uses
+# Debian's x64 systemd EFI stub for the UKI and vendor firmware
+# blobs where no source release exists; those are documented in
+# the README.
 #
 # First build wall-clock is non-trivial: gcc bootstrap + Erlang
 # cross-build + HB compile dominate. Incremental builds are

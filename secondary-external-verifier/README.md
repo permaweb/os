@@ -35,11 +35,8 @@ Five checks, in order:
 
 ## Intentional limitations
 
-- Envelope shape: currently handles `lapee_attestation_version = "0.2"`
-  (hex-encoded fields). The envelope format on `agent/lapee-dev-tpm2`
-  has moved on (base64url in v0.3, kebab-case keys in later work).
-  Bringing this verifier up to the current shape is a small follow-up
-  once the format is settled.
+- Envelope shape: currently handles `lapee-attestation-version = "0.4"`,
+  the live shape emitted by `~tpm2@2.0a/attestation`.
 - No hardware introspection — this tool never talks to a TPM; it only
   validates cryptographic evidence in the envelope itself.
 - Trust anchor selection is operator-supplied via `--roots-dir`. A
