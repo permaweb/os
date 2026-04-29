@@ -48,6 +48,7 @@ BR2_KERNEL_HEADERS_6_6=y
 # own (no sysvinit, no systemd).
 BR2_INIT_NONE=y
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/post-build.sh"
 
 # ----- kernel ------------------------------------------------
 BR2_LINUX_KERNEL=y
@@ -61,11 +62,9 @@ BR2_LINUX_KERNEL_BZIMAGE=y
 BR2_LINUX_KERNEL_INSTALL_TARGET=y
 
 # ----- filesystem -------------------------------------------
-# Primary is cpio.zst (smaller, faster init; kernel
-# CONFIG_RD_ZSTD=y in our fragment); .gz alongside as a
-# fallback for any consumer that doesn't speak zstd.
+# cpio.zst is smaller and faster to load; CONFIG_RD_ZSTD=y
+# is enabled in our kernel fragment.
 BR2_TARGET_ROOTFS_CPIO=y
-BR2_TARGET_ROOTFS_CPIO_GZIP=y
 BR2_TARGET_ROOTFS_CPIO_ZSTD=y
 
 # ----- userspace --------------------------------------------
@@ -73,10 +72,9 @@ BR2_TARGET_ROOTFS_CPIO_ZSTD=y
 BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 
-# Erlang/OTP: target runtime. Buildroot version pinning is
-# handled in `package/erlang-version-override' (hyperbeam.mk
-# depends on it); the upstream Buildroot package's default OTP
-# version may lag, so we override.
+# Erlang/OTP: target runtime. scripts/build-buildroot.sh pins
+# ERLANG_VERSION=27.x because the v1-ish LapEE HyperBEAM branch uses
+# OTP 27 syntax while Buildroot 2026.02.1 defaults to OTP 26.
 BR2_PACKAGE_ERLANG=y
 
 # OpenSSL: BEAM crypto NIFs link against this. libtss2's TPM
@@ -98,19 +96,31 @@ BR2_PACKAGE_IW=y
 # ip / ss / network setup.
 BR2_PACKAGE_IPROUTE2=y
 
-# WiFi firmware. Intel iwlwifi for AX210/AX211, MediaTek
-# MT7922. These are the only non-source binaries in the chain;
-# their measurements are extended into PCR 9 by the kernel
-# firmware loader, so a verifier can chain-validate against a
-# known-good list.
+# WiFi + common USB-Ethernet firmware. These are the only non-source
+# binaries in the chain; their measurements are extended into PCR 9
+# by the kernel firmware loader, so a verifier can chain-validate
+# against a known-good list.
 BR2_PACKAGE_LINUX_FIRMWARE=y
-BR2_PACKAGE_LINUX_FIRMWARE_INTEL_AX200=y
-BR2_PACKAGE_LINUX_FIRMWARE_INTEL_AX210=y
-BR2_PACKAGE_LINUX_FIRMWARE_RADIO_MEDIATEK_MT7922=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_QUZ=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7921=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7922=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7925=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_8169=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_RTW89=y
+BR2_PACKAGE_WIRELESS_REGDB=y
 
 # zstd: needed at runtime by the kernel's CONFIG_RD_ZSTD path
 # (initramfs decompression) and by any operator-side tooling.
 BR2_PACKAGE_ZSTD=y
+
+# Some HyperBEAM dependencies and OTP libraries link against libgmp
+# on the v1 LapEE branch. Keep the target runtime complete even when
+# Buildroot's transitive dependency graph does not pull it in.
+BR2_PACKAGE_GMP=y
 
 # ----- LapEE custom packages --------------------------------
 # Cross-compiles HyperBEAM (Erlang code + lapee_tpm_nif) inside

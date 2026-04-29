@@ -33,6 +33,13 @@ BUILDROOT_VER=${BUILDROOT_VER:-2026.02.1}
 BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
 BUILDROOT_SHA256=${BUILDROOT_SHA256:-e296791039f806294a4e3e8d708d6b95631ca9fbca2e76a83d6058acaca459b5}
 
+# HyperBEAM's v1-ish LapEE branch uses OTP 27 syntax (maybe expressions
+# and triple-quoted strings). Buildroot 2026.02.1 still defaults to OTP
+# 26, so pin the package version here while keeping the package recipe
+# itself upstream Buildroot.
+ERLANG_VERSION=${ERLANG_VERSION:-27.3.4.11}
+ERLANG_SHA256=${ERLANG_SHA256:-9d63382d3e7707c058dabe338114e09ff8228d54d29df794d907d3c8dddde5f9}
+
 # Ensure the docker volume exists. Wipe its config marker if the
 # defconfig file's mtime is newer than what the volume saw last
 # time — Buildroot regenerates the config but doesn't always
@@ -68,16 +75,110 @@ if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
             tar -xzf br.tar.gz
             rm -f br.tar.gz
             mv 'buildroot-${BUILDROOT_VER}' /build/buildroot
+	        "
+fi
+
+# Teach the pinned Buildroot tree the hash for the Erlang/OTP release
+# selected above. The make command line overrides ERLANG_VERSION; the
+# package hash file still needs to know about that source tarball.
+docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+    bash -euo pipefail -c "
+        hash_file=/build/buildroot/package/erlang/erlang.hash
+        grep -q 'otp_src_${ERLANG_VERSION}.tar.gz' \"\$hash_file\" || \
+            printf '%s  %s  %s\n' \
+                sha256 '${ERLANG_SHA256}' \
+                'otp_src_${ERLANG_VERSION}.tar.gz' >> \"\$hash_file\"
+    "
+
+# Re-generate defconfig when absent or when the external defconfig
+# changes. This preserves package build artefacts but keeps the
+# Buildroot .config aligned with the moving BR2_EXTERNAL tree during
+# the from-scratch-toolchain transition.
+DEFCONFIG_SHA=$(shasum -a 256 "buildroot-external/configs/$DEFCONFIG" | awk '{print $1}')
+HYPERBEAM_RECIPE_SHA=$(
+    find buildroot-external/package/hyperbeam -type f \
+        | LC_ALL=C sort \
+        | xargs shasum -a 256 \
+        | shasum -a 256 \
+        | awk '{print $1}'
+)
+FIRMWARE_SELECTION_SHA=$(
+    grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "buildroot-external/configs/$DEFCONFIG" \
+        | LC_ALL=C sort \
+        | shasum -a 256 \
+        | awk '{print $1}'
+)
+CONFIG_NEEDS_REFRESH=0
+if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test -f /build/out/.config" 2>/dev/null; then
+    CONFIG_NEEDS_REFRESH=1
+elif ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test \"\$(cat /build/out/.lapee-defconfig.sha256 2>/dev/null)\" = '$DEFCONFIG_SHA'" 2>/dev/null; then
+    CONFIG_NEEDS_REFRESH=1
+fi
+
+if [ "$CONFIG_NEEDS_REFRESH" = "1" ]; then
+    echo "=== Generating $DEFCONFIG ==="
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+	    bash -c "mkdir -p /build/out && cd /build/buildroot && \
+	             make O=/build/out BR2_EXTERNAL=/build/buildroot-external $DEFCONFIG && \
+	             echo '$DEFCONFIG_SHA' > /build/out/.lapee-defconfig.sha256"
+fi
+
+# Buildroot tracks package state with stamps, so a defconfig refresh that
+# enables additional firmware can leave linux-firmware marked installed from
+# the previous selection. Force just that package to rebuild when our firmware
+# selection changes; keep the wireless regulatory database owned by its own
+# package intact.
+if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test \"\$(cat /build/out/.lapee-firmware-selection.sha256 2>/dev/null)\" = '$FIRMWARE_SELECTION_SHA'" 2>/dev/null; then
+    echo "=== Firmware selection changed or untracked; cleaning linux-firmware ==="
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -euo pipefail -c "
+            cd /build/out
+            make linux-firmware-dirclean || true
+            rm -rf /build/out/target/lib/firmware/intel/iwlwifi \
+                   /build/out/target/lib/firmware/mediatek \
+                   /build/out/target/lib/firmware/rtl_nic \
+                   /build/out/target/lib/firmware/rtw89
+            echo '$FIRMWARE_SELECTION_SHA' > /build/out/.lapee-firmware-selection.sha256
         "
 fi
 
-# Re-generate defconfig if /build/out doesn't exist yet.
+# Rebuild Erlang and HyperBEAM when the pinned OTP version changes; the
+# target rootfs can otherwise retain stale erts/lib files from an older
+# package install.
 if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
-        bash -c "test -f /build/out/.config" 2>/dev/null; then
-    echo "=== Generating $DEFCONFIG ==="
+        bash -c "test \"\$(cat /build/out/.lapee-erlang-version 2>/dev/null)\" = '$ERLANG_VERSION'" 2>/dev/null; then
+    echo "=== Erlang/OTP version changed or untracked; cleaning Erlang + HyperBEAM ==="
     docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
-        bash -c "mkdir -p /build/out && cd /build/buildroot && \
-                 make O=/build/out BR2_EXTERNAL=/build/buildroot-external $DEFCONFIG"
+        bash -euo pipefail -c "
+            cd /build/out
+            make ERLANG_VERSION='$ERLANG_VERSION' erlang-dirclean host-erlang-dirclean hyperbeam-dirclean || true
+            rm -rf /build/out/target/usr/lib/erlang \
+                   /build/out/target/usr/lib/hyperbeam \
+                   /build/out/build/hyperbeam-*
+            echo '$ERLANG_VERSION' > /build/out/.lapee-erlang-version
+        "
+fi
+
+# Rebuild HyperBEAM when its Buildroot recipe changes. Buildroot
+# correctly tracks package source files once extracted, but it does not
+# automatically notice edits to BR2_EXTERNAL package makefiles. During
+# this toolchain transition those makefile hooks are exactly where
+# cross-compile fixes land, so stale release trees are more dangerous
+# than a short dirclean.
+if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test \"\$(cat /build/out/.lapee-hyperbeam-recipe.sha256 2>/dev/null)\" = '$HYPERBEAM_RECIPE_SHA'" 2>/dev/null; then
+    echo "=== HyperBEAM recipe changed or untracked; cleaning HyperBEAM ==="
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -euo pipefail -c "
+            cd /build/out
+            make ERLANG_VERSION='$ERLANG_VERSION' hyperbeam-dirclean || true
+            rm -rf /build/out/target/usr/lib/hyperbeam \
+                   /build/out/build/hyperbeam-*
+            echo '$HYPERBEAM_RECIPE_SHA' > /build/out/.lapee-hyperbeam-recipe.sha256
+        "
 fi
 
 # Run the build to completion.
@@ -93,7 +194,19 @@ echo "=== Buildroot build (foreground; logs streamed; -j$JOBS) ==="
 docker run --rm --name lapee-br-build $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -e BR2_JLEVEL="$JOBS" \
-    $IMAGE bash -c "cd /build/out && date && make -j$JOBS 2>&1 | tee /build/out/build.log"
+    $IMAGE bash -c "cd /build/out && date && make ERLANG_VERSION='$ERLANG_VERSION' -j$JOBS 2>&1 | tee /build/out/build.log"
+
+# Guard the final rootfs against stale host-architecture release
+# payloads. This is especially important on Apple Silicon because relx
+# runs under host Erlang while the target release must be x86_64.
+docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+    bash -euo pipefail -c '
+        test -f /build/out/target/usr/lib/hyperbeam/lib/asn1-*/priv/lib/asn1rt_nif.so
+        find /build/out/target/usr/lib/hyperbeam /build/out/target/usr/lib/erlang \
+            -type f \( -perm /111 -o -name "*.so*" \) -print0 \
+            | xargs -0 -r file \
+            | awk "/ELF/ && \$0 !~ /x86-64/ {print; bad=1} END {exit bad}"
+    '
 
 # Collect artefacts.
 mkdir -p build-kernel work

@@ -59,6 +59,26 @@ probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
 probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm2@2.0a/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 
+splash_layout() ->
+    case os:getenv("LAPEE_SPLASH_LAYOUT") of
+        false -> blue;
+        ""    -> blue;
+        Str ->
+            case string:lowercase(Str) of
+                "qr"      -> qr;
+                "max"     -> max;
+                "full"    -> max;
+                "deck"    -> deck;
+                "sigil"   -> sigil;
+                "blue"    -> blue;
+                "orbit"   -> orbit;
+                "matrix"  -> matrix;
+                "plaque"  -> plaque;
+                "classic" -> classic;
+                _         -> blue
+            end
+    end.
+
 %% Terminal dimensions detected at startup via `stty size'. On the
 %% iron framebuffer console with -vga std + 8x16 font that's
 %% typically 128x48, not 80x24. Hard-coding 80x24 leaves the splash
@@ -66,7 +86,7 @@ log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 detect_dims() ->
     Cmd = io_lib:format("stty -F ~s size 2>/dev/null", [console_path()]),
     Out = string:trim(os:cmd(lists:flatten(Cmd))),
-    case string:tokens(Out, " ") of
+    SttyDims = case string:tokens(Out, " ") of
         [RowsStr, ColsStr] ->
             try
                 Rows = list_to_integer(RowsStr),
@@ -75,6 +95,30 @@ detect_dims() ->
             catch _:_ -> {?MIN_W, ?MIN_H}
             end;
         _ -> {?MIN_W, ?MIN_H}
+    end,
+    fb_dims(SttyDims).
+
+fb_dims(Default = {SttyW, SttyH}) ->
+    case file:read_file("/sys/class/graphics/fb0/virtual_size") of
+        {ok, Bin} ->
+            case string:tokens(string:trim(binary_to_list(Bin)), ",") of
+                [PxWStr, PxHStr] ->
+                    try
+                        PxW = list_to_integer(PxWStr),
+                        PxH = list_to_integer(PxHStr),
+                        %% fbcon usually uses an 8x16 font with
+                        %% simpledrm/efifb. Some firmware paths leave
+                        %% `stty size' stuck at 80x25, which makes the
+                        %% splash occupy only the upper-left quadrant.
+                        %% Prefer the larger inferred grid, while never
+                        %% shrinking below the TTY-reported dimensions.
+                        {max(SttyW, PxW div 8),
+                         max(SttyH, PxH div 16)}
+                    catch _:_ -> Default
+                    end;
+                _ -> Default
+            end;
+        _ -> Default
     end.
 
 %% ============================================================
@@ -97,11 +141,13 @@ main(_Args) ->
 
     %% Monotonic clock for the hb-wait elapsed-seconds counter.
     T0 = erlang:monotonic_time(millisecond),
+    Layout = splash_layout(),
 
     State0 = #{
         out         => Out,
         cols        => Cols,
         rows        => Rows,
+        layout      => Layout,
         frame       => 0,
         yaw         => 0.0,
         lid         => 0.0,
@@ -110,7 +156,7 @@ main(_Args) ->
         t0_ms       => T0,
         hb_wait_t0  => undefined
     },
-    log_event("phase=boot"),
+    log_event(io_lib:format("phase=boot layout=~p", [Layout])),
     process_flag(trap_exit, true),
     try
         loop(State0)
@@ -379,12 +425,12 @@ splash_status_row(H) ->
 
 %% Project a 3D point to a 2D grid cell.
 %% Orthographic projection with a Y-axis tilt for the 3/4 view.
-project({X, Y, Z}, W, H, Scale, Lift) ->
+project_at({X, Y, Z}, Xc, Yc, Scale) ->
     Tilt = 0.45,                                  %% radians, look-down
     Yt = Y * math:cos(Tilt) - Z * math:sin(Tilt),
     %% Char cells are roughly 2:1 tall:wide; scale Y by half.
-    Cx = W / 2.0 + X * Scale,
-    Cy = H / 2.0 - Yt * Scale * 0.5 - Lift,
+    Cx = Xc + X * Scale,
+    Cy = Yc - Yt * Scale * 0.5,
     {round(Cx), round(Cy)}.
 
 %% ============================================================
@@ -428,38 +474,789 @@ bres_step(Grid, W, H, X, Y, X1, Y1, Dx, Dy, Sx, Sy, Err, Ch) ->
 
 plot(Grid, W, H, X, Y, Ch) ->
     case X >= 1 andalso X =< W andalso Y >= 1 andalso Y =< H of
-        true  -> Grid#{{Y, X} => Ch};
+        true  -> Grid#{{Y, X} => cell(Ch)};
         false -> Grid
     end.
+
+cell(Ch) when is_integer(Ch), Ch >= 0, Ch =< 255 ->
+    Ch;
+cell(Ch) when is_integer(Ch) ->
+    unicode:characters_to_binary([Ch]);
+cell(Ch) ->
+    Ch.
 
 %% ============================================================
 %% Frame composition + ANSI emission
 %% ============================================================
-render(#{cols := W, rows := H, yaw := Yaw, lid := Lid,
-         phase := Phase, ip := Ip, hb_wait_t0 := HbT0}) ->
+render(#{cols := W, rows := H, layout := Layout, frame := Frame,
+         yaw := Yaw, lid := Lid, phase := Phase, ip := Ip,
+         hb_wait_t0 := HbT0}) ->
+    Footer = footer_text(Phase, Ip, HbT0),
+    Grid = case {small_canvas(W, H), Layout} of
+        {true, classic} -> render_classic_grid(W, H, Yaw, Lid, Footer);
+        {true, _}       -> render_compact_grid(W, H, Yaw, Lid, Footer, Frame, Layout);
+        {_, classic}    -> render_classic_grid(W, H, Yaw, Lid, Footer);
+        {_, max}        -> render_max_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, deck}       -> render_deck_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, sigil}      -> render_sigil_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, blue}       -> render_blue_grid(W, H, Yaw, Lid, Footer, Frame, Ip);
+        {_, orbit}      -> render_orbit_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, matrix}     -> render_matrix_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, plaque}     -> render_plaque_grid(W, H, Yaw, Lid, Footer, Frame);
+        _               -> render_qr_grid(W, H, Yaw, Lid, Footer, Frame, Ip)
+    end,
+    %% Emit: cursor home, theme colour, then row by row separated
+    %% by CRLF. Every row is full-width, so old frame cells are
+    %% overwritten without needing a full clear at 12 fps.
+    Rows = [emit_row(Grid, W, R) || R <- lists:seq(1, H)],
+    [<<"\e[H">>, theme_prefix(Layout, Phase, Frame),
+     lists:join(<<"\r\n">>, Rows), <<"\e[0m">>].
+
+render_classic_grid(W, H, Yaw, Lid, Footer) ->
     Scale = splash_scale(W, H),
     Lift  = splash_lift(H, Scale),
-    Edges = laptop_edges(Lid),
-    %% Apply yaw rotation around Y axis to every point.
-    Edges1 = [{rotate_y(P, Yaw), rotate_y(Q, Yaw)} || {P, Q} <- Edges],
-    %% Project to 2D using the dynamic scale + lift.
-    Edges2 = [{project(P, W, H, Scale, Lift),
-               project(Q, W, H, Scale, Lift)}
-              || {P, Q} <- Edges1],
-    %% Rasterise.
+    Grid0 = draw_laptop(#{}, W, H, Yaw, Lid,
+                        W / 2.0, H / 2.0 - Lift, Scale),
+    overlay_centered(Grid0, W, splash_status_row(H), Footer).
+
+small_canvas(W, H) ->
+    W < 100 orelse H < 34.
+
+render_compact_grid(W, H, Yaw, Lid, Footer, Frame, Layout) ->
+    Seed = machine_seed(),
+    Grid0 = scan_background(#{}, W, H, Frame, compact_step(Layout)),
+    Scale = max(5.0, min(W / 6.2, (H - 7) / 2.25)),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W / 2.0, H * 0.49, Scale),
+    Grid1a = fill_rect(Grid1, W, H, 1, 1, W, 4),
+    Grid2 = overlay_centered(Grid1a, W, 2, compact_title(Layout)),
+    Grid3 = overlay_centered(Grid2, W, 4,
+                             "PUBLIC ID " ++ fingerprint_label(Seed)),
+    Grid3a = fill_rect(Grid3, W, H, 1, H - 7, W, 7),
+    Grid4 = overlay_centered(Grid3a, W, H - 6,
+                             compact_caption(Layout)),
+    Grid5 = draw_progress(Grid4, W, H, 6, H - 4, W - 12, Frame, Footer),
+    overlay_centered(Grid5, W, H - 2, Footer).
+
+compact_title(qr)     -> "LapEE // public node sigil";
+compact_title(max)    -> "LapEE // full-frame trust machine";
+compact_title(deck)   -> "LapEE // boot deck";
+compact_title(sigil)  -> "LapEE // machine sigil";
+compact_title(blue)   -> ":) LapEE proof boot";
+compact_title(orbit)  -> "LapEE // orbital proof field";
+compact_title(matrix) -> "LapEE // measured boot stream";
+compact_title(plaque) -> "LapEE // public compute object";
+compact_title(_)      -> "LapEE // HyperBEAM node".
+
+compact_caption(qr)     -> "TPM quote | PCR replay | node sigil";
+compact_caption(max)    -> "TPM quote | PCR replay | AK bind";
+compact_caption(deck)   -> "kernel locked | TPM live | HyperBEAM waking";
+compact_caption(sigil)  -> "public-key pattern, no secrets";
+compact_caption(blue)   -> "collecting measured boot proof";
+compact_caption(orbit)  -> "AK orbit | quote live | route open";
+compact_caption(matrix) -> "PCR0 ok | PCR4 ok | PCR15 ok";
+compact_caption(plaque) -> "decentralized compute, visibly alive";
+compact_caption(_)      -> "TPM-backed HyperBEAM node".
+
+compact_step(blue)   -> 41;
+compact_step(matrix) -> 13;
+compact_step(orbit)  -> 29;
+compact_step(_)      -> 23.
+
+render_max_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Scale = max_scale(W, H),
+    Grid0 = scan_background(#{}, W, H, Frame, 17),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W / 2.0, H * 0.50, Scale),
+    Grid2 = draw_box(Grid1, W, H, 2, 2, W - 2, H - 2),
+    Grid3 = overlay_text(Grid2, W, H, 4, 3,
+                         "LAPEE // HYPERBEAM TRUST MACHINE"),
+    Grid4 = overlay_centered(Grid3, W, 5,
+                             "[ TPM QUOTE | PCR REPLAY | AK BIND | NODE MESSAGE ]"),
+    Grid5 = draw_progress(Grid4, W, H, 6, H - 4, W - 12, Frame, Footer),
+    overlay_centered(Grid5, W, H - 2, Footer).
+
+render_qr_grid(W, H, Yaw, Lid, Footer, Frame, Ip) ->
+    Mods = qr_modules(W, H),
+    QrW = Mods * 2 + 2,
+    QrH = Mods + 2,
+    QrX = max(2, W - QrW - 2),
+    QrY = max(3, H - QrH - 1),
+    PanelW = min(42, max(28, W - QrX + 2)),
+    PanelX = max(2, W - PanelW - 2),
+    WorkRight = max(36, min(W - 4, PanelX - 3)),
+    Scale = max(5.0, min(WorkRight / 5.5, (H - 8) / 2.15)),
+    Grid0 = scan_background(#{}, W, H, Frame, 23),
+    PanelH = max(9, QrY - 5),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        WorkRight / 2.0 + 1, H * 0.47, Scale),
+    Grid2 = overlay_text(Grid1, W, H, 3, 2,
+                         "LapEE / live attestation console"),
+    Grid3 = draw_box(fill_rect(Grid2, W, H, PanelX + 1, 4,
+                               PanelW - 2, PanelH - 2),
+                     W, H, PanelX, 3, PanelW, PanelH),
+    Url = case Ip of
+        undefined -> "http://<node>:8734/";
+        _         -> "http://" ++ Ip ++ ":8734/"
+    end,
+    Lines = ["HYPERBEAM BOOT",
+             "> load dev_tpm2",
+             "> quote PCR[0,2,4,8,15]",
+             "> bind node message",
+             "> public sigil (no secrets)",
+             "> serve " ++ Url,
+             "> " ++ status_word(Footer)],
+    Grid4 = overlay_lines(Grid3, W, H, PanelX + 2, 5, Lines),
+    Grid5 = draw_qr(Grid4, W, H, QrX, QrY, Mods),
+    Grid6 = overlay_text(Grid5, W, H, QrX, max(1, QrY - 1),
+                         "PUBLIC NODE SIGIL"),
+    overlay_text(Grid6, W, H, 3, H - 2, Footer).
+
+render_deck_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    RailW = min(32, max(24, W div 4)),
+    Grid0 = scan_background(#{}, W, H, Frame, 11),
+    Scale = max(5.0, min((W - RailW - 8) / 5.2, (H - 7) / 2.2)),
+    Xc = RailW + (W - RailW) / 2.0,
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid, Xc, H * 0.48, Scale),
+    Grid2 = draw_box(fill_rect(Grid1, W, H, 3, 3, RailW - 2, H - 5),
+                     W, H, 2, 2, RailW, H - 3),
+    HbLine = case status_word(Footer) of
+        "READY" -> "05 hyperbeam  ready";
+        _       -> "05 hyperbeam  waking"
+    end,
+    Grid3 = overlay_lines(Grid2, W, H, 4, 4,
+        ["BOOT DECK",
+         "01 kernel     locked",
+         "02 initramfs  sealed",
+         "03 tpm quote  live",
+         "04 pcr replay armed",
+         HbLine,
+         "",
+         "mode: LAPEE",
+         "net : dhcp -> node",
+         "out : attestation only"]),
+    Grid4 = overlay_text(Grid3, W, H, RailW + 4, 3,
+                         "HYPERBEAM NODE ONLINE PATH"),
+    Grid5 = draw_progress(Grid4, W, H, RailW + 4, H - 5,
+                          W - RailW - 8, Frame, Footer),
+    overlay_text(Grid5, W, H, RailW + 4, H - 3, Footer).
+
+render_sigil_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Seed = machine_seed(),
+    Label = fingerprint_label(Seed),
+    Grid0 = constellation_background(#{}, W, H, Seed, Frame, 29),
+    Scale = max(7.0, min(W / 7.4, (H - 8) / 2.25)),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W * 0.43, H * 0.49, Scale),
+    PanelW = min(48, max(34, W div 3)),
+    PanelH = min(31, max(22, H - 10)),
+    PanelX = W - PanelW - 4,
+    PanelY = 5,
+    Grid2 = draw_box(fill_rect(Grid1, W, H, PanelX + 1, PanelY + 1,
+                               PanelW - 2, PanelH - 2),
+                     W, H, PanelX, PanelY, PanelW, PanelH),
+    Grid3 = overlay_lines(Grid2, W, H, PanelX + 3, PanelY + 2,
+        ["MACHINE SIGIL",
+         "PUBLIC ID " ++ Label,
+         "",
+         "derived from public key material",
+         "no secrets, no disk diagnostics"]),
+    Grid4 = draw_sigil(Grid3, W, H, PanelX + 7, PanelY + 9,
+                       17, 17, Seed, $#),
+    Grid5 = overlay_text(Grid4, W, H, 4, 3,
+                         "LapEE // this machine is awake"),
+    Grid6 = draw_progress(Grid5, W, H, 4, H - 4, W - 8, Frame, Footer),
+    overlay_text(Grid6, W, H, 4, H - 2, Footer).
+
+render_blue_grid(W, H, Yaw, Lid, Footer, _Frame, Ip) ->
     Grid0 = #{},
-    Grid1 = lists:foldl(
-              fun({P1, P2}, G) -> draw_line(G, W, H, P1, P2) end,
-              Grid0, Edges2),
-    %% Single status line under the laptop. Spin continues during
-    %% the `ready' phase with the URL underneath -- no face-on lock.
-    Footer = footer_text(Phase, Ip, HbT0),
-    StatusRow = splash_status_row(H),
-    Grid2 = overlay_centered(Grid1, W, StatusRow, Footer),
-    %% Emit: cursor home, then row by row separated by \r\n.
-    Rows = [emit_row(Grid2, W, R) || R <- lists:seq(1, H)],
-    [<<"\e[H">> |
-     lists:join(<<"\r\n">>, Rows)].
+    LeftW = max(70, min(80, W div 2)),
+    Gap = 3,
+    RightX = LeftW + Gap,
+    RightW = max(34, W - RightX - 2),
+    Url = node_url(Ip),
+    Scale = max(8.0, min(RightW / 4.05, (H - 4) / 1.9)),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        RightX + RightW * 0.58 - 5, H * 0.69, Scale),
+    Grid2 = overlay_lines(Grid1, W, H, 6, 3, blue_left_top_lines(LeftW)),
+    draw_blue_qr_panel(Grid2, W, H, 6, 17, LeftW - 4, Url, Footer, Ip).
+
+blue_left_top_lines(LeftW) ->
+    Max = max(12, LeftW - 3),
+    [fit_text(Line, Max) || Line <- hyperbeam_greeter_lines()].
+
+hyperbeam_greeter_lines() ->
+    %% Mirrors hb_http_server:print_greeter/2 without the operator,
+    %% config, border, and version rows that do not belong on splash.
+    ["██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗",
+     "██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗",
+     "███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝",
+     "██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗",
+     "██║  ██║   ██║   ██║     ███████╗██║  ██║",
+     "╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝",
+     "██████╗ ███████╗ █████╗ ███╗   ███╗",
+     "██╔══██╗██╔════╝██╔══██╗████╗ ████║",
+     "██████╔╝█████╗  ███████║██╔████╔██║",
+     "██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║ EAT GLASS,",
+     "██████╔╝███████╗██║  ██║██║ ╚═╝ ██║ BUILD THE",
+     "╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝ FUTURE."].
+
+node_url(undefined) ->
+    "http://<node>:8734/";
+node_url(Ip) ->
+    "http://" ++ Ip ++ ":8734/".
+
+fit_text(Text, Max) when length(Text) =< Max ->
+    Text;
+fit_text(_Text, Max) when Max =< 1 ->
+    "";
+fit_text(Text, Max) ->
+    lists:sublist(Text, Max - 1) ++ "~".
+
+draw_blue_qr_panel(Grid, W, H, X, Y, _ColW, Url, Footer, Ip) ->
+    Rows = qr_display_rows_for_url(Url),
+    QrMods = length(hd(Rows)),
+    QrW = QrMods * 2,
+    QrH = length(Rows),
+    QrX = X,
+    Grid1 = fill_rect(Grid, W, H, QrX, Y, QrW, QrH),
+    case {status_word(Footer), Ip} of
+        {"READY", _} when Ip =/= undefined ->
+            draw_qr_double_rows(Grid1, W, H, QrX, Y, Rows);
+        _ ->
+            draw_qr_placeholder(Grid1, W, H, QrX, Y, QrMods, QrH, Footer)
+    end.
+
+qr_display_rows_for_url(Url) ->
+    qr_crop_quiet_zone(qr_rows_for_url(Url), 4).
+
+qr_crop_quiet_zone(Rows, Quiet) ->
+    InnerH = length(Rows) - Quiet * 2,
+    InnerRows = lists:sublist(lists:nthtail(Quiet, Rows), InnerH),
+    [lists:sublist(lists:nthtail(Quiet, Row), length(Row) - Quiet * 2) ||
+        Row <- InnerRows].
+
+qr_rows_for_url(Url) ->
+    Bin = unicode:characters_to_binary(Url),
+    case byte_size(Bin) =< 32 of
+        true  -> qr_v2_l_rows(Bin);
+        false -> qr_v2_l_rows(<<"http://node-too-long/">>)
+    end.
+
+qr_v2_l_rows(Data) ->
+    Size = 25,
+    DataCodewords = qr_data_codewords(Data, 34),
+    EccCodewords = rs_remainder(DataCodewords, 10),
+    Bits = lists:append([bits_int(Cw, 8) || Cw <- DataCodewords ++ EccCodewords]),
+    {Base, Reserved} = qr_base_v2(Size),
+    WithData = qr_place_bits(Base, Reserved, Size, Bits),
+    WithFormat = qr_apply_format_l_mask0(WithData, Size),
+    qr_add_quiet_zone(WithFormat, Size, 4).
+
+qr_data_codewords(Data, Target) ->
+    Bits0 = [0, 1, 0, 0] ++ bits_int(byte_size(Data), 8) ++ binary_bits(Data),
+    MaxBits = Target * 8,
+    Terminator = lists:duplicate(max(0, min(4, MaxBits - length(Bits0))), 0),
+    Bits1 = pad_bits_to_byte(Bits0 ++ Terminator),
+    pad_codewords(bits_to_codewords(Bits1), Target, 16#EC).
+
+binary_bits(Bin) ->
+    lists:append([bits_int(Byte, 8) || <<Byte:8>> <= Bin]).
+
+bits_int(N, Width) ->
+    [(N bsr Shift) band 1 || Shift <- lists:seq(Width - 1, 0, -1)].
+
+pad_bits_to_byte(Bits) ->
+    case length(Bits) rem 8 of
+        0 -> Bits;
+        Rem -> Bits ++ lists:duplicate(8 - Rem, 0)
+    end.
+
+bits_to_codewords([]) ->
+    [];
+bits_to_codewords(Bits) ->
+    {ByteBits, Rest} = lists:split(8, Bits),
+    [bits_to_int(ByteBits) | bits_to_codewords(Rest)].
+
+bits_to_int(Bits) ->
+    lists:foldl(fun(Bit, Acc) -> (Acc bsl 1) bor Bit end, 0, Bits).
+
+pad_codewords(Codewords, Target, _Next) when length(Codewords) >= Target ->
+    lists:sublist(Codewords, Target);
+pad_codewords(Codewords, Target, Next) ->
+    Following = case Next of
+        16#EC -> 16#11;
+        _     -> 16#EC
+    end,
+    pad_codewords(Codewords ++ [Next], Target, Following).
+
+rs_remainder(Data, EccLen) ->
+    Generator = rs_generator(EccLen),
+    GenTail = tl(Generator),
+    Rem0 = lists:duplicate(EccLen, 0),
+    lists:foldl(
+      fun(Byte, Rem) ->
+          Factor = Byte bxor hd(Rem),
+          Shifted = tl(Rem) ++ [0],
+          [R bxor gf_mul(Factor, G) || {R, G} <- lists:zip(Shifted, GenTail)]
+      end,
+      Rem0,
+      Data).
+
+rs_generator(Degree) ->
+    lists:foldl(
+      fun(I, Poly) ->
+          poly_mul_high(Poly, [1, gf_pow2(I)])
+      end,
+      [1],
+      lists:seq(0, Degree - 1)).
+
+poly_mul_high(P, Q) ->
+    PLen = length(P),
+    QLen = length(Q),
+    [poly_mul_coeff(P, Q, PLen, QLen, K) ||
+        K <- lists:seq(0, PLen + QLen - 2)].
+
+poly_mul_coeff(P, Q, PLen, QLen, K) ->
+    lists:foldl(
+      fun(I, Acc) ->
+          J = K - I,
+          case I >= 0 andalso I < PLen andalso J >= 0 andalso J < QLen of
+              true ->
+                  Acc bxor gf_mul(nth0(I, P), nth0(J, Q));
+              false ->
+                  Acc
+          end
+      end,
+      0,
+      lists:seq(0, K)).
+
+nth0(I, List) ->
+    lists:nth(I + 1, List).
+
+gf_pow2(0) ->
+    1;
+gf_pow2(N) ->
+    lists:foldl(fun(_, Acc) -> gf_mul(Acc, 2) end, 1, lists:seq(1, N)).
+
+gf_mul(A, B) ->
+    gf_mul(A, B, 0).
+
+gf_mul(_A, 0, Acc) ->
+    Acc;
+gf_mul(A, B, Acc) ->
+    Acc1 = case B band 1 of
+        1 -> Acc bxor A;
+        _ -> Acc
+    end,
+    A0 = A bsl 1,
+    A1 = case A0 band 16#100 of
+        0 -> A0 band 16#FF;
+        _ -> (A0 bxor 16#11D) band 16#FF
+    end,
+    gf_mul(A1, B bsr 1, Acc1).
+
+qr_base_v2(Size) ->
+    S0 = {#{}, #{}},
+    S1 = qr_draw_finder(S0, Size, 0, 0),
+    S2 = qr_draw_finder(S1, Size, 0, Size - 7),
+    S3 = qr_draw_finder(S2, Size, Size - 7, 0),
+    S4 = qr_draw_alignment(S3, Size, 18, 18),
+    S5 = qr_draw_timing(S4, Size),
+    S6 = qr_put(S5, Size, 4 * 2 + 9, 8, true, true),
+    qr_reserve_format(S6, Size).
+
+qr_draw_finder(State, Size, R0, C0) ->
+    lists:foldl(
+      fun(R, SRow) ->
+          lists:foldl(
+            fun(C, S) ->
+                Row = R0 + R,
+                Col = C0 + C,
+                Separator = R =:= -1 orelse R =:= 7 orelse
+                            C =:= -1 orelse C =:= 7,
+                Dark = (not Separator) andalso
+                       (R =:= 0 orelse R =:= 6 orelse
+                        C =:= 0 orelse C =:= 6 orelse
+                        (R >= 2 andalso R =< 4 andalso
+                         C >= 2 andalso C =< 4)),
+                qr_put(S, Size, Row, Col, Dark, true)
+            end,
+            SRow,
+            lists:seq(-1, 7))
+      end,
+      State,
+      lists:seq(-1, 7)).
+
+qr_draw_alignment(State, Size, R0, C0) ->
+    lists:foldl(
+      fun(R, SRow) ->
+          lists:foldl(
+            fun(C, S) ->
+                Dark = abs(R) =:= 2 orelse abs(C) =:= 2 orelse
+                       (R =:= 0 andalso C =:= 0),
+                qr_put(S, Size, R0 + R, C0 + C, Dark, true)
+            end,
+            SRow,
+            lists:seq(-2, 2))
+      end,
+      State,
+      lists:seq(-2, 2)).
+
+qr_draw_timing(State, Size) ->
+    lists:foldl(
+      fun(I, S0) ->
+          Dark = I rem 2 =:= 0,
+          S1 = qr_put(S0, Size, 6, I, Dark, true),
+          qr_put(S1, Size, I, 6, Dark, true)
+      end,
+      State,
+      lists:seq(8, Size - 9)).
+
+qr_reserve_format(State, Size) ->
+    lists:foldl(
+      fun({R, C}, S) -> qr_put(S, Size, R, C, false, true) end,
+      State,
+      qr_format_coords(Size)).
+
+qr_put({Modules, Reserved}, Size, Row, Col, Dark, Reserve) ->
+    case Row >= 0 andalso Row < Size andalso Col >= 0 andalso Col < Size of
+        true ->
+            R1 = case Reserve of
+                true  -> Reserved#{{Row, Col} => true};
+                false -> Reserved
+            end,
+            {Modules#{{Row, Col} => Dark}, R1};
+        false ->
+            {Modules, Reserved}
+    end.
+
+qr_place_bits(Modules0, Reserved, Size, Bits0) ->
+    Positions = qr_data_positions(Size, Reserved),
+    {Modules, _Bits} = lists:foldl(
+      fun({Row, Col}, {M, Bits}) ->
+          {Bit, Rest} = case Bits of
+              [B | Bs] -> {B, Bs};
+              []       -> {0, []}
+          end,
+          Mask = (Row + Col) rem 2 =:= 0,
+          Dark = (Bit =:= 1) =/= Mask,
+          {M#{{Row, Col} => Dark}, Rest}
+      end,
+      {Modules0, Bits0},
+      Positions),
+    Modules.
+
+qr_data_positions(Size, Reserved) ->
+    {Positions, _Dir} = lists:foldl(
+      fun(Col, {Acc, Dir}) ->
+          Rows = case Dir of
+              up   -> lists:seq(Size - 1, 0, -1);
+              down -> lists:seq(0, Size - 1)
+          end,
+          Pair = [{R, C} || R <- Rows,
+                            C <- [Col, Col - 1],
+                            not maps:is_key({R, C}, Reserved)],
+          {Acc ++ Pair, flip_dir(Dir)}
+      end,
+      {[], up},
+      qr_column_starts(Size - 1)),
+    Positions.
+
+qr_column_starts(Col) when Col =< 0 ->
+    [];
+qr_column_starts(6) ->
+    qr_column_starts(5);
+qr_column_starts(Col) ->
+    [Col | qr_column_starts(Col - 2)].
+
+flip_dir(up) -> down;
+flip_dir(down) -> up.
+
+qr_apply_format_l_mask0(Modules, Size) ->
+    Bits = [(16#77C4 bsr I) band 1 || I <- lists:seq(0, 14)],
+    lists:foldl(
+      fun({Bit, Coord}, M) ->
+          M#{Coord => Bit =:= 1}
+      end,
+      Modules,
+      lists:zip(Bits ++ Bits, qr_format_coords(Size))).
+
+qr_format_coords(Size) ->
+    [{0, 8}, {1, 8}, {2, 8}, {3, 8}, {4, 8}, {5, 8}, {7, 8},
+     {8, 8}, {8, 7}, {8, 5}, {8, 4}, {8, 3}, {8, 2}, {8, 1},
+     {8, 0},
+     {8, Size - 1}, {8, Size - 2}, {8, Size - 3}, {8, Size - 4},
+     {8, Size - 5}, {8, Size - 6}, {8, Size - 7}, {8, Size - 8},
+     {Size - 7, 8}, {Size - 6, 8}, {Size - 5, 8}, {Size - 4, 8},
+     {Size - 3, 8}, {Size - 2, 8}, {Size - 1, 8}].
+
+qr_add_quiet_zone(Modules, Size, Quiet) ->
+    Total = Size + Quiet * 2,
+    [[qr_quiet_module(Modules, Size, Quiet, R, C) ||
+        C <- lists:seq(0, Total - 1)] ||
+        R <- lists:seq(0, Total - 1)].
+
+qr_quiet_module(Modules, Size, Quiet, R, C) ->
+    InnerR = R - Quiet,
+    InnerC = C - Quiet,
+    case InnerR >= 0 andalso InnerR < Size andalso
+         InnerC >= 0 andalso InnerC < Size of
+        true  -> maps:get({InnerR, InnerC}, Modules, false);
+        false -> false
+    end.
+
+draw_qr_double_rows(Grid, W, H, X, Y, Rows) ->
+    lists:foldl(
+      fun({R, Row}, G0) ->
+          lists:foldl(
+            fun({C, true}, G) ->
+                    draw_qr_tile(G, W, H, X + C * 2, Y + R);
+               ({_C, false}, G) ->
+                    G
+            end,
+            G0,
+            lists:zip(lists:seq(0, length(Row) - 1), Row))
+      end,
+      Grid,
+      lists:zip(lists:seq(0, length(Rows) - 1), Rows)).
+
+draw_qr_placeholder(Grid, W, H, X, Y, ModsW, ModsH, Footer) ->
+    G1 = lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) ->
+                case R =:= 0 orelse R =:= ModsH - 1 orelse
+                     C =:= 0 orelse C =:= ModsW - 1 of
+                    true  -> draw_qr_tile(G, W, H, X + C * 2, Y + R);
+                    false -> G
+                end
+            end,
+            G0,
+            lists:seq(0, ModsW - 1))
+      end,
+      Grid,
+      lists:seq(0, ModsH - 1)),
+    Text = fit_text(Footer, ModsW * 2 - 4),
+    TextX = X + max(2, (ModsW * 2 - length(Text)) div 2),
+    TextY = Y + ModsH div 2,
+    overlay_text(G1, W, H, TextX, TextY, Text).
+
+draw_qr_tile(Grid, W, H, X, Y) ->
+    Block = <<226, 150, 136>>,
+    plot(plot(Grid, W, H, X, Y, Block), W, H, X + 1, Y, Block).
+
+render_orbit_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Seed = machine_seed(),
+    Grid0 = constellation_background(#{}, W, H, Seed, Frame, 37),
+    Xc = W / 2.0,
+    Yc = H * 0.48,
+    Grid1 = draw_orbit(Grid0, W, H, Xc, Yc, W * 0.31, H * 0.24, Frame, $.),
+    Grid2 = draw_orbit(Grid1, W, H, Xc, Yc, W * 0.23, H * 0.16, Frame + 40, $+),
+    Grid3 = draw_laptop(Grid2, W, H, Yaw, Lid, Xc, Yc,
+                        max(6.0, min(W / 8.2, (H - 8) / 2.35))),
+    Grid4 = overlay_centered(Grid3, W, 3,
+                             "LapEE ORBITAL NODE // measured proof field"),
+    Grid5 = overlay_centered(Grid4, W, H - 4,
+                             "AK " ++ fingerprint_label(Seed) ++
+                             "  |  TPM quote live  |  HyperBEAM route open"),
+    overlay_centered(Grid5, W, H - 2, Footer).
+
+render_matrix_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Seed = machine_seed(),
+    Grid0 = matrix_rain(#{}, W, H, Seed, Frame),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W * 0.52, H * 0.50,
+                        max(6.0, min(W / 6.8, (H - 8) / 2.2))),
+    Grid2 = draw_box(fill_rect(Grid1, W, H, 4, 4, 36, 8),
+                     W, H, 3, 3, 38, 10),
+    Grid3 = overlay_lines(Grid2, W, H, 5, 5,
+        ["MEASURED BOOT STREAM",
+         "PCR0  firmware   ok",
+         "PCR4  cmdline    ok",
+         "PCR15 node bind  ok",
+         "HB    serving"]),
+    overlay_text(Grid3, W, H, 5, H - 2, Footer).
+
+render_plaque_grid(W, H, Yaw, Lid, Footer, Frame) ->
+    Seed = machine_seed(),
+    Grid0 = constellation_background(#{}, W, H, Seed, Frame, 43),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        W * 0.38, H * 0.50,
+                        max(6.0, min(W / 8.0, (H - 7) / 2.15))),
+    PlaqueW = min(58, max(44, W div 3)),
+    PlaqueX = W - PlaqueW - 6,
+    Grid2 = draw_box(fill_rect(Grid1, W, H, PlaqueX + 1, 7,
+                               PlaqueW - 2, 22),
+                     W, H, PlaqueX, 6, PlaqueW, 24),
+    Grid3 = overlay_lines(Grid2, W, H, PlaqueX + 3, 9,
+        ["LAPEE",
+         "PUBLIC COMPUTE OBJECT",
+         "",
+         "A measured HyperBEAM node.",
+         "TPM-backed identity. Local proof.",
+         "Decentralized compute, visibly alive.",
+         "",
+         "machine " ++ fingerprint_label(Seed)]),
+    Grid4 = draw_sigil(Grid3, W, H, PlaqueX + 3, 21, 7, 17, Seed, $*),
+    ProgressY = min(H - 6, 33),
+    Grid4a = overlay_text(Grid4, W, H, PlaqueX + 3, 18,
+                          "public key derived; no secrets displayed"),
+    Grid5 = draw_progress(Grid4a, W, H, PlaqueX + 3, ProgressY,
+                          PlaqueW - 8, Frame, Footer),
+    overlay_text(Grid5, W, H, PlaqueX + 3, H - 3, Footer).
+
+theme_prefix(qr, ready, _)      -> <<"\e[1;36m">>;
+theme_prefix(qr, _, _)          -> <<"\e[0;36m">>;
+theme_prefix(max, ready, _)     -> <<"\e[1;32m">>;
+theme_prefix(max, _, _)         -> <<"\e[0;32m">>;
+theme_prefix(deck, ready, _)    -> <<"\e[1;35m">>;
+theme_prefix(deck, _, _)        -> <<"\e[0;35m">>;
+theme_prefix(sigil, ready, _)   -> <<"\e[1;33m">>;
+theme_prefix(sigil, _, _)       -> <<"\e[0;33m">>;
+theme_prefix(blue, ready, _)    -> blue_theme_prefix();
+theme_prefix(blue, _, _)        -> blue_theme_prefix();
+theme_prefix(orbit, ready, _)   -> <<"\e[1;36m">>;
+theme_prefix(orbit, _, _)       -> <<"\e[0;36m">>;
+theme_prefix(matrix, ready, _)  -> <<"\e[1;32m">>;
+theme_prefix(matrix, _, _)      -> <<"\e[0;32m">>;
+theme_prefix(plaque, ready, _)  -> <<"\e[1;37m">>;
+theme_prefix(plaque, _, _)      -> <<"\e[0;37m">>;
+theme_prefix(classic, ready, _) -> <<"\e[1;37m">>;
+theme_prefix(classic, _, _)     -> <<"\e[0;37m">>.
+
+blue_theme_prefix() ->
+    %% Linux fbcon supports a 16-colour palette, not true per-cell RGB.
+    %% Remap slot 4 (blue background) to a dark indigo/purple and slot
+    %% 15 (bright white foreground) to a clean white, then draw every
+    %% full-width row as bright white text on that blue block colour.
+    <<"\e]P415123a\e]Pff8fbff\e[1;37;44m">>.
+
+draw_laptop(Grid0, W, H, Yaw, Lid, Xc, Yc, Scale) ->
+    Edges = laptop_edges(Lid),
+    Edges1 = [{rotate_y(P, Yaw), rotate_y(Q, Yaw)} || {P, Q} <- Edges],
+    Edges2 = [{project_at(P, Xc, Yc, Scale),
+               project_at(Q, Xc, Yc, Scale)}
+              || {P, Q} <- Edges1],
+    lists:foldl(fun({P1, P2}, G) -> draw_line(G, W, H, P1, P2) end,
+                Grid0, Edges2).
+
+max_scale(W, H) ->
+    max(6.0, min(W / 5.3, (H - 6) / 2.05)).
+
+machine_fingerprint_source() ->
+    case os:getenv("LAPEE_MACHINE_FINGERPRINT") of
+        false ->
+            case file:read_file("/run/lapee/machine-fingerprint") of
+                {ok, Bin} ->
+                    string:trim(binary_to_list(Bin));
+                _ ->
+                    "LAPEE-QEMU-PREVIEW-PUBLIC-AK"
+            end;
+        "" ->
+            "LAPEE-QEMU-PREVIEW-PUBLIC-AK";
+        Str ->
+            Str
+    end.
+
+machine_seed() ->
+    lists:foldl(
+      fun(C, Acc) -> ((Acc * 131) + C) band 16#7fffffff end,
+      16#4c415045,
+      machine_fingerprint_source()).
+
+fingerprint_label(Seed) ->
+    string:uppercase(lists:flatten(io_lib:format("~8.16.0B", [Seed]))).
+
+constellation_background(Grid, W, H, Seed, Frame, Step) ->
+    Stars = [{star_x(W, Seed, I), star_y(H, Seed, I)}
+             || I <- lists:seq(1, min(72, max(18, W div 2)))],
+    G1 = lists:foldl(
+           fun({X, Y}, G) ->
+               Ch = case ((X + Y + Frame) rem Step) of
+                   0 -> $+;
+                   _ -> $.
+               end,
+               plot(G, W, H, X, Y, Ch)
+           end,
+           Grid,
+           Stars),
+    Links = lists:seq(1, min(14, length(Stars) - 1)),
+    lists:foldl(
+      fun(I, G) ->
+          case (I + Frame div 24) rem 3 of
+              0 ->
+                  P1 = lists:nth(I, Stars),
+                  P2 = lists:nth(I + 1, Stars),
+                  draw_line(G, W, H, P1, P2);
+              _ ->
+                  G
+          end
+      end,
+      G1,
+      Links).
+
+star_x(W, Seed, I) ->
+    1 + ((Seed + I * 37 + I * I * 11) rem max(1, W)).
+
+star_y(H, Seed, I) ->
+    1 + ((Seed div 7 + I * 29 + I * I * 5) rem max(1, H)).
+
+draw_sigil(Grid0, W, H, X, Y, Rows, Cols, Seed, Ch) ->
+    Cells = [{R, C} || R <- lists:seq(0, Rows - 1),
+                       C <- lists:seq(0, Cols - 1),
+                       sigil_dark(Seed, Rows, Cols, R, C)],
+    lists:foldl(
+      fun({R, C}, G) ->
+          X0 = X + C * 2,
+          Y0 = Y + R,
+          plot(plot(G, W, H, X0, Y0, Ch), W, H, X0 + 1, Y0, Ch)
+      end,
+      Grid0,
+      Cells).
+
+sigil_dark(Seed, Rows, Cols, R, C) ->
+    HalfC = Cols div 2,
+    C1 = if C > HalfC -> Cols - 1 - C; true -> C end,
+    Mid = (R =:= Rows div 2) orelse (C =:= HalfC),
+    V = (Seed + R * 1103 + C1 * 1973 + R * C1 * 89) rem 31,
+    Mid orelse V < 11.
+
+draw_orbit(Grid0, W, H, Xc, Yc, Rx, Ry, Frame, Ch) ->
+    Angles = lists:seq(0, 354, 6),
+    G1 = lists:foldl(
+           fun(A0, G) ->
+               A = (A0 + Frame) * math:pi() / 180.0,
+               X = round(Xc + Rx * math:cos(A)),
+               Y = round(Yc + Ry * math:sin(A)),
+               plot(G, W, H, X, Y, Ch)
+           end,
+           Grid0,
+           Angles),
+    Sweep = (Frame * 4) rem 360,
+    A = Sweep * math:pi() / 180.0,
+    draw_line(G1, W, H,
+              {round(Xc), round(Yc)},
+              {round(Xc + Rx * math:cos(A)),
+               round(Yc + Ry * math:sin(A))}).
+
+matrix_rain(Grid, W, H, Seed, Frame) ->
+    Glyphs = "01AKPCRHB8734",
+    lists:foldl(
+      fun(C, G0) ->
+          Phase = (Seed + C * 17 + Frame) rem max(1, H),
+          lists:foldl(
+            fun(K, G) ->
+                R = 1 + ((Phase + K * 7) rem max(1, H)),
+                Index = 1 + ((Seed + C * 3 + R + K) rem length(Glyphs)),
+                Ch = lists:nth(Index, Glyphs),
+                plot(G, W, H, C, R, Ch)
+            end,
+            G0,
+            lists:seq(0, 2))
+      end,
+      Grid,
+      lists:seq(2, W - 1, 4)).
 
 emit_row(Grid, W, Row) ->
     [maps:get({Row, Col}, Grid, $\s) || Col <- lists:seq(1, W)].
@@ -472,6 +1269,161 @@ overlay_centered(Grid, W, Row, Text) ->
       end,
       Grid,
       lists:zip(lists:seq(0, length(Text) - 1), Text)).
+
+overlay_text(Grid, W, H, X, Y, Text) ->
+    case Y >= 1 andalso Y =< H of
+        true ->
+            lists:foldl(
+              fun({I, Ch}, G) ->
+                  plot(G, W, H, X + I, Y, Ch)
+              end,
+              Grid,
+              lists:zip(lists:seq(0, length(Text) - 1), Text));
+        false ->
+            Grid
+    end.
+
+overlay_lines(Grid, W, H, X, Y, Lines) ->
+    lists:foldl(
+      fun({I, Line}, G) -> overlay_text(G, W, H, X, Y + I, Line) end,
+      Grid,
+      lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
+
+draw_box(Grid, W, H, X, Y, BW, BH) when BW >= 2, BH >= 2 ->
+    X2 = X + BW - 1,
+    Y2 = Y + BH - 1,
+    G1 = draw_hline(Grid, W, H, X + 1, X2 - 1, Y, $-),
+    G2 = draw_hline(G1, W, H, X + 1, X2 - 1, Y2, $-),
+    G3 = draw_vline(G2, W, H, X, Y + 1, Y2 - 1, $|),
+    G4 = draw_vline(G3, W, H, X2, Y + 1, Y2 - 1, $|),
+    plot(plot(plot(plot(G4, W, H, X, Y, $+), W, H, X2, Y, $+),
+              W, H, X, Y2, $+), W, H, X2, Y2, $+);
+draw_box(Grid, _, _, _, _, _, _) ->
+    Grid.
+
+fill_rect(Grid, W, H, X, Y, BW, BH) when BW > 0, BH > 0 ->
+    lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) -> plot(G, W, H, C, R, $\s) end,
+            G0,
+            lists:seq(X, X + BW - 1))
+      end,
+      Grid,
+      lists:seq(Y, Y + BH - 1));
+fill_rect(Grid, _, _, _, _, _, _) ->
+    Grid.
+
+draw_hline(Grid, W, H, X1, X2, Y, Ch) ->
+    lists:foldl(fun(X, G) -> plot(G, W, H, X, Y, Ch) end,
+                Grid, lists:seq(min(X1, X2), max(X1, X2))).
+
+draw_vline(Grid, W, H, X, Y1, Y2, Ch) ->
+    lists:foldl(fun(Y, G) -> plot(G, W, H, X, Y, Ch) end,
+                Grid, lists:seq(min(Y1, Y2), max(Y1, Y2))).
+
+draw_progress(Grid, W, H, X, Y, Len0, Frame) ->
+    Len = max(8, Len0),
+    G1 = overlay_text(Grid, W, H, X, Y, "["),
+    G2 = overlay_text(G1, W, H, X + Len + 1, Y, "]"),
+    Pos = Frame rem Len,
+    lists:foldl(
+      fun(I, G) ->
+          Ch = case I of
+              Pos -> $>;
+              _ when I < Pos -> $=;
+              _ -> $.
+          end,
+          plot(G, W, H, X + I + 1, Y, Ch)
+      end,
+      G2,
+      lists:seq(0, Len - 1)).
+
+draw_progress(Grid, W, H, X, Y, Len0, Frame, Footer) ->
+    case status_word(Footer) of
+        "READY" ->
+            draw_complete_progress(Grid, W, H, X, Y, Len0);
+        _ ->
+            draw_progress(Grid, W, H, X, Y, Len0, Frame)
+    end.
+
+draw_complete_progress(Grid, W, H, X, Y, Len0) ->
+    Len = max(8, Len0),
+    G1 = overlay_text(Grid, W, H, X, Y, "["),
+    G2 = overlay_text(G1, W, H, X + Len + 1, Y, "]"),
+    lists:foldl(
+      fun(I, G) -> plot(G, W, H, X + I + 1, Y, $=) end,
+      G2,
+      lists:seq(0, Len - 1)).
+
+scan_background(Grid, W, H, Frame, Step) ->
+    lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) ->
+                case ((R * 3 + C * 5 + Frame) rem Step) of
+                    0 -> plot(G, W, H, C, R, $.);
+                    _ -> G
+                end
+            end,
+            G0,
+            lists:seq(1, W))
+      end,
+      Grid,
+      lists:seq(1, H)).
+
+qr_modules(W, H) ->
+    if
+        W >= 118 andalso H >= 42 -> 21;
+        W >= 96  andalso H >= 34 -> 17;
+        true -> 13
+    end.
+
+draw_qr(Grid0, W, H, X, Y, Mods) ->
+    G0 = fill_rect(Grid0, W, H, X + 1, Y + 1, Mods * 2, Mods),
+    G1 = draw_box(G0, W, H, X, Y, Mods * 2 + 2, Mods + 2),
+    Cells = [{R, C} || R <- lists:seq(0, Mods - 1),
+                       C <- lists:seq(0, Mods - 1),
+                       qr_dark(Mods, R, C)],
+    lists:foldl(
+      fun({R, C}, G) ->
+          X0 = X + 1 + C * 2,
+          Y0 = Y + 1 + R,
+          plot(plot(G, W, H, X0, Y0, $#), W, H, X0 + 1, Y0, $#)
+      end,
+      G1,
+      Cells).
+
+qr_dark(Mods, R, C) ->
+    case finder_pos(Mods, R, C) of
+        {true, FR, FC} ->
+            finder_dark(FR, FC);
+        false ->
+            A = (R * 11 + C * 7 + R * C) rem 17,
+            B = (R + C * 3) rem 5,
+            A < 7 orelse B =:= 0
+    end.
+
+finder_pos(_Mods, R, C) when R < 7, C < 7 ->
+    {true, R, C};
+finder_pos(Mods, R, C) when R < 7, C >= Mods - 7 ->
+    {true, R, C - (Mods - 7)};
+finder_pos(Mods, R, C) when R >= Mods - 7, C < 7 ->
+    {true, R - (Mods - 7), C};
+finder_pos(_, _, _) ->
+    false.
+
+finder_dark(R, C) ->
+    R =:= 0 orelse R =:= 6 orelse C =:= 0 orelse C =:= 6 orelse
+    (R >= 2 andalso R =< 4 andalso C >= 2 andalso C =< 4).
+
+status_word(Text) ->
+    case Text of
+        "Running" ++ _ -> "READY";
+        "starting HyperBEAM" ++ _ -> "HB STARTING";
+        "network up" ++ _ -> "NETWORK UP";
+        _ -> "BOOTING"
+    end.
 
 %% Status line texts -- the only words the operator sees on screen
 %% during boot. In `hb-wait' we surface the IP + an elapsed-seconds
@@ -500,12 +1452,10 @@ nth(N, L) -> lists:nth(N, L).
 %% ============================================================
 %% Diagnostic log -- /run/lapee/splash.log
 %% ============================================================
-%% Append-only, per-event. init copies this to the ESP at writeback
-%% time so an operator can post-mortem the boot from the stick. The
-%% log records phase transitions, the IP (already on screen) and
-%% probe error reasons -- no PSK, no SSID, no wallet material. All
-%% errors swallowed: best-effort diagnostic, must never kill the
-%% splash itself.
+%% Append-only, per-event, and kept on tmpfs. The log records phase
+%% transitions, the IP (already on screen) and probe error reasons --
+%% no PSK, no SSID, no wallet material. All errors swallowed:
+%% best-effort diagnostic, must never kill the splash itself.
 log_start() ->
     catch file:write_file(log_path(),
         io_lib:format("[lapee-splash] started pid=~p t=~p~n",

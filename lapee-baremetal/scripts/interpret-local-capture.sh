@@ -12,8 +12,8 @@
 # Output goes to out/local-capture/<slug>/. If the input file is
 # older than 30 minutes the script bails (override via
 # LAPEE_ACCEPT_STALE=1) -- this catches the case where a verifier
-# Mac has a stale ESP mounted from a previous boot and someone
-# unwittingly parses yesterday's envelope against today's parser.
+# Mac has a stale saved envelope from a previous boot and someone
+# unwittingly parses yesterday's machine state against today's parser.
 #
 # Usage:
 #   ./scripts/interpret-local-capture.sh path/to/eventlog.bin
@@ -88,7 +88,7 @@ if [[ -n "$URL" && -z "$INPUT" ]]; then
     TMP="$(mktemp -t fw-attestation.XXXXXX)"
     echo ">> fetching ${URL}/~tpm2@2.0a/attestation"
     if ! curl -fsSL "${URL}/~tpm2@2.0a/attestation" \
-           -H "accept: application/json@1.0" \
+           -H "accept: application/json" \
            -H "accept-bundle: true" \
            -o "$TMP.json"; then
         echo "error: fetch from ${URL} failed" >&2
@@ -122,15 +122,17 @@ if [[ ! -f "$INPUT" ]]; then
     exit 1
 fi
 
-# v1.2 demo-ops guard: reject stale captures. A mounted ESP from a
-# previous boot can leave `attestation-latest.json' around for
-# weeks or years. Someone running this script on what they think
-# is today's boot would parse yesterday's envelope and report
-# yesterday's machine state -- confusing for a demo, dangerous
-# for any policy decision.
+# v1.2 demo-ops guard: reject stale file captures. Saved envelopes
+# from previous boots can sit around for weeks or years. Someone
+# running this script on what they think is today's boot would parse
+# yesterday's envelope and report yesterday's machine state --
+# confusing for a demo, dangerous for any policy decision. Prefer
+# --url for live machines so the verifier captures directly over the
+# network.
 #
 # Threshold: 30 minutes. The file SHOULD be brand-new (just
-# written by the guest). Override with LAPEE_ACCEPT_STALE=1.
+# fetched from the node, or intentionally captured for offline
+# analysis). Override with LAPEE_ACCEPT_STALE=1.
 if [[ "${LAPEE_ACCEPT_STALE:-0}" != "1" ]]; then
     AGE_SEC=""
     if stat -f "%m" "$INPUT" >/dev/null 2>&1; then
@@ -149,14 +151,12 @@ if [[ "${LAPEE_ACCEPT_STALE:-0}" != "1" ]]; then
         printf "  %s\n" "$INPUT" >&2
         printf "  last modified: %s minutes ago\n" "$AGE_MIN" >&2
         printf "\n" >&2
-        printf "  This file is older than 30 minutes. A mounted ESP from\n" >&2
-        printf "  a previous boot can show a stale attestation-latest.json;\n" >&2
-        printf "  the verifier would parse yesterday's capture and report\n" >&2
-        printf "  yesterday's machine state.\n" >&2
+        printf "  This file is older than 30 minutes. Saved envelopes\n" >&2
+        printf "  from previous boots can be mistaken for fresh captures;\n" >&2
+        printf "  the verifier would parse yesterday's machine state.\n" >&2
         printf "\n" >&2
-        printf "  Unmount the ESP (diskutil unmount force /Volumes/LAPEE_ESP),\n" >&2
-        printf "  boot the target laptop fresh from USB, let the writeback\n" >&2
-        printf "  complete, then re-mount and re-run.\n" >&2
+        printf "  For a live LapEE, use the network path instead:\n" >&2
+        printf "      %s --url http://NODE-IP:8734 --label LABEL\n" "$0" >&2
         printf "\n" >&2
         printf "  Or, to accept a known-stale file deliberately:\n" >&2
         printf "      LAPEE_ACCEPT_STALE=1 %s %s\n" "$0" "$INPUT" >&2
@@ -183,7 +183,7 @@ echo ">> label: $LABEL"
 [[ -n "$IMA_LOG" ]] && echo ">> IMA log: $OUT/ima.log"
 
 # Auto-detect: is the input a full attestation JSON envelope
-# (as produced by `~tpm2@2.0a/attestation' + LAPEE_WRITEBACK)
+# (as produced by `~tpm2@2.0a/attestation')
 # or a raw TCG binary event log? Both are valid starting points,
 # but the envelope form contains the FULL set of fields the
 # interpret device knows how to cross-reference (quote, AK, EK,

@@ -36,6 +36,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         bc \
+        binutils-mingw-w64-x86-64 \
         binutils \
         bison \
         build-essential \
@@ -54,8 +55,10 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         libelf-dev \
         libncurses-dev \
         libssl-dev \
+        libudev-dev \
         m4 \
         mtools \
+        ninja-build \
         openssl \
         parted \
         perl \
@@ -71,6 +74,16 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         zlib1g-dev \
         zstd \
     && rm -rf /var/lib/apt/lists/*
+
+# UKI assembly targets x86_64 laptops even when the build container
+# itself is native arm64. Debian's native systemd-boot-efi package
+# only ships linuxaa64.efi.stub on arm64, so install the amd64 package
+# solely for linuxx64.efi.stub / systemd-bootx64.efi.
+RUN dpkg --add-architecture amd64 && \
+    apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        systemd-boot-efi:amd64 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain for rebar3_cargo Rust NIFs (hb_keccak and
 # friends). Pinned to a specific version + cross target so a

@@ -127,7 +127,9 @@ EOF
                 STUB=\$(find /usr/lib /lib -name 'linuxx64.efi.stub' \\
                         -print -quit 2>/dev/null)
                 : \${STUB:?systemd-stub not found}
-                objcopy \\
+                OBJCOPY=\$(command -v x86_64-w64-mingw32-objcopy || \\
+                          command -v objcopy)
+                \"\$OBJCOPY\" \\
                     --add-section .osrel=/work/usb-build/os-release \\
                     --change-section-vma .osrel=0x20000 \\
                     --add-section .cmdline=/work/usb-build/cmdline.txt \\
@@ -165,10 +167,15 @@ if [[ -n "$STAGED_SB" ]]; then
     echo ">> staging SB enrolment bundle: $STAGED_SB"
 fi
 
-# Stage host-side wifi.conf if present.
-if [[ -f "${LAPEE_ROOT}/wifi.conf" ]]; then
+# Stage host-side wifi.conf if present and enabled. WIFI=0 is useful
+# for QEMU/test images and for intentionally wired-only USB sticks:
+# the measured cmdline may still carry lapee.wifi=enabled, but init
+# will find no credential file and keep association disabled.
+if [[ "${WIFI:-1}" != "0" && -f "${LAPEE_ROOT}/wifi.conf" ]]; then
     cp "${LAPEE_ROOT}/wifi.conf" "$BUILD_DIR/wifi.conf"
     echo ">> staging wifi.conf ($(wc -c <"${LAPEE_ROOT}/wifi.conf" | tr -d ' ') bytes)"
+elif [[ "${WIFI:-1}" == "0" ]]; then
+    echo ">> not staging wifi.conf (WIFI=0)"
 fi
 
 # ---- step 2: build the disk image inside the tools container --
@@ -206,8 +213,11 @@ docker run --rm $DOCKER_PLATFORM \
             /work/usb-build/lapee.efi ::/EFI/Boot/BootX64.efi
         echo 'LapEE UEFI-bootable USB. UKI at /EFI/Boot/BootX64.efi.' \\
             > /work/usb-build/README.TXT
+        echo 'lapee-baremetal-esp-v1' > /work/usb-build/LAPEE.MARKER
         mcopy -i /work/usb-build/esp.img \\
             /work/usb-build/README.TXT ::/README.TXT
+        mcopy -i /work/usb-build/esp.img \\
+            /work/usb-build/LAPEE.MARKER ::/LAPEE.MARKER
 
         for _a in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer; do
             if [[ -f /work/usb-build/\$_a ]]; then

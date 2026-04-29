@@ -3,20 +3,21 @@
 #
 # Responsibilities:
 #   1. Mount the essentials.
-#   2. Parse /proc/cmdline for a user config snippet (optional,
-#      LAPEE_USER_CONFIG=<file:path>).
-#   3. Assemble HB_CONFIG as a comma-separated list: the user config
-#      (if any) first, the enforced config LAST so it always wins.
-#   4. exec the HyperBEAM release in foreground mode.
+#   2. Read the ESP only long enough to copy optional WiFi credentials.
+#   3. Detach boot media and USB host input before HyperBEAM starts.
+#   4. Assemble HB_CONFIG with the enforced config last.
+#   5. exec the HyperBEAM release in foreground mode.
 #
 # This script is deliberately tiny — all key generation, PCR extension,
 # and attestation logic lives in dev_tpm2 via the on.start hook.
 set -eu
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+umask 077
 
-# Wire init's stdio to /dev/console so any trace lands on the screen
-# + serial. Kernel exec of rdinit=/init doesn't auto-wire stdio --
-# without this, userspace prints go nowhere visible. Must happen
-# after the kernel has set up /dev/console (guaranteed by PID 1).
+# Wire init's stdio to /dev/console just for the earliest mount
+# failures. Production closes stdin and goes quiet immediately after
+# devtmpfs provides /dev/null.
 exec < /dev/console > /dev/console 2>&1
 
 mount -t proc  -o nosuid,noexec,nodev  proc  /proc
@@ -28,12 +29,90 @@ mkdir -p /dev/pts
 mount -t devpts -o nosuid,noexec devpts /dev/pts
 mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
 
-# Calm /dev/console down so the splash daemon's 12 fps redraw isn't
-# fighting kernel printk. With `dmesg -n 1' only KERN_ALERT/EMERG
-# reach the console; everything else still accumulates in the dmesg
-# ring buffer for post-mortem. Userspace traces from this script
-# keep going to /dev/kmsg (see trace() below) and reach dmesg.
-dmesg -n 1 2>/dev/null || true
+# cmdline_value KEY
+#   Print the first value for the exact cmdline token KEY=VALUE.
+#   The literal case-pattern prefix keeps dotted names such as
+#   `lapee.debug' from turning into regular-expression matches.
+cmdline_value() {
+    _key="$1"
+    for _tok in $(cat /proc/cmdline 2>/dev/null); do
+        case "$_tok" in
+            "$_key"=*)
+                printf '%s\n' "${_tok#*=}"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+# cmdline_flag_set FLAGNAME
+#   True iff /proc/cmdline contains the exact token `FLAGNAME=1'
+#   bounded by whitespace (or start / end of line).
+#   Use for every on/off toggle the operator sets on the cmdline:
+#       lapee.debug, LAPEE_NO_NET, LAPEE_HB_VERBOSE, LAPEE_HB_DIAG,
+#       LAPEE_HB_CONSOLE.
+cmdline_flag_set() {
+    _v=$(cmdline_value "$1" || true)
+    [ "$_v" = "1" ]
+}
+
+LAPEE_MODE=$(cmdline_value lapee.mode || echo prod)
+case "$LAPEE_MODE" in
+    debug|prod) ;;
+    *) LAPEE_MODE=prod ;;
+esac
+
+LAPEE_DEBUG=0
+if [ "$LAPEE_MODE" = "debug" ] || \
+   cmdline_flag_set lapee.debug || cmdline_flag_set LAPEE_DEBUG; then
+    LAPEE_DEBUG=1
+    LAPEE_MODE=debug
+fi
+export LAPEE_MODE LAPEE_DEBUG
+
+debug_log() {
+    [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
+    printf '%s\n' "$*" > /dev/console 2>/dev/null || true
+    if [ -w /dev/ttyS0 ]; then
+        printf '%s\n' "$*" > /dev/ttyS0 2>/dev/null || true
+    fi
+}
+
+if [ "$LAPEE_DEBUG" = "1" ]; then
+    # Debug boots are intentionally loud and measured: the
+    # `lapee.debug=1' cmdline token lands in the attested boot
+    # identity. Show kernel + init logs on the laptop panel and do
+    # not start the BEAM splash below.
+    dmesg -n 8 2>/dev/null || true
+    debug_log ""
+    debug_log "=== LAPEE DEBUG CONSOLE (lapee.debug=1) ==="
+    debug_log "[debug] splash disabled; boot stage logs are visible on /dev/console"
+else
+    # Calm /dev/console down so the splash daemon's 12 fps redraw isn't
+    # fighting kernel printk. With `dmesg -n 1' only KERN_ALERT/EMERG
+    # reaches the console. Userspace init/HB stdio is closed below.
+    dmesg -n 1 2>/dev/null || true
+    exec < /dev/null > /dev/null 2>&1
+fi
+
+disable_usb_future_hotplug() {
+    [ "$LAPEE_DEBUG" != "1" ] || {
+        debug_log "[debug] usb: leaving future USB authorization enabled"
+        return 0
+    }
+
+    # Refuse USB devices plugged after init starts. Already-enumerated
+    # devices are left alone here so the boot ESP can still be read for
+    # wifi.conf; after that, lock_down_usb_after_boot_media deauthorizes
+    # existing devices and unbinds xHCI too.
+    for _hub in /sys/bus/usb/devices/usb*; do
+        [ -e "$_hub/authorized_default" ] || continue
+        echo 0 > "$_hub/authorized_default" 2>/dev/null || true
+    done
+}
+
+disable_usb_future_hotplug
 
 # Splash daemon, FIRST THING after mounts. Runs in its own BEAM VM,
 # parallel to the HyperBEAM node forked later. Same erts binary that
@@ -46,53 +125,184 @@ dmesg -n 1 2>/dev/null || true
 # `start_clean' (kernel + stdlib) and add HB's lib/ ebin paths so
 # the splash can resolve any runtime modules it needs.
 mkdir -p /run/lapee
-ERL=$(ls -1 /usr/lib/hyperbeam/erts-*/bin/erl 2>/dev/null | head -1)
-HB_BOOT=$(ls -1 /usr/lib/hyperbeam/releases/*/start_clean.boot 2>/dev/null | head -1)
-HB_BOOT=${HB_BOOT%.boot}
-if [ -x "$ERL" ] && [ -n "$HB_BOOT" ] && \
-   [ -f /usr/local/lib/lapee-splash/lapee_splash.beam ]; then
-    "$ERL" -boot "$HB_BOOT" \
-           -pa /usr/local/lib/lapee-splash \
-                /usr/lib/hyperbeam/lib/*/ebin \
-           -noshell -noinput \
-           -run lapee_splash main \
-        > /dev/null 2>>/run/lapee/splash.err </dev/null &
-    SPLASH_PID=$!
+SPLASH_LAYOUT=$(cmdline_value lapee.splash || true)
+case "$SPLASH_LAYOUT" in
+    qr|max|full|deck|sigil|blue|orbit|matrix|plaque|classic)
+        export LAPEE_SPLASH_LAYOUT="$SPLASH_LAYOUT"
+        ;;
+esac
+if [ "$LAPEE_DEBUG" = "1" ]; then
+    SPLASH_PID=""
+else
+    ERL=$(ls -1 /usr/lib/hyperbeam/erts-*/bin/erl 2>/dev/null | head -1)
+    HB_BOOT=$(ls -1 /usr/lib/hyperbeam/releases/*/start_clean.boot 2>/dev/null | head -1)
+    HB_BOOT=${HB_BOOT%.boot}
+    if [ -x "$ERL" ] && [ -n "$HB_BOOT" ] && \
+       [ -f /usr/local/lib/lapee-splash/lapee_splash.beam ]; then
+        "$ERL" -boot "$HB_BOOT" \
+               -pa /usr/local/lib/lapee-splash \
+                    /usr/lib/hyperbeam/lib/*/ebin \
+               -noshell -noinput \
+               -run lapee_splash main \
+            > /dev/null 2>/dev/null </dev/null &
+        SPLASH_PID=$!
+    fi
 fi
 
-# From here on the splash daemon owns /dev/console. Redirect init's
-# own stdio to /dev/kmsg so any stray `echo' lands in the dmesg
-# ring buffer instead of scribbling over the splash.
-exec >/dev/kmsg 2>&1
+# From here on the splash daemon owns /dev/console. Production init
+# remains silent; debug keeps its visible console traces.
+if [ "$LAPEE_DEBUG" != "1" ]; then
+    exec < /dev/null > /dev/null 2>&1
+fi
 
 # trace MSG
-#   Append a timestamped line to /dev/kmsg so it accumulates in
-#   the dmesg ring buffer for post-mortem (`dmesg | grep
-#   lapee-trace'). Doesn't touch /dev/console -- that's the
-#   splash's.
+#   Debug only. Production deliberately records no local boot log: the
+#   machine should only output the splash and network attestation.
 trace() {
+    [ "$LAPEE_DEBUG" = "1" ] || return 0
     _ts=$(awk '{printf "t+%0.2fs",$1}' /proc/uptime 2>/dev/null || echo '?')
-    echo "[lapee-trace] $_ts $*" > /dev/kmsg 2>/dev/null || true
+    _msg="[lapee-trace] $_ts $*"
+    debug_log "$_msg"
 }
 
-# cmdline_flag_set FLAGNAME
-#   True iff /proc/cmdline contains the exact token `FLAGNAME=1'
-#   bounded by whitespace (or start / end of line). Anchored
-#   token extraction -- same idiom as the `lapee.wifi=' gate --
-#   so a different option containing the substring (e.g.
-#   `X_LAPEE_TRACE=1foo') cannot accidentally satisfy the check.
-#   Use for every on/off toggle the operator sets on the cmdline:
-#       LAPEE_NO_NET, LAPEE_HB_VERBOSE, LAPEE_HB_DIAG,
-#       LAPEE_WRITEBACK, LAPEE_TRACE.
-cmdline_flag_set() {
-    _flag="$1"
-    _v=$(tr ' ' '\n' < /proc/cmdline \
-         | sed -n "s/^${_flag}=\\(.*\\)\$/\\1/p")
-    [ "$_v" = "1" ]
+halt_boot() {
+    _why="$*"
+    trace "HALT: $_why"
+    if [ "$LAPEE_DEBUG" = "1" ] && [ -n "${SPLASH_PID:-}" ]; then
+        kill "$SPLASH_PID" 2>/dev/null || true
+        sleep 1
+        {
+            printf '\n\nHALTED: %s\n' "$_why"
+            printf 'LapEE stopped before network/HyperBEAM to preserve boot-media isolation.\n'
+        } > /dev/console 2>/dev/null || true
+    fi
+    exec < /dev/null > /dev/null 2>&1
+    exec sh -c 'while :; do sleep 3600; done'
+}
+
+debug_dump_hardware() {
+    [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
+
+    debug_log "--- LAPEE DEBUG: hardware detected ---"
+    debug_log "[debug] kernel: $(uname -r 2>/dev/null || echo '?')"
+    _vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
+    _product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+    debug_log "[debug] dmi: vendor='${_vendor:-unknown}' product='${_product:-unknown}'"
+    _cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo 2>/dev/null | head -1)
+    debug_log "[debug] cpu: ${_cpu:-unknown}"
+    _tpm=$(ls /sys/class/tpm 2>/dev/null | tr '\n' ' ')
+    debug_log "[debug] tpm class: ${_tpm:-none}"
+
+    debug_log "[debug] block devices:"
+    for _b in /sys/block/*; do
+        [ -e "$_b" ] || continue
+        _name=$(basename "$_b")
+        case "$_name" in
+            loop*|ram*) continue ;;
+        esac
+        _sectors=$(cat "$_b/size" 2>/dev/null || echo 0)
+        case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
+        _mib=$(( _sectors / 2048 ))
+        _rem=$(cat "$_b/removable" 2>/dev/null || echo '?')
+        _ro=$(cat "$_b/ro" 2>/dev/null || echo '?')
+        debug_log "  - /dev/$_name size=${_mib}MiB removable=$_rem ro=$_ro"
+    done
+
+    debug_log "[debug] network interfaces:"
+    for _n in /sys/class/net/*; do
+        [ -e "$_n" ] || continue
+        _name=$(basename "$_n")
+        [ "$_name" = "lo" ] && continue
+        _type=$(cat "$_n/type" 2>/dev/null || echo '?')
+        if [ -e "$_n/wireless" ]; then
+            _kind=wifi
+        else
+            _kind=ethernet-or-virtual
+        fi
+        debug_log "  - $_name kind=$_kind type=$_type"
+    done
+    debug_log "--- LAPEE DEBUG: init stages ---"
+}
+
+debug_dump_network_state() {
+    [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
+
+    debug_log "--- LAPEE DEBUG: network snapshot ---"
+    debug_log "[debug] links:"
+    ip -o link show 2>&1 | while IFS= read -r _l; do
+        debug_log "  $_l"
+    done || true
+    debug_log "[debug] IPv4 addresses:"
+    ip -o -4 addr show 2>&1 | while IFS= read -r _l; do
+        debug_log "  $_l"
+    done || true
+    debug_log "[debug] routes:"
+    ip route 2>&1 | while IFS= read -r _l; do
+        debug_log "  $_l"
+    done || true
+    if [ -s /run/lapee/udhcpc.log ]; then
+        debug_log "[debug] recent DHCP log:"
+        tail -20 /run/lapee/udhcpc.log 2>/dev/null \
+            | while IFS= read -r _l; do
+                debug_log "  $_l"
+            done || true
+    fi
+    debug_log "--- LAPEE DEBUG: end network snapshot ---"
+}
+
+debug_dump_wifi_state() {
+    [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
+
+    debug_log "--- LAPEE DEBUG: wifi snapshot ---"
+    if command -v iw >/dev/null 2>&1; then
+        iw dev 2>&1 | while IFS= read -r _l; do
+            debug_log "  $_l"
+        done || true
+        for _w in /sys/class/net/wl*; do
+            [ -e "$_w" ] || continue
+            _name=$(basename "$_w")
+            debug_log "[debug] iw link $_name:"
+            iw dev "$_name" link 2>&1 | while IFS= read -r _l; do
+                debug_log "  $_l"
+            done || true
+        done
+    else
+        debug_log "[debug] iw command missing"
+    fi
+
+    for _r in /sys/class/rfkill/rfkill*; do
+        [ -e "$_r" ] || continue
+        _type=$(cat "$_r/type" 2>/dev/null || true)
+        [ "$_type" = "wlan" ] || continue
+        _name=$(cat "$_r/name" 2>/dev/null || echo '?')
+        _soft=$(cat "$_r/soft" 2>/dev/null || echo '?')
+        _hard=$(cat "$_r/hard" 2>/dev/null || echo '?')
+        debug_log "[debug] rfkill $_name: soft=$_soft hard=$_hard"
+    done
+
+    if [ -s /run/lapee/wpa.log ]; then
+        debug_log "[debug] recent wpa_supplicant log:"
+        tail -40 /run/lapee/wpa.log 2>/dev/null \
+            | while IFS= read -r _l; do
+                debug_log "  $_l"
+            done || true
+    else
+        debug_log "[debug] no /run/lapee/wpa.log"
+    fi
+
+    debug_log "[debug] recent kernel wifi lines:"
+    dmesg 2>/dev/null \
+        | grep -Ei 'iwlwifi|wlan|cfg80211|firmware|80211|mt792|rtw89|rfkill|deauth|auth|assoc|dhcp' \
+        | tail -60 \
+        | while IFS= read -r _l; do
+            debug_log "  $_l"
+        done || true
+    debug_log "--- LAPEE DEBUG: end wifi snapshot ---"
 }
 
 trace "init: started; kernel=$(uname -r 2>/dev/null || echo ?)"
 trace "init: /proc /sys /dev /tmp /run mounted"
+debug_dump_hardware
 
 # Memory-encryption capability gate (paper P2).
 #
@@ -113,7 +323,7 @@ trace "init: /proc /sys /dev /tmp /run mounted"
 # The override is measured into PCR 4/8 via the UKI cmdline, so any
 # attestation carries it.
 check_tme_sme() {
-    if cmdline_flag_set LAPEE_NO_TME; then
+    if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_TME; then
         trace "tme: LAPEE_NO_TME=1 on cmdline; skipping enforcement"
         return 0
     fi
@@ -142,19 +352,8 @@ check_tme_sme() {
     esac
     if [ "$_has_cap" = "no" ]; then
         trace "tme: CPU lacks tme/sme in /proc/cpuinfo; halting (paper P2)"
-        trace "tme: (override with LAPEE_NO_TME=1 on cmdline)"
-        # Kill the BEAM splash so its 12 fps render loop stops
-        # repainting the screen, then write the HALT banner directly
-        # to /dev/console. The brief sleep gives the splash's
-        # cursor-restore + close to land before our banner so it
-        # isn't overwritten by a final frame in flight.
-        if [ -n "${SPLASH_PID:-}" ]; then
-            kill "$SPLASH_PID" 2>/dev/null || true
-            sleep 1
-        fi
-        printf '\n\nHALTED: CPU does not support memory encryption (TME/SME).\n' \
-            > /dev/console 2>/dev/null || true
-        exec sh -c 'while :; do sleep 3600; done'
+        trace "tme: (debug override with LAPEE_NO_TME=1 on cmdline)"
+        halt_boot "CPU does not support memory encryption (TME/SME)."
     fi
     # Capability present -> proceed. Activation state is reported
     # to the verifier via claim_tme/1 (same cpuinfo source) in the
@@ -172,7 +371,7 @@ if [ -n "${SPLASH_PID:-}" ]; then
     else
         trace "splash: exited (PID=$SPLASH_PID)"
         # Surface any startup crash reason on the exit branch so a
-        # non-writeback boot still has an actionable trace.
+        # normal boot still has an actionable trace.
         if [ -s /run/lapee/splash.err ]; then
             while IFS= read -r _l; do
                 trace "splash.err: $_l"
@@ -208,7 +407,8 @@ mkdir -p /run/lapee /etc/lapee
 #   1. CAPABILITY (measured, attested):  `lapee.wifi=enabled' on the
 #      kernel cmdline. Baked into the UKI; changes the PCR-4 boot
 #      identity hash. An operator/verifier can tell from a verdict
-#      that the appliance was in WiFi-enabled mode. DEFAULT IS OFF.
+#      that the appliance was in WiFi-enabled mode. Without this token
+#      init leaves the WiFi association path dormant.
 #   2. CREDENTIAL (unmeasured, untrusted):  /EFI/boot/wifi.conf on
 #      the FAT32 ESP. Format: SSID\nPASSWORD. Rewritable without
 #      a PCR change (the same boot can connect to different
@@ -217,8 +417,8 @@ mkdir -p /run/lapee /etc/lapee
 #
 # Without the cmdline gate, the parser and wpa_supplicant launch
 # paths do NOT run, even if wifi.conf exists. This keeps the
-# 802.11 association + EAPOL attack surface dormant on default
-# boots. Drivers are still compiled into the kernel so `lspci'
+# 802.11 association + EAPOL attack surface dormant on boots without
+# the gate. Drivers are still compiled into the kernel so `lspci'
 # reports the card; the interface stays DOWN.
 #
 # Attack-surface delta vs. USB tether: WiFi adds ~3 MB of kernel
@@ -257,6 +457,7 @@ mkdir -p /run/lapee /etc/lapee
 
 WIFI_SSID=""
 WIFI_PSK=""
+BOOT_ESP_DEV=""
 
 # Gate (1): capability flag on kernel cmdline. Default OFF.
 # Only when `lapee.wifi=enabled' is explicitly present do we even
@@ -268,8 +469,7 @@ WIFI_PSK=""
 # match `^lapee.wifi=<val>$' exactly. This prevents a different
 # option name containing the substring (e.g. `X_lapee.wifi=foo')
 # from silently being read as the gate value.
-LAPEE_WIFI_GATE=$(tr ' ' '\n' < /proc/cmdline \
-    | sed -n 's/^lapee\.wifi=\(.*\)$/\1/p')
+LAPEE_WIFI_GATE=$(cmdline_value lapee.wifi || true)
 
 parse_wifi_conf() {
     _f="$1"
@@ -348,64 +548,205 @@ parse_wifi_conf() {
 
     WIFI_SSID="$_ssid"
     WIFI_PSK="$_psk"
-    # Redact SSID in traces -- it reaches /dev/kmsg + serial +
-    # lapee-hb-tail.log via the early boot path. Operators posting
-    # dmesg to support tickets should not be unknowingly leaking
-    # the network name. Full SSID goes into wpa_supplicant.conf
-    # only (chmod 600, never persisted to ESP).
+    # Redact SSID in traces. Operators posting dmesg or serial logs
+    # to support tickets should not be unknowingly leaking the network
+    # name. Full SSID goes into wpa_supplicant.conf only (chmod 600,
+    # never persisted to ESP by init).
     trace "wifi: wifi.conf accepted (ssid len=${#_ssid}, PSK len=${#_psk}; both redacted)"
     return 0
 }
 
-if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
-    trace "wifi: capability gate OPEN (lapee.wifi=enabled on cmdline)"
-    # Try to mount the ESP briefly (read-only) and read wifi.conf.
+ensure_unmounted() {
+    _mp="$1"
+    _label="$2"
+    for _try in 1 2 3 4 5; do
+        if ! grep -q " $_mp " /proc/mounts 2>/dev/null; then
+            return 0
+        fi
+        umount "$_mp" 2>/dev/null || true
+        sleep 1
+    done
+    if grep -q " $_mp " /proc/mounts 2>/dev/null; then
+        trace "$_label: failed to unmount $_mp"
+        return 1
+    fi
+    return 0
+}
+
+read_boot_media_config() {
+    # The boot ESP is input-only. Mount it read-only just long enough
+    # to detect the LapEE marker file and, when the measured WiFi gate
+    # is open, parse /EFI/boot/wifi.conf. Then unmount immediately.
     # Retries up to ~10 s because USB storage enumeration is async
     # and mass-storage-class probe lands a few seconds after init
-    # starts on real hardware. We don't care if the ESP isn't
-    # found -- boot continues either way.
+    # starts on real hardware. We don't care if the ESP isn't found:
+    # boot continues either way.
     mkdir -p /mnt/esp 2>/dev/null
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
                     /dev/nvme[0-9]n[0-9]p[0-9]* \
                     /dev/mmcblk[0-9]p[0-9]*; do
             [ -b "$_dev" ] || continue
-            if timeout 3 mount -t vfat -o ro,noatime "$_dev" /mnt/esp \
-                    2>/dev/null; then
-                if [ -f /mnt/esp/EFI/Boot/BootX64.efi ]; then
-                    if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
-                        parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true
-                    elif [ -f /mnt/esp/EFI/Boot/wifi.conf ]; then
-                        # Case-insensitive filesystem: FAT32
-                        # preserves on-disk case but allows
-                        # any-case lookup. Accept PE-standard
-                        # `/EFI/Boot/' spelling too.
-                        parse_wifi_conf /mnt/esp/EFI/Boot/wifi.conf || true
-                    else
-                        trace "wifi: no /EFI/boot/wifi.conf on ESP"
+            _probe_disk=$(parent_block_for_part "$_dev")
+            if [ -n "$_probe_disk" ] && [ -w "/sys/block/$_probe_disk/ro" ]; then
+                echo 1 > "/sys/block/$_probe_disk/ro" 2>/dev/null || true
+            fi
+            if mount -t vfat -o ro,nosuid,nodev,noexec,noatime "$_dev" /mnt/esp 2>/dev/null; then
+                if [ -f /mnt/esp/EFI/Boot/BootX64.efi ] && \
+                   [ -f /mnt/esp/LAPEE.MARKER ]; then
+                    BOOT_ESP_DEV="$_dev"
+                    trace "boot-media: found LapEE ESP at $BOOT_ESP_DEV"
+                    if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
+                        if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
+                            parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true
+                        elif [ -f /mnt/esp/EFI/Boot/wifi.conf ]; then
+                            # Case-insensitive filesystem: FAT32
+                            # preserves on-disk case but allows
+                            # any-case lookup. Accept PE-standard
+                            # `/EFI/Boot/' spelling too.
+                            parse_wifi_conf /mnt/esp/EFI/Boot/wifi.conf || true
+                        else
+                            trace "wifi: no /EFI/boot/wifi.conf on ESP"
+                        fi
                     fi
-                    umount /mnt/esp 2>/dev/null
-                    break 2
+                    umount /mnt/esp 2>/dev/null || true
+                    ensure_unmounted /mnt/esp boot-media \
+                        || halt_boot "boot ESP stayed mounted after read-only config scan"
+                    return 0
                 fi
-                umount /mnt/esp 2>/dev/null
+                umount /mnt/esp 2>/dev/null || true
+                ensure_unmounted /mnt/esp boot-media \
+                    || halt_boot "non-LapEE ESP stayed mounted after probe"
             fi
         done
         sleep 1
     done
+    trace "boot-media: LapEE ESP not found"
+    return 1
+}
+
+parent_block_for_part() {
+    _base=$(basename "$1")
+    # sda1 -> sda, vda1 -> vda, nvme0n1p1 -> nvme0n1,
+    # mmcblk0p1 -> mmcblk0. Busybox sed basic-regexp syntax.
+    printf '%s\n' "$_base" | sed 's/p\{0,1\}[0-9][0-9]*$//'
+}
+
+wait_block_gone() {
+    _disk="$1"
+    for _try in 1 2 3 4 5; do
+        if [ ! -e "/sys/block/$_disk" ] && \
+           [ ! -e "/dev/$_disk" ] && \
+           ! ls /dev/"$_disk"* >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+detach_boot_media() {
+    [ -n "$BOOT_ESP_DEV" ] || {
+        trace "boot-media: no ESP device to detach"
+        return 0
+    }
+
+    _disk=$(parent_block_for_part "$BOOT_ESP_DEV")
+    [ -n "$_disk" ] || {
+        trace "boot-media: could not derive parent for $BOOT_ESP_DEV"
+        return 0
+    }
+
+    trace "boot-media: detaching $BOOT_ESP_DEV parent /dev/$_disk before network/HB"
+    sync 2>/dev/null || true
+
+    if [ -w "/sys/block/$_disk/ro" ]; then
+        echo 1 > "/sys/block/$_disk/ro" 2>/dev/null \
+            || trace "boot-media: failed to mark /dev/$_disk read-only"
+    else
+        trace "boot-media: no read-only sysfs knob for /dev/$_disk"
+    fi
+
+    if [ -w "/sys/block/$_disk/device/delete" ]; then
+        if sh -c "echo 1 > /sys/block/$_disk/device/delete" 2>/dev/null; then
+            if wait_block_gone "$_disk"; then
+                trace "boot-media: deleted /dev/$_disk via sysfs"
+                return 0
+            fi
+            trace "boot-media: sysfs delete returned success but /dev/$_disk remains"
+        fi
+        trace "boot-media: sysfs delete failed for /dev/$_disk"
+    fi
+
+    # QEMU's virtio-block smoke path has no removable USB parent and
+    # no delete hook. Keep that test path alive while preserving the
+    # fail-closed posture for real USB/NVMe/MMC boot media.
+    _dmi_vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null \
+        | tr -d '\r\n' || echo '')
+    case "$_dmi_vendor:$_disk" in
+        QEMU:vd*)
+            rm -f /dev/"$_disk" /dev/"$_disk"* 2>/dev/null || true
+            trace "boot-media: QEMU virtio block has no detach hook; removed dev nodes for /dev/$_disk"
+            return 0
+            ;;
+    esac
+
+    halt_boot "could not detach boot media /dev/$_disk"
+}
+
+lock_down_usb_after_boot_media() {
+    [ "$LAPEE_DEBUG" != "1" ] || {
+        trace "usb: debug mode; leaving USB host stack authorized"
+        return 0
+    }
+
+    # Stop future USB hotplug first.
+    for _hub in /sys/bus/usb/devices/usb*; do
+        [ -e "$_hub/authorized_default" ] || continue
+        echo 0 > "$_hub/authorized_default" 2>/dev/null || true
+    done
+
+    # Deauthorize every already-enumerated USB device. This is after
+    # wifi.conf has been copied out and after boot-media deletion, so
+    # production no longer needs USB storage, HID, tethering, or NICs.
+    for _dev in /sys/bus/usb/devices/[0-9]*; do
+        [ -e "$_dev/authorized" ] || continue
+        echo 0 > "$_dev/authorized" 2>/dev/null || true
+    done
+
+    # If the host controller supports PCI driver unbind, take it down
+    # too. Built-in xHCI can still exist in memory, but without a bound
+    # controller it cannot enumerate later devices.
+    for _ctrl in /sys/bus/pci/drivers/xhci_hcd/*:*; do
+        [ -e "$_ctrl" ] || continue
+        _bdf=$(basename "$_ctrl")
+        echo "$_bdf" > /sys/bus/pci/drivers/xhci_hcd/unbind \
+            2>/dev/null || true
+    done
+}
+
+if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
+    trace "wifi: capability gate OPEN (lapee.wifi=enabled on cmdline)"
 else
     trace "wifi: capability gate CLOSED (no lapee.wifi=enabled on cmdline); 802.11 stack dormant"
 fi
+read_boot_media_config || true
+detach_boot_media
+lock_down_usb_after_boot_media
 
 # If the gate was OPEN and we have both SSID and PSK after the
 # parse, bring up WiFi. If the gate was CLOSED, the preceding
 # block was skipped entirely, so WIFI_SSID/WIFI_PSK are still
 # empty and this branch is dead.
-if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ] && \
-   [ -x /sbin/wpa_supplicant ]; then
+WIFI_IFACE=""
+WIFI_DHCP_READY=""
+if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
+    WPA_SUPPLICANT=$(command -v wpa_supplicant 2>/dev/null || true)
+    IW_BIN=$(command -v iw 2>/dev/null || true)
+
     # Wait up to 15 s for the wlan iface to appear. iwlwifi / mt76
     # PCI probe runs asynchronously; may land after userspace
     # starts.
-    WIFI_IFACE=""
     for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         for _i in /sys/class/net/wl*; do
             [ -e "$_i/device" ] || continue
@@ -416,15 +757,19 @@ if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ] && \
     done
     if [ -z "$WIFI_IFACE" ]; then
         trace "wifi: no wlan interface after 15s (card absent or driver probe failed)"
+    elif [ -z "$WPA_SUPPLICANT" ]; then
+        trace "wifi: credentials accepted but wpa_supplicant not found in PATH=$PATH"
+    elif [ -z "$IW_BIN" ]; then
+        trace "wifi: credentials accepted but iw not found in PATH=$PATH"
     else
         trace "wifi: iface=$WIFI_IFACE bringing up (SSID redacted)"
         ip link set "$WIFI_IFACE" up 2>/dev/null || true
         mkdir -p /var/run/wpa_supplicant
         # wpa_supplicant.conf -- strict double-quoted SSID + PSK
         # strings. Parser above rejected the `"\$`-family
-        # characters so injection isn't possible.
+        # characters so injection isn't possible. No ctrl_interface:
+        # production has no local wpa_cli control socket.
         cat > /etc/wpa_supplicant.conf <<WPACFG
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=0
 update_config=0
 country=US
 network={
@@ -438,24 +783,74 @@ network={
 }
 WPACFG
         chmod 600 /etc/wpa_supplicant.conf
-        /sbin/wpa_supplicant -B \
-            -i "$WIFI_IFACE" \
-            -c /etc/wpa_supplicant.conf \
-            -f /run/lapee/wpa.log \
-            2>/dev/null \
-            || trace "wifi: wpa_supplicant launch failed; /run/lapee/wpa.log for details"
-        trace "wifi: wpa_supplicant backgrounded on $WIFI_IFACE"
+        WPA_STARTED=""
+        if "$WPA_SUPPLICANT" -B \
+                -i "$WIFI_IFACE" \
+                -c /etc/wpa_supplicant.conf \
+                -f /run/lapee/wpa.log \
+                2>/dev/null; then
+            WPA_STARTED=1
+            trace "wifi: wpa_supplicant backgrounded on $WIFI_IFACE"
+        else
+            trace "wifi: wpa_supplicant launch failed; /run/lapee/wpa.log for details"
+        fi
+        rm -f /etc/wpa_supplicant.conf
+        WIFI_PSK=""
+
+        # Do not race DHCP ahead of WiFi association. Without this,
+        # udhcpc can produce endless lease failures that obscure the
+        # real problem: no authenticated link yet.
+        if [ "$WPA_STARTED" = "1" ]; then
+            for _assoc_try in 1 2 3 4 5 6 7 8 9 10 \
+                              11 12 13 14 15 16 17 18 19 20 \
+                              21 22 23 24 25 26 27 28 29 30; do
+                if "$IW_BIN" dev "$WIFI_IFACE" link 2>/dev/null \
+                        | grep -q '^Connected'; then
+                    WIFI_DHCP_READY=1
+                    trace "wifi: $WIFI_IFACE associated (SSID redacted)"
+                    break
+                fi
+                if [ "$LAPEE_DEBUG" = "1" ]; then
+                    trace "wifi: waiting for association on $WIFI_IFACE ($_assoc_try/30)"
+                fi
+                sleep 1
+            done
+        fi
+        if [ "$WIFI_DHCP_READY" != "1" ]; then
+            trace "wifi: no association after 30s; skipping DHCP on $WIFI_IFACE"
+        fi
     fi
 fi
 
 # Kill-switch: LAPEE_NO_NET=1 on cmdline skips interface enumeration
 # + udhcpc fork loop entirely. Useful when debugging a suspected
-# network-related init stall, or when the node is intended to run
-# purely over ESP writeback + reboot cycles without a LAN.
+# network-related init stall.
 NIC_COUNT=0
-if cmdline_flag_set LAPEE_NO_NET; then
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_NET; then
     trace "net: SKIPPED (LAPEE_NO_NET=1 on cmdline)"
 else
+    trace "net: waiting for physical interfaces"
+    for _net_scan in 1 2 3 4 5 6 7 8 9 10 \
+                     11 12 13 14 15 16 17 18 19 20 \
+                     21 22 23 24 25 26 27 28 29 30; do
+        _seen=0
+        for iface in /sys/class/net/*; do
+            name=$(basename "$iface")
+            case "$name" in
+                lo|bonding_masters|bonding|ip6tnl0|tunl0|sit0) continue ;;
+            esac
+            [ -e "$iface/device" ] || continue
+            _seen=$((_seen + 1))
+        done
+        if [ "$_seen" -gt 0 ]; then
+            break
+        fi
+        if [ "$_net_scan" = "1" ] || [ $((_net_scan % 5)) -eq 0 ]; then
+            trace "net: no physical interfaces yet ($_net_scan/30)"
+        fi
+        sleep 1
+    done
+
     trace "net: enumerating /sys/class/net"
     for iface in /sys/class/net/*; do
         name=$(basename "$iface")
@@ -463,6 +858,12 @@ else
             lo|bonding_masters|bonding|ip6tnl0|tunl0|sit0) continue ;;
         esac
         [ -e "$iface/device" ] || continue
+        if [ -d "$iface/wireless" ] || [ "${name#wl}" != "$name" ]; then
+            if [ "$name" != "$WIFI_IFACE" ] || [ "$WIFI_DHCP_READY" != "1" ]; then
+                trace "net: skip $name (wifi not associated)"
+                continue
+            fi
+        fi
         echo "[init] net: up $name"
         trace "net: up $name"
         ip link set "$name" up 2>/dev/null || true
@@ -474,6 +875,24 @@ else
         NIC_COUNT=$((NIC_COUNT + 1))
     done
     trace "net: $NIC_COUNT interface(s) enumerated; DHCP in flight"
+fi
+
+if [ "$LAPEE_DEBUG" = "1" ] && ! cmdline_flag_set LAPEE_NO_NET; then
+    trace "net: waiting up to 20s for primary lease with gateway"
+    for _net_wait in 1 2 3 4 5 6 7 8 9 10 \
+                     11 12 13 14 15 16 17 18 19 20; do
+        if [ -s /run/lapee/primary-net ]; then
+            _primary=$(tr '\n' ' ' < /run/lapee/primary-net 2>/dev/null || true)
+            trace "net: primary ready: $_primary"
+            break
+        fi
+        sleep 1
+    done
+    if [ ! -s /run/lapee/primary-net ]; then
+        trace "net: no primary lease after debug wait; continuing to HyperBEAM"
+        debug_dump_network_state
+        debug_dump_wifi_state
+    fi
 fi
 
 # Splash phase machine is internal to lapee_splash.erl: it polls
@@ -491,24 +910,22 @@ LAPEE_JSON=/etc/lapee/lapee.json
 ENFORCED_CFG=/etc/lapee/lapee-enforced.flat
 USER_CFG_DEFAULT=/etc/lapee/user.flat
 
-# Optional user config via kernel cmdline: `lapee.userconfig=<path>' or
-# `lapee.user_b64=<base64_of_flat_file_contents>'. Anchored
-# token match (same rationale as lapee.wifi= above) so a different
-# option containing the substring can't be mis-read as the value.
-USER_CFG_CMDLINE=$(tr ' ' '\n' < /proc/cmdline \
-    | sed -n 's/^lapee\.userconfig=\(.*\)$/\1/p')
-USER_B64=$(tr ' ' '\n' < /proc/cmdline \
-    | sed -n 's/^lapee\.user_b64=\(.*\)$/\1/p')
-
+# Debug-only user config via kernel cmdline: `lapee.userconfig=<path>' or
+# `lapee.user_b64=<base64_of_flat_file_contents>'. Production ignores
+# these so the measured appliance accepts no operator-supplied HB config.
 USER_CFG=""
-if [ -n "$USER_B64" ]; then
-    mkdir -p /run/lapee
-    echo "$USER_B64" | base64 -d > /run/lapee/user-cmdline.flat
-    USER_CFG=/run/lapee/user-cmdline.flat
-elif [ -n "$USER_CFG_CMDLINE" ] && [ -f "$USER_CFG_CMDLINE" ]; then
-    USER_CFG=$USER_CFG_CMDLINE
-elif [ -f "$USER_CFG_DEFAULT" ]; then
-    USER_CFG=$USER_CFG_DEFAULT
+if [ "$LAPEE_DEBUG" = "1" ]; then
+    USER_CFG_CMDLINE=$(cmdline_value lapee.userconfig || true)
+    USER_B64=$(cmdline_value lapee.user_b64 || true)
+    if [ -n "$USER_B64" ]; then
+        mkdir -p /run/lapee
+        echo "$USER_B64" | base64 -d > /run/lapee/user-cmdline.flat
+        USER_CFG=/run/lapee/user-cmdline.flat
+    elif [ -n "$USER_CFG_CMDLINE" ] && [ -f "$USER_CFG_CMDLINE" ]; then
+        USER_CFG=$USER_CFG_CMDLINE
+    elif [ -f "$USER_CFG_DEFAULT" ]; then
+        USER_CFG=$USER_CFG_DEFAULT
+    fi
 fi
 
 # LAPEE_JSON is currently OFF: HB's config loader rejects the
@@ -531,17 +948,18 @@ export HB_CONFIG
 # TPM access.
 export LAPEE_TPM_TCTI=${LAPEE_TPM_TCTI:-device:/dev/tpm0}
 
-# Diagnostic: when LAPEE_HB_VERBOSE=1 is in /proc/cmdline, turn on HB
-# startup tracing so we can see where HB hangs during boot. The setting
-# is opt-in because the output is very noisy.
-if cmdline_flag_set LAPEE_HB_VERBOSE; then
+# Diagnostic: in debug mode only, LAPEE_HB_VERBOSE=1 turns on HB startup
+# tracing so we can see where HB hangs during boot. Production keeps this off.
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_HB_VERBOSE; then
     export HB_PRINT="http,boot,start,hook,debug_router_info"
-    echo "[init] HB_PRINT = $HB_PRINT (verbose boot diagnostics)"
+    trace "hyperbeam: HB_PRINT=$HB_PRINT (verbose boot diagnostics)"
 fi
 
-# Force HB into `debug' mode so it doesn't try to reach Arweave gateways
-# on startup (the guest's user-mode networking can't reach the outside
-# world in a useful way for attestation demos).
+# HyperBEAM upstream `prod' still intentionally throws on several
+# request paths guarded by ?no_prod. LapEE's prod/debug distinction is
+# the measured `lapee.mode' command line and this init's local-surface
+# posture; keep HB itself in the working mode until upstream prod mode
+# is ready for this node profile.
 export HB_MODE=${HB_MODE:-debug}
 
 # /etc/lapee + /run/lapee were pre-created in the networking block
@@ -567,7 +985,7 @@ fi
 # slirp hostfwd is wired correctly and the blocker is in HB's cowboy
 # stack; if nc stays silent, slirp isn't delivering and we need a
 # non-slirp transport.
-if cmdline_flag_set LAPEE_HB_DIAG; then
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_HB_DIAG; then
     set +e  # stay alive through any subcommand failure
     echo "--- LAPEE-DIAG-BEGIN ---"
     echo "[diag] address state:"
@@ -575,10 +993,9 @@ if cmdline_flag_set LAPEE_HB_DIAG; then
     echo "[diag] routes:"
     ip route 2>&1 | head -6
     echo "[diag] listening on 0.0.0.0:8734 via busybox nc (up to 30s)..."
-    # busybox nc: `-l -p PORT` listens; without -w the server reads
-    # until the client closes or timeout. We run it under `timeout'
-    # so we don't hang the diag window forever.
-    timeout 30 nc -l -p 8734 2>&1 | sed 's/^/[diag-recv] /' &
+    # busybox nc: `-l -p PORT` listens. Run it in the background and
+    # reap it explicitly below so this diag window cannot outlive PID 1.
+    nc -l -p 8734 2>&1 | sed 's/^/[diag-recv] /' &
     NCPID=$!
     # Keep the DIAG window open long enough for the host probe.
     sleep 15
@@ -593,7 +1010,7 @@ if cmdline_flag_set LAPEE_HB_DIAG; then
     echo "[diag] outbound reachability (slirp default gw 10.0.2.2):"
     # busybox nc without -z: try connecting to a well-known port on
     # the host; failure is fine, we only want log lines.
-    echo "" | timeout 3 nc -w 3 10.0.2.2 80 2>&1 | head -3 \
+    echo "" | nc -w 3 10.0.2.2 80 2>&1 | head -3 \
         | sed 's/^/[diag-out-80] /'
     echo "--- LAPEE-DIAG-END ---"
     echo "[diag] holding init — kill qemu from the host when done"
@@ -606,249 +1023,18 @@ fi
 trace "cd /usr/lib/hyperbeam"
 cd /usr/lib/hyperbeam
 
-# USB-stick round-trip validation path (opt-in via kernel cmdline
-# `LAPEE_WRITEBACK=1'). Used when a Framework boots this image
-# from a USB stick and we want the attested envelope to end up
-# back on the same stick so the operator can interpret it on
-# their verifier host after power-off. Required kernel builtins
-# are all present in vmlinuz-lapee: CONFIG_USB_STORAGE,
-# CONFIG_VFAT_FS, CONFIG_BLK_DEV_SD, CONFIG_USB_XHCI_HCD —
-# no modprobes, no network.
-if cmdline_flag_set LAPEE_WRITEBACK; then
-    trace "writeback: forking HB in background"
-    /usr/lib/hyperbeam/bin/hb foreground \
-        > /run/lapee/hb.log 2>&1 &
-    HB_PID=$!
-    trace "writeback: HB_PID=$HB_PID"
-
-    # Two-phase wait. Phase 1: probe the cheap /info handler
-    # with short wget timeouts, logging progress every 10
-    # iterations so the console shows we're alive. Rosetta-
-    # emulated amd64 BEAM startup under QEMU takes 60-180s to
-    # reach cowboy-listen state; real hardware is much faster.
-    #
-    # `accept-bundle: true' routes around HB's auto-index
-    # generation in dev_codec_httpsig_conv (which otherwise
-    # hits an `{error, not_found}' on HB's cold store and
-    # loops the reply encoder).
-    #
-    # Phase 2: a single `/attestation' call with a long timeout
-    # (quotes are expensive: 2-5s of TPM work per request). One
-    # call = one quote = one envelope.
-    mkdir -p /mnt/esp /run/lapee
-    PROBE_OUT=/run/lapee/probe.json
-    ATT_OUT=/run/lapee/attestation.json
-
-    echo "[writeback] phase 1: waiting for HB to answer /~tpm2@2.0a/info"
-    ready=0
-    for i in $(seq 1 120); do
-        if wget -q -O "$PROBE_OUT" --timeout=2 \
-                --header='accept: application/json@1.0' \
-                --header='accept-bundle: true' \
-                http://127.0.0.1:8734/~tpm2@2.0a/info \
-                2>/dev/null && [ -s "$PROBE_OUT" ]; then
-            trace "writeback: HB responded to /info after ~$((i*3))s"
-            if [ -s /run/lapee/primary-net ]; then
-                _ip=$(sed -n 's/^ip=//p' /run/lapee/primary-net)
-            else
-                _ip=""
-            fi
-            # `dmesg -n 1' was already issued at the very top of
-            # this script to give the splash daemon a clean canvas
-            # from boot through ready. Re-asserting here is cheap
-            # and idempotent in case anything else flipped it back.
-            dmesg -n 1 2>/dev/null || true
-            # Splash watchdog goes to dmesg (kmsg), not /dev/console
-            # -- the splash itself is the source of truth on screen.
-            if [ -n "${SPLASH_PID:-}" ] && kill -0 "$SPLASH_PID" 2>/dev/null; then
-                trace "splash: still alive (PID=$SPLASH_PID)"
-            elif [ -s /run/lapee/splash.err ]; then
-                while IFS= read -r _line; do
-                    trace "splash.err: $_line"
-                done < /run/lapee/splash.err
-            else
-                trace "splash: status unknown (PID=${SPLASH_PID:-none})"
-            fi
-            ready=1; break
-        fi
-        # Check whether HB is even still alive -- if it exited,
-        # keep looping burns the whole 240s window on a dead
-        # process. The trace line captures this for post-pull
-        # diagnosis.
-        if ! kill -0 $HB_PID 2>/dev/null; then
-            trace "writeback: HB_PID=$HB_PID died before answering /info"
-            tail -40 /run/lapee/hb.log 2>/dev/null \
-                | while IFS= read -r line; do trace "hb.log: $line"; done
-            break
-        fi
-        # Heartbeat trace every 5 probes (~10s of wall-time) so
-        # `dmesg | grep lapee-trace' has progress evidence even on a
-        # boot that ultimately times out. The screen-side counter is
-        # owned by the BEAM splash (footer_text/3 in lapee_splash.erl).
-        if [ $((i % 5)) -eq 0 ]; then
-            trace "writeback: phase 1 still waiting" \
-                  "(probe ${i}/120 ~$((i*2))s elapsed)"
-        fi
-        sleep 2
-    done
-
-    if [ $ready -ne 1 ]; then
-        trace "writeback: FAIL - HB did not answer /info in ~240s"
-        tail -80 /run/lapee/hb.log 2>/dev/null \
-            | while IFS= read -r line; do trace "hb.log: $line"; done
-    else
-        trace "writeback: phase 2 - calling /~tpm2@2.0a/attestation"
-        if wget -q -O "$ATT_OUT" --timeout=120 \
-                --header='accept: application/json@1.0' \
-                --header='accept-bundle: true' \
-                http://127.0.0.1:8734/~tpm2@2.0a/attestation \
-                2>/dev/null && [ -s "$ATT_OUT" ]; then
-            ATT_BYTES=$(wc -c < "$ATT_OUT")
-            echo "[writeback] phase 2: got $ATT_BYTES bytes"
-        else
-            echo "[writeback] FAIL - /attestation returned empty or error"
-            tail -40 /run/lapee/hb.log 2>/dev/null
-            ATT_OUT=""
-        fi
-
-        # Find the ESP + write the envelope. Busybox does not
-        # ship a `blkid' applet that supports label lookup, so
-        # we take the robust path: try-mount every block-device
-        # partition as vfat-RO and check for the ESP marker file
-        # `/EFI/Boot/BootX64.efi' (which this UKI image always
-        # writes at build time). This works on USB mass-storage
-        # (/dev/sdXN on real hardware + QEMU emulated), virtio-
-        # blk (/dev/vdXN under QEMU), NVMe (/dev/nvmeXnYpZ),
-        # and eMMC (/dev/mmcblkXpY) without any extra tools.
-        ESP_DEV=""
-        if [ -n "$ATT_OUT" ]; then
-            for iter in $(seq 1 20); do
-                for dev in /dev/sd[a-z][0-9]* \
-                           /dev/vd[a-z][0-9]* \
-                           /dev/nvme[0-9]n[0-9]p[0-9]* \
-                           /dev/mmcblk[0-9]p[0-9]*; do
-                    [ -b "$dev" ] || continue
-                    if mount -t vfat -o ro,noatime "$dev" /mnt/esp \
-                          2>/dev/null; then
-                        if [ -f /mnt/esp/EFI/Boot/BootX64.efi ]; then
-                            ESP_DEV=$dev
-                            umount /mnt/esp 2>/dev/null
-                            break 2
-                        fi
-                        umount /mnt/esp 2>/dev/null
-                    fi
-                done
-                sleep 1
-            done
-        fi
-        if [ -z "$ESP_DEV" ] && [ -n "$ATT_OUT" ]; then
-            echo "[writeback] FAIL - could not locate LapEE ESP"
-            echo "[writeback] block devices:"
-            ls /dev/sd* /dev/vd* /dev/nvme* /dev/mmcblk* \
-                2>/dev/null | sed 's/^/[writeback]   /'
-        elif [ -n "$ESP_DEV" ]; then
-            echo "[writeback] ESP = $ESP_DEV"
-            if mount -t vfat -o rw,noatime "$ESP_DEV" /mnt/esp; then
-                STAMP=$(date +%Y%m%dT%H%M%SZ 2>/dev/null || echo run)
-                OUT=/mnt/esp/attestation-$STAMP.json
-                LINK=/mnt/esp/attestation-latest.json
-                cp "$ATT_OUT" "$OUT" && ATT_OK=1 || ATT_OK=0
-                if [ "$ATT_OK" = "1" ] && [ -s "$OUT" ]; then
-                    rm -f "$LINK"
-                    cp "$OUT" "$LINK"
-                    # Optional diagnostic logs, gated on LAPEE_TRACE=1
-                    # because they leak operator-sensitive context:
-                    #   - lapee-wpa.log carries SSID strings in the
-                    #     clear (`Trying to associate with SSID...').
-                    #   - lapee-hb-tail.log carries peer URLs, request
-                    #     paths, node-message details.
-                    # Default OFF so an operator sharing the ESP for
-                    # attestation review doesn't unknowingly ship
-                    # network identity + HB internals.
-                    if cmdline_flag_set LAPEE_TRACE; then
-                        [ -f /run/lapee/wpa.log ] && \
-                            cp /run/lapee/wpa.log \
-                                /mnt/esp/lapee-wpa.log 2>/dev/null
-                        [ -f /run/lapee/hb.log ] && \
-                            tail -c 65536 /run/lapee/hb.log \
-                                > /mnt/esp/lapee-hb-tail.log 2>/dev/null
-                    fi
-                    # splash.log is copied unconditionally: phase
-                    # transitions + the IP already shown on screen +
-                    # probe error reasons. No PSK/SSID/wallet.
-                    [ -f /run/lapee/splash.log ] && \
-                        cp /run/lapee/splash.log \
-                            /mnt/esp/lapee-splash.log 2>/dev/null
-                    cat > /mnt/esp/README-VALIDATOR.txt <<RV
-LapEE attestation written on boot $STAMP.
-
-On your verifier host (with the USB stick plugged in):
-
-    ./lapee-baremetal/scripts/interpret-local-capture.sh \\
-        --label "Framework (USB roundtrip)" \\
-        /Volumes/LAPEE_ESP/attestation-latest.json
-
-The JSON is the full envelope returned by
-\`~tpm2@2.0a/attestation\`. The EK certificate (when the
-platform TPM has one provisioned in NV storage) is embedded
-inline as the \`ek-cert-pem\` field. Its provenance is
-recorded under \`ek-cert-source\`:
-
-    {"kind": "tpm-nv", "handle": "0x01C00002", "bytes": 1234}
-        EK cert read from the TPM's NV storage at the TCG-
-        standard low-range index. Chain-valid against the
-        matching vendor EK root CA shipped in the verifier.
-
-    {"kind": "absent", "reason": ...}
-        The TPM has no EK cert provisioned at any of the
-        TCG-standard indices. The attestation still carries
-        the live TPM quote + PCR set; the EK chain check
-        will fail because there is nothing to chain. This
-        is expected on some AMD fTPM configurations where
-        the cert is fetched out-of-band from AMD PSP. It is
-        NOT an error from LapEE -- we deliberately never
-        substitute a synthetic cert.
-RV
-                    sync
-                    SZ=$(stat -c %s "$OUT" 2>/dev/null || \
-                           stat -f %z "$OUT" 2>/dev/null || echo ?)
-                    # Writeback marker for the automated `make
-                    # hb-usb-qemu' harness, which greps the QEMU
-                    # serial log for `LAPEE-WRITEBACK-OK' to know
-                    # it can stop the guest and extract the ESP.
-                    # init's stdio is on /dev/kmsg by now and
-                    # `dmesg -n 1' filters the kmsg-to-console path,
-                    # so write directly to /dev/ttyS0 (file-backed
-                    # chardev under QEMU `-nographic'). On a real
-                    # Framework boot without a serial cable the
-                    # device is absent; the [ -w ] guard makes it
-                    # a no-op and the operator gets their "node is
-                    # ready" signal from the splash's READY footer.
-                    if [ -w /dev/ttyS0 ]; then
-                        printf 'LAPEE-WRITEBACK-OK: %s (%s bytes)\n' \
-                            "$OUT" "$SZ" > /dev/ttyS0 2>/dev/null || true
-                        printf 'LAPEE-WRITEBACK-LINK: %s\n' \
-                            "$LINK" > /dev/ttyS0 2>/dev/null || true
-                    fi
-                    # Always trace via /dev/kmsg for post-mortem
-                    # `dmesg | grep' diagnostics on a real boot.
-                    trace "writeback-ok: $OUT ($SZ bytes)"
-                    trace "writeback-link: $LINK"
-                else
-                    echo "[writeback] FAIL - wget could not fetch /attestation"
-                fi
-                umount /mnt/esp || true
-            else
-                echo "[writeback] FAIL - mount -o rw on $ESP_DEV"
-            fi
-        fi
-    fi
-
-    # Keep HB in foreground so the node stays up for any
-    # follow-on interactive use over the serial console.
-    wait $HB_PID
+echo "[init] exec hyperbeam"
+echo "-----------------------------------------------"
+trace "hyperbeam: exec foreground"
+exec < /dev/null
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_HB_CONSOLE; then
+    trace "hyperbeam: stdout/stderr -> /dev/console (LAPEE_HB_CONSOLE=1)"
+    exec >/dev/console 2>&1
+elif [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_HB_SERIAL; then
+    trace "hyperbeam: stdout/stderr -> /dev/ttyS0 (LAPEE_HB_SERIAL=1)"
+    exec >/dev/ttyS0 2>&1
 else
-    echo "[init] exec hyperbeam"
-    echo "-----------------------------------------------"
-    exec /usr/lib/hyperbeam/bin/hb foreground
+    trace "hyperbeam: stdout/stderr -> /dev/null"
+    exec >/dev/null 2>&1
 fi
+exec /usr/lib/hyperbeam/bin/hb foreground
