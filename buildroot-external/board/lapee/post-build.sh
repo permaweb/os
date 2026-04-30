@@ -64,7 +64,22 @@ stage_firmware_tree() {
     cp -a "$src"/. "$dst"/
 }
 
+stage_iwlwifi_root_links() {
+    # iwlwifi requests firmware by bare filename (for example
+    # /lib/firmware/iwlwifi-ma-b0-gf-a0-89.ucode), while the upstream
+    # linux-firmware tree now stores many files under intel/iwlwifi/.
+    # Buildroot creates a subset of these compatibility symlinks for its
+    # selected firmware options; because we copy the complete Intel tree
+    # ourselves, synthesize the complete symlink set too.
+    for fw in "$TARGET_DIR"/lib/firmware/intel/iwlwifi/iwlwifi-*; do
+        [ -f "$fw" ] || continue
+        name=$(basename "$fw")
+        ln -sfn "intel/iwlwifi/$name" "$TARGET_DIR/lib/firmware/$name"
+    done
+}
+
 stage_firmware_tree intel/iwlwifi
+stage_iwlwifi_root_links
 stage_firmware_tree ath10k
 stage_firmware_tree ath11k
 stage_firmware_tree ath12k
@@ -88,6 +103,10 @@ for f in /init /etc/lapee/lapee-enforced.flat \
          /lib/firmware/intel/iwlwifi/iwlwifi-sc-a0-wh-b0-c103.ucode \
          /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode \
          /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf-a0.pnvm \
+         /lib/firmware/intel/iwlwifi/iwlwifi-ma-b0-gf-a0-89.ucode \
+         /lib/firmware/intel/iwlwifi/iwlwifi-ma-b0-gf-a0.pnvm \
+         /lib/firmware/iwlwifi-ma-b0-gf-a0-89.ucode \
+         /lib/firmware/iwlwifi-ma-b0-gf-a0.pnvm \
          /lib/firmware/intel/iwlwifi/iwlwifi-ty-a0-gf-a0.pnvm \
          /lib/firmware/intel/iwlwifi/iwlwifi-gl-c0-fm-c0.pnvm \
          /lib/firmware/mrvl/pcie8897_uapsta.bin \
