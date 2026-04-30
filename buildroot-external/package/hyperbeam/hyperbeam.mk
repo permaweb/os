@@ -152,15 +152,17 @@ HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_CREATE_BUILD_HELPERS
 # port_specs honours CC/CFLAGS/LDFLAGS; rebar3_cargo passes the
 # full env through to cargo.
 #
-# Upstream edge still has native BEAMR C that trips GCC 14's
-# stricter C diagnostics against OTP 27/WAMR headers. Keep that as
-# an explicit compiler compatibility boundary instead of mutating
-# upstream HyperBEAM source in the fetched checkout.
+# Upstream native builds still inject absolute host include/library
+# paths such as /usr/local/include and /usr/lib. Route native compile
+# commands through cc-filter so the temporary HyperBEAM checkout stays
+# unpatched while Buildroot's cross compiler only sees staged target
+# headers and libraries.
+#
+# Upstream edge's native BEAMR C currently trips GCC 14 against OTP 27
+# ei.h pointer types. Keep that as a single explicit compiler
+# compatibility boundary instead of mutating upstream HyperBEAM source.
 HYPERBEAM_C_NATIVE_COMPAT_FLAGS = \
-	-Wno-error=incompatible-pointer-types \
-	-Wno-error=discarded-qualifiers \
-	-Wno-error=int-conversion \
-	-Wno-error=implicit-function-declaration
+	-Wno-error=incompatible-pointer-types
 
 HYPERBEAM_BUILD_ENV = \
 	PATH=$(@D)/.lapee-build:$(HOST_DIR)/bin:/home/builder/.cargo/bin:$(BR_PATH) \
