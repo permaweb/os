@@ -64,27 +64,53 @@ stage_firmware_tree() {
     cp -a "$src"/. "$dst"/
 }
 
-stage_iwlwifi_root_links() {
-    # iwlwifi requests firmware by bare filename (for example
-    # /lib/firmware/iwlwifi-ma-b0-gf-a0-89.ucode), while the upstream
-    # linux-firmware tree now stores many files under intel/iwlwifi/.
-    # Buildroot creates a subset of these compatibility symlinks for its
-    # selected firmware options; because we copy the complete Intel tree
-    # ourselves, synthesize the complete symlink set too.
-    for fw in "$TARGET_DIR"/lib/firmware/intel/iwlwifi/iwlwifi-*; do
-        [ -f "$fw" ] || continue
-        name=$(basename "$fw")
-        ln -sfn "intel/iwlwifi/$name" "$TARGET_DIR/lib/firmware/$name"
-    done
+stage_firmware_whence_links() {
+    # The kernel firmware loader does exact-path lookups. Upstream
+    # linux-firmware records the public compatibility paths in WHENCE as
+    # `Link:' entries, often pointing from a driver-requested root filename
+    # to a vendor subdirectory. Replay every link whose target exists in
+    # our staged subset instead of carrying vendor-specific guesses here.
+    links_file=$BUILD_ROOT/.lapee-firmware-whence-links
+    awk '
+        /^Link:[[:space:]]*/ {
+            line = $0
+            sub(/^Link:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*->[[:space:]]*/, "|", line)
+            print line
+        }
+    ' "$FW_SRC/WHENCE" > "$links_file"
+
+    count=0
+    while IFS='|' read -r link target; do
+        [ -n "$link" ] || continue
+        [ -n "$target" ] || continue
+
+        link_dir=$TARGET_DIR/lib/firmware/$(dirname "$link")
+        link_path=$TARGET_DIR/lib/firmware/$link
+        mkdir -p "$link_dir"
+
+        # WHENCE link targets are relative to the link's directory, matching
+        # upstream copy-firmware.sh.
+        [ -e "$link_dir/$target" ] || continue
+        if [ -e "$link_path" ] && [ ! -L "$link_path" ]; then
+            echo ">> preserving existing firmware file $link"
+            continue
+        fi
+
+        ln -sfn "$target" "$link_path"
+        count=$((count + 1))
+    done < "$links_file"
+    rm -f "$links_file"
+    echo ">> staged $count firmware compatibility links from WHENCE"
 }
 
 stage_firmware_tree intel/iwlwifi
-stage_iwlwifi_root_links
 stage_firmware_tree ath10k
 stage_firmware_tree ath11k
 stage_firmware_tree ath12k
 stage_firmware_tree brcm
 stage_firmware_tree cypress
+stage_firmware_whence_links
 
 # 3. Sanity checks.
 for f in /init /etc/lapee/lapee-enforced.flat \
