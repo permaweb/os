@@ -46,6 +46,15 @@
 #   make hb-usb-debug-write DEV=
 #                           — flash a measured debug-console image
 #                             with lapee.debug=1 on the cmdline.
+#   make hb-usb-no-tme-write DEV=
+#                           — flash a production image with
+#                             LAPEE_NO_TME=1 on the cmdline.
+#   make hb-usb-no-tme-debug-write DEV=
+#                           — flash a debug-console image with
+#                             LAPEE_NO_TME=1 on the cmdline.
+#   make hb-usb-no-tme-verify DEV=
+#                           — byte-compare the no-TME image against
+#                             the beginning of the USB device.
 #   make gather-wifi-creds  — prompt locally for wifi.conf.
 #   make hb-usb-qemu        — boot build/images/lapee-usb.img under
 #                             QEMU+OVMF+swtpm and fetch attestation
@@ -110,6 +119,10 @@ LENOVO_INTEL_OUT = build/images/lapee-usb-lenovo-intel-debug.img
 LENOVO_INTEL_KERNEL = $(LENOVO_INTEL_BUILD_DIR)/kernel/vmlinuz-lapee
 LENOVO_INTEL_INITRAMFS = $(LENOVO_INTEL_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
 LENOVO_INTEL_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1 i915.force_probe=*
+NO_TME_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme.img
+NO_TME_CMDLINE = $(PROD_CMDLINE) LAPEE_NO_TME=1
+NO_TME_DEBUG_OUT = $(BUILD_DIR)/images/lapee-usb-wifi-debug-no-tme.img
+NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
@@ -127,6 +140,8 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 .PHONY: help all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
         hb-usb-image hb-usb-write hb-image-write hb-usb-debug-image hb-usb-debug-write \
+        hb-usb-no-tme-image hb-usb-no-tme-write hb-usb-no-tme-verify \
+        hb-usb-no-tme-debug-image hb-usb-no-tme-debug-write hb-usb-no-tme-debug-verify \
         hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
         hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
@@ -274,6 +289,91 @@ hb-usb-debug-image: hb-usb-image
 
 hb-usb-debug-write: DEBUG=1
 hb-usb-debug-write: hb-usb-write
+
+hb-usb-no-tme-image:
+	$(MAKE) hb-usb-image \
+	    CMDLINE='$(NO_TME_CMDLINE)' \
+	    OUT="$(NO_TME_OUT)"
+
+hb-usb-no-tme-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-no-tme-write DEV=/dev/diskN"; exit 1; }
+	@if [ "$(WIFI)" != "0" ]; then \
+	    ./scripts/gather-wifi-creds.sh --if-missing; \
+	else \
+	    echo ">> skipping wifi credential gather (WIFI=0)"; \
+	fi
+	$(MAKE) hb-usb-no-tme-image WIFI="$(WIFI)"
+	@if [ "$(HOST_OS)" = "Darwin" ]; then \
+	    case "$(DEV)" in /dev/disk*|/dev/rdisk*) ;; \
+	        *) echo "macOS device must be /dev/diskN or /dev/rdiskN" >&2; exit 1;; \
+	    esac; \
+	    DISKID=$$(basename "$(DEV)" | sed 's/^r//'); \
+	    RAW="/dev/r$$DISKID"; \
+	    echo ">> target : $(DEV) -> $$RAW"; \
+	    diskutil info "/dev/$$DISKID" | \
+	        grep -E '(Device.*(Identifier|Node)|Media Name|Disk Size)' | \
+	        sed 's/^/     /'; \
+	    printf "Write $(NO_TME_OUT) to $$RAW? [type YES] "; \
+	    read CONFIRM; [ "$$CONFIRM" = "YES" ] || { echo "aborted"; exit 1; }; \
+	    BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
+	    diskutil unmountDisk "/dev/$$DISKID"; \
+	    sudo dd if="$(NO_TME_OUT)" of="$$RAW" bs=4m; \
+	    sync; \
+	    echo ">> verifying first $$BYTES bytes"; \
+	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$$RAW"; \
+	    echo ">> no-TME image bytes verified on $(DEV)"; \
+	    diskutil eject "/dev/$$DISKID"; \
+	else \
+	    [ -b "$(DEV)" ] || { echo "not a block device: $(DEV)" >&2; exit 1; }; \
+	    echo ">> target : $(DEV)"; \
+	    lsblk -o NAME,SIZE,MODEL "$(DEV)" 2>/dev/null | sed 's/^/     /' || true; \
+	    printf "Write $(NO_TME_OUT) to $(DEV)? [type YES] "; \
+	    read CONFIRM; [ "$$CONFIRM" = "YES" ] || { echo "aborted"; exit 1; }; \
+	    BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
+	    sudo dd if="$(NO_TME_OUT)" of="$(DEV)" bs=4M status=progress conv=fsync; \
+	    sync; \
+	    echo ">> verifying first $$BYTES bytes"; \
+	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$(DEV)"; \
+	    echo ">> no-TME image bytes verified on $(DEV)"; \
+	fi
+
+hb-usb-no-tme-verify:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-no-tme-verify DEV=/dev/diskN"; exit 1; }
+	@test -f "$(NO_TME_OUT)" || { \
+	    echo "$(NO_TME_OUT) missing. Run: make hb-usb-no-tme-image"; \
+	    exit 1; }
+	@set -e; \
+	BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
+	if [ "$(HOST_OS)" = "Darwin" ]; then \
+	    DISKID=$$(basename "$(DEV)" | sed 's/^r//'); \
+	    RAW="/dev/r$$DISKID"; \
+	    echo ">> comparing first $$BYTES bytes of $(NO_TME_OUT) against $$RAW"; \
+	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$$RAW"; \
+	else \
+	    echo ">> comparing first $$BYTES bytes of $(NO_TME_OUT) against $(DEV)"; \
+	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$(DEV)"; \
+	fi; \
+	echo ">> no-TME image bytes match $(DEV)"
+
+hb-usb-no-tme-debug-image:
+	$(MAKE) hb-usb-no-tme-image \
+	    NO_TME_CMDLINE='$(NO_TME_DEBUG_CMDLINE)' \
+	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
+
+hb-usb-no-tme-debug-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-no-tme-debug-write DEV=/dev/diskN"; exit 1; }
+	$(MAKE) hb-usb-no-tme-write DEV="$(DEV)" WIFI="$(WIFI)" \
+	    NO_TME_CMDLINE='$(NO_TME_DEBUG_CMDLINE)' \
+	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
+
+hb-usb-no-tme-debug-verify:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-no-tme-debug-verify DEV=/dev/diskN"; exit 1; }
+	$(MAKE) hb-usb-no-tme-verify DEV="$(DEV)" \
+	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
 
 hb-usb-lenovo-intel-debug-image:
 	$(MAKE) buildroot \

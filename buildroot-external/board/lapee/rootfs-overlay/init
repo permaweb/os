@@ -302,7 +302,7 @@ debug_dump_wifi_state() {
 
     debug_log "[debug] recent kernel wifi lines:"
     dmesg 2>/dev/null \
-        | grep -Ei 'iwlwifi|wlan|cfg80211|firmware|80211|mt792|rtw89|rfkill|deauth|auth|assoc|dhcp' \
+        | grep -Ei 'iwlwifi|iwlegacy|wlan|cfg80211|firmware|80211|ath[0-9]|brcm|mt76|mt792|mwifiex|rtl|rtw88|rtw89|rfkill|deauth|auth|assoc|dhcp' \
         | tail -60 \
         | while IFS= read -r _l; do
             debug_log "  $_l"
@@ -332,10 +332,12 @@ debug_dump_hardware
 #
 # Operator override: `LAPEE_NO_TME=1' on the cmdline skips the gate.
 # The override is measured into PCR 4/8 via the UKI cmdline, so any
-# attestation carries it.
+# attestation carries it. This is intentionally allowed in production
+# images for hardware-compatibility testing; verifier policy must treat
+# such boots as non-memory-encrypted.
 check_tme_sme() {
-    if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_TME; then
-        status "Skipping memory-encryption check for debug boot."
+    if cmdline_flag_set LAPEE_NO_TME; then
+        status "Memory-encryption check skipped for this boot."
         trace "tme: LAPEE_NO_TME=1 on cmdline; skipping enforcement"
         return 0
     fi
@@ -394,7 +396,7 @@ check_tme_sme() {
             ;;
         *)
             trace "tme: CPU/firmware did not advertise tme/sme in /proc/cpuinfo"
-            trace "tme: (debug override with LAPEE_NO_TME=1 on cmdline)"
+            trace "tme: (operator override with LAPEE_NO_TME=1 on cmdline)"
             halt_boot "Memory encryption is not advertised by this CPU or firmware."
             ;;
     esac
@@ -460,13 +462,12 @@ mkdir -p /run/lapee /etc/lapee
 # the gate. Drivers are still compiled into the kernel so `lspci'
 # reports the card; the interface stays DOWN.
 #
-# Attack-surface delta vs. USB tether: WiFi adds ~3 MB of kernel
-# code (mac80211/cfg80211/iwlwifi/mt76), ~5 MB of opaque vendor
-# firmware, ~2 MB of wpa_supplicant with an EAPOL state machine
-# history of CVEs (KRACK/FragAttacks-family). USB tether drivers
-# are ~50 KB each with no cryptographic handshake. Enabling WiFi
-# is a real trade-off; gating it explicitly is the minimum we
-# owe the paper's threat model.
+# Attack-surface delta vs. USB tether: WiFi adds a broad in-kernel
+# 802.11 stack plus opaque vendor firmware and wpa_supplicant's EAPOL
+# state machine history of CVEs (KRACK/FragAttacks-family). USB tether
+# drivers are much smaller and have no wireless cryptographic handshake.
+# Enabling WiFi is a real trade-off; gating it explicitly is the minimum
+# we owe the paper's threat model.
 #
 # wifi.conf format: EXACTLY two lines.
 #
@@ -907,6 +908,17 @@ fi
 # + udhcpc fork loop entirely. Useful when debugging a suspected
 # network-related init stall.
 NIC_COUNT=0
+primary_net_iface() {
+    sed -n 's/^iface=//p' /run/lapee/primary-net 2>/dev/null | sed -n '1p'
+}
+
+iface_has_carrier() {
+    _carrier="/sys/class/net/$1/carrier"
+    [ ! -e "$_carrier" ] && return 0
+    _carrier_state=$(cat "$_carrier" 2>/dev/null || echo 1)
+    [ "$_carrier_state" != "0" ]
+}
+
 if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_NET; then
     trace "net: SKIPPED (LAPEE_NO_NET=1 on cmdline)"
 else
@@ -946,6 +958,13 @@ else
                 trace "net: skip $name (wifi not associated)"
                 continue
             fi
+        elif ! iface_has_carrier "$name"; then
+            trace "net: skip $name (no carrier)"
+            continue
+        fi
+        if [ -s /run/lapee/primary-net ]; then
+            trace "net: skip $name (primary $(primary_net_iface) already ready)"
+            continue
         fi
         echo "[init] net: up $name"
         status "Requesting a network address on $name."
@@ -958,7 +977,9 @@ else
                || echo "[net] $name: udhcpc launch failed"
         NIC_COUNT=$((NIC_COUNT + 1))
     done
-    if [ "$NIC_COUNT" -gt 0 ]; then
+    if [ -s /run/lapee/primary-net ]; then
+        status "Network is up on $(primary_net_iface)."
+    elif [ "$NIC_COUNT" -gt 0 ]; then
         status "Waiting for a network address."
     else
         status "No network interfaces found. Starting HyperBEAM locally."

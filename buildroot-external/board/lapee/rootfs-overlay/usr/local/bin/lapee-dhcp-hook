@@ -33,11 +33,23 @@ log_net() {
     fi
 }
 
+primary_iface() {
+    sed -n 's/^iface=//p' "$PRIMARY" 2>/dev/null | sed -n '1p'
+}
+
+status_if_no_primary() {
+    if [ ! -s "$PRIMARY" ]; then
+        status "$@"
+    else
+        log_net "[net] $interface: status unchanged; primary $(primary_iface) is already up"
+    fi
+}
+
 case "${1:-unknown}" in
     deconfig)
         ip -4 addr flush dev "$interface" 2>/dev/null || true
         ip link set "$interface" up 2>/dev/null || true
-        status "Requesting a network address on $interface."
+        status_if_no_primary "Requesting a network address on $interface."
         log_net "[net] $interface: deconfig"
         ;;
 
@@ -95,8 +107,12 @@ case "${1:-unknown}" in
         ;;
 
     nak|leasefail)
-        status "Still waiting for a network address on $interface."
-        log_net "[net] $interface: $1 (no lease)"
+        if [ -s "$PRIMARY" ]; then
+            log_net "[net] $interface: $1 (no lease; primary $(primary_iface) already up)"
+        else
+            status "Still waiting for a network address on $interface."
+            log_net "[net] $interface: $1 (no lease)"
+        fi
         ;;
 
     *)

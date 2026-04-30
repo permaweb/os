@@ -44,6 +44,13 @@ BUILDROOT_SHA256=${BUILDROOT_SHA256:-e296791039f806294a4e3e8d708d6b95631ca9fbca2
 ERLANG_VERSION=${ERLANG_VERSION:-27.3.4.11}
 ERLANG_SHA256=${ERLANG_SHA256:-9d63382d3e7707c058dabe338114e09ff8228d54d29df794d907d3c8dddde5f9}
 
+# Buildroot pins linux-firmware to the release current at its own cut.
+# Laptop Wi-Fi support ages faster than the rest of the rootfs, so keep
+# this override close to the build driver where the matching source hash
+# can be audited.
+LINUX_FIRMWARE_VERSION=${LINUX_FIRMWARE_VERSION:-20260410}
+LINUX_FIRMWARE_SHA256=${LINUX_FIRMWARE_SHA256:-b7812ed6d59f6b09ecceddaa0be842a7e82a79cc0e46ca60478a4ebf02f1e178}
+
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     [[ -f "$KERNEL_EXTRA_FRAGMENT" ]] || {
         echo "missing KERNEL_EXTRA_FRAGMENT: $KERNEL_EXTRA_FRAGMENT" >&2
@@ -142,6 +149,18 @@ docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
                 'otp_src_${ERLANG_VERSION}.tar.gz' >> \"\$hash_file\"
     "
 
+# Buildroot's linux-firmware package accepts LINUX_FIRMWARE_VERSION from
+# the make command line; add the corresponding source hash before the
+# package downloader sees the override.
+docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+    bash -euo pipefail -c "
+        hash_file=/build/buildroot/package/linux-firmware/linux-firmware.hash
+        grep -q 'linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz' \"\$hash_file\" || \
+            printf '%s  %s  %s\n' \
+                sha256 '${LINUX_FIRMWARE_SHA256}' \
+                'linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz' >> \"\$hash_file\"
+    "
+
 # Re-generate defconfig when absent or when the external defconfig
 # changes. This preserves package build artefacts but keeps the
 # Buildroot .config aligned with the moving BR2_EXTERNAL tree during
@@ -157,6 +176,14 @@ DEFCONFIG_SHA=$(
         fi
     } | shasum -a 256 | awk '{print $1}'
 )
+KERNEL_FRAGMENT_SHA=$(
+    {
+        shasum -a 256 buildroot-external/board/lapee/linux-*.config
+        if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
+            shasum -a 256 "$KERNEL_EXTRA_FRAGMENT"
+        fi
+    } | shasum -a 256 | awk '{print $1}'
+)
 HYPERBEAM_RECIPE_SHA=$(
     find buildroot-external/package/hyperbeam -type f \
         | LC_ALL=C sort \
@@ -166,6 +193,8 @@ HYPERBEAM_RECIPE_SHA=$(
 )
 FIRMWARE_SELECTION_SHA=$(
     {
+        printf 'LINUX_FIRMWARE_VERSION=%s\n' "$LINUX_FIRMWARE_VERSION"
+        printf 'LINUX_FIRMWARE_SHA256=%s\n' "$LINUX_FIRMWARE_SHA256"
         grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "buildroot-external/configs/$DEFCONFIG"
         if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
             grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$DEFCONFIG_EXTRA_SNIPPET" || true
@@ -190,15 +219,18 @@ if [ "$CONFIG_NEEDS_REFRESH" = "1" ]; then
 	    bash -c "mkdir -p /build/out && cd /build/buildroot && \
 	             make O=/build/out BR2_EXTERNAL=/build/buildroot-external $DEFCONFIG && \
 	             echo '$DEFCONFIG_SHA' > /build/out/.lapee-defconfig.sha256"
-    if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
-        echo "=== Kernel fragment changed or variant enabled; cleaning linux ==="
-        docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
-            bash -euo pipefail -c "
-                cd /build/out
-                make linux-dirclean || true
-                rm -f /build/out/images/bzImage
-            "
-    fi
+fi
+
+if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -c "test \"\$(cat /build/out/.lapee-kernel-fragment.sha256 2>/dev/null)\" = '$KERNEL_FRAGMENT_SHA'" 2>/dev/null; then
+    echo "=== Kernel fragment changed or untracked; cleaning linux ==="
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
+        bash -euo pipefail -c "
+            cd /build/out
+            make linux-dirclean || true
+            rm -f /build/out/images/bzImage
+            echo '$KERNEL_FRAGMENT_SHA' > /build/out/.lapee-kernel-fragment.sha256
+        "
 fi
 
 # Buildroot tracks package state with stamps, so a defconfig refresh that
@@ -212,12 +244,22 @@ if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
     docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
         bash -euo pipefail -c "
             cd /build/out
-            make linux-firmware-dirclean || true
+            make LINUX_FIRMWARE_VERSION='$LINUX_FIRMWARE_VERSION' linux-firmware-dirclean || true
+            rm -rf /build/out/build/linux-firmware-*
             rm -rf /build/out/target/lib/firmware/intel/iwlwifi \
                    /build/out/target/lib/firmware/i915 \
                    /build/out/target/lib/firmware/xe \
+                   /build/out/target/lib/firmware/amdgpu \
+                   /build/out/target/lib/firmware/ath10k \
+                   /build/out/target/lib/firmware/ath11k \
+                   /build/out/target/lib/firmware/ath12k \
+                   /build/out/target/lib/firmware/brcm \
+                   /build/out/target/lib/firmware/cypress \
                    /build/out/target/lib/firmware/mediatek \
+                   /build/out/target/lib/firmware/mrvl \
+                   /build/out/target/lib/firmware/rtlwifi \
                    /build/out/target/lib/firmware/rtl_nic \
+                   /build/out/target/lib/firmware/rtw88 \
                    /build/out/target/lib/firmware/rtw89
             echo '$FIRMWARE_SELECTION_SHA' > /build/out/.lapee-firmware-selection.sha256
         "
@@ -272,7 +314,7 @@ echo "=== Buildroot build (foreground; logs streamed; -j$JOBS) ==="
 docker run --rm --name lapee-br-build $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -e BR2_JLEVEL="$JOBS" \
-    $IMAGE bash -c "cd /build/out && date && make ERLANG_VERSION='$ERLANG_VERSION' -j$JOBS 2>&1 | tee /build/out/build.log"
+    $IMAGE bash -euo pipefail -c "cd /build/out && date && make ERLANG_VERSION='$ERLANG_VERSION' LINUX_FIRMWARE_VERSION='$LINUX_FIRMWARE_VERSION' -j$JOBS 2>&1 | tee /build/out/build.log"
 
 # Guard the final rootfs against stale host-architecture release
 # payloads. This is especially important on Apple Silicon because relx
