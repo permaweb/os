@@ -9,7 +9,8 @@
 #   # runs `rebar3 as test compile' from REPO (see line ~155) to
 #   # pick up the latest src/dev_tpm_interpret.erl.
 #
-# Output goes to out/local-capture/<slug>/. If the input file is
+# Output goes to build/hyperbeam/src-edge/out/local-capture/<slug>/ by
+# default. If the input file is
 # older than 30 minutes the script bails (override via
 # LAPEE_ACCEPT_STALE=1) -- this catches the case where a verifier
 # Mac has a stale saved envelope from a previous boot and someone
@@ -22,7 +23,7 @@
 #
 # Expects one argument: path to a binary TCG event log. Writes
 # claim.json, interpret.json, interpret.txt, input-preview.txt,
-# and dashboard.html to out/local-capture/<slug>/. Opens the
+# and dashboard.html to that local-capture directory. Opens the
 # dashboard in Chrome at the end.
 #
 # To capture an event log on:
@@ -47,14 +48,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # + the dev_tpm_interpret module's compiled .beam files. Pre-
 # migration this tree lived under HB and `$ROOT/..' was that HB root;
 # in the standalone LapEE repo, the HB clone we need is
-# `build-hyperbeam/src-edge' (populated by `make hb-fetch').
+# `build/hyperbeam/src-edge' (populated by `make hb-fetch').
 # Allow REPO=path override for operators iterating on a sibling
 # HB worktree. Bail loudly if no rebar.config is reachable.
-REPO="${REPO:-$ROOT/build-hyperbeam/src-edge}"
+REPO="${REPO:-$ROOT/build/hyperbeam/src-edge}"
 if [[ ! -f "$REPO/rebar.config" ]]; then
     echo "interpret-local-capture: REPO=$REPO has no rebar.config." >&2
     echo "Either run 'make hb-fetch' to populate" \
-         "$ROOT/build-hyperbeam/src-edge,"                          >&2
+         "$ROOT/build/hyperbeam/src-edge,"                          >&2
     echo "or set REPO=path/to/HyperBEAM and re-run."                >&2
     exit 1
 fi
@@ -87,7 +88,8 @@ if [[ -n "$URL" && -z "$INPUT" ]]; then
     URL="${URL%/}"
     TMP="$(mktemp -t fw-attestation.XXXXXX)"
     echo ">> fetching ${URL}/~tpm2@2.0a/attestation"
-    if ! curl -fsSL "${URL}/~tpm2@2.0a/attestation" \
+    if ! curl -fsSL --connect-timeout 3 --max-time 20 \
+           "${URL}/~tpm2@2.0a/attestation" \
            -H "accept: application/json" \
            -H "accept-bundle: true" \
            -o "$TMP.json"; then
@@ -273,8 +275,11 @@ erl -noshell \
                 debug_print_truncate => 200
               }))
         catch _:E ->
-            iolist_to_binary(io_lib:format(
-              \"hb_format failed: ~p\", [E]))
+            iolist_to_binary([
+              io_lib:format(
+                \"hb_format:message failed: ~p~n~n\", [E]),
+              json:encode(Scrub(Interp))
+            ])
         end,
         file:write_file(\"$OUT/interpret.txt\", FmtText),
         HexRows =

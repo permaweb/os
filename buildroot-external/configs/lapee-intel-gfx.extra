@@ -1,0 +1,2 @@
+# Intel display firmware for the i915 compatibility image.
+BR2_PACKAGE_LINUX_FIRMWARE_I915=y

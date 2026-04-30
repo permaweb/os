@@ -125,6 +125,9 @@ disable_usb_future_hotplug
 # `start_clean' (kernel + stdlib) and add HB's lib/ ebin paths so
 # the splash can resolve any runtime modules it needs.
 mkdir -p /run/lapee
+STATUS_FILE=/run/lapee/status
+printf 'Starting LapEE.\n' > "$STATUS_FILE" 2>/dev/null || true
+export LAPEE_STATUS="$STATUS_FILE"
 SPLASH_LAYOUT=$(cmdline_value lapee.splash || true)
 case "$SPLASH_LAYOUT" in
     qr|max|full|deck|sigil|blue|orbit|matrix|plaque|classic)
@@ -165,8 +168,15 @@ trace() {
     debug_log "$_msg"
 }
 
+status() {
+    _msg="$*"
+    printf '%s\n' "$_msg" > "$STATUS_FILE" 2>/dev/null || true
+    trace "status: $_msg"
+}
+
 halt_boot() {
     _why="$*"
+    status "Boot stopped: $_why"
     trace "HALT: $_why"
     if [ "$LAPEE_DEBUG" = "1" ] && [ -n "${SPLASH_PID:-}" ]; then
         kill "$SPLASH_PID" 2>/dev/null || true
@@ -302,28 +312,30 @@ debug_dump_wifi_state() {
 
 trace "init: started; kernel=$(uname -r 2>/dev/null || echo ?)"
 trace "init: /proc /sys /dev /tmp /run mounted"
+status "Checking this machine."
 debug_dump_hardware
 
-# Memory-encryption capability gate (paper P2).
+# Memory-encryption gate (paper P2).
 #
-# Init verifies that the CPU has TME/SME capability via
-# /proc/cpuinfo; activation STATE (rather than capability) is
-# reported in the attestation envelope's tme-enabled signal so the
-# verifier's policy engine -- not init -- decides whether to accept
-# a node running with encryption inactive. Init refuses only when
-# the CPU has NO memory-encryption capability at all; otherwise the
-# attestation would fundamentally lie about supported primitives.
+# Intel TME is firmware-configured before Linux starts. The kernel's
+# early Intel probe reads IA32_TME_ACTIVATE and emits one of the useful
+# states we care about:
 #
-# Why not read the IA32_TME_ACTIVATE MSR directly? msr-tools in the
-# initramfs would mean lockdown relaxations + extra binaries; the
-# kernel's TME-enabled printk also varies across releases and CPU
-# vendors in ways a shell script can't reliably canonicalise.
+#   x86/tme: enabled by BIOS
+#   x86/tme: not enabled by BIOS
+#
+# Prefer that evidence over a raw `/proc/cpuinfo' flag. CPU flags alone
+# can only say "advertised"; the kernel log distinguishes "advertised
+# but firmware left it off" from "actually enabled". AMD SME is still
+# handled as a capability flag for now; the shipped v1 target is Intel-
+# focused and the verifier reports the final posture separately.
 #
 # Operator override: `LAPEE_NO_TME=1' on the cmdline skips the gate.
 # The override is measured into PCR 4/8 via the UKI cmdline, so any
 # attestation carries it.
 check_tme_sme() {
     if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_TME; then
+        status "Skipping memory-encryption check for debug boot."
         trace "tme: LAPEE_NO_TME=1 on cmdline; skipping enforcement"
         return 0
     fi
@@ -339,10 +351,30 @@ check_tme_sme() {
         | tr -d '\r\n' || echo '')
     case "$_dmi_vendor" in
         QEMU|"Bochs"|"Xen"|"VMware, Inc."|"innotek GmbH"|"Microsoft Corporation")
+            status "Virtual machine detected; skipping hardware memory-encryption check."
             trace "tme: virt host detected (dmi sys_vendor='$_dmi_vendor'); paper P2 enforcement applies only to physical silicon -- proceeding"
             return 0
             ;;
     esac
+
+    _tme_log=$(dmesg 2>/dev/null | grep -Ei 'x86/(tme|mktme)' || true)
+    if [ -n "$_tme_log" ]; then
+        printf '%s\n' "$_tme_log" | while IFS= read -r _line; do
+            trace "tme-kernel: $_line"
+        done
+    fi
+    case "$_tme_log" in
+        *"x86/tme: enabled by BIOS"*)
+            trace "tme: kernel confirmed Intel TME enabled"
+            status "Memory encryption is enabled."
+            return 0
+            ;;
+        *"x86/tme: not enabled by BIOS"*)
+            trace "tme: Intel TME advertised but firmware did not enable it"
+            halt_boot "Memory encryption is supported, but firmware has not enabled TME."
+            ;;
+    esac
+
     _cpuflags=$(awk '/^flags[^:]*:/ {$1=""; $2=""; print; exit}' \
         /proc/cpuinfo 2>/dev/null)
     _has_cap=no
@@ -350,15 +382,22 @@ check_tme_sme() {
         *" tme "*) _has_cap=tme ;;
         *" sme "*) _has_cap=sme ;;
     esac
-    if [ "$_has_cap" = "no" ]; then
-        trace "tme: CPU lacks tme/sme in /proc/cpuinfo; halting (paper P2)"
-        trace "tme: (debug override with LAPEE_NO_TME=1 on cmdline)"
-        halt_boot "CPU does not support memory encryption (TME/SME)."
-    fi
-    # Capability present -> proceed. Activation state is reported
-    # to the verifier via claim_tme/1 (same cpuinfo source) in the
-    # envelope's tme-enabled signal.
-    trace "tme: $_has_cap capability present -> proceed"
+    case "$_has_cap" in
+        tme)
+            trace "tme: CPU advertises TME, but kernel did not confirm enablement"
+            halt_boot "TME is advertised, but the kernel did not confirm that firmware enabled it."
+            ;;
+        sme)
+            trace "tme: AMD SME capability present -> proceed"
+            status "Memory-encryption capability is present."
+            return 0
+            ;;
+        *)
+            trace "tme: CPU/firmware did not advertise tme/sme in /proc/cpuinfo"
+            trace "tme: (debug override with LAPEE_NO_TME=1 on cmdline)"
+            halt_boot "Memory encryption is not advertised by this CPU or firmware."
+            ;;
+    esac
 }
 check_tme_sme
 
@@ -474,13 +513,16 @@ LAPEE_WIFI_GATE=$(cmdline_value lapee.wifi || true)
 parse_wifi_conf() {
     _f="$1"
     [ -f "$_f" ] || return 1
+    status "Reading Wi-Fi settings from the boot USB."
 
     _sz=$(wc -c < "$_f" 2>/dev/null | tr -d ' ')
     case "$_sz" in
         ''|*[!0-9]*)
+            status "Could not read Wi-Fi settings."
             trace "wifi: wc -c failed"; return 1 ;;
     esac
     if [ "$_sz" -lt 10 ] || [ "$_sz" -gt 256 ]; then
+        status "Wi-Fi settings were rejected: file size is wrong."
         trace "wifi: wifi.conf rejected: size=$_sz (want 10..256)"
         return 1
     fi
@@ -492,9 +534,12 @@ parse_wifi_conf() {
     # least one NUL was present.
     _nulcount=$(LC_ALL=C tr -d -c '\000' < "$_f" | wc -c | tr -d ' ')
     case "$_nulcount" in
-        ''|*[!0-9]*) trace "wifi: NUL count failed"; return 1 ;;
+        ''|*[!0-9]*)
+            status "Could not validate Wi-Fi settings."
+            trace "wifi: NUL count failed"; return 1 ;;
     esac
     if [ "$_nulcount" -ne 0 ]; then
+        status "Wi-Fi settings were rejected: invalid bytes."
         trace "wifi: wifi.conf rejected: contains NUL"
         return 1
     fi
@@ -505,21 +550,25 @@ parse_wifi_conf() {
 
     # Fail if a third line exists with any content.
     if sed -n '3p' "$_f" 2>/dev/null | grep -q .; then
+        status "Wi-Fi settings were rejected: expected two lines."
         trace "wifi: wifi.conf rejected: more than 2 lines"
         return 1
     fi
 
     # SSID validation.
     if [ -z "$_ssid" ]; then
+        status "Wi-Fi settings were rejected: missing SSID."
         trace "wifi: wifi.conf rejected: SSID empty"
         return 1
     fi
     if [ ${#_ssid} -gt 32 ]; then
+        status "Wi-Fi settings were rejected: SSID is too long."
         trace "wifi: wifi.conf rejected: SSID len=${#_ssid} > 32"
         return 1
     fi
     case "$_ssid" in
         *[!a-zA-Z0-9_\ .-]*)
+            status "Wi-Fi settings were rejected: SSID has unsupported characters."
             trace "wifi: wifi.conf rejected: SSID has chars outside [a-zA-Z0-9_ .-]"
             return 1
             ;;
@@ -527,6 +576,7 @@ parse_wifi_conf() {
 
     # PSK length + safe-char validation.
     if [ ${#_psk} -lt 8 ] || [ ${#_psk} -gt 63 ]; then
+        status "Wi-Fi settings were rejected: password length is wrong."
         trace "wifi: wifi.conf rejected: PSK length outside [8..63]"
         return 1
     fi
@@ -535,6 +585,7 @@ parse_wifi_conf() {
     # pattern below uses shell-safe escapes.
     case "$_psk" in
         *'"'*|*'\'*|*'$'*|*'`'*)
+            status "Wi-Fi settings were rejected: password has unsupported characters."
             trace "wifi: wifi.conf rejected: PSK contains forbidden shell/config-escape chars"
             return 1
             ;;
@@ -542,6 +593,7 @@ parse_wifi_conf() {
     # Control char check via tr (portable across busybox/coreutils).
     if echo "$_psk" | LC_ALL=C tr -d -c '[:cntrl:]' | head -c 1 \
             | grep -q . 2>/dev/null; then
+        status "Wi-Fi settings were rejected: password has control characters."
         trace "wifi: wifi.conf rejected: PSK contains control chars"
         return 1
     fi
@@ -552,6 +604,7 @@ parse_wifi_conf() {
     # to support tickets should not be unknowingly leaking the network
     # name. Full SSID goes into wpa_supplicant.conf only (chmod 600,
     # never persisted to ESP by init).
+    status "Wi-Fi settings loaded."
     trace "wifi: wifi.conf accepted (ssid len=${#_ssid}, PSK len=${#_psk}; both redacted)"
     return 0
 }
@@ -582,6 +635,7 @@ read_boot_media_config() {
     # starts on real hardware. We don't care if the ESP isn't found:
     # boot continues either way.
     mkdir -p /mnt/esp 2>/dev/null
+    status "Looking for the boot USB."
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
                     /dev/nvme[0-9]n[0-9]p[0-9]* \
@@ -606,12 +660,16 @@ read_boot_media_config() {
                             # `/EFI/Boot/' spelling too.
                             parse_wifi_conf /mnt/esp/EFI/Boot/wifi.conf || true
                         else
+                            status "No Wi-Fi settings found on the boot USB."
                             trace "wifi: no /EFI/boot/wifi.conf on ESP"
                         fi
+                    else
+                        status "Boot USB found."
                     fi
                     umount /mnt/esp 2>/dev/null || true
                     ensure_unmounted /mnt/esp boot-media \
                         || halt_boot "boot ESP stayed mounted after read-only config scan"
+                    status "Finished reading the boot USB."
                     return 0
                 fi
                 umount /mnt/esp 2>/dev/null || true
@@ -619,8 +677,10 @@ read_boot_media_config() {
                     || halt_boot "non-LapEE ESP stayed mounted after probe"
             fi
         done
+        status "Looking for the boot USB ($_i/10)."
         sleep 1
     done
+    status "Boot USB was not found; continuing without Wi-Fi settings."
     trace "boot-media: LapEE ESP not found"
     return 1
 }
@@ -651,6 +711,7 @@ detach_boot_media() {
         return 0
     }
 
+    status "Disconnecting the boot USB."
     _disk=$(parent_block_for_part "$BOOT_ESP_DEV")
     [ -n "$_disk" ] || {
         trace "boot-media: could not derive parent for $BOOT_ESP_DEV"
@@ -671,6 +732,7 @@ detach_boot_media() {
         if sh -c "echo 1 > /sys/block/$_disk/device/delete" 2>/dev/null; then
             if wait_block_gone "$_disk"; then
                 trace "boot-media: deleted /dev/$_disk via sysfs"
+                status "Boot USB disconnected."
                 return 0
             fi
             trace "boot-media: sysfs delete returned success but /dev/$_disk remains"
@@ -687,6 +749,7 @@ detach_boot_media() {
         QEMU:vd*)
             rm -f /dev/"$_disk" /dev/"$_disk"* 2>/dev/null || true
             trace "boot-media: QEMU virtio block has no detach hook; removed dev nodes for /dev/$_disk"
+            status "Boot media isolated."
             return 0
             ;;
     esac
@@ -700,6 +763,7 @@ lock_down_usb_after_boot_media() {
         return 0
     }
 
+    status "Locking local USB input."
     # Stop future USB hotplug first.
     for _hub in /sys/bus/usb/devices/usb*; do
         [ -e "$_hub/authorized_default" ] || continue
@@ -723,9 +787,11 @@ lock_down_usb_after_boot_media() {
         echo "$_bdf" > /sys/bus/pci/drivers/xhci_hcd/unbind \
             2>/dev/null || true
     done
+    status "Local USB input locked."
 }
 
 if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
+    status "Wi-Fi is enabled for this boot."
     trace "wifi: capability gate OPEN (lapee.wifi=enabled on cmdline)"
 else
     trace "wifi: capability gate CLOSED (no lapee.wifi=enabled on cmdline); 802.11 stack dormant"
@@ -747,21 +813,29 @@ if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
     # Wait up to 15 s for the wlan iface to appear. iwlwifi / mt76
     # PCI probe runs asynchronously; may land after userspace
     # starts.
+    status "Waiting for Wi-Fi hardware."
     for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         for _i in /sys/class/net/wl*; do
             [ -e "$_i/device" ] || continue
             WIFI_IFACE=$(basename "$_i")
             break 2
         done
+        if [ "$_w" = "1" ] || [ $((_w % 5)) -eq 0 ]; then
+            status "Waiting for Wi-Fi hardware ($_w/15)."
+        fi
         sleep 1
     done
     if [ -z "$WIFI_IFACE" ]; then
+        status "No Wi-Fi interface appeared."
         trace "wifi: no wlan interface after 15s (card absent or driver probe failed)"
     elif [ -z "$WPA_SUPPLICANT" ]; then
+        status "Cannot start Wi-Fi: wpa_supplicant is missing."
         trace "wifi: credentials accepted but wpa_supplicant not found in PATH=$PATH"
     elif [ -z "$IW_BIN" ]; then
+        status "Cannot start Wi-Fi: iw is missing."
         trace "wifi: credentials accepted but iw not found in PATH=$PATH"
     else
+        status "Connecting to Wi-Fi."
         trace "wifi: iface=$WIFI_IFACE bringing up (SSID redacted)"
         ip link set "$WIFI_IFACE" up 2>/dev/null || true
         mkdir -p /var/run/wpa_supplicant
@@ -790,8 +864,10 @@ WPACFG
                 -f /run/lapee/wpa.log \
                 2>/dev/null; then
             WPA_STARTED=1
+            status "Authenticating Wi-Fi."
             trace "wifi: wpa_supplicant backgrounded on $WIFI_IFACE"
         else
+            status "Wi-Fi authentication did not start."
             trace "wifi: wpa_supplicant launch failed; /run/lapee/wpa.log for details"
         fi
         rm -f /etc/wpa_supplicant.conf
@@ -807,8 +883,12 @@ WPACFG
                 if "$IW_BIN" dev "$WIFI_IFACE" link 2>/dev/null \
                         | grep -q '^Connected'; then
                     WIFI_DHCP_READY=1
+                    status "Wi-Fi is associated."
                     trace "wifi: $WIFI_IFACE associated (SSID redacted)"
                     break
+                fi
+                if [ "$_assoc_try" = "1" ] || [ $((_assoc_try % 5)) -eq 0 ]; then
+                    status "Waiting for Wi-Fi association ($_assoc_try/30)."
                 fi
                 if [ "$LAPEE_DEBUG" = "1" ]; then
                     trace "wifi: waiting for association on $WIFI_IFACE ($_assoc_try/30)"
@@ -817,6 +897,7 @@ WPACFG
             done
         fi
         if [ "$WIFI_DHCP_READY" != "1" ]; then
+            status "Wi-Fi did not associate; starting without it."
             trace "wifi: no association after 30s; skipping DHCP on $WIFI_IFACE"
         fi
     fi
@@ -829,6 +910,7 @@ NIC_COUNT=0
 if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_NO_NET; then
     trace "net: SKIPPED (LAPEE_NO_NET=1 on cmdline)"
 else
+    status "Looking for network interfaces."
     trace "net: waiting for physical interfaces"
     for _net_scan in 1 2 3 4 5 6 7 8 9 10 \
                      11 12 13 14 15 16 17 18 19 20 \
@@ -846,6 +928,7 @@ else
             break
         fi
         if [ "$_net_scan" = "1" ] || [ $((_net_scan % 5)) -eq 0 ]; then
+            status "Waiting for a network interface ($_net_scan/30)."
             trace "net: no physical interfaces yet ($_net_scan/30)"
         fi
         sleep 1
@@ -865,6 +948,7 @@ else
             fi
         fi
         echo "[init] net: up $name"
+        status "Requesting a network address on $name."
         trace "net: up $name"
         ip link set "$name" up 2>/dev/null || true
         udhcpc -i "$name" -b -t 5 -T 1 -A 2 \
@@ -874,6 +958,11 @@ else
                || echo "[net] $name: udhcpc launch failed"
         NIC_COUNT=$((NIC_COUNT + 1))
     done
+    if [ "$NIC_COUNT" -gt 0 ]; then
+        status "Waiting for a network address."
+    else
+        status "No network interfaces found. Starting HyperBEAM locally."
+    fi
     trace "net: $NIC_COUNT interface(s) enumerated; DHCP in flight"
 fi
 
@@ -937,9 +1026,11 @@ fi
 # the enforced flat overlay; the snp/hyperbuddy modules stay loaded
 # but never get dispatched because nothing references them.
 if [ -n "$USER_CFG" ]; then
+    status "Preparing HyperBEAM configuration."
     HB_CONFIG="$USER_CFG,$ENFORCED_CFG"
     echo "[init] user config: $USER_CFG"
 else
+    status "Preparing HyperBEAM configuration."
     HB_CONFIG="$ENFORCED_CFG"
 fi
 echo "[init] HB_CONFIG = $HB_CONFIG"
@@ -1025,6 +1116,11 @@ cd /usr/lib/hyperbeam
 
 echo "[init] exec hyperbeam"
 echo "-----------------------------------------------"
+if [ -s /run/lapee/primary-net ]; then
+    status "Starting HyperBEAM."
+else
+    status "Starting HyperBEAM. Waiting for a network address."
+fi
 trace "hyperbeam: exec foreground"
 exec < /dev/null
 if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_HB_CONSOLE; then

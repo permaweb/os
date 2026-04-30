@@ -44,15 +44,15 @@ do. Run these commands from the repository root.
 2. Put it at the default repo path:
 
    ```sh
-   mkdir -p work
-   cp /path/to/lapee-usb.img work/lapee-usb.img
+   mkdir -p build/images
+   cp /path/to/lapee-usb.img build/images/lapee-usb.img
    ```
 
 3. Verify the supplied SHA-256 hash against a signed release note or a
    coordinator-provided hash obtained separately:
 
    ```sh
-   printf '<expected-sha256>  work/lapee-usb.img\n' | shasum -a 256 -c -
+   printf '<expected-sha256>  build/images/lapee-usb.img\n' | shasum -a 256 -c -
    ```
 
 4. Add WiFi credentials if they were not already baked into the image.
@@ -66,7 +66,7 @@ do. Run these commands from the repository root.
    ```
 
    `wifi.conf` is plaintext and is copied into the image. After this
-   step, both `wifi.conf` and `work/lapee-usb.img` contain the WiFi
+   step, both `wifi.conf` and `build/images/lapee-usb.img` contain the WiFi
    password; do not share them. Adding `wifi.conf` changes the disk
    image hash, but not the UKI hash used by Secure Boot hash enrollment.
 
@@ -113,7 +113,7 @@ The verifier fetches a freshly fetched network attestation envelope,
 interprets it, and writes an HTML dashboard under:
 
 ```text
-build-hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
+build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
 ```
 
 Useful live endpoints:
@@ -263,8 +263,14 @@ JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
 The build produces:
 
 ```text
-work/lapee-usb.img
+build/images/lapee-usb.img
 ```
+
+By default the USB image is auto-sized from the generated UKI and the
+small files staged into the ESP. It is not fixed at 1 GiB. It still
+includes GPT, FAT32 metadata, and a little compatibility margin around
+the payload, so it will be larger than `BootX64.efi` itself. Override
+with `SIZE_MIB=...` only when you deliberately want a larger image.
 
 Smoke-test the image in QEMU:
 
@@ -375,5 +381,7 @@ are built from source.
   reviewers and CI-style checks.
 - `paper/` - research paper and design notes.
 
-`work/`, `build-*`, `out/`, `wifi.conf`, and `secureboot/` are
-local/operator artefacts and are intentionally ignored by git.
+`build/`, `wifi.conf`, and `secureboot/` are local/operator artefacts
+and are intentionally ignored by git. `build/` contains generated
+images, initramfses, QEMU scratch state, splash captures, the local
+HyperBEAM verifier checkout, and attestation dashboards.

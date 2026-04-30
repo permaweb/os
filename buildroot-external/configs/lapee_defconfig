@@ -33,13 +33,13 @@ BR2_TOOLCHAIN_BUILDROOT=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_TOOLCHAIN_BUILDROOT_VENDOR="lapee"
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
-# Kernel headers pinned explicitly to 6.6 — that drives
+# Kernel headers pinned explicitly to 6.19 — that drives
 # BR2_TOOLCHAIN_HEADERS_AT_LEAST to a value high enough that
 # glibc's choice dependency is satisfied (otherwise Buildroot
 # silently falls back to uclibc, with HEADERS_AT_LEAST=2.6).
 # BR2_KERNEL_HEADERS_AS_KERNEL doesn't compute the at-least
 # value correctly in 2026.02.1; explicit X_Y pin works.
-BR2_KERNEL_HEADERS_6_6=y
+BR2_KERNEL_HEADERS_6_19=y
 
 # ----- init / rootfs structure -------------------------------
 # Init: the LapEE shell init lives in the rootfs overlay at
@@ -53,9 +53,8 @@ BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/post-build.
 # ----- kernel ------------------------------------------------
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.51"
-# (kernel pin matches Buildroot 2026.02.1's tested kernel set;
-# bump in lockstep with Buildroot if the LTS series shifts)
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.19.12"
+# (kernel pin matches Buildroot 2026.02.1's latest tested kernel set)
 BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/linux-m1-fragment.config"
 BR2_LINUX_KERNEL_BZIMAGE=y
@@ -101,6 +100,9 @@ BR2_PACKAGE_IPROUTE2=y
 # by the kernel firmware loader, so a verifier can chain-validate
 # against a known-good list.
 BR2_PACKAGE_LINUX_FIRMWARE=y
+BR2_PACKAGE_LINUX_FIRMWARE_AMDGPU=y
+BR2_PACKAGE_LINUX_FIRMWARE_I915=y
+BR2_PACKAGE_LINUX_FIRMWARE_XE=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6E=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7=y

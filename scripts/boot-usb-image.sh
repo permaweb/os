@@ -12,15 +12,17 @@
 #
 # Usage:
 #   ./scripts/boot-usb-image.sh
-#   ./scripts/boot-usb-image.sh --img work/lapee-usb.img
+#   ./scripts/boot-usb-image.sh --img build/images/lapee-usb.img
 #   ./scripts/boot-usb-image.sh --timeout 600   (seconds)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMG=${IMG:-work/lapee-usb.img}
+BUILD_DIR=${LAPEE_BUILD_DIR:-build}
+IMG=${IMG:-$BUILD_DIR/images/lapee-usb.img}
 TIMEOUT=${TIMEOUT:-420}
-LOGFILE=${LOGFILE:-/tmp/lapee-usb-qemu.log}
+OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-network-test}
+LOGFILE=${LOGFILE:-$OUTDIR/serial.log}
 # `--gui' opens a QEMU window so the operator can see the framebuffer
 # console -- splash daemon, kernel banners, init traces. Default stays
 # headless (`-nographic') for non-interactive attestation testing.
@@ -73,22 +75,25 @@ for f in "$OVMF_CODE" "$OVMF_VARS_TEMPLATE"; do
 done
 
 # Scratch copies so we don't mutate the source image or NVRAM.
-mkdir -p work/qemu-usb
-SCRATCH_IMG=work/qemu-usb/scratch.img
-SCRATCH_VARS=work/qemu-usb/vars.fd
+QEMU_WORK="$BUILD_DIR/qemu-usb"
+TPM_WORK="$BUILD_DIR/tpm-qemu"
+mkdir -p "$QEMU_WORK"
+SCRATCH_IMG="$QEMU_WORK/scratch.img"
+SCRATCH_VARS="$QEMU_WORK/vars.fd"
 cp "$IMG" "$SCRATCH_IMG"
 cp "$OVMF_VARS_TEMPLATE" "$SCRATCH_VARS"
 
 # Fresh swtpm.
-if [[ -f work/tpm-qemu/swtpm.pid ]]; then
-    kill "$(cat work/tpm-qemu/swtpm.pid)" 2>/dev/null || true
+if [[ -f "$TPM_WORK/swtpm.pid" ]]; then
+    kill "$(cat "$TPM_WORK/swtpm.pid")" 2>/dev/null || true
 fi
-rm -rf work/tpm-qemu && mkdir -p work/tpm-qemu
-swtpm socket --tpm2 --tpmstate dir=work/tpm-qemu \
-    --ctrl type=unixio,path="$(pwd)/work/tpm-qemu/swtpm-sock" \
+rm -rf "$TPM_WORK" && mkdir -p "$TPM_WORK"
+TPM_SOCK="$TPM_WORK/swtpm-sock"
+swtpm socket --tpm2 --tpmstate "dir=$TPM_WORK" \
+    --ctrl "type=unixio,path=$TPM_SOCK" \
     --flags not-need-init,startup-clear \
-    --log "file=work/tpm-qemu/swtpm.log,level=5" \
-    --daemon --pid "file=work/tpm-qemu/swtpm.pid"
+    --log "file=$TPM_WORK/swtpm.log,level=5" \
+    --daemon --pid "file=$TPM_WORK/swtpm.pid"
 sleep 1
 
 echo "=== booting $SCRATCH_IMG under QEMU+OVMF+swtpm ==="
@@ -108,7 +113,7 @@ COMMON_ARGS=(
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
     -drive "if=pflash,format=raw,file=${SCRATCH_VARS}"
     -drive "file=${SCRATCH_IMG},format=raw,if=virtio"
-    -chardev "socket,id=chrtpm,path=$(pwd)/work/tpm-qemu/swtpm-sock"
+    -chardev "socket,id=chrtpm,path=$TPM_SOCK"
     -tpmdev emulator,id=tpm0,chardev=chrtpm
     -device tpm-tis,tpmdev=tpm0
     -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:18734-:8734"
@@ -117,6 +122,7 @@ COMMON_ARGS=(
 
 # Truncate the serial log up front so a failure report only shows
 # the current run.
+mkdir -p "$OUTDIR" "$(dirname "$LOGFILE")"
 : > "$LOGFILE"
 
 if (( GUI )); then
@@ -132,7 +138,7 @@ else
         > "$LOGFILE" 2>&1 &
 fi
 QEMUPID=$!
-trap 'kill $QEMUPID 2>/dev/null || true; kill $(cat work/tpm-qemu/swtpm.pid 2>/dev/null) 2>/dev/null || true' EXIT
+trap 'kill $QEMUPID 2>/dev/null || true; kill $(cat "$TPM_WORK/swtpm.pid" 2>/dev/null) 2>/dev/null || true' EXIT
 
 if (( GUI )); then
     # GUI mode: hand control to the QEMU window. Do not poll the
@@ -141,15 +147,13 @@ if (( GUI )); then
     # (window close, Ctrl-C, guest poweroff).
     echo "    waiting for QEMU to exit (close window or Ctrl-C)..."
     wait $QEMUPID 2>/dev/null || true
-    kill "$(cat work/tpm-qemu/swtpm.pid 2>/dev/null)" 2>/dev/null || true
+    kill "$(cat "$TPM_WORK/swtpm.pid" 2>/dev/null)" 2>/dev/null || true
     exit 0
 fi
 
 # Poll the forwarded HTTP port until HB answers. The cheap /info
 # endpoint is readiness; /attestation is the actual end-to-end proof.
 BASE_URL=http://127.0.0.1:18734
-OUTDIR=out/qemu-network-test
-mkdir -p "$OUTDIR"
 INFO_OUT="$OUTDIR/info.json"
 ATT_OUT="$OUTDIR/attestation.json"
 
@@ -196,7 +200,7 @@ fi
 
 kill $QEMUPID 2>/dev/null || true
 wait $QEMUPID 2>/dev/null || true
-kill "$(cat work/tpm-qemu/swtpm.pid 2>/dev/null)" 2>/dev/null || true
+kill "$(cat "$TPM_WORK/swtpm.pid" 2>/dev/null)" 2>/dev/null || true
 
 echo ""
 echo "=== QEMU boot test PASSED ==="

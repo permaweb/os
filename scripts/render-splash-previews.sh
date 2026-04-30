@@ -9,7 +9,7 @@ usage() {
 Usage: scripts/render-splash-previews.sh
 
 Environment overrides:
-  OUTDIR=out/splash-previews/<label>   Output directory
+  OUTDIR=build/splash-previews/<label> Output directory
   DIMS="160x50 128x48"                 Terminal sizes to render
   LAYOUTS="qr max deck sigil blue orbit matrix plaque classic"
                                        Splash layouts to render
@@ -55,7 +55,7 @@ command -v erl >/dev/null 2>&1 || {
 }
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
-OUTDIR="${OUTDIR:-out/splash-previews/$timestamp}"
+OUTDIR="${OUTDIR:-build/splash-previews/$timestamp}"
 DIMS="${DIMS:-160x50}"
 LAYOUTS="${LAYOUTS:-qr max deck sigil blue orbit matrix plaque classic}"
 STATES="${STATES:-ready hb-wait}"
@@ -152,6 +152,7 @@ render_one() {
             yaw => Float("PREVIEW_YAW"),
             lid => Float("PREVIEW_LID"),
             phase => Phase,
+            status => undefined,
             ip => os:getenv("PREVIEW_IP"),
             hb_wait_t0 => HbT0
         },

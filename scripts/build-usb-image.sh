@@ -19,7 +19,9 @@
 # fresh USB image.
 #
 #   Inputs  : --kernel PATH --initramfs PATH --cmdline TEXT
-#             [--size MIB]     image size in MiB (default 1024)
+#             [--size MIB]     image size in MiB, or "auto"
+#                              (default: auto, derived from UKI
+#                              plus staged ESP files and margin)
 #             [--uki PATH]     skip the inline ukify build and
 #                              use a pre-built UKI (e.g. the
 #                              signed one from sb-setup.sh)
@@ -39,7 +41,7 @@ set -euo pipefail
 LAPEE_ROOT="${LAPEE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 BUILD_IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
-WORK="${LAPEE_ROOT}/work"
+WORK="${LAPEE_BUILD_DIR:-${LAPEE_ROOT}/build}"
 
 KERNEL=""
 INITRAMFS=""
@@ -47,7 +49,7 @@ CMDLINE=""
 PREBUILT_UKI=""
 OUT_IMAGE=""
 OUT_DEVICE=""
-SIZE_MIB=1024
+SIZE_MIB=auto
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -77,6 +79,9 @@ if [[ -z "$OUT_IMAGE" && -z "$OUT_DEVICE" ]]; then
 fi
 if [[ -n "$OUT_IMAGE" && -n "$OUT_DEVICE" ]]; then
     die "--image and --device are mutually exclusive"
+fi
+if [[ -n "$OUT_IMAGE" && "$OUT_IMAGE" != /* ]]; then
+    OUT_IMAGE="${LAPEE_ROOT}/${OUT_IMAGE}"
 fi
 
 if [[ -z "$PREBUILT_UKI" ]]; then
@@ -112,7 +117,7 @@ EOF
     echo "$CMDLINE" > "$BUILD_DIR/cmdline.txt"
 
     docker run --rm $DOCKER_PLATFORM \
-        -v "${LAPEE_ROOT}/work":/work \
+        -v "${WORK}":/work \
         -w /work/usb-build \
         "$BUILD_IMAGE" \
         bash -euo pipefail -c "
@@ -129,15 +134,19 @@ EOF
                 : \${STUB:?systemd-stub not found}
                 OBJCOPY=\$(command -v x86_64-w64-mingw32-objcopy || \\
                           command -v objcopy)
+                KERNEL_SIZE=\$(stat -c %s /work/usb-build/kernel)
+                LINUX_VMA=0x2000000
+                INITRD_VMA=\$(( (LINUX_VMA + KERNEL_SIZE + 0xfffff) & ~0xfffff ))
+                INITRD_VMA_HEX=\$(printf '0x%x' "\$INITRD_VMA")
                 \"\$OBJCOPY\" \\
                     --add-section .osrel=/work/usb-build/os-release \\
                     --change-section-vma .osrel=0x20000 \\
                     --add-section .cmdline=/work/usb-build/cmdline.txt \\
                     --change-section-vma .cmdline=0x30000 \\
                     --add-section .linux=/work/usb-build/kernel \\
-                    --change-section-vma .linux=0x2000000 \\
+                    --change-section-vma .linux=\$LINUX_VMA \\
                     --add-section .initrd=/work/usb-build/initramfs.cpio.gz \\
-                    --change-section-vma .initrd=0x3000000 \\
+                    --change-section-vma .initrd=\$INITRD_VMA_HEX \\
                     \"\${STUB}\" /work/usb-build/lapee.efi
             fi
         "
@@ -147,19 +156,18 @@ UKI_SIZE=$(stat -f %z "$BUILD_DIR/lapee.efi" 2>/dev/null \
            || stat -c %s "$BUILD_DIR/lapee.efi")
 echo ">> UKI size: $UKI_SIZE bytes"
 
-ESP_MIN=$(( (UKI_SIZE / (1024 * 1024)) + 32 ))
-if (( SIZE_MIB < ESP_MIN )); then
-    die "--size $SIZE_MIB MiB too small (UKI needs $ESP_MIN MiB plus GPT)"
-fi
-
 # ---- step 1b: stage SB enrolment .auth files if present -------
 SB_ENROL_DIR="${LAPEE_ROOT}/secureboot/enrol"
 STAGED_SB=""
+STAGED_EXTRA_BYTES=0
 if [[ -d "$SB_ENROL_DIR" ]]; then
     for f in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer; do
         if [[ -f "$SB_ENROL_DIR/$f" ]]; then
             cp "$SB_ENROL_DIR/$f" "$BUILD_DIR/$f"
             STAGED_SB="${STAGED_SB}${STAGED_SB:+ }$f"
+            sz=$(stat -f %z "$SB_ENROL_DIR/$f" 2>/dev/null \
+                 || stat -c %s "$SB_ENROL_DIR/$f")
+            STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + sz))
         fi
     done
 fi
@@ -173,9 +181,36 @@ fi
 # will find no credential file and keep association disabled.
 if [[ "${WIFI:-1}" != "0" && -f "${LAPEE_ROOT}/wifi.conf" ]]; then
     cp "${LAPEE_ROOT}/wifi.conf" "$BUILD_DIR/wifi.conf"
-    echo ">> staging wifi.conf ($(wc -c <"${LAPEE_ROOT}/wifi.conf" | tr -d ' ') bytes)"
+    wifi_bytes=$(wc -c <"${LAPEE_ROOT}/wifi.conf" | tr -d ' ')
+    STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + wifi_bytes))
+    echo ">> staging wifi.conf (${wifi_bytes} bytes)"
 elif [[ "${WIFI:-1}" == "0" ]]; then
     echo ">> not staging wifi.conf (WIFI=0)"
+fi
+
+# A disk image cannot be exactly the UKI byte length: firmware wants
+# a GPT disk with an EFI System Partition, and FAT32 needs metadata
+# and slack. Auto-size from staged payload bytes, then add enough room
+# for FAT tables, GPT alignment, and small ESP-side metadata.
+PAYLOAD_BYTES=$((UKI_SIZE + STAGED_EXTRA_BYTES + 131072))
+PAYLOAD_MIB=$(( (PAYLOAD_BYTES + 1024 * 1024 - 1) / (1024 * 1024) ))
+MIN_IMAGE_MIB=$((PAYLOAD_MIB + 20))
+if (( MIN_IMAGE_MIB < 64 )); then
+    MIN_IMAGE_MIB=64
+fi
+# Round to a 4 MiB boundary. This keeps the image compact without
+# creating awkward byte-sized GPT/FAT geometry.
+MIN_IMAGE_MIB=$(( ((MIN_IMAGE_MIB + 3) / 4) * 4 ))
+
+if [[ "$SIZE_MIB" == "auto" ]]; then
+    SIZE_MIB="$MIN_IMAGE_MIB"
+    echo ">> auto image size: ${SIZE_MIB} MiB (payload ${PAYLOAD_MIB} MiB)"
+elif [[ "$SIZE_MIB" =~ ^[0-9]+$ ]]; then
+    if (( SIZE_MIB < MIN_IMAGE_MIB )); then
+        die "--size $SIZE_MIB MiB too small (minimum ${MIN_IMAGE_MIB} MiB for staged payload)"
+    fi
+else
+    die "--size must be an integer MiB value or 'auto'"
 fi
 
 # ---- step 2: build the disk image inside the tools container --
@@ -183,7 +218,7 @@ fi
 IMG_IN_WORK="usb-build/disk.img"
 
 docker run --rm $DOCKER_PLATFORM \
-    -v "${LAPEE_ROOT}/work":/work \
+    -v "${WORK}":/work \
     -w /work \
     "$BUILD_IMAGE" \
     bash -euo pipefail -c "
@@ -241,7 +276,7 @@ docker run --rm $DOCKER_PLATFORM \
         ls -lh /work/${IMG_IN_WORK}
     "
 
-FINAL_IMG="${LAPEE_ROOT}/work/${IMG_IN_WORK}"
+FINAL_IMG="${WORK}/${IMG_IN_WORK}"
 if [[ ! -f "$FINAL_IMG" ]]; then
     die "image build failed (no $FINAL_IMG)"
 fi
@@ -295,9 +330,11 @@ if [[ -n "$OUT_DEVICE" ]]; then
         sudo dd if="$FINAL_IMG" of="$OUT_DEVICE" bs=4M status=progress conv=fsync
         sync
     fi
-    mv "$FINAL_IMG" "${LAPEE_ROOT}/work/lapee-usb-last.img"
+    LAST_IMG="${WORK}/images/lapee-usb-last.img"
+    mkdir -p "$(dirname "$LAST_IMG")"
+    mv "$FINAL_IMG" "$LAST_IMG"
     echo ""
     echo "=========================================================="
-    echo ">> $OUT_DEVICE ready. Image saved at work/lapee-usb-last.img."
+    echo ">> $OUT_DEVICE ready. Image saved at ${LAST_IMG#$LAPEE_ROOT/}."
     echo "=========================================================="
 fi

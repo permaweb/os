@@ -9,8 +9,8 @@ usage() {
 Usage: scripts/capture-splash-qemu.sh
 
 Environment overrides:
-  BUILD_DIR=out/splash-builds/<label>   Directory containing lapee-usb-<layout>.img
-  OUTDIR=out/splash-captures/<label>    Capture output directory
+  BUILD_DIR=build/splash-builds/<label> Directory containing lapee-usb-<layout>.img
+  OUTDIR=build/splash-captures/<label>  Capture output directory
   LAYOUTS="qr max deck ..."             Layouts to boot and capture
   CAPTURE_SECONDS="30 75 120"           Seconds after QEMU launch to capture
   QEMU_TIMEOUT=180                      Per-layout hard stop in seconds
@@ -36,15 +36,15 @@ case "${1:-}" in
 esac
 
 if [ -z "${BUILD_DIR:-}" ]; then
-    if [ -f out/splash-builds/LATEST ]; then
-        BUILD_DIR=$(cat out/splash-builds/LATEST)
+    if [ -f build/splash-builds/LATEST ]; then
+        BUILD_DIR=$(cat build/splash-builds/LATEST)
     else
-        BUILD_DIR=out/splash-builds
+        BUILD_DIR=build/splash-builds
     fi
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-OUTDIR="${OUTDIR:-out/splash-captures/overnight-$timestamp}"
+OUTDIR="${OUTDIR:-build/splash-captures/overnight-$timestamp}"
 LAYOUTS="${LAYOUTS:-qr max deck sigil blue orbit matrix plaque classic}"
 CAPTURE_SECONDS="${CAPTURE_SECONDS:-30 75 120}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-180}"
@@ -85,7 +85,8 @@ command -v nc >/dev/null 2>&1 || { echo "missing nc" >&2; exit 1; }
 
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
-echo "$OUTDIR" > out/splash-captures/LATEST
+mkdir -p build/splash-captures
+echo "$OUTDIR" > build/splash-captures/LATEST
 
 abs_build_dir="$(cd "$BUILD_DIR" && pwd)"
 
@@ -122,11 +123,12 @@ capture_layout() {
     [ -f "$img" ] || { echo "missing image for layout '$layout': $img" >&2; return 1; }
 
     local layout_out="$OUTDIR/$layout"
-    local scratch_dir="work/qemu-splash-capture/$layout"
+    local scratch_dir="build/qemu-splash-capture/$layout"
     local scratch_img="$scratch_dir/scratch.img"
     local scratch_vars="$scratch_dir/vars.fd"
     local tpm_dir="$scratch_dir/tpm"
     local tpm_pid="$tpm_dir/swtpm.pid"
+    local tpm_sock="$tpm_dir/swtpm-sock"
     local mon="$scratch_dir/hmp.sock"
     local serial="$layout_out/serial.log"
 
@@ -138,7 +140,7 @@ capture_layout() {
     : > "$serial"
 
     swtpm socket --tpm2 --tpmstate "dir=$tpm_dir" \
-        --ctrl "type=unixio,path=$tpm_dir/swtpm-sock" \
+        --ctrl "type=unixio,path=$tpm_sock" \
         --flags not-need-init,startup-clear \
         --log "file=$tpm_dir/swtpm.log,level=5" \
         --daemon --pid "file=$tpm_pid"
@@ -150,7 +152,7 @@ capture_layout() {
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
         -drive "if=pflash,format=raw,file=$scratch_vars" \
         -drive "file=$scratch_img,format=raw,if=virtio" \
-        -chardev "socket,id=chrtpm,path=$(pwd)/$tpm_dir/swtpm-sock" \
+        -chardev "socket,id=chrtpm,path=$tpm_sock" \
         -tpmdev emulator,id=tpm0,chardev=chrtpm \
         -device tpm-tis,tpmdev=tpm0 \
         -netdev "user,id=net0" \

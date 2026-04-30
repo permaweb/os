@@ -39,18 +39,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 LAPEE=$(pwd)
+BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE/build}"
 SB_DIR="$LAPEE/secureboot"
 # On the host the UKI is named lapee.efi; it gets copied to
 # /EFI/Boot/BootX64.efi inside the ESP by build-usb-image.sh
 # (UEFI's fallback boot path). Sign the host-side file; the rename
 # happens automatically when the image is re-wrapped.
-BUILD_UKI="$LAPEE/work/usb-build/lapee.efi"
+BUILD_UKI="$BUILD_DIR/usb-build/lapee.efi"
 # Keep the signed UKI one level up from usb-build/ because
-# build-usb-image.sh --uki does `rm -rf work/usb-build/` before
+# build-usb-image.sh --uki does `rm -rf build/usb-build/` before
 # re-populating it (which would wipe the signed file if it lived
 # inside).
-SIGNED_UKI="$LAPEE/work/lapee.signed.efi"
-USB_IMAGE="$LAPEE/work/lapee-usb.img"
+SIGNED_UKI="$BUILD_DIR/images/lapee.signed.efi"
+USB_IMAGE="$BUILD_DIR/images/lapee-usb.img"
 
 # Honor the Makefile's BUILD_IMAGE if exported, fall back to the
 # local-build default.
@@ -253,6 +254,7 @@ if [ "$cmd" = "sign" ]; then
         echo "       Run: make hb-usb-image"; exit 2;
     }
     echo "=== signing UKI with db.key ==="
+    mkdir -p "$(dirname "$SIGNED_UKI")"
     run_tool sbsign \
         --key "$SB_DIR/db.key" \
         --cert "$SB_DIR/db.crt" \
@@ -322,7 +324,7 @@ if [ "$cmd" = "enrol" ]; then
 Enrolment procedure on the Framework 13:
   1. If you haven't yet: `./scripts/sb-setup.sh sign' -- this
      bakes the six enrolment files above into the ESP root of
-     work/lapee-usb.img alongside the signed UKI, so one stick
+     build/images/lapee-usb.img alongside the signed UKI, so one stick
      covers both boot and enrolment. (Running `sign' after
      `enrol' picks up the newly-produced files; running `sign'
      before `enrol' is also fine -- rerun `sign' once `enrol'

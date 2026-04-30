@@ -58,6 +58,7 @@ probe_host()       -> os:getenv("LAPEE_PROBE_HOST",  "127.0.0.1").
 probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
 probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm2@2.0a/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
+status_path()      -> os:getenv("LAPEE_STATUS",      "/run/lapee/status").
 
 splash_layout() ->
     case os:getenv("LAPEE_SPLASH_LAYOUT") of
@@ -152,6 +153,7 @@ main(_Args) ->
         yaw         => 0.0,
         lid         => 0.0,
         phase       => boot,
+        status      => undefined,
         ip          => undefined,
         t0_ms       => T0,
         hb_wait_t0  => undefined
@@ -192,7 +194,8 @@ loop(S0) ->
 %% ============================================================
 %% State polling -- phase machine, IP discovery, HB probe
 %% ============================================================
-poll_state(S = #{phase := Phase, ip := _Ip}) ->
+poll_state(S0 = #{phase := Phase, ip := _Ip}) ->
+    S = S0#{status => read_status()},
     case Phase of
         boot ->
             case read_ip() of
@@ -245,6 +248,21 @@ read_ip() ->
                 _             -> undefined
             end;
         _ -> undefined
+    end.
+
+read_status() ->
+    case file:read_file(status_path()) of
+        {ok, Bin} ->
+            trim_status(binary_to_list(Bin));
+        _ ->
+            undefined
+    end.
+
+trim_status(Text0) ->
+    Text = string:trim(Text0),
+    case Text of
+        "" -> undefined;
+        _  -> lists:sublist(Text, 120)
     end.
 
 %% Returns `true' when /info answered with HTTP 200, or
@@ -489,9 +507,9 @@ cell(Ch) ->
 %% Frame composition + ANSI emission
 %% ============================================================
 render(#{cols := W, rows := H, layout := Layout, frame := Frame,
-         yaw := Yaw, lid := Lid, phase := Phase, ip := Ip,
+         yaw := Yaw, lid := Lid, phase := Phase, status := Status, ip := Ip,
          hb_wait_t0 := HbT0}) ->
-    Footer = footer_text(Phase, Ip, HbT0),
+    Footer = footer_text(Phase, Ip, HbT0, Status),
     Grid = case {small_canvas(W, H), Layout} of
         {true, classic} -> render_classic_grid(W, H, Yaw, Lid, Footer);
         {true, _}       -> render_compact_grid(W, H, Yaw, Lid, Footer, Frame, Layout);
@@ -1037,10 +1055,70 @@ draw_qr_placeholder(Grid, W, H, X, Y, ModsW, ModsH, Footer) ->
       end,
       Grid,
       lists:seq(0, ModsH - 1)),
-    Text = fit_text(Footer, ModsW * 2 - 4),
-    TextX = X + max(2, (ModsW * 2 - length(Text)) div 2),
-    TextY = Y + ModsH div 2,
-    overlay_text(G1, W, H, TextX, TextY, Text).
+    TextW = max(8, ModsW * 2 - 8),
+    MaxLines = max(1, min(5, ModsH - 4)),
+    Lines = wrap_status_lines(Footer, TextW, MaxLines),
+    StartY = Y + max(2, (ModsH - length(Lines)) div 2),
+    lists:foldl(
+      fun({I, Line}, G) ->
+          TextX = X + max(2, (ModsW * 2 - length(Line)) div 2),
+          overlay_text(G, W, H, TextX, StartY + I, Line)
+      end,
+      G1,
+      lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
+
+wrap_status_lines(Text0, Width, MaxLines) ->
+    Words = string:tokens(string:trim(Text0), " \t\r\n"),
+    Lines0 = case wrap_words(Words, Width) of
+        [] -> [""];
+        Wrapped -> Wrapped
+    end,
+    case length(Lines0) =< MaxLines of
+        true ->
+            Lines0;
+        false ->
+            Head = lists:sublist(Lines0, MaxLines - 1),
+            Tail = string:join(lists:nthtail(MaxLines - 1, Lines0), " "),
+            Head ++ [fit_text(Tail, Width)]
+    end.
+
+wrap_words(Words, Width) ->
+    {LinesRev, Current} =
+        lists:foldl(
+          fun(Word, {Acc, Cur}) ->
+              add_wrapped_word(Word, Width, Acc, Cur)
+          end,
+          {[], ""},
+          Words),
+    lists:reverse(case Current of
+        "" -> LinesRev;
+        _  -> [Current | LinesRev]
+    end).
+
+add_wrapped_word(Word, Width, Acc, Cur) when length(Word) > Width ->
+    Acc1 = case Cur of
+        "" -> Acc;
+        _  -> [Cur | Acc]
+    end,
+    {lists:reverse(split_long_word(Word, Width)) ++ Acc1, ""};
+add_wrapped_word(Word, Width, Acc, "") ->
+    {Acc, fit_text(Word, Width)};
+add_wrapped_word(Word, Width, Acc, Cur) ->
+    Candidate = Cur ++ " " ++ Word,
+    case length(Candidate) =< Width of
+        true  -> {Acc, Candidate};
+        false -> {[Cur | Acc], fit_text(Word, Width)}
+    end.
+
+split_long_word("", _Width) ->
+    [];
+split_long_word(Word, Width) when length(Word) =< Width ->
+    [Word];
+split_long_word(Word, Width) ->
+    Take = max(1, Width - 1),
+    Head = lists:sublist(Word, Take) ++ "~",
+    Rest = lists:nthtail(Take, Word),
+    [Head | split_long_word(Rest, Width)].
 
 draw_qr_tile(Grid, W, H, X, Y) ->
     Block = <<226, 150, 136>>,
@@ -1420,29 +1498,46 @@ finder_dark(R, C) ->
 status_word(Text) ->
     case Text of
         "Running" ++ _ -> "READY";
-        "starting HyperBEAM" ++ _ -> "HB STARTING";
-        "network up" ++ _ -> "NETWORK UP";
+        "Starting HyperBEAM" ++ _ -> "HB STARTING";
+        "Network" ++ _ -> "NETWORK UP";
+        "Connecting to Wi-Fi" ++ _ -> "WIFI";
+        "Authenticating Wi-Fi" ++ _ -> "WIFI";
+        "Waiting for Wi-Fi" ++ _ -> "WIFI";
+        "Waiting for a network" ++ _ -> "NETWORK";
+        "Requesting a network" ++ _ -> "DHCP";
+        "Boot stopped" ++ _ -> "STOPPED";
         _ -> "BOOTING"
     end.
 
 %% Status line texts -- the only words the operator sees on screen
-%% during boot. In `hb-wait' we surface the IP + an elapsed-seconds
-%% counter so a slow HB cold-start is visibly progressing rather
-%% than indistinguishable from a hang.
-footer_text(boot, _, _)              -> "starting LapEE...";
-footer_text('net-up', undefined, _)  -> "network up; starting HyperBEAM...";
-footer_text('net-up', Ip, _)         -> "network up (" ++ Ip ++ "); starting HyperBEAM...";
-footer_text('hb-wait', undefined, _) -> "starting HyperBEAM...";
-footer_text('hb-wait', Ip, undefined) ->
-    "starting HyperBEAM... " ++ Ip;
-footer_text('hb-wait', Ip, HbT0) ->
+%% during boot. Before networking is up, init writes the current
+%% high-level stage into a tmpfs file; after DHCP, the splash owns the
+%% network/HB-ready phase machine itself.
+footer_text(boot, _, _, Status) ->
+    default_status(Status, "Starting LapEE.");
+footer_text('net-up', undefined, _, _) ->
+    "Network is up; starting HyperBEAM.";
+footer_text('net-up', Ip, _, _) ->
+    "Network is up (" ++ Ip ++ "); starting HyperBEAM.";
+footer_text('hb-wait', undefined, _, _) ->
+    "Starting HyperBEAM.";
+footer_text('hb-wait', Ip, undefined, _) ->
+    "Starting HyperBEAM. " ++ Ip;
+footer_text('hb-wait', Ip, HbT0, _) ->
     Now = erlang:monotonic_time(millisecond),
     Secs = (Now - HbT0) div 1000,
-    "starting HyperBEAM... " ++ Ip ++
+    "Starting HyperBEAM. " ++ Ip ++
         " (" ++ integer_to_list(Secs) ++ "s)";
-footer_text(ready, undefined, _)     -> "Running.";
-footer_text(ready, Ip, _)            -> "Running at http://" ++ Ip ++ ":8734/";
-footer_text(_, _, _)                 -> "".
+footer_text(ready, undefined, _, _) ->
+    "Running.";
+footer_text(ready, Ip, _, _) ->
+    "Running at http://" ++ Ip ++ ":8734/";
+footer_text(_, _, _, Status) ->
+    default_status(Status, "").
+
+default_status(undefined, Fallback) -> Fallback;
+default_status("", Fallback)        -> Fallback;
+default_status(Status, _Fallback)   -> Status.
 
 %% ============================================================
 %% Helpers

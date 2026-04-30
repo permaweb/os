@@ -1,0 +1,38 @@
+diff --git a/src/dev_tpm_tcg.erl b/src/dev_tpm_tcg.erl
+index d32f87181..4c657df1e 100644
+--- a/src/dev_tpm_tcg.erl
++++ b/src/dev_tpm_tcg.erl
+@@ -2806,0 +2807 @@ decode_cpu_microcode(#{<<"event-data">> := Data}) ->
++        marker -> decode_microcode_marker(Data);
+@@ -2818 +2819,8 @@ classify_microcode(<<1:32/little, _:24/binary, _/binary>>) -> intel;
+-classify_microcode(<<V:32/little, _/binary>>)
++classify_microcode(Data) when is_binary(Data) ->
++    case ascii_only(Data) of
++        true  -> marker;
++        false -> classify_microcode_binary(Data)
++    end;
++classify_microcode(_) -> too_short.
++
++classify_microcode_binary(<<V:32/little, _/binary>>)
+@@ -2824,2 +2832,2 @@ classify_microcode(<<V:32/little, _/binary>>)
+-classify_microcode(Data) when byte_size(Data) >= 28 -> partial;
+-classify_microcode(_) -> too_short.
++classify_microcode_binary(Data) when byte_size(Data) >= 28 -> partial;
++classify_microcode_binary(_) -> too_short.
+@@ -2886,0 +2895,7 @@ decode_microcode_amd(Data) ->
++decode_microcode_marker(Data) ->
++    #{
++        <<"format">> => <<"unknown">>,
++        <<"marker">> => ascii_trim(Data),
++        <<"length">> => byte_size(Data)
++    }.
++
+@@ -3885,0 +3901,8 @@ decode_amd_cpu_microcode_test() ->
++decode_cpu_microcode_ascii_marker_test() ->
++    Ev = #{<<"event-type-code">> => 16#9,
++           <<"event-data">> => <<"CPU Microcode", 0>>},
++    P = maps:get(<<"parsed">>, decode_event(Ev)),
++    ?assertEqual(<<"unknown">>, maps:get(<<"format">>, P)),
++    ?assertEqual(<<"CPU Microcode">>, maps:get(<<"marker">>, P)),
++    ?assertEqual(14, maps:get(<<"length">>, P)).
++

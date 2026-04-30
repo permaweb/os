@@ -39,20 +39,20 @@
 #   make toolchain          — pull the pinned upstream Debian base
 #                             + build the lapee-build image for
 #                             the selected mode.
-#   make hb-usb-write DEV=  — flash work/lapee-usb.img to a USB.
+#   make hb-usb-write DEV=  — flash build/images/lapee-usb.img to a USB.
 #   make hb-image-write DEV=
-#                           — flash an existing work/lapee-usb.img
+#                           — flash an existing build/images/lapee-usb.img
 #                             without rebuilding it first.
 #   make hb-usb-debug-write DEV=
 #                           — flash a measured debug-console image
 #                             with lapee.debug=1 on the cmdline.
 #   make gather-wifi-creds  — prompt locally for wifi.conf.
-#   make hb-usb-qemu        — boot work/lapee-usb.img under
+#   make hb-usb-qemu        — boot build/images/lapee-usb.img under
 #                             QEMU+OVMF+swtpm and fetch attestation
 #                             over the forwarded network port.
 #   make hb-usb-qemu-gui    — same with a Cocoa window so the
 #                             operator can watch the splash.
-#   make hb-fetch           — populate build-hyperbeam/src-edge
+#   make hb-fetch           — populate build/hyperbeam/src-edge
 #                             with the pinned verifier source.
 #   make hb-wifi-apply      — inject host-side wifi.conf into the
 #                             ESP without re-signing.
@@ -61,7 +61,7 @@
 #   make buildroot-shell    — drop into the Buildroot volume in a
 #                             shell, for debugging.
 #   make buildroot-clean    — wipe the Buildroot volume entirely.
-#   make clean              — remove generated work/ files only.
+#   make clean              — remove generated build/ files only.
 #
 # ============================================================
 
@@ -92,16 +92,27 @@ endif
 export DOCKER_PLATFORM BUILD_IMAGE BUILD_MODE
 
 # ----- artefact paths -----------------------------------------
-KERNEL    ?= build-kernel/vmlinuz-lapee
-INITRAMFS ?= work/initramfs-lapee.cpio.zst
-SIZE_MIB  ?= 1024
-OUT       ?= work/lapee-usb.img
+BUILD_DIR ?= build
+LAPEE_BUILD_DIR := $(abspath $(BUILD_DIR))
+export LAPEE_BUILD_DIR
+KERNEL    ?= $(BUILD_DIR)/kernel/vmlinuz-lapee
+INITRAMFS ?= $(BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
+SIZE_MIB  ?= auto
+OUT       ?= $(BUILD_DIR)/images/lapee-usb.img
 WIFI      ?= 1
 SPLASH    ?= blue
 DEBUG     ?= 0
+BUILDROOT_VOLUME ?= lapee-buildroot
+KERNEL_EXTRA_FRAGMENT ?=
+DEFCONFIG_EXTRA_SNIPPET ?=
+LENOVO_INTEL_BUILD_DIR ?= build/intel-gfx
+LENOVO_INTEL_OUT = build/images/lapee-usb-lenovo-intel-debug.img
+LENOVO_INTEL_KERNEL = $(LENOVO_INTEL_BUILD_DIR)/kernel/vmlinuz-lapee
+LENOVO_INTEL_INITRAMFS = $(LENOVO_INTEL_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
+LENOVO_INTEL_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1 i915.force_probe=*
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
-HYPERBEAM_SRC ?= build-hyperbeam/src-edge
+HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -111,10 +122,12 @@ DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
                 lapee.splash=$(SPLASH)
 
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
+export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 
 .PHONY: help all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
         hb-usb-image hb-usb-write hb-image-write hb-usb-debug-image hb-usb-debug-write \
+        hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
         hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
 
@@ -256,11 +269,39 @@ hb-image-write:
 	fi
 
 hb-usb-debug-image: DEBUG=1
-hb-usb-debug-image: OUT=work/lapee-usb-debug.img
+hb-usb-debug-image: OUT=$(BUILD_DIR)/images/lapee-usb-debug.img
 hb-usb-debug-image: hb-usb-image
 
 hb-usb-debug-write: DEBUG=1
 hb-usb-debug-write: hb-usb-write
+
+hb-usb-lenovo-intel-debug-image:
+	$(MAKE) buildroot \
+	    BUILDROOT_VOLUME=lapee-buildroot-intel-gfx \
+	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
+	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-intel-gfx-fragment.config" \
+	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-intel-gfx.extra"
+	$(MAKE) hb-usb-image DEBUG=1 \
+	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
+	    KERNEL="$(LENOVO_INTEL_KERNEL)" \
+	    INITRAMFS="$(LENOVO_INTEL_INITRAMFS)" \
+	    CMDLINE='$(LENOVO_INTEL_CMDLINE)' \
+	    OUT="$(LENOVO_INTEL_OUT)"
+
+hb-usb-lenovo-intel-debug-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-lenovo-intel-debug-write DEV=/dev/diskN"; exit 1; }
+	$(MAKE) buildroot \
+	    BUILDROOT_VOLUME=lapee-buildroot-intel-gfx \
+	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
+	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-intel-gfx-fragment.config" \
+	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-intel-gfx.extra"
+	$(MAKE) hb-usb-write DEBUG=1 DEV="$(DEV)" \
+	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
+	    KERNEL="$(LENOVO_INTEL_KERNEL)" \
+	    INITRAMFS="$(LENOVO_INTEL_INITRAMFS)" \
+	    CMDLINE='$(LENOVO_INTEL_CMDLINE)' \
+	    OUT="$(LENOVO_INTEL_OUT)"
 
 hb-usb-qemu:
 	./scripts/boot-usb-image.sh
@@ -286,6 +327,7 @@ hb-fetch:
 	    git clone "$(HYPERBEAM_REPO)" "$(HYPERBEAM_SRC)"; \
 	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
 	fi
+	@./scripts/apply-hyperbeam-patches.sh "$(HYPERBEAM_SRC)"
 
 # ------------------------------------------------------------
 # ESP injection helpers (operator-side, no UKI re-sign).
@@ -299,57 +341,59 @@ hb-wifi-apply: toolchain
 	    echo "wifi.conf missing. Create it with EXACTLY two lines:"; \
 	    echo "  <SSID>"; echo "  <PSK>"; \
 	    echo "(and nothing else). See README.md."; exit 1; }
-	@test -f work/lapee-usb.img || { \
-	    echo "work/lapee-usb.img missing. Run: make build"; \
+	@test -f "$(OUT)" || { \
+	    echo "$(OUT) missing. Run: make build"; \
 	    exit 1; }
 	docker run --rm $(DOCKER_PLATFORM) \
 	    -v $(LAPEE_ROOT):/w -w /w $(BUILD_IMAGE) \
 	    bash -euo pipefail -c '\
-	        START=$$(parted --script --machine /w/work/lapee-usb.img \
+	        START=$$(parted --script --machine /w/$(OUT) \
 	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$2); print \$$2}"); \
-	        SECT=$$(parted --script --machine /w/work/lapee-usb.img \
+	        SECT=$$(parted --script --machine /w/$(OUT) \
 	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$4); print \$$4}"); \
-	        dd if=/w/work/lapee-usb.img of=/tmp/esp.img \
+	        dd if=/w/$(OUT) of=/tmp/esp.img \
 	            bs=512 skip=$$START count=$$SECT status=none; \
 	        mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true; \
 	        mcopy -i /tmp/esp.img -o /w/wifi.conf ::/EFI/boot/wifi.conf; \
-	        dd if=/tmp/esp.img of=/w/work/lapee-usb.img \
+	        dd if=/tmp/esp.img of=/w/$(OUT) \
 	            bs=512 seek=$$START count=$$SECT \
 	            conv=notrunc status=none'
-	@echo ">> wifi.conf applied to work/lapee-usb.img"
+	@echo ">> wifi.conf applied to $(OUT)"
 
 hb-sb-apply: toolchain
 	@test -d secureboot/enrol || { \
 	    echo "secureboot/enrol/ missing. Run: ./scripts/sb-setup.sh enrol"; \
 	    exit 1; }
-	@test -f work/lapee-usb.img || { \
-	    echo "work/lapee-usb.img missing. Run: make build"; \
+	@test -f "$(OUT)" || { \
+	    echo "$(OUT) missing. Run: make build"; \
 	    exit 1; }
 	docker run --rm $(DOCKER_PLATFORM) \
 	    -v $(LAPEE_ROOT):/w -w /w $(BUILD_IMAGE) \
 	    bash -euo pipefail -c '\
-	        START=$$(parted --script --machine /w/work/lapee-usb.img \
+	        START=$$(parted --script --machine /w/$(OUT) \
 	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$2); print \$$2}"); \
-	        SECT=$$(parted --script --machine /w/work/lapee-usb.img \
+	        SECT=$$(parted --script --machine /w/$(OUT) \
 	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$4); print \$$4}"); \
-	        dd if=/w/work/lapee-usb.img of=/tmp/esp.img \
+	        dd if=/w/$(OUT) of=/tmp/esp.img \
 	            bs=512 skip=$$START count=$$SECT status=none; \
 	        for f in PK.cer KEK.cer db.cer PK.auth KEK.auth db.auth; do \
 	            if [[ -f /w/secureboot/enrol/$$f ]]; then \
 	                mcopy -i /tmp/esp.img -o /w/secureboot/enrol/$$f ::/$$f; \
 	            fi; \
 	        done; \
-	        dd if=/tmp/esp.img of=/w/work/lapee-usb.img \
+	        dd if=/tmp/esp.img of=/w/$(OUT) \
 	            bs=512 seek=$$START count=$$SECT \
 	            conv=notrunc status=none'
-	@echo ">> SB enrolment bundle applied to work/lapee-usb.img"
+	@echo ">> SB enrolment bundle applied to $(OUT)"
 
 # ------------------------------------------------------------
 # Cleanup.
 # ------------------------------------------------------------
 
 clean:
-	rm -rf work/lapee-usb.img work/lapee-usb-last.img \
-	       work/initramfs-lapee.cpio.* work/usb-build/ out/local-capture/
+	rm -rf $(BUILD_DIR)/images $(BUILD_DIR)/initramfs $(BUILD_DIR)/kernel \
+	       $(BUILD_DIR)/usb-build $(BUILD_DIR)/qemu-usb $(BUILD_DIR)/tpm-qemu \
+	       $(BUILD_DIR)/qemu-network-test $(BUILD_DIR)/splash-previews \
+	       $(BUILD_DIR)/splash-captures $(BUILD_DIR)/qemu-splash-capture
 	-$(MAKE) -C paper clean
-	@echo "cleaned. Buildroot volume preserved (run 'make buildroot-clean' to wipe)."
+	@echo "cleaned. HyperBEAM checkout and Buildroot volume preserved (run 'make buildroot-clean' to wipe Buildroot)."
