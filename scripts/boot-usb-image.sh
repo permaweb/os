@@ -156,6 +156,7 @@ fi
 BASE_URL=http://127.0.0.1:18734
 INFO_OUT="$OUTDIR/info.json"
 ATT_OUT="$OUTDIR/attestation.json"
+rm -f "$INFO_OUT" "$ATT_OUT"
 
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do

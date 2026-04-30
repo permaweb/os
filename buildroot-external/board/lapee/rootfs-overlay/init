@@ -1055,50 +1055,13 @@ fi
 # for HB readiness, transitioning boot -> net-up -> hb-wait -> ready
 # on its own. Nothing in init pushes state to the splash.
 
-# Default config files (shipped with image).
-# LAPEE_JSON is the JSON-formatted base config (preloaded_devices
-# list with snp@1.0 / hyperbuddy@1.0 excluded, render_index_page=false).
-# ENFORCED_CFG is the flat-format overlay that wires the on/start hook.
-# HB_CONFIG reads a comma-separated list in first-to-last override order;
-# we put JSON first (base), enforced LAST so the hook-wiring always wins.
+# Default config file shipped with the image. HyperBEAM edge reads one
+# HB_CONFIG file, so this JSON carries both the upstream preloaded devices
+# plus LapEE's TPM devices and the enforced on/start PCR-15 hook.
 LAPEE_JSON=/etc/lapee/lapee.json
-ENFORCED_CFG=/etc/lapee/lapee-enforced.flat
-USER_CFG_DEFAULT=/etc/lapee/user.flat
 
-# Debug-only user config via kernel cmdline: `lapee.userconfig=<path>' or
-# `lapee.user_b64=<base64_of_flat_file_contents>'. Production ignores
-# these so the measured appliance accepts no operator-supplied HB config.
-USER_CFG=""
-if [ "$LAPEE_DEBUG" = "1" ]; then
-    USER_CFG_CMDLINE=$(cmdline_value lapee.userconfig || true)
-    USER_B64=$(cmdline_value lapee.user_b64 || true)
-    if [ -n "$USER_B64" ]; then
-        mkdir -p /run/lapee
-        echo "$USER_B64" | base64 -d > /run/lapee/user-cmdline.flat
-        USER_CFG=/run/lapee/user-cmdline.flat
-    elif [ -n "$USER_CFG_CMDLINE" ] && [ -f "$USER_CFG_CMDLINE" ]; then
-        USER_CFG=$USER_CFG_CMDLINE
-    elif [ -f "$USER_CFG_DEFAULT" ]; then
-        USER_CFG=$USER_CFG_DEFAULT
-    fi
-fi
-
-# LAPEE_JSON is currently OFF: HB's config loader rejects the
-# preloaded_devices override delivered through the JSON base config
-# and trips an `unexpected_hook_result: failure' at hb_http_server
-# startup. Until that's fixed HB-side (either by teaching the loader
-# to recognise list-of-map config entries, or by pre-baking a
-# narrower device list into a LapEE release profile), we ship just
-# the enforced flat overlay; the snp/hyperbuddy modules stay loaded
-# but never get dispatched because nothing references them.
-if [ -n "$USER_CFG" ]; then
-    status "Preparing HyperBEAM configuration."
-    HB_CONFIG="$USER_CFG,$ENFORCED_CFG"
-    echo "[init] user config: $USER_CFG"
-else
-    status "Preparing HyperBEAM configuration."
-    HB_CONFIG="$ENFORCED_CFG"
-fi
+status "Preparing HyperBEAM configuration."
+HB_CONFIG="$LAPEE_JSON"
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
 

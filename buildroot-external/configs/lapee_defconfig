@@ -72,8 +72,8 @@ BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 
 # Erlang/OTP: target runtime. scripts/build-buildroot.sh pins
-# ERLANG_VERSION=27.x because the v1-ish LapEE HyperBEAM branch uses
-# OTP 27 syntax while Buildroot 2026.02.1 defaults to OTP 26.
+# ERLANG_VERSION=27.x because current HyperBEAM edge uses OTP 27 syntax
+# while Buildroot 2026.02.1 defaults to OTP 26.
 BR2_PACKAGE_ERLANG=y
 
 # OpenSSL: BEAM crypto NIFs link against this. libtss2's TPM

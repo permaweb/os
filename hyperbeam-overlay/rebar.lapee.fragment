@@ -1,0 +1,34 @@
+{lapee, [
+    {erl_opts, [{d, 'ENABLE_LAPEE_TPM', true}, {feature, maybe_expr, enable}]},
+    {port_specs, [
+        {"./priv/lapee_tpm_nif.so", [
+            "./native/lapee_tpm_nif/lapee_tpm_nif.c",
+            "./native/lapee_tpm_nif/tpm_helpers.c"
+        ]}
+    ]},
+    {port_env, [
+        {"(linux|darwin|solaris)", "LAPEE_TSS2_PREFIX", "${LAPEE_TSS2_PREFIX}"},
+        {"linux", "CFLAGS",
+         "$CFLAGS -std=c11 -Wall -Wextra -Wno-unused-parameter "
+         "-fPIC -O2 "
+         "${LAPEE_TSS2_PREFIX:+-I${LAPEE_TSS2_PREFIX}/include "
+         "-I${LAPEE_TSS2_PREFIX}/include/tss2}"},
+        {"linux", "LDFLAGS",
+         "$LDFLAGS "
+         "${LAPEE_TSS2_PREFIX:+-L${LAPEE_TSS2_PREFIX}/lib "
+         "-Wl,-rpath,${LAPEE_TSS2_PREFIX}/lib} "
+         "-ltss2-esys -ltss2-mu -ltss2-tctildr -ltss2-rc -lcrypto"},
+        {"darwin", "CFLAGS",
+         "$CFLAGS -std=c11 -Wall -Wextra -Wno-unused-parameter "
+         "-fPIC -O2 "
+         "-I${LAPEE_TSS2_PREFIX}/include "
+         "-I${LAPEE_TSS2_PREFIX}/include/tss2 "
+         "-I/opt/homebrew/opt/openssl@3/include"},
+        {"darwin", "LDFLAGS",
+         "$LDFLAGS "
+         "-L${LAPEE_TSS2_PREFIX}/lib "
+         "-Wl,-rpath,${LAPEE_TSS2_PREFIX}/lib "
+         "-L/opt/homebrew/opt/openssl@3/lib "
+         "-ltss2-esys -ltss2-mu -ltss2-tctildr -ltss2-rc -lcrypto"}
+    ]}
+]}

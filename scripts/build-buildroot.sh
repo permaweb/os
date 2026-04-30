@@ -24,6 +24,7 @@ cd "$(dirname "$0")/.."
 
 LAPEE_ROOT="$(pwd)"
 HOST_BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE_ROOT/build}"
+LAPEE_HB_OVERLAY_DIR="${LAPEE_HB_OVERLAY_DIR:-$LAPEE_ROOT/hyperbeam-overlay}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
@@ -31,15 +32,15 @@ DEFCONFIG=${DEFCONFIG:-lapee_defconfig}
 KERNEL_EXTRA_FRAGMENT="${KERNEL_EXTRA_FRAGMENT:-}"
 DEFCONFIG_EXTRA_SNIPPET="${DEFCONFIG_EXTRA_SNIPPET:-}"
 
-# Buildroot 2024.02 LTS sources. Pinned tarball URL + sha256 so
+# Buildroot 2026.02 LTS sources. Pinned tarball URL + sha256 so
 # a corrupted/moved upstream is caught at fetch time.
 BUILDROOT_VER=${BUILDROOT_VER:-2026.02.1}
 BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
 BUILDROOT_SHA256=${BUILDROOT_SHA256:-e296791039f806294a4e3e8d708d6b95631ca9fbca2e76a83d6058acaca459b5}
 
-# HyperBEAM's v1-ish LapEE branch uses OTP 27 syntax (maybe expressions
-# and triple-quoted strings). Buildroot 2026.02.1 still defaults to OTP
-# 26, so pin the package version here while keeping the package recipe
+# Current HyperBEAM edge uses OTP 27 syntax (maybe expressions and
+# triple-quoted strings). Buildroot 2026.02.1 still defaults to OTP 26,
+# so pin the package version here while keeping the package recipe
 # itself upstream Buildroot.
 ERLANG_VERSION=${ERLANG_VERSION:-27.3.4.11}
 ERLANG_SHA256=${ERLANG_SHA256:-9d63382d3e7707c058dabe338114e09ff8228d54d29df794d907d3c8dddde5f9}
@@ -66,6 +67,11 @@ if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
     DEFCONFIG_EXTRA_SNIPPET="$(cd "$(dirname "$DEFCONFIG_EXTRA_SNIPPET")" && pwd)/$(basename "$DEFCONFIG_EXTRA_SNIPPET")"
 fi
 
+[[ -d "$LAPEE_HB_OVERLAY_DIR" ]] || {
+    echo "missing LAPEE_HB_OVERLAY_DIR: $LAPEE_HB_OVERLAY_DIR" >&2
+    exit 1
+}
+
 # Ensure the docker volume exists. Wipe its config marker if the
 # defconfig file's mtime is newer than what the volume saw last
 # time — Buildroot regenerates the config but doesn't always
@@ -88,6 +94,19 @@ docker run --rm $DOCKER_PLATFORM \
     -v "$LAPEE_ROOT/buildroot-external":/src-external:ro \
     $IMAGE bash -c "rm -rf /build/buildroot-external && \
                     cp -r /src-external /build/buildroot-external"
+
+# Sync the LapEE-owned HyperBEAM overlay and helper script into the
+# volume. Buildroot's package source tree is temporary; the overlay is
+# replayed into that fetched upstream checkout during the package build.
+docker run --rm $DOCKER_PLATFORM \
+    -v $VOLUME:/build \
+    -v "$LAPEE_HB_OVERLAY_DIR":/src-hyperbeam-overlay:ro \
+    -v "$LAPEE_ROOT/scripts/stage-hyperbeam-overlay.sh":/src-stage-hyperbeam-overlay.sh:ro \
+    $IMAGE bash -c "rm -rf /build/hyperbeam-overlay /build/scripts && \
+                    mkdir -p /build/scripts && \
+                    cp -r /src-hyperbeam-overlay /build/hyperbeam-overlay && \
+                    cp /src-stage-hyperbeam-overlay.sh /build/scripts/stage-hyperbeam-overlay.sh && \
+                    chmod +x /build/scripts/stage-hyperbeam-overlay.sh"
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"
@@ -185,7 +204,11 @@ KERNEL_FRAGMENT_SHA=$(
     } | shasum -a 256 | awk '{print $1}'
 )
 HYPERBEAM_RECIPE_SHA=$(
-    find buildroot-external/package/hyperbeam -type f \
+    {
+        find buildroot-external/package/hyperbeam -type f
+        find "$LAPEE_HB_OVERLAY_DIR" -type f
+        printf '%s\n' scripts/stage-hyperbeam-overlay.sh
+    } \
         | LC_ALL=C sort \
         | xargs shasum -a 256 \
         | shasum -a 256 \

@@ -126,6 +126,8 @@ NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
+HYPERBEAM_ALLOW_CLEAN ?= 0
+LAPEE_HB_OVERLAY_DIR ?= $(LAPEE_ROOT)/hyperbeam-overlay
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -283,12 +285,13 @@ hb-image-write:
 	    sync; \
 	fi
 
-hb-usb-debug-image: DEBUG=1
-hb-usb-debug-image: OUT=$(BUILD_DIR)/images/lapee-usb-debug.img
-hb-usb-debug-image: hb-usb-image
+hb-usb-debug-image:
+	$(MAKE) hb-usb-image DEBUG=1 \
+	    OUT="$(BUILD_DIR)/images/lapee-usb-debug.img"
 
-hb-usb-debug-write: DEBUG=1
-hb-usb-debug-write: hb-usb-write
+hb-usb-debug-write:
+	$(MAKE) hb-usb-write DEBUG=1 \
+	    OUT="$(BUILD_DIR)/images/lapee-usb-debug.img" DEV="$(DEV)"
 
 hb-usb-no-tme-image:
 	$(MAKE) hb-usb-image \
@@ -416,6 +419,15 @@ hb-fetch:
 	@mkdir -p "$(dir $(HYPERBEAM_SRC))"
 	@if [ -f "$(HYPERBEAM_SRC)/rebar.config" ]; then \
 	    echo ">> HyperBEAM verifier source already present: $(HYPERBEAM_SRC)"; \
+	    if [ "$(HYPERBEAM_SRC)" = "$(BUILD_DIR)/hyperbeam/src-edge" ] || \
+	       [ "$(HYPERBEAM_ALLOW_CLEAN)" = "1" ]; then \
+	        git -C "$(HYPERBEAM_SRC)" reset --hard; \
+	        git -C "$(HYPERBEAM_SRC)" clean -fdx; \
+	    elif [ -n "$$(git -C "$(HYPERBEAM_SRC)" status --porcelain)" ]; then \
+	        echo "refusing to clean dirty HYPERBEAM_SRC outside $(BUILD_DIR); set HYPERBEAM_ALLOW_CLEAN=1 if this checkout is disposable" >&2; \
+	        exit 1; \
+	    fi; \
+	    git -C "$(HYPERBEAM_SRC)" fetch origin edge; \
 	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
 	elif [ -d "$(HOME_DIR)/src/hyperbeam/.git" ] && \
 	     git -C "$(HOME_DIR)/src/hyperbeam" cat-file -e "$(HYPERBEAM_VERSION)^{commit}" 2>/dev/null; then \
@@ -427,7 +439,8 @@ hb-fetch:
 	    git clone "$(HYPERBEAM_REPO)" "$(HYPERBEAM_SRC)"; \
 	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
 	fi
-	@./scripts/apply-hyperbeam-patches.sh "$(HYPERBEAM_SRC)"
+	@LAPEE_HB_OVERLAY_DIR="$(LAPEE_HB_OVERLAY_DIR)" \
+	    ./scripts/stage-hyperbeam-overlay.sh "$(HYPERBEAM_SRC)"
 
 # ------------------------------------------------------------
 # ESP injection helpers (operator-side, no UKI re-sign).

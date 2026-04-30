@@ -113,7 +113,7 @@ stage_firmware_tree cypress
 stage_firmware_whence_links
 
 # 3. Sanity checks.
-for f in /init /etc/lapee/lapee-enforced.flat \
+for f in /init /etc/lapee/lapee.json \
          /usr/lib/hyperbeam/bin/hb \
          /usr/local/lib/lapee-splash/lapee_splash.beam \
          /lib/firmware/regulatory.db \

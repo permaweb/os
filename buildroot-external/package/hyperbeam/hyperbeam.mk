@@ -25,11 +25,10 @@
 #
 ################################################################################
 
-# Pin the v1-ish LapEE HyperBEAM branch state. Current `edge' does
-# not yet carry dev_tpm2, dev_tpm_interpret, the lapee rebar profile,
-# or the lapee_tpm_nif sources, so building it would produce a node
-# without the appliance's attestation surface.
-HYPERBEAM_VERSION ?= a9b360674d4c6c963a55d577ec5438bc7e24a3d8
+# Track upstream HyperBEAM edge. LapEE-owned TPM devices and the
+# `lapee' build profile are staged from this repository's
+# hyperbeam-overlay tree during the package pre-build step.
+HYPERBEAM_VERSION ?= 40b74af02eb8e0e90dc341203a45c985323e7869
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -53,35 +52,14 @@ define HYPERBEAM_DOWNLOAD_REBAR3
 endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
-define HYPERBEAM_SANITIZE_HOST_PATHS
-	sed -i \
-		-e 's|-I /usr/local/include||g' \
-		-e 's|-L /usr/local/lib||g' \
-		-e 's|-L /usr/lib||g' \
-		$(@D)/native/secp256k1/Makefile
-	sed -i \
-		-e 's|-I/usr/local/lib/erlang/usr/include/|-I$(STAGING_DIR)/usr/lib/erlang/usr/include|g' \
-		$(@D)/rebar.config
-endef
-HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_SANITIZE_HOST_PATHS
+HYPERBEAM_OVERLAY_DIR ?= $(BR2_EXTERNAL_LAPEE_PATH)/../hyperbeam-overlay
+HYPERBEAM_OVERLAY_SCRIPT ?= $(BR2_EXTERNAL_LAPEE_PATH)/../scripts/stage-hyperbeam-overlay.sh
 
-define HYPERBEAM_FIX_OTP27_EI_TYPES
-	perl -0pi -e 's|long ptr, size;\n        int type;\n        ei_decode_tuple_header\(buff, &index, &arity\);\n        ei_decode_long\(buff, &index, &ptr\);\n        ei_get_type\(buff, &index, &type, &size\);\n        long size_l = \(long\)size;\n        char\* wasm_binary;\n        int res = ei_decode_bitstring\(buff, &index, &wasm_binary, NULL, &size_l\);\n        DRV_DEBUG\("Decoded binary\. Res: %d\. Size \(bits\): %ld", res, size_l\);\n        long size_bytes = size_l / 8;|long ptr;\n        int size, type;\n        ei_decode_tuple_header(buff, &index, &arity);\n        ei_decode_long(buff, &index, &ptr);\n        ei_get_type(buff, &index, &type, &size);\n        size_t size_bits;\n        const char* wasm_binary;\n        int res = ei_decode_bitstring(buff, &index, &wasm_binary, NULL, &size_bits);\n        DRV_DEBUG("Decoded binary. Res: %d. Size (bits): %lu", res, (unsigned long)size_bits);\n        long size_bytes = (long)(size_bits / 8);|s' \
-		$(@D)/native/hb_beamr/hb_beamr.c
-	perl -0pi -e 's#uint64_t argc = prepared_args\.size;\n    uint64_t\* argv = malloc\(sizeof\(uint64_t\) \* argc\);\n    \n    // Convert prepared arguments to an array of 64-bit integers\n    for \(uint64_t i = 0; i < argc; \+\+i\) \{\n        argv\[i\] = prepared_args\.data\[i\]\.of\.i64;\n    \}#uint32_t argc = 0;\n    for (size_t i = 0; i < prepared_args.size; ++i) {\n        argc += (prepared_args.data[i].kind == WASM_I64 || prepared_args.data[i].kind == WASM_F64) ? 2 : 1;\n    }\n    uint32_t* argv = malloc(sizeof(uint32_t) * argc);\n    \n    // Convert prepared arguments into WAMR packed 32-bit cells.\n    uint32_t argv_index = 0;\n    for (size_t i = 0; i < prepared_args.size; ++i) {\n        switch (prepared_args.data[i].kind) {\n            case WASM_I64:\n                memcpy(&argv[argv_index], &prepared_args.data[i].of.i64, sizeof(int64_t));\n                argv_index += 2;\n                break;\n            case WASM_F64:\n                memcpy(&argv[argv_index], &prepared_args.data[i].of.f64, sizeof(float64_t));\n                argv_index += 2;\n                break;\n            case WASM_F32:\n                memcpy(&argv[argv_index], &prepared_args.data[i].of.f32, sizeof(float32_t));\n                argv_index += 1;\n                break;\n            default:\n                argv[argv_index++] = (uint32_t)prepared_args.data[i].of.i32;\n                break;\n        }\n    }#s' \
-		$(@D)/native/hb_beamr/hb_wasm.c
-	perl -0pi -e 's|wasm_runtime_get_exception\(proc->exec_env\)|wasm_runtime_get_exception(wasm_runtime_get_module_inst(proc->exec_env))|g' \
-		$(@D)/native/hb_beamr/hb_wasm.c
+define HYPERBEAM_STAGE_LAPEE_OVERLAY
+	LAPEE_HB_OVERLAY_DIR='$(HYPERBEAM_OVERLAY_DIR)' \
+		'$(HYPERBEAM_OVERLAY_SCRIPT)' $(@D)
 endef
-HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_FIX_OTP27_EI_TYPES
-
-define HYPERBEAM_ENABLE_MAYBE_EXPR
-	grep -q '{feature, maybe_expr, enable}' $(@D)/rebar.config || \
-		sed -i \
-			"s/{erl_opts, \[debug_info,/{erl_opts, [debug_info, {feature, maybe_expr, enable},/" \
-			$(@D)/rebar.config
-endef
-HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_ENABLE_MAYBE_EXPR
+HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_STAGE_LAPEE_OVERLAY
 
 # Buildroot exports HyperBEAM from a git checkout into a plain source
 # tree, so rebar's build-info hooks cannot rely on `.git' being
@@ -112,10 +90,52 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		> $(@D)/.lapee-build/cargo
 	chmod +x $(@D)/.lapee-build/cargo
 	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'real=$${LAPEE_REAL_CC:?}' \
+		'args=()' \
+		'while (($$#)); do' \
+		'    arg=$$1; shift' \
+		'    case "$$arg" in' \
+		'        -I|-L|-isystem|-idirafter|-iquote)' \
+		'            if (($$#)) && [[ "$$1" =~ ^/usr(/|$$) ]]; then' \
+		'                shift' \
+		'                continue' \
+		'            fi' \
+		'            args+=("$$arg")' \
+		'            ;;' \
+		'        -I/usr|-I/usr/*)' \
+		'            ;;' \
+		'        -L/usr|-L/usr/*)' \
+		'            ;;' \
+		'        -isystem/usr|-isystem/usr/*)' \
+		'            ;;' \
+		'        -idirafter/usr|-idirafter/usr/*)' \
+		'            ;;' \
+		'        -iquote/usr|-iquote/usr/*)' \
+		'            ;;' \
+		'        -Wl,-rpath,/usr|-Wl,-rpath,/usr/*|-Wl,-rpath-link,/usr|-Wl,-rpath-link,/usr/*)' \
+		'            ;;' \
+		'        *)' \
+		'            args+=("$$arg")' \
+		'            ;;' \
+		'    esac' \
+		'done' \
+		'exec "$$real" "$${args[@]}"' \
+		> $(@D)/.lapee-build/cc-filter
+	chmod +x $(@D)/.lapee-build/cc-filter
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'export LAPEE_REAL_CC=$${LAPEE_REAL_CXX:?}' \
+		'exec "$$(dirname "$$0")/cc-filter" "$$@"' \
+		> $(@D)/.lapee-build/cxx-filter
+	chmod +x $(@D)/.lapee-build/cxx-filter
+	printf '%s\n' \
 		'set(CMAKE_SYSTEM_NAME Linux)' \
 		'set(CMAKE_SYSTEM_PROCESSOR x86_64)' \
-		'set(CMAKE_C_COMPILER $(TARGET_CC))' \
-		'set(CMAKE_CXX_COMPILER $(TARGET_CXX))' \
+		'set(CMAKE_C_COMPILER $(@D)/.lapee-build/cc-filter)' \
+		'set(CMAKE_CXX_COMPILER $(@D)/.lapee-build/cxx-filter)' \
 		'set(CMAKE_AR $(TARGET_AR))' \
 		'set(CMAKE_RANLIB $(TARGET_RANLIB))' \
 		'set(CMAKE_FIND_ROOT_PATH $(STAGING_DIR) $(TARGET_DIR))' \
@@ -131,13 +151,26 @@ HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_CREATE_BUILD_HELPERS
 # Cross-compile environment for rebar3 + cargo. rebar3's
 # port_specs honours CC/CFLAGS/LDFLAGS; rebar3_cargo passes the
 # full env through to cargo.
+#
+# Upstream edge still has native BEAMR C that trips GCC 14's
+# stricter C diagnostics against OTP 27/WAMR headers. Keep that as
+# an explicit compiler compatibility boundary instead of mutating
+# upstream HyperBEAM source in the fetched checkout.
+HYPERBEAM_C_NATIVE_COMPAT_FLAGS = \
+	-Wno-error=incompatible-pointer-types \
+	-Wno-error=discarded-qualifiers \
+	-Wno-error=int-conversion \
+	-Wno-error=implicit-function-declaration
+
 HYPERBEAM_BUILD_ENV = \
 	PATH=$(@D)/.lapee-build:$(HOST_DIR)/bin:/home/builder/.cargo/bin:$(BR_PATH) \
-	CC="$(TARGET_CC)" \
-	CXX="$(TARGET_CXX)" \
+	LAPEE_REAL_CC="$(TARGET_CC)" \
+	LAPEE_REAL_CXX="$(TARGET_CXX)" \
+	CC="$(@D)/.lapee-build/cc-filter" \
+	CXX="$(@D)/.lapee-build/cxx-filter" \
 	AR="$(TARGET_AR)" \
 	RANLIB="$(TARGET_RANLIB)" \
-	CFLAGS="$(TARGET_CFLAGS) -I$(STAGING_DIR)/usr/include/tss2 -I$(STAGING_DIR)/usr/include" \
+	CFLAGS="$(TARGET_CFLAGS) $(HYPERBEAM_C_NATIVE_COMPAT_FLAGS) -I$(STAGING_DIR)/usr/include/tss2 -I$(STAGING_DIR)/usr/include" \
 	LDFLAGS="$(TARGET_LDFLAGS) -L$(STAGING_DIR)/usr/lib -L$(STAGING_DIR)/usr/lib/erlang/usr/lib -Wl,-rpath,/usr/lib" \
 	PKG_CONFIG_ALLOW_CROSS=1 \
 	PKG_CONFIG_SYSROOT_DIR="$(STAGING_DIR)" \
@@ -148,10 +181,10 @@ HYPERBEAM_BUILD_ENV = \
 	OPENSSL_NO_VENDOR=1 \
 	CMAKE_TOOLCHAIN_FILE="$(@D)/.lapee-build/toolchain.cmake" \
 	CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu \
-	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(TARGET_CC)" \
-	CC_x86_64_unknown_linux_gnu="$(TARGET_CC)" \
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(@D)/.lapee-build/cc-filter" \
+	CC_x86_64_unknown_linux_gnu="$(@D)/.lapee-build/cc-filter" \
 	AR_x86_64_unknown_linux_gnu="$(TARGET_AR)" \
-	CFLAGS_x86_64_unknown_linux_gnu="$(TARGET_CFLAGS)" \
+	CFLAGS_x86_64_unknown_linux_gnu="$(TARGET_CFLAGS) $(HYPERBEAM_C_NATIVE_COMPAT_FLAGS)" \
 	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib"
 
 define HYPERBEAM_BUILD_CMDS

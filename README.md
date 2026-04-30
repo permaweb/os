@@ -329,13 +329,14 @@ diagnostic surface than production.
 
 The image contains:
 
-- Linux 6.6.51 with EFI stub, TPM, lockdown, WiFi, framebuffer, and
+- Linux 6.19.12 with EFI stub, TPM, lockdown, WiFi, framebuffer, and
   common laptop networking support.
 - A Buildroot-generated initramfs with busybox, glibc, Erlang/OTP 27,
   OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, and HyperBEAM.
-- A custom Buildroot `hyperbeam` package that fetches the pinned
-  HyperBEAM source, applies LapEE package patches, builds Erlang code,
-  and cross-compiles the TPM NIF against Buildroot's libtss2.
+- A custom Buildroot `hyperbeam` package that fetches pinned upstream
+  HyperBEAM `edge`, stages LapEE-owned TPM devices from
+  `hyperbeam-overlay/`, builds Erlang code, and cross-compiles the TPM
+  NIF against Buildroot's libtss2.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
 
@@ -373,8 +374,11 @@ are built from source.
 - `buildroot-external/board/lapee/linux-m1-fragment.config` - kernel
   config fragment for TPM, networking, framebuffer, and production
   input-surface reduction.
-- `buildroot-external/package/hyperbeam/` - Buildroot package and LapEE
-  patches for HyperBEAM.
+- `buildroot-external/package/hyperbeam/` - Buildroot package for the
+  pinned HyperBEAM release.
+- `hyperbeam-overlay/` - LapEE-owned HyperBEAM device modules, TPM NIF
+  sources, verifier catalogues, and the `lapee` rebar profile fragment
+  staged into the temporary HyperBEAM checkout during builds.
 - `scripts/` - image assembly, QEMU boot, verifier capture, WiFi and
   Secure Boot helpers.
 - `secondary-external-verifier/` - standalone Python verifier for
