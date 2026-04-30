@@ -264,6 +264,58 @@ debug_dump_wifi_state() {
     [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0
 
     debug_log "--- LAPEE DEBUG: wifi snapshot ---"
+    debug_log "[debug] firmware inventory:"
+    if [ -d /lib/firmware/intel/iwlwifi ]; then
+        _iwl_count=$(find /lib/firmware/intel/iwlwifi -maxdepth 1 -type f \
+            2>/dev/null | wc -l | tr -d ' ')
+        debug_log "  intel/iwlwifi files: ${_iwl_count:-0}"
+        for _fw in \
+            /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode \
+            /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf4-a0-89.ucode \
+            /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf-a0.pnvm \
+            /lib/firmware/intel/iwlwifi/iwlwifi-so-a0-gf4-a0.pnvm \
+            /lib/firmware/intel/iwlwifi/iwlwifi-bz-b0-fm-c0-c103.ucode \
+            /lib/firmware/intel/iwlwifi/iwlwifi-gl-c0-fm-c0-c103.ucode \
+            /lib/firmware/intel/iwlwifi/iwlwifi-sc-a0-fm-c0-c103.ucode; do
+            if [ -e "$_fw" ]; then
+                _size=$(wc -c < "$_fw" 2>/dev/null | tr -d ' ')
+                debug_log "  present $(basename "$_fw") (${_size:-?} bytes)"
+            else
+                debug_log "  missing $(basename "$_fw")"
+            fi
+        done
+    else
+        debug_log "  missing /lib/firmware/intel/iwlwifi"
+    fi
+    if [ -e /lib/firmware/regulatory.db ] && \
+       [ -e /lib/firmware/regulatory.db.p7s ]; then
+        debug_log "  regulatory.db + signature present"
+    else
+        debug_log "  regulatory.db or signature missing"
+    fi
+
+    debug_log "[debug] PCI network controllers:"
+    _found_pci_net=0
+    for _dev in /sys/bus/pci/devices/*; do
+        [ -e "$_dev" ] || continue
+        _class=$(cat "$_dev/class" 2>/dev/null || true)
+        case "$_class" in
+            0x020000|0x028000) ;;
+            *) continue ;;
+        esac
+        _found_pci_net=1
+        _vendor=$(cat "$_dev/vendor" 2>/dev/null || echo '?')
+        _device=$(cat "$_dev/device" 2>/dev/null || echo '?')
+        _subvendor=$(cat "$_dev/subsystem_vendor" 2>/dev/null || echo '?')
+        _subdevice=$(cat "$_dev/subsystem_device" 2>/dev/null || echo '?')
+        _driver='none'
+        if [ -L "$_dev/driver" ]; then
+            _driver=$(basename "$(readlink "$_dev/driver" 2>/dev/null)" 2>/dev/null || echo '?')
+        fi
+        debug_log "  $(basename "$_dev") class=$_class vendor=$_vendor device=$_device subvendor=$_subvendor subdevice=$_subdevice driver=$_driver"
+    done
+    [ "$_found_pci_net" = "1" ] || debug_log "  none found"
+
     if command -v iw >/dev/null 2>&1; then
         iw dev 2>&1 | while IFS= read -r _l; do
             debug_log "  $_l"
@@ -829,12 +881,15 @@ if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
     if [ -z "$WIFI_IFACE" ]; then
         status "No Wi-Fi interface appeared."
         trace "wifi: no wlan interface after 15s (card absent or driver probe failed)"
+        debug_dump_wifi_state
     elif [ -z "$WPA_SUPPLICANT" ]; then
         status "Cannot start Wi-Fi: wpa_supplicant is missing."
         trace "wifi: credentials accepted but wpa_supplicant not found in PATH=$PATH"
+        debug_dump_wifi_state
     elif [ -z "$IW_BIN" ]; then
         status "Cannot start Wi-Fi: iw is missing."
         trace "wifi: credentials accepted but iw not found in PATH=$PATH"
+        debug_dump_wifi_state
     else
         status "Connecting to Wi-Fi."
         trace "wifi: iface=$WIFI_IFACE bringing up (SSID redacted)"
@@ -900,6 +955,7 @@ WPACFG
         if [ "$WIFI_DHCP_READY" != "1" ]; then
             status "Wi-Fi did not associate; starting without it."
             trace "wifi: no association after 30s; skipping DHCP on $WIFI_IFACE"
+            debug_dump_wifi_state
         fi
     fi
 fi
