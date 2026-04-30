@@ -96,24 +96,6 @@ else
     exec < /dev/null > /dev/null 2>&1
 fi
 
-disable_usb_future_hotplug() {
-    [ "$LAPEE_DEBUG" != "1" ] || {
-        debug_log "[debug] usb: leaving future USB authorization enabled"
-        return 0
-    }
-
-    # Refuse USB devices plugged after init starts. Already-enumerated
-    # devices are left alone here so the boot ESP can still be read for
-    # wifi.conf; after that, lock_down_usb_after_boot_media deauthorizes
-    # existing devices and unbinds xHCI too.
-    for _hub in /sys/bus/usb/devices/usb*; do
-        [ -e "$_hub/authorized_default" ] || continue
-        echo 0 > "$_hub/authorized_default" 2>/dev/null || true
-    done
-}
-
-disable_usb_future_hotplug
-
 # Splash daemon, FIRST THING after mounts. Runs in its own BEAM VM,
 # parallel to the HyperBEAM node forked later. Same erts binary that
 # ships in HB's release -- no extra disk footprint. The .beam was
@@ -687,15 +669,13 @@ read_boot_media_config() {
     # The boot ESP is input-only. Mount it read-only just long enough
     # to detect the LapEE marker file and, when the measured WiFi gate
     # is open, parse /EFI/boot/wifi.conf. Then unmount immediately.
-    # Retries up to ~30 s because USB storage enumeration is async
+    # Retries up to ~10 s because USB storage enumeration is async
     # and mass-storage-class probe lands a few seconds after init
     # starts on real hardware. We don't care if the ESP isn't found:
     # boot continues either way.
     mkdir -p /mnt/esp 2>/dev/null
     status "Looking for the boot USB."
-    for _i in 1 2 3 4 5 6 7 8 9 10 \
-              11 12 13 14 15 16 17 18 19 20 \
-              21 22 23 24 25 26 27 28 29 30; do
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
         for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
                     /dev/nvme[0-9]n[0-9]p[0-9]* \
                     /dev/mmcblk[0-9]p[0-9]*; do
@@ -736,9 +716,7 @@ read_boot_media_config() {
                     || halt_boot "non-LapEE ESP stayed mounted after probe"
             fi
         done
-        if [ "$_i" = "1" ] || [ $((_i % 5)) -eq 0 ]; then
-            status "Looking for the boot USB ($_i/30)."
-        fi
+        status "Looking for the boot USB ($_i/10)."
         sleep 1
     done
     status "Boot USB was not found; continuing without Wi-Fi settings."
@@ -825,7 +803,10 @@ lock_down_usb_after_boot_media() {
     }
 
     status "Locking local USB input."
-    # Stop future USB hotplug first.
+    # Stop future USB hotplug only after read_boot_media_config has had a
+    # chance to see the boot stick. Doing this at init start races USB
+    # mass-storage enumeration on some laptops and can stop the ESP from
+    # appearing in production while debug works.
     for _hub in /sys/bus/usb/devices/usb*; do
         [ -e "$_hub/authorized_default" ] || continue
         echo 0 > "$_hub/authorized_default" 2>/dev/null || true
