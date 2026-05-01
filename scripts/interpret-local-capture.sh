@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # interpret-local-capture.sh -- run the ~tpm-interpret@1.0 parser
-# on a TCG event log captured from a real machine, and produce
-# a per-machine HTML dashboard.
+# on a boot-attestation bundle or TCG event log captured from a real
+# machine, and produce a per-machine HTML dashboard.
 #
 # Prerequisites (one-time install on the verifier Mac):
 #   brew install erlang rebar3 docker python@3
@@ -17,11 +17,13 @@
 # unwittingly parses yesterday's machine state against today's parser.
 #
 # Usage:
+#   ./scripts/interpret-local-capture.sh path/to/boot-attestation.json
 #   ./scripts/interpret-local-capture.sh path/to/eventlog.bin
 #   ./scripts/interpret-local-capture.sh --label "Framework 13 Ryzen" fw.bin
 #   ./scripts/interpret-local-capture.sh --ima ima-ascii.log fw.bin
 #
-# Expects one argument: path to a binary TCG event log. Writes
+# Expects one argument: path to a boot-attestation JSON bundle or
+# binary TCG event log. Writes
 # claim.json, interpret.json, interpret.txt, input-preview.txt,
 # and dashboard.html to that local-capture directory. Opens the
 # dashboard in Chrome at the end.
@@ -76,8 +78,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --url NODE  pulls the FULL attestation envelope over HTTP
-# via `~tpm2@2.0a/attestation' and extracts `tcg-event-log'
+# --url NODE  pulls the FULL boot-attestation bundle over HTTP
+# via `~tpm@2.0a/boot-attestation' and extracts `tcg-event-log'
 # from the attested payload. This is the ONLY legitimate over-
 # the-wire capture path — the envelope binds the TPM quote,
 # the event log, the runtime log, and the node message into
@@ -87,9 +89,9 @@ done
 if [[ -n "$URL" && -z "$INPUT" ]]; then
     URL="${URL%/}"
     TMP="$(mktemp -t fw-attestation.XXXXXX)"
-    echo ">> fetching ${URL}/~tpm2@2.0a/attestation"
+    echo ">> fetching ${URL}/~tpm@2.0a/boot-attestation"
     if ! curl -fsSL --connect-timeout 3 --max-time 20 \
-           "${URL}/~tpm2@2.0a/attestation" \
+           "${URL}/~tpm@2.0a/boot-attestation" \
            -H "accept: application/json" \
            -H "accept-bundle: true" \
            -o "$TMP.json"; then
@@ -97,7 +99,7 @@ if [[ -n "$URL" && -z "$INPUT" ]]; then
         exit 2
     fi
     if [[ ! -s "$TMP.json" ]]; then
-        echo "error: empty response from ${URL}/~tpm2@2.0a/attestation" >&2
+        echo "error: empty response from ${URL}/~tpm@2.0a/boot-attestation" >&2
         echo "       (is a TPM driver loaded? does HB have the on.start" >&2
         echo "        hook configured?)" >&2
         exit 3
@@ -109,7 +111,7 @@ if [[ -n "$URL" && -z "$INPUT" ]]; then
     # message), not just the raw TCG event log bytes.
     INPUT="$TMP.json"
     BYTES=$(stat -f %z "$TMP.json" 2>/dev/null || stat -c %s "$TMP.json")
-    echo ">> captured $BYTES bytes (full attestation envelope)"
+    echo ">> captured $BYTES bytes (full boot-attestation bundle)"
 fi
 
 if [[ -z "$INPUT" ]]; then
@@ -185,7 +187,7 @@ echo ">> label: $LABEL"
 [[ -n "$IMA_LOG" ]] && echo ">> IMA log: $OUT/ima.log"
 
 # Auto-detect: is the input a full attestation JSON envelope
-# (as produced by `~tpm2@2.0a/attestation')
+# (as produced by `~tpm@2.0a/boot-attestation')
 # or a raw TCG binary event log? Both are valid starting points,
 # but the envelope form contains the FULL set of fields the
 # interpret device knows how to cross-reference (quote, AK, EK,

@@ -869,9 +869,10 @@ summarise_interp(_) -> #{}.
 
 %% The response from `hb_http:get' is a full HB message. The
 %% attestation envelope may be returned directly (top-level
-%% `lapee_attestation_version' key) or wrapped under `body' (the
-%% usual device-response shape). Peel until we find something that
-%% looks like our envelope.
+%% `lapee_attestation_version' key or the newer boot-attestation
+%% {system,node,tpm} shape) or wrapped under `body' (the usual
+%% device-response shape). Peel until we find something that looks
+%% like one of our envelopes.
 unwrap_envelope(M, Opts) ->
     case is_envelope(M) of
         true -> M;
@@ -904,18 +905,20 @@ interpret(Base, Req, Opts) ->
 %% only path through `interpret/3' / `claim/3' that reaches this
 %% without a `safely_run' shield is the direct-call one.
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
-    case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
-        E when is_map(E) -> E;
-        _ ->
-            case is_envelope(Base) of
-                true -> Base;
-                false ->
-                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                        Inner when is_map(Inner) -> Inner;
-                        _ -> Base
-                    end
-            end
-    end;
+    Envelope =
+        case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
+            E when is_map(E) -> E;
+            _ ->
+                case is_envelope(Base) of
+                    true -> Base;
+                    false ->
+                        case hb_maps:get(<<"body">>, Base, undefined, Opts) of
+                            Inner when is_map(Inner) -> Inner;
+                            _ -> Base
+                        end
+                end
+        end,
+    normalize_envelope(Envelope);
 resolve_envelope(_Base, _Req, _Opts) ->
     %% Non-map Base (list, binary, integer, atom, etc.). No
     %% envelope can be extracted; fall through to an empty map so
@@ -925,8 +928,114 @@ resolve_envelope(_Base, _Req, _Opts) ->
 
 is_envelope(M) when is_map(M) ->
     hb_maps:get(<<"lapee-attestation-version">>, M, undefined, #{}) /=
-        undefined;
+        undefined
+        orelse is_boot_attestation(M);
 is_envelope(_) -> false.
+
+is_boot_attestation(M) when is_map(M) ->
+    is_map(hb_maps:get(<<"system">>, M, undefined, #{}))
+        andalso is_map(hb_maps:get(<<"node">>, M, undefined, #{}))
+        andalso is_map(hb_maps:get(<<"tpm">>, M, undefined, #{}));
+is_boot_attestation(_) -> false.
+
+normalize_envelope(E) when is_map(E) ->
+    case is_boot_attestation(E) of
+        true -> normalize_boot_attestation(E);
+        false -> E
+    end;
+normalize_envelope(E) -> E.
+
+%% The on-node `~tpm@2.0a/boot-attestation' endpoint returns the new
+%% canonical shape:
+%%
+%%     #{ <<"system">> => System, <<"node">> => Node, <<"tpm">> => Tpm }
+%%
+%% Most of the verifier predates that shape and expects the legacy
+%% top-level fields. Keep this adapter small and mechanical: it does
+%% not decide policy, it only projects the same evidence under the
+%% keys the existing parser already understands.
+normalize_boot_attestation(E) ->
+    System = hb_maps:get(<<"system">>, E, #{}, #{}),
+    Node = hb_maps:get(<<"node">>, E, #{}, #{}),
+    Tpm = hb_maps:get(<<"tpm">>, E, #{}, #{}),
+    Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
+    NodeID = message_human_id(Node),
+    PlatformProbes = system_platform_probes(System),
+    E#{
+        <<"lapee-attestation-version">> =>
+            hb_maps:get(<<"version">>, E, <<"boot-attestation@1.0">>, #{}),
+        <<"wallet-address">> =>
+            hb_maps:get(<<"address">>, Node, null, #{}),
+        <<"node-message">> => Node,
+        <<"node-message-id">> => NodeID,
+        <<"boot-subject">> => #{<<"system">> => System, <<"node">> => Node},
+        <<"boot-subject-id">> =>
+            hb_maps:get(<<"extended-subject">>, Tpm, null, #{}),
+        <<"boot-subject-digest">> =>
+            hb_maps:get(<<"extended-subject-digest">>, Tpm, null, #{}),
+        <<"platform-probes">> => PlatformProbes,
+        <<"tpm-quote">> => Quote,
+        <<"ek-cert-pem">> =>
+            hb_maps:get(<<"ek-cert-pem">>, Tpm, <<>>, #{}),
+        <<"ek-cert-chain-pem">> =>
+            hb_maps:get(<<"ek-cert-chain-pem">>, Tpm, [], #{}),
+        <<"ek-cert-source">> =>
+            hb_maps:get(<<"ek-cert-source">>, Tpm, null, #{}),
+        <<"tpm-properties">> =>
+            hb_maps:get(<<"tpm-properties">>, Tpm, #{}, #{}),
+        <<"ak-pub-pem">> =>
+            hb_maps:get(<<"ak-pub-pem">>, Tpm, <<>>, #{}),
+        <<"ak-hierarchy">> =>
+            hb_maps:get(<<"ak-hierarchy">>, Tpm, null, #{}),
+        <<"tpm-session-mode">> =>
+            hb_maps:get(<<"tpm-session-mode">>, Tpm, null, #{}),
+        <<"runtime-event-log">> =>
+            hb_maps:get(<<"runtime-event-log">>, Tpm, [], #{}),
+        <<"tcg-event-log">> =>
+            hb_maps:get(<<"tcg-event-log">>, Tpm, <<>>, #{}),
+        <<"tcg-event-log-source-path">> =>
+            hb_maps:get(<<"tcg-event-log-source-path">>, Tpm, null, #{}),
+        <<"tcg-event-log-length-bytes">> =>
+            hb_maps:get(<<"tcg-event-log-length-bytes">>, Tpm, null, #{}),
+        <<"tcg-event-log-format">> =>
+            hb_maps:get(<<"tcg-event-log-format">>, Tpm, null, #{})
+    }.
+
+message_human_id(Msg) when is_map(Msg) ->
+    try hb_util:human_id(hb_message:id(Msg, all, #{}))
+    catch _:_ -> null
+    end;
+message_human_id(_) -> null.
+
+system_platform_probes(System) ->
+    Kernel = hb_maps:get(<<"kernel">>, System, #{}, #{}),
+    Cpu = hb_maps:get(<<"cpu">>, System, #{}, #{}),
+    CpuInfo = hb_maps:get(<<"cpuinfo">>, Cpu, #{}, #{}),
+    FirstCpu = hb_maps:get(<<"first-processor">>, CpuInfo, #{}, #{}),
+    Firmware = hb_maps:get(<<"firmware">>, System, #{}, #{}),
+    Dmi = hb_maps:get(<<"dmi">>, Firmware, #{}, #{}),
+    DmiFields = hb_maps:get(<<"fields">>, Dmi, #{}, #{}),
+    Iommu = hb_maps:get(<<"iommu">>, System, #{}, #{}),
+    Integrity = hb_maps:get(<<"integrity">>, System, #{}, #{}),
+    #{
+        <<"cpuinfo">> => FirstCpu,
+        <<"kernel-cmdline">> =>
+            hb_maps:get(<<"cmdline">>, Kernel, null, #{}),
+        <<"lockdown">> =>
+            hb_maps:get(<<"lockdown">>, Integrity, null, #{}),
+        <<"iommu-groups-count">> =>
+            hb_maps:get(<<"group-count">>, Iommu, null, #{}),
+        <<"dmi-sys-vendor">> =>
+            hb_maps:get(<<"sys-vendor">>, DmiFields, null, #{}),
+        <<"dmi-product-name">> =>
+            hb_maps:get(<<"product-name">>, DmiFields, null, #{}),
+        <<"dmi-board-name">> =>
+            hb_maps:get(<<"board-name">>, DmiFields, null, #{}),
+        <<"dmi-bios-version">> =>
+            hb_maps:get(<<"bios-version">>, DmiFields, null, #{}),
+        <<"dmi-bios-release">> =>
+            hb_maps:get(<<"bios-release">>, DmiFields, null, #{})
+    }.
 
 %% Reviewer pass 10 fuzzer: three sites read `platform-probes'
 %% as a map and then index into it. An adversarial envelope that
@@ -968,6 +1077,7 @@ interpret_envelope(E, Opts) ->
     Kernel = interpret_kernel(E, Db, Pcrs),
     Ima = interpret_ima(E, Db, Pcrs),
     Node = interpret_node(E),
+    System = interpret_system(E),
     Env = interpret_envelope_meta(E),
     Claim = interpret_claim(Events, E, Db),
     #{
@@ -980,6 +1090,7 @@ interpret_envelope(E, Opts) ->
         <<"kernel">>   => Kernel,
         <<"ima">>      => Ima,
         <<"node">>     => Node,
+        <<"system">>   => System,
         <<"events">>   => Events,
         <<"claim">>    => Claim
     }.
@@ -1230,6 +1341,7 @@ interpret_claim_body(Events, EvList, E, Db, Context) ->
         <<"boot-chain">>         => claim_boot_chain(EvList, Db),
         <<"kernel">>             => claim_kernel(EvList, E),
         <<"cpu">>                => claim_cpu(EvList, E, Db),
+        <<"system">>             => claim_system(E),
         <<"shim">>               => claim_shim(EvList),
         %% Paper section Architecture -- the quote itself carries freshness
         %% (reset-count / restart-count / clock-ms), TPM firmware
@@ -3036,6 +3148,8 @@ collect_policy_signals(Claim, Envelope) ->
             length(maps:get(<<"known-cves">>, TPM, [])),
         <<"tme-enabled">> =>
             maps:get(<<"enabled">>, TME, <<"unknown">>),
+        <<"tme-operator-override">> =>
+            tme_operator_override(TME),
         %% v1.2.2 paper P3: AK under Endorsement hierarchy gives
         %% the verifier cryptographic knowledge that AK and EK
         %% share a primary seed -> same physical TPM. Envelope
@@ -3121,7 +3235,9 @@ collect_policy_signals(Claim, Envelope) ->
         %% The critical end-to-end binding the paper asks for:
         %% the HB operator wallet (which signs every AO-Core
         %% result) must be provably linked to the TPM's
-        %% measured-boot session. Chain:
+        %% measured-boot session. Legacy envelopes bind the node
+        %% message directly; boot-attestation envelopes bind the
+        %% whole subject #{system,node}. Chain:
         %%
         %%   wallet W  \in  node-message
         %%        |
@@ -3143,11 +3259,10 @@ collect_policy_signals(Claim, Envelope) ->
         %; produced by a LapEE-bound key ... the chain binds the
         %; transcript to the boot conditional on A1."
         %%
-        %% Verifier: re-compute hb_message:id(node-message) and
-        %% confirm it matches node-message-id, then check that
-        %; wallet-address is a value inside node-message, then
-        %; check that a PCR-15 event carries the decoded node-
-        %; message-id as its digest. All three must hold.
+        %% Verifier: re-compute the attested message ID and confirm
+        %% it matches the declared ID, then check that wallet-address
+        %; is a value inside node-message, then check that a PCR-15
+        %; event carries the same digest. All three must hold.
         <<"wallet-tpm-binding-verified">> =>
             verify_wallet_tpm_binding(Envelope)
     }.
@@ -3460,6 +3575,16 @@ tme_finding(#{<<"tme-enabled">> := <<"unknown">>}) ->
             <<"TME state could not be determined; no "
               "tier-2/3/4/5 evidence fired.">>);
 tme_finding(_) -> ok.
+
+tme_operator_override(TME) ->
+    Evidence = maps:get(<<"enabled-evidence">>, TME, []),
+    lists:any(
+        fun
+            ({<<"operator-override">>, <<"LAPEE_NO_TME">>}) -> true;
+            ([<<"operator-override">>, <<"LAPEE_NO_TME">>]) -> true;
+            (_) -> false
+        end,
+        Evidence).
 
 runtime_driver_finding(#{<<"has-runtime-driver">> := true}) ->
     finding(warn, <<"boot-chain-has-runtime-driver">>,
@@ -3896,19 +4021,55 @@ verify_ak_pubkey_extend(E) ->
 %%
 %% Returns:
 %%   true           all three sub-checks hold:
-%;                  (a) node-message-id == hb_message:id(node-message)
-%;                      (recomputed by the verifier from node-message)
+%;                  (a) attested-id == hb_message:id(attested-message)
+%;                      (legacy node-message or boot-subject)
 %;                  (b) wallet-address appears as a value inside
 %;                      node-message (direct or nested)
 %;                  (c) a runtime event on PCR 15 carries the
-%;                      decoded node-message-id as its digest
-%;                      (same check the producer self-verification
-%;                      chk_binding/1 performs)
+%;                      attested-message digest
 %;   false          envelope has all inputs but at least one check
 %;                  failed
 %;   <<"unknown">>  envelope missing wallet-address, node-message,
-%;                  node-message-id, or runtime-event-log
+%;                  attested-message-id, or runtime-event-log
 verify_wallet_tpm_binding(E) ->
+    case hb_maps:get(<<"boot-subject">>, E, undefined, #{}) of
+        Subject when is_map(Subject) ->
+            verify_boot_subject_tpm_binding(E, Subject);
+        _ ->
+            verify_node_message_tpm_binding(E)
+    end.
+
+verify_boot_subject_tpm_binding(E, Subject) ->
+    Wallet = hb_maps:get(<<"wallet-address">>, E, null, #{}),
+    NodeMap = hb_maps:get(<<"node">>, Subject,
+                          hb_maps:get(<<"node-message">>, E,
+                                      undefined, #{}), #{}),
+    ClaimedId = hb_maps:get(<<"boot-subject-id">>, E, null, #{}),
+    ClaimedDigest = hb_maps:get(<<"boot-subject-digest">>, E, null, #{}),
+    Log = hb_maps:get(<<"runtime-event-log">>, E, [], #{}),
+    case {Wallet, NodeMap, ClaimedId, Log} of
+        {null, _, _, _}       -> <<"unknown">>;
+        {_, undefined, _, _}  -> <<"unknown">>;
+        {_, _, null, _}       -> <<"unknown">>;
+        {_, _, _, []}         -> <<"unknown">>;
+        {W, Nm, Id, Events}
+            when is_map(Nm), is_binary(W), is_binary(Id) ->
+            SubjectIds = message_id_candidates(Subject),
+            IdMatchesHash = id_value_matches_any(Id, SubjectIds),
+            WalletInNm = map_contains_value(Nm, W),
+            IdInLog = boot_subject_event_matches(
+                Events,
+                SubjectIds,
+                [ClaimedDigest, Id]
+            ),
+            case {IdMatchesHash, WalletInNm, IdInLog} of
+                {true, true, true} -> true;
+                _                  -> false
+            end;
+        _ -> <<"unknown">>
+    end.
+
+verify_node_message_tpm_binding(E) ->
     Wallet = hb_maps:get(<<"wallet-address">>, E, null, #{}),
     Nm     = hb_maps:get(<<"node-message">>, E, undefined, #{}),
     Id     = hb_maps:get(<<"node-message-id">>, E, null, #{}),
@@ -3923,16 +4084,10 @@ verify_wallet_tpm_binding(E) ->
             %% (a) Recompute hb_message:id(node-message) and
             %; compare to the declared node-message-id.
             IdMatchesHash =
-                try
-                    %% hb_message:id returns the native (raw) id.
-                    %; Envelope carries the human_id form.
-                    Native = hb_message:id(NodeMap, all, #{}),
-                    Human = hb_util:human_id(Native),
-                    Human =:= ClaimedId
-                        orelse Native =:= ClaimedId
-                        orelse hb_util:encode(Native) =:= ClaimedId
-                catch _:_ -> false
-                end,
+                id_value_matches_any(
+                    ClaimedId,
+                    message_id_candidates(NodeMap)
+                ),
             %% (b) Wallet must appear somewhere in node-message.
             WalletInNm = map_contains_value(NodeMap, W),
             %% (c) Runtime log has PCR-15 event whose digest
@@ -3959,8 +4114,113 @@ verify_wallet_tpm_binding(E) ->
                 {true, true, true} -> true;
                 _                  -> false
             end;
-        _ -> <<"unknown">>
+	        _ -> <<"unknown">>
+	    end.
+
+boot_subject_event_matches(Events, SubjectIds, DigestValues) ->
+    DigestCandidates = raw_digest_candidates(SubjectIds ++ DigestValues),
+    lists:any(
+        fun(Ev) ->
+            is_map(Ev)
+                andalso ev_pcr(Ev) =:= 15
+                andalso
+                    maps:get(<<"event-type">>, Ev, <<>>) =:=
+                        <<"EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT">>
+                andalso event_subject_id_matches(Ev, SubjectIds)
+                andalso event_digest_matches(Ev, DigestCandidates)
+        end,
+        Events
+    ).
+
+event_subject_id_matches(Ev, SubjectIds) ->
+    case maps:get(<<"subject-id">>, Ev, null) of
+        null -> false;
+        SubjectId -> id_value_matches_any(SubjectId, SubjectIds)
     end.
+
+event_digest_matches(Ev, DigestCandidates) ->
+    case maps:get(<<"digest">>, Ev, <<>>) of
+        <<>> -> false;
+        Digest -> raw_value_matches_any(Digest, DigestCandidates)
+    end.
+
+message_id_candidates(Msg) when is_map(Msg) ->
+    try
+        ID = hb_message:id(Msg, all, #{}),
+        Native = hb_util:native_id(ID),
+        unique_binaries([ID, Native, hb_util:human_id(ID),
+                         hb_util:encode(Native)])
+    catch _:_ -> []
+    end;
+message_id_candidates(_) -> [].
+
+id_value_matches_any(Value, Candidates) when is_binary(Value) ->
+    lists:any(fun(Candidate) -> id_value_matches(Value, Candidate) end,
+              Candidates);
+id_value_matches_any(_, _) -> false.
+
+id_value_matches(A, B) when is_binary(A), is_binary(B) ->
+    A =:= B orelse raw_value_matches_any(A, raw_digest_candidates([B]));
+id_value_matches(_, _) -> false.
+
+raw_value_matches_any(Value, Candidates) when is_binary(Value) ->
+    lists:any(fun(Candidate) -> raw_value_matches(Value, Candidate) end,
+              Candidates);
+raw_value_matches_any(_, _) -> false.
+
+raw_value_matches(A, B) when is_binary(A), is_binary(B) ->
+    case {raw_digest_candidates([A]), raw_digest_candidates([B])} of
+        {[], _} -> false;
+        {_, []} -> false;
+        {As, Bs} ->
+            lists:any(fun(X) -> lists:member(X, Bs) end, As)
+    end;
+raw_value_matches(_, _) -> false.
+
+raw_digest_candidates(Values) ->
+    unique_binaries(lists:flatmap(fun raw_digest_candidates1/1, Values)).
+
+raw_digest_candidates1(V) when is_binary(V) ->
+    Direct =
+        case byte_size(V) of
+            32 -> [V];
+            _ -> []
+        end,
+    Decoded =
+        try
+            D = hb_util:decode(V),
+            case byte_size(D) of
+                32 -> [D];
+                _ -> []
+            end
+        catch _:_ -> []
+        end,
+    Native =
+        try
+            N = hb_util:native_id(V),
+            case byte_size(N) of
+                32 -> [N];
+                _ -> []
+            end
+        catch _:_ -> []
+        end,
+    Direct ++ Decoded ++ Native;
+raw_digest_candidates1(_) -> [].
+
+unique_binaries(Values) ->
+    lists:reverse(
+        lists:foldl(
+            fun(V, Acc) when is_binary(V) ->
+                    case lists:member(V, Acc) of
+                        true -> Acc;
+                        false -> [V | Acc]
+                    end;
+               (_, Acc) -> Acc
+            end,
+            [],
+            Values
+        )
+    ).
 
 %% Recursive search for a value in a HyperBEAM-style map. Returns
 %% true iff `Target' appears as a leaf binary, list element, or
@@ -5938,10 +6198,10 @@ cmdline_from_events_or_runtime(Events, E) ->
           ipl_kv_matches(Events, <<"kernel-cmdline">>),
     case Evs of
         [] -> runtime_cmdline_and_flags(E);
-        [E | _] ->
-            Cmdline = nested(E, [<<"parsed">>, <<"value">>], <<"unknown">>),
-            Flags = nested(E, [<<"parsed">>, <<"cmdline-flags">>], #{}),
-            {Cmdline, Flags, [event_provenance(E)]}
+        [Ev | _] ->
+            Cmdline = nested(Ev, [<<"parsed">>, <<"value">>], <<"unknown">>),
+            Flags = nested(Ev, [<<"parsed">>, <<"cmdline-flags">>], #{}),
+            {Cmdline, Flags, [event_provenance(Ev)]}
     end.
 
 runtime_cmdline_and_flags(E) ->
@@ -8029,7 +8289,17 @@ interpret_node(E) ->
         <<"pcr15-event-types">> =>
             [hb_maps:get(<<"event-type">>, Ev, null, #{})
              || Ev <- Pcr15Events]
-    }.
+	    }.
+
+interpret_system(E) ->
+    hb_maps:get(<<"system">>, E, #{}, #{}).
+
+claim_system(E) ->
+    System = interpret_system(E),
+    case is_map(System) of
+        true -> System;
+        false -> #{}
+    end.
 
 int_pcr(V) when is_integer(V) -> V;
 int_pcr(V) when is_binary(V)  -> binary_to_integer(V);
@@ -10693,15 +10963,17 @@ v1_2_freshness_safe_false_first_boot_warns_test() ->
     ?assertEqual(<<"freshness-safe-false-first-boot">>,
                  maps:get(<<"code">>, F)).
 
-v1_2_freshness_safe_false_tamper_stays_critical_test() ->
-    %% Non-first-boot TPM (> 1 reset AND > 1 restart) with safe=false
-    %% -- this IS the tamper pattern.
+v1_2_freshness_safe_false_stale_counters_warns_test() ->
+    %% LapEE does not issue TPM2_Shutdown(STATE) at node shutdown, so
+    %% plausible non-first-boot counters with safe=false are expected
+    %% on appliance power cycles. This remains visible, but is not a
+    %% critical failure when the quote carries a fresh nonce.
     S = #{<<"freshness-indicator">> => <<"safe-false">>,
           <<"reset-count">>         => 5,
           <<"restart-count">>       => 17},
     F = freshness_finding(S),
-    ?assertEqual(critical, maps:get(<<"severity">>, F)),
-    ?assertEqual(<<"freshness-safe-false">>,
+    ?assertEqual(warn, maps:get(<<"severity">>, F)),
+    ?assertEqual(<<"freshness-safe-false-stale-counters">>,
                  maps:get(<<"code">>, F)).
 
 v1_2_freshness_safe_false_missing_counts_is_critical_test() ->

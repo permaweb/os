@@ -56,7 +56,7 @@ console_path()     -> os:getenv("LAPEE_CONSOLE",     "/dev/console").
 primary_net_path() -> os:getenv("LAPEE_PRIMARY_NET", "/run/lapee/primary-net").
 probe_host()       -> os:getenv("LAPEE_PROBE_HOST",  "127.0.0.1").
 probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
-probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm2@2.0a/info").
+probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm@2.0a/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 status_path()      -> os:getenv("LAPEE_STATUS",      "/run/lapee/status").
 
@@ -271,7 +271,7 @@ trim_status(Text0) ->
 %%
 %% Speaks HTTP/1.0 over a raw gen_tcp connection rather than going
 %% through inets/httpc. The probe URL contains both `~' and `@'
-%% (e.g. `/~tpm2@2.0a/info'); httpc URL parsing throws on that pair
+%% (e.g. `/~tpm@2.0a/info'); httpc URL parsing throws on that pair
 %% under OTP 27. Raw gen_tcp has no URL parser to throw at all.
 hb_ready() ->
     Host = probe_host(),

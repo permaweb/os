@@ -3,11 +3,11 @@
 %%%
 %%% This device is the software-layer of the LapEE (Laptop Execution
 %%% Environment) appliance architecture. At node startup, the `on.start'
-%%% hook invokes `extend' with the running node message as its subject.
-%%% The digest of the subject is fed to `TPM2_PCR_Extend' (PCR 15 by
-%%% default), binding this specific boot of the node -- with this wallet,
-%%% this `trusted_signers' set, this device map -- to a measurement the
-%%% TPM can later quote.
+%%% hook invokes `boot-attestation'. The device gathers the neutral
+%%% `~system@1.0/all' report and the public `~meta@1.0/info' node
+%%% message, extends PCR 15 with that combined subject's AO-Core ID,
+%%% quotes the selected PCR set, signs the resulting boot-attestation
+%%% message, and caches it under a stable pseudo-path.
 %%%
 %%% Any party can then request `attestation', which returns a signed
 %%% envelope containing:
@@ -27,7 +27,8 @@
 %%% `(Base, Req, Opts)', exports map), standard error returns, and
 %%% integration with AO-Core hook dispatch.
 -module(dev_tpm2).
--export([info/1, info/3, extend/3, quote/3, pcr_read/3, attestation/3]).
+-export([info/1, info/3, extend/3, quote/3, pcr_read/3,
+         attestation/3, boot_attestation/3]).
 -export([verify/3]).
 -export([event_log/1]).
 -include("include/hb.hrl").
@@ -38,6 +39,7 @@
 -define(NODE_IDENTITY_PCR, 15).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
+-define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
 
 %%%============================================================================
 %%% Device API information
@@ -53,6 +55,7 @@ info(_) ->
                 <<"quote">>,
                 <<"pcr-read">>,
                 <<"attestation">>,
+                <<"boot-attestation">>,
                 <<"verify">>
             ]
     }.
@@ -125,6 +128,15 @@ info(_Base, _Req, _Opts) ->
                         <<"Optional nonce. Typical usage: consumer provides "
                           "a random nonce to prove freshness.">>
                 }
+            },
+            <<"boot-attestation">> => #{
+                <<"description">> =>
+                    <<"Produce or return the singleton boot attestation. "
+                      "The first call gathers ~system@1.0/all and "
+                      "~meta@1.0/info, extends PCR 15 with their combined "
+                      "subject ID, quotes the selected PCRs, signs the full "
+                      "message, stores it by signed ID, and links the stable "
+                      "boot-attestation path to that signed ID.">>
             }
         }
     },
@@ -497,9 +509,6 @@ trust_anchor_source(Req, _Opts, _Pem) ->
 %% Wrap any check in a try/catch so one misformed field doesn't take
 %% down the whole verifier -- the relevant check just becomes `ok=false,
 %% detail=<exception info>'.
-safely_run(F, Name) ->
-    safely_run(F, Name, <<"core">>).
-
 safely_run(F, Name, Severity) ->
     try F() of
         {ok, Detail}    -> #{ <<"name">> => Name,
@@ -1235,13 +1244,6 @@ read_tcg_event_log_with_source() ->
     ],
     read_first_available_with_source(Paths).
 
-read_first_available([]) -> <<>>;
-read_first_available([Path | Rest]) ->
-    case file:read_file(binary_to_list(Path)) of
-        {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 -> Bin;
-        _ -> read_first_available(Rest)
-    end.
-
 read_first_available_with_source([]) ->
     {<<>>, <<"unavailable">>};
 read_first_available_with_source([Path | Rest]) ->
@@ -1280,6 +1282,163 @@ infer_log_format(Bin) ->
         Pcr =/= 0 andalso IsSpecId -> <<"tdx-ccel">>;
         IsSpecId                    -> <<"crypto-agile">>;
         true                        -> <<"legacy-sha1">>
+    end.
+
+%%%============================================================================
+%%% boot-attestation/3
+%%%============================================================================
+
+boot_attestation(_Base, _Req, Opts) ->
+    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
+        {ok, Msg} ->
+            {ok, #{<<"status">> => 200, <<"body">> => Msg}};
+        _ ->
+            global:trans(
+                {dev_tpm2, boot_attestation},
+                fun() -> boot_attestation_locked(Opts) end,
+                [node()])
+    end.
+
+boot_attestation_locked(Opts) ->
+    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
+        {ok, Msg} ->
+            {ok, #{<<"status">> => 200, <<"body">> => Msg}};
+        _ ->
+            case generate_boot_attestation(Opts) of
+                {ok, Signed} ->
+                    SignedID = hb_message:id(Signed, signed, Opts),
+                    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
+                    ok = hb_cache:link(SignedID, ?BOOT_ATTESTATION_PATH, Opts),
+                    {ok, #{<<"status">> => 200, <<"body">> => Signed}};
+                {error, Reason} ->
+                    error_resp(500, <<"boot_attestation_failed">>, Reason)
+            end
+    end.
+
+generate_boot_attestation(Opts) ->
+    with_ok(
+        fun() ->
+            System = resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts)),
+            Node0 = resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts)),
+            Node = ensure_committed(Node0, Opts),
+            Subject = #{
+                <<"system">> => System,
+                <<"node">> => Node
+            },
+            SubjectID = hb_message:id(Subject, all, Opts),
+            SubjectDigest = hb_util:native_id(SubjectID),
+            Tpm = boot_tpm_evidence(SubjectID, SubjectDigest, Opts),
+            hb_message:commit(
+                Subject#{
+                    <<"version">> => <<"1.0">>,
+                    <<"issued-at-unix">> => erlang:system_time(second),
+                    <<"tpm">> => Tpm
+                },
+                Opts)
+        end).
+
+with_ok(Fun) ->
+    try
+        {ok, Fun()}
+    catch
+        throw:{boot_attestation_error, Reason} ->
+            {error, Reason};
+        Class:Reason:Stacktrace ->
+            {error, #{
+                <<"class">> => to_bin(Class),
+                <<"reason">> => to_bin(Reason),
+                <<"stacktrace">> =>
+                    iolist_to_binary(io_lib:format("~p", [Stacktrace]))
+            }}
+    end.
+
+resolve_body({ok, #{<<"body">> := Body}}) ->
+    Body;
+resolve_body({ok, Msg}) ->
+    Msg;
+resolve_body({error, Reason}) ->
+    throw({boot_attestation_error, Reason});
+resolve_body(Other) ->
+    throw({boot_attestation_error, Other}).
+
+ensure_committed(Msg, Opts) when is_map(Msg) ->
+    case hb_message:signers(Msg, Opts) of
+        [] -> hb_message:commit(Msg, Opts);
+        _ -> Msg
+    end;
+ensure_committed(Msg, _Opts) ->
+    Msg.
+
+boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
+    Pcrs = ?DEFAULT_QUOTE_PCRS,
+    Nonce = crypto:strong_rand_bytes(32),
+    case ensure_ak(Opts) of
+        {ok, AkTr} ->
+            ok = extend_boot_subject(SubjectID, SubjectDigest),
+            case nif_quote(AkTr, Pcrs, Nonce) of
+                {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
+                    {TcgLogBin, TcgLogSource} =
+                        read_tcg_event_log_with_source(),
+                    #{
+                        <<"extended-subject">> => SubjectID,
+                        <<"extended-subject-digest">> =>
+                            hb_util:encode(SubjectDigest),
+                        <<"extended-pcr">> => ?NODE_IDENTITY_PCR,
+                        <<"ek-cert-pem">> => ek_cert_pem(Opts),
+                        <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
+                        <<"ek-cert-source">> => ek_cert_source(),
+                        <<"tpm-properties">> => tpm_properties(),
+                        <<"ak-pub-pem">> => ak_pub_pem(Opts),
+                        <<"ak-hierarchy">> => <<"endorsement">>,
+                        <<"tpm-session-mode">> =>
+                            <<"hmac-aes128cfb">>,
+                        <<"quote">> => #{
+                            <<"pcr-selection">> => Pcrs,
+                            <<"nonce">> => hb_util:encode(Nonce),
+                            <<"quoted">> => hb_util:encode(Q),
+                            <<"signature">> => hb_util:encode(Sig),
+                            <<"pcr-values">> =>
+                                maps:from_list(
+                                    [{integer_to_binary(I),
+                                      hb_util:encode(V)}
+                                     || {I, V} <- maps:to_list(PcrMap)])
+                        },
+                        <<"runtime-event-log">> => event_log(Opts),
+                        <<"tcg-event-log">> => hb_util:encode(TcgLogBin),
+                        <<"tcg-event-log-source-path">> => TcgLogSource,
+                        <<"tcg-event-log-length-bytes">> =>
+                            byte_size(TcgLogBin),
+                        <<"tcg-event-log-format">> =>
+                            infer_log_format(TcgLogBin)
+                    };
+                {error, Reason} ->
+                    throw({boot_attestation_error,
+                           #{<<"quote">> => reason_to_text(Reason)}})
+            end;
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"ak">> => reason_to_text(Reason)}})
+    end.
+
+extend_boot_subject(SubjectID, SubjectDigest) ->
+    case nif_pcr_extend(?NODE_IDENTITY_PCR, SubjectDigest) of
+        ok ->
+            _ = append_event(?NODE_IDENTITY_PCR,
+                #{
+                    <<"event-type">> =>
+                        <<"EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT">>,
+                    <<"description">> =>
+                        <<"AO-Core boot attestation subject extended into "
+                          "PCR 15. The subject ID commits to the nested "
+                          "`system' report and signed `node' message.">>,
+                    <<"digest">> => hb_util:encode(SubjectDigest),
+                    <<"subject-id">> => SubjectID,
+                    <<"subject-is-message">> => true
+                }),
+            ok;
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"pcr-extend">> => reason_to_text(Reason)}})
     end.
 
 
@@ -1749,7 +1908,12 @@ to_bin(T) -> iolist_to_binary(io_lib:format("~p", [T])).
 %% absent / unreadable. Unknown paths do NOT fail the whole probe
 %% pass -- a partial snapshot is still useful.
 capture_platform_probes() ->
-    Probes = #{
+    Probes = live_platform_probes(),
+    persistent_term:put({dev_tpm2, platform_probes}, Probes),
+    ok.
+
+live_platform_probes() ->
+    #{
         cpuinfo          => read_cpuinfo_stanza(),
         lockdown         => read_trim(
             <<"/sys/kernel/security/lockdown">>),
@@ -1766,26 +1930,6 @@ capture_platform_probes() ->
             <<"/sys/class/dmi/id/bios_version">>),
         dmi_bios_release => read_trim(
             <<"/sys/class/dmi/id/bios_release">>),
-        %% v1.2 review addendum: three runtime-visible signals
-        %% that strengthen the claim without changing the threat
-        %% model:
-        %%
-        %%   kernel-cmdline  verbatim /proc/cmdline so the
-        %%                    verifier can cross-check claim
-        %%                    flags (iommu=, lockdown=, ...)
-        %%                    against ground truth.
-        %%
-        %%   secure-boot     1-byte data octet from the SecureBoot
-        %%                    EFI variable (GUID constant per
-        %%                    UEFI spec 2.10 Table 3-1). 0x01 =
-        %%                    enabled, 0x00 = disabled, null if
-        %%                    the firmware isn't UEFI / efivarfs
-        %%                    isn't mounted.
-        %%
-        %%   tpm-version-major  /sys/class/tpm/tpm0/tpm_version_major
-        %%                       (1 or 2; complements the
-        %%                        TPM2_GetCapability spec-family
-        %%                        field).
         kernel_cmdline     => read_trim(<<"/proc/cmdline">>),
         secure_boot        => read_secure_boot_state(),
         tpm_version_major  => read_trim(
@@ -1794,9 +1938,7 @@ capture_platform_probes() ->
             <<"/sys/kernel/security/integrity/ima/"
               "runtime_measurements_count">>),
         probed_at_unix     => erlang:system_time(second)
-    },
-    persistent_term:put({dev_tpm2, platform_probes}, Probes),
-    ok.
+    }.
 
 %% Read the one-byte data octet from the EFI SecureBoot variable.
 %% The efivarfs file layout is `<attributes:4><data:N>', where N=1
