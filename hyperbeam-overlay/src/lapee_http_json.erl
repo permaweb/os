@@ -10,17 +10,17 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-get(BaseURL, Path, _Opts) ->
-    request(get, BaseURL, Path, undefined).
+get(BaseURL, Path, Opts) ->
+    request(get, BaseURL, Path, undefined, Opts).
 
-post(BaseURL, Path, Body, _Opts) ->
-    request(post, BaseURL, Path, Body).
+post(BaseURL, Path, Body, Opts) ->
+    request(post, BaseURL, Path, Body, Opts).
 
-request(Method, BaseURL, Path, Body) ->
+request(Method, BaseURL, Path, Body, Opts) ->
     URL = url_parts(BaseURL, Path),
-    Socket = connect(URL),
+    Socket = connect(URL, Opts),
     ok = gen_tcp:send(Socket, request_bytes(Method, URL, Body)),
-    Response = recv_all(Socket, []),
+    Response = recv_all(Socket, [], recv_timeout(Opts)),
     gen_tcp:close(Socket),
     parse_response(Response).
 
@@ -43,17 +43,34 @@ url_parts(BaseURL, Path) ->
         end,
     #{host => Host, port => Port, path => RequestPath}.
 
-connect(#{host := Host, port := Port}) ->
+connect(#{host := Host, port := Port}, Opts) ->
     case gen_tcp:connect(
         binary_to_list(Host),
         Port,
         [binary, {packet, raw}, {active, false}],
-        5000
+        connect_timeout(Opts)
     ) of
         {ok, Socket} -> Socket;
         {error, Reason} ->
             throw({lapee_http_json_error,
-                   #{<<"connect">> => hb_util:bin(Reason)}})
+                  #{<<"connect">> => hb_util:bin(Reason)}})
+    end.
+
+connect_timeout(Opts) ->
+    timeout_opt(<<"peer-http-connect-timeout-ms">>, 10000, Opts).
+
+recv_timeout(Opts) ->
+    timeout_opt(<<"peer-http-timeout-ms">>, 120000, Opts).
+
+timeout_opt(Key, Default, Opts) ->
+    case hb_opts:get(Key, Default, Opts) of
+        N when is_integer(N), N > 0 -> N;
+        B when is_binary(B) ->
+            try binary_to_integer(B) of
+                N when N > 0 -> N
+            catch _:_ -> Default
+            end;
+        _ -> Default
     end.
 
 request_bytes(get, URL, _Body) ->
@@ -86,9 +103,9 @@ request_head(Method, #{host := Host, port := Port, path := Path}, Extra) ->
         <<"\r\n">>
     ].
 
-recv_all(Socket, Acc) ->
-    case gen_tcp:recv(Socket, 0, 15000) of
-        {ok, Chunk} -> recv_all(Socket, [Chunk | Acc]);
+recv_all(Socket, Acc, Timeout) ->
+    case gen_tcp:recv(Socket, 0, Timeout) of
+        {ok, Chunk} -> recv_all(Socket, [Chunk | Acc], Timeout);
         {error, closed} -> iolist_to_binary(lists:reverse(Acc));
         {error, Reason} ->
             throw({lapee_http_json_error,

@@ -338,11 +338,86 @@ Validation evidence at `2026-05-02 04:24:12 EDT`:
   passes.
 - `git diff --check` passes.
 
-Remaining environment blockers in this Codex desktop sandbox:
+Earlier environment blockers, superseded by Update 11:
 
-- `make buildroot JOBS=18` still cannot connect to Docker:
+- An earlier `make buildroot JOBS=18` attempt could not connect to Docker:
   `permission denied while trying to connect to the docker API at unix:///Users/sam/.docker/run/docker.sock`.
-- The four-node QEMU harness still fails before node boot because `swtpm`
+- An earlier four-node QEMU harness attempt failed before node boot because `swtpm`
   cannot create its UnixIO socket here:
   `!! swtpm failed for node 1` /
   `Could not open UnixIO socket: Operation not permitted`.
+
+## Update 11
+
+The four-node TPM-backed green-zone acceptance gate now passes end-to-end in
+this environment.
+
+Fixes made in this checkpoint:
+
+- `TPM2_MakeCredential` now loads the peer EK as a public-only external object
+  with `inPrivate = NULL` and `TPM_RH_NULL`. Passing an empty sensitive area
+  caused swtpm/ESYS to reject the peer EK load with
+  `Esys_LoadExternal(peer EK public): 0x0009000b`.
+- Green-zone templates are now canonicalized before storage/matching by
+  removing AO envelope metadata keys (`commitments`, `ao-types`) recursively.
+  Response commitments are transport/provenance metadata, not ring policy.
+- Template rejection responses include `mismatch-path`, which made the
+  inadmissible QEMU node's rejection externally inspectable as
+  `/system/kernel/cmdline`.
+- The local HTTP JSON client now uses configurable long receive timeouts
+  (`peer-http-timeout-ms`, default 120s) so TPM-heavy peer admission does not
+  fail during legitimate MakeCredential/ActivateCredential work.
+- The QEMU harness now checks for the ring wallet address as a HyperBEAM
+  commitment `committer`, including nested signed-message response shapes.
+
+Acceptance evidence at `2026-05-02 05:01 EDT`:
+
+```text
+$ rm -f build/images/lapee-usb-no-tme.img \
+    build/images/lapee-usb-no-tme-bad-ring.img
+$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
+>> node 1 ready
+>> node 2 ready
+>> node 3 ready
+>> node 4 ready
+>> node 1 initialized green-zone 2mSXuqxRI3m6WmRANgtw3vOku28Yns2FfMGX3Vi3j28
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone 2mSXuqxRI3m6WmRANgtw3vOku28Yns2FfMGX3Vi3j28
+>> node 2 signed as green-zone 2mSXuqxRI3m6WmRANgtw3vOku28Yns2FfMGX3Vi3j28
+>> node 3 signed as green-zone 2mSXuqxRI3m6WmRANgtw3vOku28Yns2FfMGX3Vi3j28
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: 2mSXuqxRI3m6WmRANgtw3vOku28Yns2FfMGX3Vi3j28
+```
+
+Focused verification after the acceptance run:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 8 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 28 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+```

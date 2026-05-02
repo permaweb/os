@@ -27,6 +27,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(DEFAULT_IDENTITY, <<"green-zone">>).
+-define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
 
 info(_) ->
     #{
@@ -72,8 +73,9 @@ status(_Base, _Req, Opts) ->
 
 match(_Base, Req, Opts) ->
     with_result(fun() ->
-        Template = hb_maps:get(<<"template">>, Req, template_from(Req, Opts),
-                               Opts),
+        Template = clean_template(
+            hb_maps:get(<<"template">>, Req, template_from(Req, Opts), Opts),
+            Opts),
         Candidate = hb_maps:get(<<"candidate">>, Req, undefined, Opts),
         #{
             <<"matched">> => match_template(Template, Candidate, Opts),
@@ -92,6 +94,8 @@ admit(_Base, Req, Opts) ->
             false ->
                 throw({green_zone_error, #{
                     <<"error">> => <<"template-mismatch">>,
+                    <<"mismatch-path">> =>
+                        mismatch_path(Template, Boot, Opts),
                     <<"joiner-url">> => JoinerURL
                 }})
         end,
@@ -171,12 +175,13 @@ ensure_committed(Msg, _Opts) ->
     Msg.
 
 template_from(Req, Opts) ->
-    hb_maps:get(
-        <<"template">>,
-        Req,
-        hb_opts:get(<<"green-zone-template">>, #{}, Opts),
-        Opts
-    ).
+    clean_template(
+        hb_maps:get(
+            <<"template">>,
+            Req,
+            hb_opts:get(<<"green-zone-template">>, #{}, Opts),
+            Opts),
+        Opts).
 
 existing_or_new_aes(Req, Opts) ->
     case hb_maps:get(<<"aes-key">>, Req, undefined, Opts) of
@@ -200,7 +205,8 @@ existing_or_new_wallet(Req, Opts) ->
             )
     end.
 
-install_ring(Template, AES, Wallet, Opts) ->
+install_ring(Template0, AES, Wallet, Opts) ->
+    Template = clean_template(Template0, Opts),
     Identities = hb_opts:get(identities, #{}, Opts),
     Opts#{
         <<"green-zone-template">> => Template,
@@ -556,6 +562,48 @@ match_template(<<"$any">>, _Candidate, _Opts) -> true;
 match_template(Expected, Expected, _Opts) -> true;
 match_template(_Expected, _Candidate, _Opts) -> false.
 
+clean_template(Template, Opts) when is_map(Template) ->
+    maps:from_list(
+        [
+            {Key, clean_template(Value, Opts)}
+         || {Key, Value} <- hb_maps:to_list(Template, Opts),
+            not lists:member(Key, ?TEMPLATE_META_KEYS)
+        ]);
+clean_template(Template, _Opts) ->
+    Template.
+
+mismatch_path(Template, Candidate, Opts) ->
+    case mismatch_path(Template, Candidate, [], Opts) of
+        [] -> <<"/">>;
+        Path -> iolist_to_binary(["/", lists:join("/", lists:reverse(Path))])
+    end.
+
+mismatch_path(Template, Candidate, Path, Opts) when is_map(Template),
+                                                   is_map(Candidate) ->
+    case lists:dropwhile(
+        fun({Key, Expected}) ->
+            case hb_maps:get(Key, Candidate, undefined, Opts) of
+                undefined -> false;
+                Actual -> match_template(Expected, Actual, Opts)
+            end
+        end,
+        hb_maps:to_list(Template, Opts))
+    of
+        [] -> [];
+        [{Key, _Expected} | _] ->
+            case hb_maps:get(Key, Candidate, undefined, Opts) of
+                undefined -> [Key | Path];
+                Actual ->
+                    mismatch_path(
+                        hb_maps:get(Key, Template, undefined, Opts),
+                        Actual,
+                        [Key | Path],
+                        Opts)
+            end
+    end;
+mismatch_path(_Template, _Candidate, Path, _Opts) ->
+    Path.
+
 -ifdef(TEST).
 
 deep_subset_match_test() ->
@@ -595,6 +643,40 @@ wildcard_match_test() ->
         #{<<"node">> => #{}},
         #{}
     )).
+
+template_metadata_is_not_policy_test() ->
+    Template = clean_template(
+        #{
+            <<"commitments">> => #{<<"ignored">> => true},
+            <<"system">> => #{
+                <<"ao-types">> => #{<<"ignored">> => true},
+                <<"kernel">> => #{
+                    <<"cmdline">> => <<"good">>,
+                    <<"commitments">> => #{<<"ignored">> => true}
+                }
+            }
+        },
+        #{}),
+    Candidate = #{
+        <<"system">> => #{
+            <<"kernel">> => #{<<"cmdline">> => <<"good">>}
+        }
+    },
+    ?assertEqual(
+        #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
+        Template),
+    ?assert(match_template(Template, Candidate, #{})).
+
+mismatch_path_test() ->
+    Template = #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+    },
+    Candidate = #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
+    },
+    ?assertEqual(
+        <<"/system/kernel/cmdline">>,
+        mismatch_path(Template, Candidate, #{})).
 
 wallet_encryption_roundtrip_test() ->
     Wallet = ar_wallet:new(),
