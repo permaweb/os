@@ -2284,23 +2284,62 @@ ek_verify_fun(_, {bad_cert, {not_supported_extension, Ext}}, UserState) ->
     %% TCG namespace here the same way we already treat non-critical
     %% unknown TCG extensions below: metadata is acceptable, the
     %% cryptographic issuer/signature/path checks still run normally.
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _ -> {fail, {not_supported_extension, Ext}}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {fail, {not_supported_extension, Ext}}
+    end;
+ek_verify_fun(Cert, {bad_cert, invalid_key_usage}, UserState) ->
+    case tpm_ek_leaf_cert(Cert) of
+        true -> {valid, UserState};
+        false -> {fail, invalid_key_usage}
     end;
 ek_verify_fun(_, {bad_cert, Reason}, _UserState) ->
     {fail, Reason};
 ek_verify_fun(_, {extension, #'Extension'{extnID = ExtId}}, UserState) ->
     %% Called for each non-critical unknown extension. Accept any
     %% OID under the TCG arc 2.23.133.x (all EK metadata).
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _                     -> {unknown, UserState}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {unknown, UserState}
     end;
 ek_verify_fun(_, valid, UserState)      -> {valid, UserState};
 ek_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
+
+tpm_ek_leaf_cert(Cert) ->
+    try
+        Otp = case Cert of
+            #'OTPCertificate'{} -> Cert;
+            Der when is_binary(Der) -> public_key:pkix_decode_cert(Der, otp)
+        end,
+        Tbs = Otp#'OTPCertificate'.tbsCertificate,
+        Extensions = cert_extensions(Tbs),
+        extension_value(?'id-ce-basicConstraints', Extensions)
+            =:= #'BasicConstraints'{cA = false, pathLenConstraint = asn1_NOVALUE}
+            andalso lists:member(
+                {2, 23, 133, 8, 1},
+                extension_value(?'id-ce-extKeyUsage', Extensions))
+    catch _:_ ->
+        false
+    end.
+
+is_tcg_oid(Oid) when is_tuple(Oid) ->
+    lists:prefix([2, 23, 133], tuple_to_list(Oid));
+is_tcg_oid(_) ->
+    false.
+
+cert_extensions(#'OTPTBSCertificate'{extensions = Extensions})
+        when is_list(Extensions) ->
+    Extensions;
+cert_extensions(_) ->
+    [].
+
+extension_value(Oid, Extensions) ->
+    case [Value || #'Extension'{extnID = ExtOid, extnValue = Value}
+                       <- Extensions,
+                   ExtOid =:= Oid] of
+        [Value | _] -> Value;
+        [] -> null
+    end.
 
 %% @doc Structured decode of the Attestation Key public blob on
 %% the flat claim surface. AK is an RSA-2048 or RSA-3072 key

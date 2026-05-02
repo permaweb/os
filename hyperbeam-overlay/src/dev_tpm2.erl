@@ -44,6 +44,7 @@
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
 -define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
 -define(PEER_ATTESTATION_PREFIX, <<"~tpm@2.0a/peer-attestations">>).
+-define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
 %%%============================================================================
 %%% Device API information
@@ -806,15 +807,16 @@ unique_chains(Chains) ->
 validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
     Attempts =
         [
-            {Intermediates,
+            {Intermediates, Path,
              public_key:pkix_path_validation(
                 AnchorOtp,
-                [EkDer | Intermediates],
+                Path,
                 [{verify_fun, ek_chain_verify_fun()}])}
         ||
-            Intermediates <- IntermediateChains
+            Intermediates <- IntermediateChains,
+            Path <- ek_cert_path_orders(EkDer, Intermediates)
         ],
-    case [{Intermediates, Result} || {Intermediates, {ok, _} = Result}
+    case [{Intermediates, Result} || {Intermediates, _Path, {ok, _} = Result}
                                 <- Attempts] of
         [{Intermediates, {ok, _}} | _] ->
             {ok, iolist_to_binary(io_lib:format(
@@ -824,12 +826,19 @@ validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
             Reasons = [
                 diagnose_chain_failure(Why, EkDer, AnchorDer)
             ||
-                {_Intermediates, {error, Why}} <- Attempts
+                {_Intermediates, _Path, {error, Why}} <- Attempts
             ],
             {error, iolist_to_binary(io_lib:format(
                 "chain invalid across ~B path candidate(s): ~p",
                 [length(Attempts), Reasons]))}
     end.
+
+ek_cert_path_orders(EkDer, Intermediates) ->
+    unique_chains([
+        lists:reverse(Intermediates) ++ [EkDer],
+        Intermediates ++ [EkDer],
+        [EkDer | Intermediates]
+    ]).
 
 %% Produce a targeted error message for common pkix_path_validation
 %% failures. The most confusing one in practice is `{bad_cert,
@@ -879,19 +888,13 @@ diagnose_chain_failure(Why, EkDer, CaDer) ->
 %% Mirrors `dev_tpm_interpret:ek_verify_fun/3' semantics (kept in
 %% sync deliberately; a divergence here would mean `dev_tpm2:verify/3'
 %% accepts a chain the parser-side `validate_ek_chain/3' rejects, or
-%% vice-versa). Two TCG OIDs are whitelisted as critical extensions
-%% that real-world EK certs always carry:
-%%
-%%   2.23.133.8.1    id-tcg-kp-EKCertificate  (EKU)
-%%   2.23.133.2.16   id-tcg-tpmSpecification  (spec-version attr)
-%%
-%% OTP's default path validator treats critical extensions it doesn't
-%% recognise as `{bad_cert, {not_supported_extension, _}}' -- without
-%% this whitelist, real Nuvoton / Infineon / STMicro EK certs all
-%% fail. Non-TCG critical extensions still fail. Non-critical
-%% extensions under the TCG arc `2.23.133.*' are accepted;
-%% non-TCG non-critical extensions fall through as `unknown' so
-%% pkix's own defaults apply.
+%% vice-versa). TCG EK-profile OIDs are metadata, so unknown critical
+%% and non-critical extensions under `2.23.133.*' are accepted while
+%% the cryptographic issuer/signature/path checks still run normally.
+%% TPM EK leaf certificates also legitimately carry keyEncipherment
+%% key usage plus the TCG EK EKU rather than the generic TLS leaf
+%% usages OTP expects; accept `invalid_key_usage' only for that exact
+%% EK-leaf shape.
 ek_chain_verify_fun() ->
     {fun ek_chain_verify_fun/3, []}.
 
@@ -901,10 +904,14 @@ ek_chain_verify_fun(_, {bad_cert, {not_supported_extension, Ext}},
         #'Extension'{extnID = Id} -> Id;
         _ -> undefined
     end,
-    case ExtId of
-        {2, 23, 133, 8, 1}   -> {valid, UserState};
-        {2, 23, 133, 2, 16}  -> {valid, UserState};
-        _ -> {fail, {not_supported_extension, Ext}}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {fail, {not_supported_extension, Ext}}
+    end;
+ek_chain_verify_fun(Cert, {bad_cert, invalid_key_usage}, UserState) ->
+    case tpm_ek_leaf_cert(Cert) of
+        true -> {valid, UserState};
+        false -> {fail, invalid_key_usage}
     end;
 ek_chain_verify_fun(_, {bad_cert, Reason}, _UserState) ->
     {fail, Reason};
@@ -912,13 +919,34 @@ ek_chain_verify_fun(_, {extension, #'Extension'{extnID = ExtId}},
                     UserState) ->
     %% Called for each non-critical unknown extension. Accept any
     %% OID under the TCG arc 2.23.133.x (EK metadata attributes).
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _                     -> {unknown, UserState}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {unknown, UserState}
     end;
 ek_chain_verify_fun(_, valid, UserState)      -> {valid, UserState};
 ek_chain_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
+
+tpm_ek_leaf_cert(Cert) ->
+    try
+        Otp = case Cert of
+            #'OTPCertificate'{} -> Cert;
+            Der when is_binary(Der) -> public_key:pkix_decode_cert(Der, otp)
+        end,
+        Tbs = Otp#'OTPCertificate'.tbsCertificate,
+        Extensions = cert_extensions(Tbs),
+        extension_value(?'id-ce-basicConstraints', Extensions)
+            =:= #'BasicConstraints'{cA = false, pathLenConstraint = asn1_NOVALUE}
+            andalso lists:member(
+                ?TCG_EK_CERT_OID,
+                extension_value(?'id-ce-extKeyUsage', Extensions))
+    catch _:_ ->
+        false
+    end.
+
+is_tcg_oid(Oid) when is_tuple(Oid) ->
+    lists:prefix([2, 23, 133], tuple_to_list(Oid));
+is_tcg_oid(_) ->
+    false.
 
 %%---- check 2: quote signature + extraData + pcrDigest -----------------
 chk_quote(Envelope, ExpectedNonce) ->
@@ -4238,6 +4266,17 @@ ek_cert_chain_handles_include_intel_odca_range_test() ->
         lists:seq(16#01C00100, 16#01C001FF),
         ek_cert_chain_handles(16#01C000FF)).
 
+intel_odca_ek_chain_accepts_tcg_key_usage_test() ->
+    EkDer = pem_fixture_der("intel-mtl-odca-ek-cert.pem"),
+    ChainDers = pem_fixture_ders("intel-mtl-odca-tpm-chain.pem"),
+    TrustedDers = [
+        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem"),
+        root_ca_fixture_der("INTEL_ODCA_MTL_00003043_CA2.pem"),
+        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem")
+    ],
+    ?assertMatch({ok, _},
+                 validate_ek_chain(EkDer, ChainDers, TrustedDers)).
+
 split_concatenated_ders_skips_non_cert_gaps_test() ->
     Der = root_ca_fixture_der(),
     ?assertEqual(
@@ -4282,16 +4321,33 @@ parse_chain_group_reads_cert_across_nv_boundary_test() ->
         maps:get(<<"span-handles">>, CertDiag)).
 
 root_ca_fixture_der() ->
+    root_ca_fixture_der("INTEL_RT.pem").
+
+root_ca_fixture_der(Name) ->
     Paths = [
         filename:join(["priv", "tpm-interpret", "root-cas",
-                       "INTEL_RT.pem"]),
+                       Name]),
         filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
-                       "root-cas", "INTEL_RT.pem"])
+                       "root-cas", Name])
     ],
     Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
     [{'Certificate', Der, not_encrypted} | _] =
         public_key:pem_decode(hd(Pems)),
     Der.
+
+pem_fixture_der(Name) ->
+    [Der | _] = pem_fixture_ders(Name),
+    Der.
+
+pem_fixture_ders(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "fixtures", Name])
+    ],
+    Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
+    [Der || {'Certificate', Der, not_encrypted} <-
+                public_key:pem_decode(hd(Pems))].
 
 %% Regression test: the verify_fun used in chk_ek_chain must reject
 %% every structural / trust failure pkix can report, while letting
