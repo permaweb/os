@@ -2300,29 +2300,58 @@ fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts,
     end.
 
 fetch_ek_cert_chain_range(First, Last) ->
-    fetch_ek_cert_chain_range(First, Last, [], [], [], []).
+    Entries = read_chain_range_entries(First, Last),
+    parse_chain_range_entries(Entries).
 
-fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts, Diagnostics)
-        when Handle > Last ->
-    finalize_chain_result(Ders, Hits, Attempts, Diagnostics);
-fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts,
-                          Diagnostics) ->
-    case read_chain_handle(Handle) of
-        {ok, ChainDers, Diagnostic} ->
-            fetch_ek_cert_chain_range(
-                Handle + 1, Last, lists:reverse(ChainDers) ++ Ders,
-                [Handle | Hits], Attempts, [Diagnostic | Diagnostics]);
-        {error, Reason, Diagnostic} ->
-            %% Do not assume the ODCA range is dense. Real machines
-            %% have already shown enough vendor-specific shape here
-            %% that probing the whole public EK-chain range once at
-            %% boot is more useful than stopping at the first missing
-            %% NV index.
-            fetch_ek_cert_chain_range(
-                Handle + 1, Last, Ders, Hits,
-                [{Handle, Reason} | Attempts],
-                [Diagnostic | Diagnostics])
+read_chain_range_entries(First, Last) ->
+    [read_chain_range_entry(Handle) || Handle <- lists:seq(First, Last)].
+
+read_chain_range_entry(Handle) ->
+    case lapee_tpm_nif:nv_read(Handle) of
+        {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
+            {ok, Handle, Bin};
+        {ok, Bin} when is_binary(Bin) ->
+            {error, Handle, <<"nv-content-empty">>};
+        {error, Reason} ->
+            {error, Handle, Reason}
     end.
+
+parse_chain_range_entries(Entries) ->
+    Groups = consecutive_chain_groups(Entries),
+    ParsedGroups = [parse_chain_group(Group) || Group <- Groups],
+    Ders = lists:append([Ds || {Ds, _Hits, _Diag} <- ParsedGroups]),
+    Hits0 = lists:append([Hs || {_Ds, Hs, _Diag} <- ParsedGroups]),
+    Hits = uniq_preserve_order(Hits0),
+    Diagnostics = [D || {_Ds, _Hs, D} <- ParsedGroups]
+        ++ [chain_error_diagnostic(Handle, Reason)
+            || {error, Handle, Reason} <- Entries],
+    Attempts = [{Handle, Reason}
+                || {error, Handle, Reason} <- Entries],
+    finalize_chain_result(Ders, Hits, Attempts, lists:reverse(Diagnostics)).
+
+consecutive_chain_groups(Entries) ->
+    consecutive_chain_groups(Entries, [], []).
+
+consecutive_chain_groups([], [], Acc) ->
+    lists:reverse(Acc);
+consecutive_chain_groups([], Current, Acc) ->
+    lists:reverse([lists:reverse(Current) | Acc]);
+consecutive_chain_groups([{ok, Handle, Bin} | Rest], Current, Acc) ->
+    consecutive_chain_groups(Rest, [{Handle, Bin} | Current], Acc);
+consecutive_chain_groups([{error, _Handle, _Reason} | Rest], [], Acc) ->
+    consecutive_chain_groups(Rest, [], Acc);
+consecutive_chain_groups([{error, _Handle, _Reason} | Rest], Current, Acc) ->
+    consecutive_chain_groups(Rest, [], [lists:reverse(Current) | Acc]).
+
+parse_chain_group(Chunks) ->
+    Bin = iolist_to_binary([Chunk || {_Handle, Chunk} <- Chunks]),
+    Certs = split_concatenated_ders_with_offsets(Bin),
+    Ders = [Der || {_Offset, Der} <- Certs],
+    Hits = case Ders of
+        [] -> [];
+        _ -> [Handle || {Handle, _Chunk} <- Chunks]
+    end,
+    {Ders, Hits, chain_group_diagnostic(Chunks, Bin, Certs)}.
 
 read_chain_handle(ChainHandle) ->
     case lapee_tpm_nif:nv_read(ChainHandle) of
@@ -2336,13 +2365,7 @@ read_chain_handle(ChainHandle) ->
             end;
         {error, Reason} ->
             {error, Reason,
-             #{
-                <<"handle">> => format_nv_handle(ChainHandle),
-                <<"status">> => <<"error">>,
-                <<"reason">> => reason_to_text(Reason),
-                <<"bytes">> => 0,
-                <<"cert-count">> => 0
-              }}
+             chain_error_diagnostic(ChainHandle, Reason)}
     end.
 
 merge_chain_results(Results) ->
@@ -2428,6 +2451,60 @@ chain_handle_diagnostic(Handle, Bin, Certs) ->
         <<"certs">> => [cert_diagnostic(Offset, Der)
                          || {Offset, Der} <- Certs]
     }.
+
+chain_group_diagnostic(Chunks, Bin, Certs) ->
+    Ranges = chunk_ranges(Chunks),
+    Handles = [Handle || {Handle, _Chunk} <- Chunks],
+    #{
+        <<"handle">> => chain_group_handle_text(Handles),
+        <<"handles">> => format_nv_handles(Handles),
+        <<"status">> =>
+            case Certs of [] -> <<"no-x509-der">>; _ -> <<"ok">> end,
+        <<"bytes">> => byte_size(Bin),
+        <<"cert-count">> => length(Certs),
+        <<"certs">> =>
+            [(cert_diagnostic(Offset, Der))#{
+                <<"span-handles">> =>
+                    format_nv_handles(
+                      handles_for_range(Offset, byte_size(Der), Ranges))
+             }
+             || {Offset, Der} <- Certs]
+    }.
+
+chain_error_diagnostic(Handle, Reason) ->
+    #{
+        <<"handle">> => format_nv_handle(Handle),
+        <<"status">> => <<"error">>,
+        <<"reason">> => reason_to_text(Reason),
+        <<"bytes">> => 0,
+        <<"cert-count">> => 0
+    }.
+
+chain_group_handle_text([]) ->
+    <<"">>;
+chain_group_handle_text([Handle]) ->
+    format_nv_handle(Handle);
+chain_group_handle_text(Handles) ->
+    First = hd(Handles),
+    Last = lists:last(Handles),
+    <<(format_nv_handle(First))/binary, "..",
+      (format_nv_handle(Last))/binary>>.
+
+chunk_ranges(Chunks) ->
+    element(2,
+        lists:foldl(
+            fun({Handle, Bin}, {Offset, Acc}) ->
+                Next = Offset + byte_size(Bin),
+                {Next, [{Handle, Offset, Next} | Acc]}
+            end,
+            {0, []},
+            Chunks)).
+
+handles_for_range(Offset, Len, Ranges) ->
+    End = Offset + Len,
+    [Handle || {Handle, Start, Stop} <- lists:reverse(Ranges),
+               Start < End,
+               Stop > Offset].
 
 cert_diagnostic(Offset, Der) ->
     Base = #{
@@ -3026,6 +3103,19 @@ split_concatenated_ders_reports_offsets_test() ->
         [{0, Der}, {byte_size(Der) + byte_size(Gap), Der}],
         split_concatenated_ders_with_offsets(
           <<Der/binary, Gap/binary, Der/binary>>)).
+
+parse_chain_group_reads_cert_across_nv_boundary_test() ->
+    Der = root_ca_fixture_der(),
+    Split = byte_size(Der) - 17,
+    <<Head:Split/binary, Tail/binary>> = Der,
+    {Ders, Hits, Diagnostic} =
+        parse_chain_group([{16#01C00100, Head}, {16#01C00101, Tail}]),
+    ?assertEqual([Der], Ders),
+    ?assertEqual([16#01C00100, 16#01C00101], Hits),
+    [CertDiag] = maps:get(<<"certs">>, Diagnostic),
+    ?assertEqual(
+        [<<"0x01C00100">>, <<"0x01C00101">>],
+        maps:get(<<"span-handles">>, CertDiag)).
 
 root_ca_fixture_der() ->
     Paths = [
