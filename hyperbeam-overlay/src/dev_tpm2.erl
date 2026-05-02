@@ -418,18 +418,10 @@ quote(_Base, Req, Opts) ->
         {ok, AkTr} ->
             case nif_quote(AkTr, Pcrs, Nonce) of
                 {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
+                    QuoteBody = quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                     {ok, #{
                         <<"status">> => 200,
-                        <<"body">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)]),
+                        <<"body">> => QuoteBody#{
                             <<"ak-pub-pem">> => ak_pub_pem(Opts)
                         }
                     }};

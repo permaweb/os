@@ -2,8 +2,9 @@
 
 ## Update 32
 
-Deduplicated TPM quote envelope construction between boot and live attestation
-paths. Evidence: `HB_PORT=19159 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+Deduplicated TPM quote envelope construction across `/quote`,
+boot-attestation, and live-attestation paths. Evidence:
+`HB_PORT=19179 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
 --module=dev_tpm2` passed 40/40 with exit 0.
 
 ## Update 31
