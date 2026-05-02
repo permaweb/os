@@ -1,5 +1,13 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 33
+
+Normalized green-zone admission authorization to use boolean
+`template-matched` instead of the string `"true"`, and removed the matching
+special case plus redundant admission name argument/checks. Evidence:
+`HB_PORT=19183 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_green_zone` passed 15/15 with exit 0.
+
 ## Update 32
 
 Deduplicated TPM quote envelope construction across `/quote`,

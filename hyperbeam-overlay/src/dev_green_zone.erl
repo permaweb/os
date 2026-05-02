@@ -193,7 +193,7 @@ join(_Base, Req, Opts) ->
         Admission =
             request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts),
         assert_admission_body(
-            Admission, PeerURL, SelfURL, AdmissionNonce, Req, Opts),
+            Admission, SelfURL, AdmissionNonce, Req, Opts),
         Credential = hb_maps:get(<<"credential">>, Admission, undefined, Opts),
         AES = activate_local_credential(Credential, Opts),
         Wallet = decrypt_wallet(
@@ -202,10 +202,6 @@ join(_Base, Req, Opts) ->
             Opts
         ),
         assert_wallet_matches_admission(Wallet, Admission, Opts),
-        case hb_maps:get(<<"name">>, Admission, undefined, Opts) of
-            Name -> ok;
-            _ -> bad_admission(<<"name">>)
-        end,
         Template = hb_maps:get(<<"template">>, Admission, #{}, Opts),
         Definition = hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
         Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
@@ -292,7 +288,7 @@ admission_authorization(Admission, Wallet, Opts) ->
                 hb_maps:get(<<"joiner-url">>, Admission, undefined, Opts),
             <<"ring-address">> =>
                 hb_maps:get(<<"ring-address">>, Admission, undefined, Opts),
-            <<"template-matched">> => <<"true">>,
+            <<"template-matched">> => true,
             <<"validity-id">> =>
                 stable_message_id(
                     hb_maps:get(<<"validity">>, Admission, #{}, Opts),
@@ -836,7 +832,7 @@ admission_response_body(#{<<"status">> := Status, <<"body">> := Body}, _Opts)
 admission_response_body(Other, Opts) ->
     response_body(Other, Opts).
 
-assert_admission_body(Admission, _PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
+assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
     Self = strip_trailing_slash(SelfURL),
     Checks = [
         {field_eq, <<"type">>, <<"green-zone-admission">>},
@@ -935,7 +931,8 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
         <<"issued-at-unix">>,
         <<"admission-nonce">>,
         <<"joiner-url">>,
-        <<"ring-address">>
+        <<"ring-address">>,
+        <<"template-matched">>
     ],
     lists:foreach(
         fun(Field) ->
@@ -948,11 +945,7 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
             end
         end,
         Fields),
-    case hb_maps:get(<<"template-matched">>, Authorization, undefined, Opts) of
-        <<"true">> -> ok;
-        true -> ok;
-        _ -> bad_admission(<<"authorization.template-matched">>)
-    end.
+    ok.
 
 assert_authorization_ids(Authorization, Admission, Opts) ->
     Pairs = [
@@ -1284,7 +1277,6 @@ admission_body_requires_joiner_binding_test() ->
         {green_zone_error, #{<<"error">> := <<"admission-invalid">>}},
         assert_admission_body(
             Admission,
-            <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
             #{<<"name">> => test_name()},
@@ -1299,7 +1291,6 @@ admission_body_requires_expected_ring_test() ->
         }},
         assert_admission_body(
             test_admission(Wallet),
-            <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
             #{<<"name">> => test_name()},
@@ -1311,7 +1302,6 @@ admission_body_accepts_expected_ring_test() ->
     ?assertEqual(ok,
         assert_admission_body(
             test_admission(Wallet),
-            <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
             #{
