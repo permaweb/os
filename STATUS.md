@@ -746,3 +746,91 @@ Residual protocol work from review:
   verifies a cached boot-attestation plus a fresh credential-activation proof.
 - Scope stored peer attestations more tightly by ring/template/peer/EK and
   validity window before they are accepted as reusable publisher evidence.
+
+## Update 17
+
+Closed the two residual protocol gaps from Update 16 and tightened admission
+replay protection:
+
+- `~tpm@2.0a/verify-peer` now fetches both the cached boot-attestation and a
+  fresh `/~tpm@2.0a/attestation?nonce=<verifier-nonce>`. The verifier checks
+  the fresh quote nonce explicitly, verifies both attestations against the same
+  credential subject, and signs the resulting `lapee-peer-attestation` with a
+  `freshness` proof.
+- Public `~tpm@2.0a/activate-credential` responses now validate as a typed
+  `lapee-tpm-credential-activation` envelope. The HMAC proof is bound to the
+  credential blobs, AK name, proof algorithm, and issued-at timestamp; the
+  verifier rejects wrong type/version/proof algorithm/AK name.
+- Signed peer attestations now carry a `peer-scope` containing the peer URL,
+  boot/fresh attestation IDs, EK-public hash, AK-name hash, and optional
+  consumer scope. Cache paths include an immutable scoped path keyed by peer
+  URL hash, EK hash, boot-attestation ID, consumer-scope hash, and signed ID.
+- `~green-zone@1.0/admit` passes the current ring scope
+  `{ring-address, template-id}` into live peer verification and requires stored
+  peer attestations to match that ring scope and TPM material before reuse.
+- Green-zone stored-attestation reuse now requires `issued-at-unix`, signed
+  validity, and a bounded max age (`green-zone-peer-attestation-max-age-seconds`,
+  default 3600s).
+- `~green-zone@1.0/admit` signs admissions as the ring wallet and includes
+  `admission-nonce`, `validity`, and `ring-scope`. `join` generates the nonce,
+  verifies the admission signer is the advertised ring address, checks expiry
+  and optional expected ring address, then decrypts and address-checks the
+  furnished wallet before installing it.
+- The QEMU harness now scopes the direct `verify-peer` reusable-attestation
+  preflight to the ring scope returned by `init`, and asserts the signed
+  attestation carries that scope.
+
+Validation evidence at `2026-05-02 08:32 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 34 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 15 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+```
+
+Target rebuild and fresh QEMU acceptance rerun remain blocked by this Codex
+macOS sandbox, not by the LapEE code path:
+
+```text
+$ make buildroot JOBS=18
+permission denied while trying to connect to the docker API at
+unix:///Users/sam/.docker/run/docker.sock
+
+$ OUTDIR=/private/tmp/lapee-qemu-green-zone \
+    bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open TCP socket: Operation not permitted
+
+$ SWTPM_CTRL=unix OUTDIR=/private/tmp/lapee-qemu-green-zone-unix \
+    bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open UnixIO socket: Operation not permitted
+
+$ make native-build
+native-build requires a Linux host (Buildroot doesn't run on Darwin).
+```
+
+The last full appliance/QEMU green-zone pass remains Update 13. The current
+increment is host-validated and staged into `build/hyperbeam/src-edge`; it
+still needs a host with Docker access and swtpm socket permission to rebuild
+images and rerun the strengthened four-node gate.

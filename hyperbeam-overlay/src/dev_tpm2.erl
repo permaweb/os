@@ -170,13 +170,17 @@ info(_Base, _Req, _Opts) ->
             <<"verify-peer">> => #{
                 <<"description">> =>
                     <<"Fetch a peer boot-attestation and credential subject, "
-                      "verify the attestation, check EK certificate/public "
+                      "verify both the cached boot evidence and a fresh "
+                      "nonce-bound attestation, check EK certificate/public "
                       "consistency, complete MakeCredential/ActivateCredential, "
                       "then sign and cache a public peer-attestation "
-                      "containing the verified peer material and activation "
-                      "transcript.">>,
+                      "containing the verified peer material, freshness proof, "
+                      "scope, validity, and activation transcript.">>,
                 <<"request">> => #{
-                    <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>
+                    <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>,
+                    <<"peer-attestation-ttl-seconds">> =>
+                        <<"Optional positive integer validity window. If "
+                          "absent, the signed attestation has no upper expiry.">>
                 },
                 <<"cache-paths">> => #{
                     <<"by-id">> =>
@@ -184,7 +188,12 @@ info(_Base, _Req, _Opts) ->
                           "/by-id/<signed-message-id>">>,
                     <<"latest-by-peer-url-sha256">> =>
                         <<(?PEER_ATTESTATION_PREFIX)/binary,
-                          "/latest-by-peer-url-sha256/<base64url-sha256-url>">>
+                          "/latest-by-peer-url-sha256/<base64url-sha256-url>">>,
+                    <<"scoped">> =>
+                        <<(?PEER_ATTESTATION_PREFIX)/binary,
+                          "/by-peer-url-sha256/<url-sha256>/"
+                          "by-ek-public-sha256/<ek-sha256>/"
+                          "by-boot-attestation-id/<boot-id>/<signed-id>">>
                 }
             }
         }
@@ -485,7 +494,7 @@ verify(Base, Req, Opts) ->
         safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
                    <<"core">>),
-        safely_run(fun() -> chk_quote(Envelope) end,
+        safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
                    <<"TPM2_Quote signature + pcrDigest + nonce all valid">>,
                    <<"core">>),
         safely_run(fun() -> chk_event_log_replay(Envelope) end,
@@ -915,7 +924,7 @@ ek_chain_verify_fun(_, valid, UserState)      -> {valid, UserState};
 ek_chain_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
 
 %%---- check 2: quote signature + extraData + pcrDigest -----------------
-chk_quote(Envelope) ->
+chk_quote(Envelope, ExpectedNonce) ->
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
     AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
     AkQualifiedName =
@@ -926,19 +935,26 @@ chk_quote(Envelope) ->
     Sel    = hb_maps:get(<<"pcr-selection">>, Q, [], #{}),
     PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
 
-    %% Signature: RSA-PSS with SHA-256, salt 32 (matches the NIF).
-    case decode_pem_rsa_pub(AkPem) of
-        {ok, RSAPub} ->
-            case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
-                true ->
-                    chk_tpms_attest(
-                        Quoted, Nonce, Sel, PcrMap, AkQualifiedName);
-                false ->
-                    {error, <<"RSA-PSS(SHA256) verify of TPMS_ATTEST failed">>}
-            end;
-        {error, Why} ->
-            {error, iolist_to_binary(io_lib:format("ak_pub_pem invalid: ~p",
-                                                    [Why]))}
+    case ExpectedNonce =/= undefined andalso Nonce =/= ExpectedNonce of
+        true ->
+            {error, <<"quote nonce does not match verifier challenge">>};
+        false ->
+            %% Signature: RSA-PSS with SHA-256, salt 32 (matches the NIF).
+            case decode_pem_rsa_pub(AkPem) of
+                {ok, RSAPub} ->
+                    case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
+                        true ->
+                            chk_tpms_attest(
+                                Quoted, Nonce, Sel, PcrMap,
+                                AkQualifiedName);
+                        false ->
+                            {error, <<"RSA-PSS(SHA256) verify of "
+                                      "TPMS_ATTEST failed">>}
+                    end;
+                {error, Why} ->
+                    {error, iolist_to_binary(
+                        io_lib:format("ak_pub_pem invalid: ~p", [Why]))}
+            end
     end.
 
 %% Parse TPMS_ATTEST: magic(4) + type(2) + qualifiedSigner(TPM2B) +
@@ -1553,16 +1569,20 @@ activate_credential_secret(Credential, Opts) ->
     end.
 
 credential_activation_public_body(CertInfo, Credential, Opts) ->
+    Now = erlang:system_time(second),
+    AkName = ak_name(Opts),
     #{
         <<"type">> => <<"lapee-tpm-credential-activation">>,
         <<"version">> => <<"1.0">>,
-        <<"issued-at-unix">> => erlang:system_time(second),
-        <<"ak-name">> => ak_name(Opts),
+        <<"issued-at-unix">> => Now,
+        <<"ak-name">> => AkName,
         <<"credential-secret-sha256">> =>
             hb_util:encode(crypto:hash(sha256, CertInfo)),
         <<"proof-alg">> => <<"HMAC-SHA256">>,
         <<"credential-secret-proof">> =>
-            hb_util:encode(credential_activation_proof(CertInfo, Credential))
+            hb_util:encode(
+                credential_activation_proof(
+                    CertInfo, Credential, AkName, Now))
     }.
 
 verify_peer(_Base, Req, Opts) ->
@@ -1592,31 +1612,68 @@ verify_peer_url(Url, Req, Opts) ->
                 fetch_peer_message(Url, <<"/~tpm@2.0a/credential-subject">>,
                                    Opts),
             Subject = resolve_subject_body(Subject0, Opts),
+            FreshNonce = crypto:strong_rand_bytes(32),
+            Fresh0 = fetch_peer_message(
+                Url, fresh_attestation_path(FreshNonce), Opts),
+            Fresh = resolve_subject_body(Fresh0, Opts),
             BootEnv = normalise_attestation(Boot, Opts),
-            VerifyReq = Req#{<<"envelope">> => BootEnv},
-            {ok, #{<<"body">> := VerifyBody}} = verify(BootEnv, VerifyReq, Opts),
-            case hb_maps:get(<<"verified">>, VerifyBody, false, #{}) of
+            FreshEnv = normalise_attestation(Fresh, Opts),
+            BootVerifyReq =
+                (maps:remove(<<"nonce">>, Req))#{<<"envelope">> => BootEnv},
+            {ok, #{<<"body">> := BootVerifyBody}} =
+                verify(BootEnv, BootVerifyReq, Opts),
+            case hb_maps:get(<<"verified">>, BootVerifyBody, false, #{}) of
                 true -> ok;
                 false ->
                     throw({boot_attestation_error,
-                           #{<<"peer-verification">> => VerifyBody}})
+                           #{<<"peer-boot-verification">> => BootVerifyBody}})
+            end,
+            FreshVerifyReq = Req#{
+                <<"envelope">> => FreshEnv,
+                <<"nonce">> => hb_util:encode(FreshNonce)
+            },
+            {ok, #{<<"body">> := FreshVerifyBody}} =
+                verify(FreshEnv, FreshVerifyReq, Opts),
+            case hb_maps:get(<<"verified">>, FreshVerifyBody, false, #{}) of
+                true -> ok;
+                false ->
+                    throw({boot_attestation_error,
+                           #{<<"peer-fresh-verification">> =>
+                                FreshVerifyBody}})
             end,
             ok = ensure_subject_matches_boot(Subject, BootEnv),
+            ok = ensure_subject_matches_boot(Subject, FreshEnv),
             ok = ensure_ek_public_matches_cert(Subject),
             Challenge = crypto:strong_rand_bytes(32),
             Credential = make_credential_for_subject(Subject, Challenge),
             Activation = activate_peer_credential(Url, Credential, Opts),
             ok = ensure_activation_secret(
-                Activation, Credential, Challenge, Opts),
+                Activation, Credential, Challenge, Subject, Opts),
+            Now = erlang:system_time(second),
             Signed = hb_message:commit(
                 #{
                     <<"type">> => <<"lapee-peer-attestation">>,
                     <<"version">> => <<"1.0">>,
-                    <<"issued-at-unix">> => erlang:system_time(second),
+                    <<"issued-at-unix">> => Now,
+                    <<"validity">> =>
+                        peer_attestation_validity(Now, Req, Opts),
                     <<"peer-url">> => Url,
+                    <<"peer-scope">> =>
+                        peer_attestation_scope(
+                            Url, Boot, Fresh, Subject, Req, Opts),
                     <<"peer-boot-attestation">> => Boot,
+                    <<"peer-fresh-attestation">> => Fresh,
                     <<"peer-credential-subject">> => Subject,
-                    <<"verification">> => VerifyBody,
+                    <<"boot-verification">> => BootVerifyBody,
+                    <<"verification">> => FreshVerifyBody,
+                    <<"freshness">> => #{
+                        <<"verified">> => true,
+                        <<"nonce-sha256">> =>
+                            hb_util:encode(
+                                crypto:hash(sha256, FreshNonce)),
+                        <<"fresh-attestation-id">> =>
+                            attestation_id(Fresh, Opts)
+                    },
                     <<"credential-activation">> => #{
                         <<"verified">> => true,
                         <<"challenge-sha256">> =>
@@ -1690,9 +1747,80 @@ activate_peer_credential(Url, Credential, Opts) ->
             Opts),
         Opts).
 
+fresh_attestation_path(Nonce) ->
+    <<"/~tpm@2.0a/attestation?nonce=",
+      (hb_util:encode(Nonce))/binary>>.
+
+peer_attestation_validity(Now, Req, Opts) ->
+    Base = #{<<"not-before-unix">> => Now},
+    case peer_attestation_ttl(Req, Opts) of
+        undefined -> Base;
+        TTL -> Base#{<<"expires-at-unix">> => Now + TTL}
+    end.
+
+peer_attestation_ttl(Req, Opts) ->
+    parse_positive_integer(first_defined([
+        hb_maps:get(
+            <<"peer-attestation-ttl-seconds">>, Req, undefined, Opts),
+        hb_opts:get(
+            <<"peer-attestation-ttl-seconds">>, undefined, Opts)
+    ])).
+
+peer_attestation_scope(Url, Boot, Fresh, Subject, Req, Opts) ->
+    #{
+        <<"peer-url">> => Url,
+        <<"boot-attestation-id">> => attestation_id(Boot, Opts),
+        <<"fresh-attestation-id">> => attestation_id(Fresh, Opts),
+        <<"ek-public-sha256">> =>
+            encoded_field_sha256(<<"ek-public">>, Subject, Opts),
+        <<"ak-name-sha256">> =>
+            encoded_field_sha256(<<"ak-name">>, Subject, Opts),
+        <<"consumer-scope">> =>
+            hb_maps:get(
+                <<"peer-attestation-scope">>, Req, null, Opts)
+    }.
+
+attestation_id(Attestation, Opts) when is_map(Attestation) ->
+    hb_message:id(Attestation, all, Opts);
+attestation_id(Other, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
+
+encoded_field_sha256(Key, Msg, Opts) ->
+    hb_util:encode(
+        crypto:hash(
+            sha256,
+            safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
+
+encoded_message_sha256(Msg, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Msg))).
+
+first_defined([]) -> undefined;
+first_defined([undefined | Rest]) -> first_defined(Rest);
+first_defined([V | _]) -> V.
+
+parse_positive_integer(undefined) ->
+    undefined;
+parse_positive_integer(N) when is_integer(N), N > 0 ->
+    N;
+parse_positive_integer(B) when is_binary(B) ->
+    try binary_to_integer(B) of
+        N when N > 0 -> N;
+        _ -> undefined
+    catch _:_ -> undefined
+    end;
+parse_positive_integer(_) ->
+    undefined.
+
 ensure_activation_secret(Activation, Credential, Expected, Opts) ->
+    ensure_activation_secret(Activation, Credential, Expected, undefined, Opts).
+
+ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
+    ok = ensure_activation_envelope(Activation, Subject, Opts),
     ExpectedHash = hb_util:encode(crypto:hash(sha256, Expected)),
-    ExpectedProof = credential_activation_proof(Expected, Credential),
+    AkName = hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts),
+    IssuedAt = hb_maps:get(<<"issued-at-unix">>, Activation, 0, Opts),
+    ExpectedProof =
+        credential_activation_proof(Expected, Credential, AkName, IssuedAt),
     GotHash = hb_maps:get(
         <<"credential-secret-sha256">>, Activation, <<>>, Opts),
     GotProof = safe_decode(
@@ -1704,18 +1832,68 @@ ensure_activation_secret(Activation, Credential, Expected, Opts) ->
                         <<"activation proof did not match challenge">>}})
     end.
 
-credential_activation_proof(Secret, Credential) ->
+ensure_activation_envelope(Activation, Subject, Opts) ->
+    Checks = [
+        {eq, <<"type">>, <<"lapee-tpm-credential-activation">>},
+        {eq, <<"version">>, <<"1.0">>},
+        {eq, <<"proof-alg">>, <<"HMAC-SHA256">>},
+        {binary, <<"ak-name">>},
+        {integer, <<"issued-at-unix">>},
+        {binary, <<"credential-secret-sha256">>},
+        {binary, <<"credential-secret-proof">>}
+    ],
+    lists:foreach(
+        fun
+            ({eq, Key, Expected}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    Expected -> ok;
+                    _ -> bad_activation(Key)
+                end;
+            ({binary, Key}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    B when is_binary(B), byte_size(B) > 0 -> ok;
+                    _ -> bad_activation(Key)
+                end;
+            ({integer, Key}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    I when is_integer(I), I > 0 -> ok;
+                    _ -> bad_activation(Key)
+                end
+        end,
+        Checks),
+    case Subject of
+        undefined -> ok;
+        _ ->
+            ExpectedAk = hb_maps:get(<<"ak-name">>, Subject, <<>>, Opts),
+            case hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts) of
+                ExpectedAk when byte_size(ExpectedAk) > 0 -> ok;
+                _ -> bad_activation(<<"ak-name">>)
+            end
+    end.
+
+bad_activation(Key) ->
+    throw({boot_attestation_error,
+           #{<<"credential-activation">> =>
+                <<Key/binary, " invalid">>}}).
+
+credential_activation_proof(Secret, Credential, AkName, IssuedAt) ->
     crypto:mac(
         hmac,
         sha256,
         Secret,
-        credential_activation_proof_context(Credential)).
+        credential_activation_proof_context(Credential, AkName, IssuedAt)).
 
-credential_activation_proof_context(Credential) ->
+credential_activation_proof_context(Credential, AkName, IssuedAt) ->
     Blob = hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
     EncSecret = hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
     <<"lapee-tpm-credential-activation-v1\n",
-      Blob/binary, "\n", EncSecret/binary>>.
+      "type:lapee-tpm-credential-activation\n",
+      "version:1.0\n",
+      "proof-alg:HMAC-SHA256\n",
+      "ak-name:", AkName/binary, "\n",
+      "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
+      "credential-blob:", Blob/binary, "\n",
+      "secret:", EncSecret/binary>>.
 
 ensure_subject_matches_boot(Subject, BootEnv) ->
     Pairs = [
@@ -1781,10 +1959,23 @@ peer_attestation_cache_paths(Signed, SignedID, Opts) ->
     Prefix = ?PEER_ATTESTATION_PREFIX,
     PeerURL = hb_maps:get(<<"peer-url">>, Signed, <<>>, Opts),
     PeerURLHash = hb_util:encode(crypto:hash(sha256, PeerURL)),
+    Scope = hb_maps:get(<<"peer-scope">>, Signed, #{}, Opts),
+    EkHash = hb_maps:get(<<"ek-public-sha256">>, Scope, <<"unknown">>, Opts),
+    BootID =
+        hb_maps:get(<<"boot-attestation-id">>, Scope, <<"unknown">>, Opts),
+    ConsumerScopeHash =
+        encoded_message_sha256(
+            hb_maps:get(<<"consumer-scope">>, Scope, null, Opts), Opts),
     [
         <<Prefix/binary, "/by-id/", SignedID/binary>>,
         <<Prefix/binary,
-          "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
+          "/latest-by-peer-url-sha256/", PeerURLHash/binary>>,
+        <<Prefix/binary,
+          "/by-peer-url-sha256/", PeerURLHash/binary,
+          "/by-ek-public-sha256/", EkHash/binary,
+          "/by-boot-attestation-id/", BootID/binary,
+          "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
+          "/", SignedID/binary>>
     ].
 
 rsa_pub_from_tpm2b_public(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
@@ -2251,6 +2442,18 @@ resolve_nonce(Req) when is_map(Req) ->
             end
     end;
 resolve_nonce(_) -> crypto:strong_rand_bytes(32).
+
+expected_nonce(Req) when is_map(Req) ->
+    case maps:get(<<"nonce">>, Req, undefined) of
+        undefined -> undefined;
+        B when is_binary(B) ->
+            try hb_util:decode(B)
+            catch _:_ -> B
+            end;
+        _ -> undefined
+    end;
+expected_nonce(_) ->
+    undefined.
 
 %% @doc Produce a 32-byte SHA-256 digest for a subject.
 %%
@@ -3406,12 +3609,19 @@ peer_attestation_cache_paths_test() ->
     SignedID = <<"signed-id">>,
     PeerURLHash = hb_util:encode(
         crypto:hash(sha256, <<"http://peer.example:8734">>)),
+    ConsumerScopeHash = encoded_message_sha256(null, #{}),
     Prefix = ?PEER_ATTESTATION_PREFIX,
     ?assertEqual(
         [
             <<Prefix/binary, "/by-id/", SignedID/binary>>,
             <<Prefix/binary,
-              "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
+              "/latest-by-peer-url-sha256/", PeerURLHash/binary>>,
+            <<Prefix/binary,
+              "/by-peer-url-sha256/", PeerURLHash/binary,
+              "/by-ek-public-sha256/unknown",
+              "/by-boot-attestation-id/unknown",
+              "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
+              "/", SignedID/binary>>
         ],
         peer_attestation_cache_paths(Signed, SignedID, #{})).
 
@@ -3438,12 +3648,20 @@ credential_activation_public_proof_rejects_wrong_secret_test() ->
         <<"credential-blob">> => hb_util:encode(<<"blob">>),
         <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
     },
+    IssuedAt = 123,
+    AkName = <<"ak-name">>,
     Activation = #{
+        <<"type">> => <<"lapee-tpm-credential-activation">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => IssuedAt,
+        <<"ak-name">> => AkName,
+        <<"proof-alg">> => <<"HMAC-SHA256">>,
         <<"credential-secret-sha256">> =>
             hb_util:encode(crypto:hash(sha256, <<"secret-a">>)),
         <<"credential-secret-proof">> =>
             hb_util:encode(
-                credential_activation_proof(<<"secret-a">>, Credential))
+                credential_activation_proof(
+                    <<"secret-a">>, Credential, AkName, IssuedAt))
     },
     ?assertThrow(
         {boot_attestation_error, #{
@@ -3451,6 +3669,22 @@ credential_activation_public_proof_rejects_wrong_secret_test() ->
                 <<"activation proof did not match challenge">>
         }},
         ensure_activation_secret(Activation, Credential, <<"secret-b">>, #{})).
+
+chk_quote_rejects_verifier_nonce_mismatch_test() ->
+    Envelope = #{
+        <<"tpm-quote">> => #{
+            <<"nonce">> => hb_util:encode(<<"quote-nonce">>),
+            <<"quoted">> => hb_util:encode(<<>>),
+            <<"signature">> => hb_util:encode(<<>>),
+            <<"pcr-selection">> => [],
+            <<"pcr-values">> => #{}
+        },
+        <<"ak-pub-pem">> => <<>>,
+        <<"ak-qualified-name">> => hb_util:encode(<<"ak">>)
+    },
+    ?assertEqual(
+        {error, <<"quote nonce does not match verifier challenge">>},
+        chk_quote(Envelope, <<"verifier-nonce">>)).
 
 rsa_pub_from_tpm2b_public_test() ->
     ModulusBin = <<1:2048>>,

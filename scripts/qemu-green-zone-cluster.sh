@@ -363,6 +363,12 @@ jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "tr
        (.body."ring-address" | type == "string" and length > 0)' \
     "$OUTDIR/responses/node1-init.json" >/dev/null
 ring_addr=$(jq -r '.body."ring-address"' "$OUTDIR/responses/node1-init.json")
+ring_scope=$(jq -c '.body."ring-scope"' "$OUTDIR/responses/node1-init.json")
+jq --argjson scope "$ring_scope" \
+    '. + {"peer-attestation-scope": $scope}' \
+    "$OUTDIR/requests/verify2.json" \
+    > "$OUTDIR/requests/verify2.scoped.json"
+mv "$OUTDIR/requests/verify2.scoped.json" "$OUTDIR/requests/verify2.json"
 echo ">> node 1 initialized green-zone $ring_addr"
 
 post_json 1 "/~tpm@2.0a/verify-peer" \
@@ -371,6 +377,9 @@ post_json 1 "/~tpm@2.0a/verify-peer" \
 jq -e '.status == 200 and .body.type == "lapee-peer-attestation" and
        (.body.verification.verified == true or
         .body.verification.verified == "true") and
+       (.body.freshness.verified == true or
+        .body.freshness.verified == "true") and
+       .body."peer-scope"."consumer-scope"."ring-address" == "'"$ring_addr"'" and
        (.body."credential-activation".verified == true or
         .body."credential-activation".verified == "true")' \
     "$OUTDIR/responses/node1-verify2.json" >/dev/null
