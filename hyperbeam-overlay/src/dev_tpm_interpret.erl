@@ -1753,9 +1753,9 @@ lookup_vendor_by_ascii(_, _) -> #{}.
 %%   evidence            provenance list
 claim_ek(E, Db) ->
     Pem = hb_maps:get(<<"ek-cert-pem">>, E, <<>>, #{}),
-    case decode_cert(Pem) of
+    case decode_cert_with_der(Pem) of
         {error, _} -> unknown_ek_claim();
-        {ok, Cert} ->
+        {ok, Cert, DerCert} ->
             Attrs = tpm_attrs_from_cert(Cert),
             {KeyAlg, KeyBits, RsaExp, PubDerSha256} =
                 cert_public_key_summary(Cert),
@@ -1766,8 +1766,8 @@ claim_ek(E, Db) ->
             %% EK Credential Profile section 2.2.1.4). Decode each
             %% one into an OTPCertificate for pkix_path_validation.
             ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, E, <<>>, #{}),
-            ChainCerts = decode_cert_bundle(ChainPem),
-            Chain = validate_ek_chain(Cert, ChainCerts, Roots),
+            ChainCerts = decode_cert_bundle_with_der(ChainPem),
+            Chain = validate_ek_chain({Cert, DerCert}, ChainCerts, Roots),
             From = maps:get(valid_from, Attrs, undefined),
             To   = maps:get(valid_to, Attrs, undefined),
             #{
@@ -1947,22 +1947,22 @@ parse_dt_tail(<<Mo:2/binary, D:2/binary, H:2/binary,
     end;
 parse_dt_tail(_) -> error.
 
-%% Decode a concatenated PEM bundle of one or more certs into a
-%% list of OTPCertificate records. Used to consume the
+%% Decode a concatenated PEM bundle of one or more certs into
+%% `{OTPCertificate, OriginalDer}' pairs. Used to consume the
 %% `ek-cert-chain-pem' field that v1.2's dev_tpm2 stamps onto the
 %% envelope (it's the concatenation of every DER cert found in
 %% TPM NV at `<ek-handle>+1'). Returns `[]' on any error -- the
 %% chain is always best-effort; a missing or malformed bundle
 %% does not break the leaf-level claim.
-decode_cert_bundle(<<>>) -> [];
-decode_cert_bundle(Pem) when is_binary(Pem) ->
+decode_cert_bundle_with_der(<<>>) -> [];
+decode_cert_bundle_with_der(Pem) when is_binary(Pem) ->
     try
         Entries = public_key:pem_decode(Pem),
-        [public_key:pkix_decode_cert(Der, otp)
+        [{public_key:pkix_decode_cert(Der, otp), Der}
          || {'Certificate', Der, not_encrypted} <- Entries]
     catch _:_ -> []
     end;
-decode_cert_bundle(_) -> [].
+decode_cert_bundle_with_der(_) -> [].
 
 %% Validate the EK cert chain against shipped root CAs, optionally
 %% threading the envelope-supplied intermediates through the
@@ -1981,8 +1981,8 @@ decode_cert_bundle(_) -> [].
 %% When no roots are loaded we return `unknown' (not a failure)
 %% since the caller may be operating in a dev environment.
 validate_ek_chain(Cert, Chain, Roots) ->
-    DerCert = safe_der_encode(Cert),
-    DerIntermediates = [safe_der_encode(C) || C <- Chain],
+    DerCert = cert_der(Cert),
+    DerIntermediates = [cert_der(C) || C <- Chain],
     validate_ek_chain_1(DerCert, DerIntermediates, Roots,
                         length(Chain)).
 
@@ -1995,6 +1995,9 @@ safe_der_encode(Cert) ->
     try public_key:pkix_encode('OTPCertificate', Cert, otp)
     catch _:_ -> <<>>
     end.
+
+cert_der({_Cert, Der}) when is_binary(Der) -> Der;
+cert_der(Cert) -> safe_der_encode(Cert).
 
 validate_ek_chain_1(_DerCert, _Intermediates, [], _ChainLen) ->
     #{
@@ -2099,18 +2102,17 @@ named_bundle_intermediates(BundleIntermediates) ->
      || I <- BundleIntermediates,
         IName <- [maps:get(<<"name">>, I, <<"unknown-intermediate">>)],
         IPem <- [maps:get(<<"pem">>, I, <<>>)],
-        {ok, ICert} <- [decode_cert(IPem)],
-        IDer <- [safe_der_encode(ICert)],
+        {ok, ICert, IDer} <- [decode_cert_with_der(IPem)],
         IDer =/= <<>>].
 
 try_validate_built_paths(DerCert, LeafCert, TrueRoots,
                          Candidates, FallbackResult) ->
     DecodedRoots = [
-        {Name, Cert} ||
+        {Name, Cert, Der} ||
         R <- TrueRoots,
         Name <- [maps:get(<<"name">>, R, <<"unknown-root">>)],
         Pem  <- [maps:get(<<"pem">>, R, <<>>)],
-        {ok, Cert} <- [decode_cert(Pem)]
+        {ok, Cert, Der} <- [decode_cert_with_der(Pem)]
     ],
     walk_built_paths(
       DerCert, LeafCert, DecodedRoots, length(DecodedRoots),
@@ -2119,11 +2121,12 @@ try_validate_built_paths(DerCert, LeafCert, TrueRoots,
 walk_built_paths(_DerCert, _LeafCert, [], _RootCount, _Candidates,
                  FallbackResult) ->
     FallbackResult;
-walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert} | Rest],
+walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert, AnchorDer} | Rest],
                  RootCount, Candidates, FallbackResult) ->
     case build_intermediate_path(LeafCert, AnchorCert, Candidates) of
         {ok, PathDers, PathNames} ->
-            case validate_against_one_root(DerCert, PathDers, AnchorCert) of
+            case validate_against_one_root_der(
+                   DerCert, PathDers, AnchorDer) of
                 true ->
                     #{
                         <<"validated-by-root-ca">> => AnchorName,
@@ -2201,9 +2204,9 @@ try_validate_against_roots(_DerCert, _Chain, [], Count) ->
 try_validate_against_roots(DerCert, Chain, [Root | Rest], Count) ->
     Name = maps:get(<<"name">>, Root, <<"unknown-root">>),
     RootPem = maps:get(<<"pem">>, Root, <<>>),
-    case decode_cert(RootPem) of
-        {ok, RootCert} ->
-            case validate_against_one_root(DerCert, Chain, RootCert) of
+    case decode_cert_with_der(RootPem) of
+        {ok, _RootCert, RootDer} ->
+            case validate_against_one_root_der(DerCert, Chain, RootDer) of
                 true ->
                     #{
                         <<"validated-by-root-ca">> => Name,
@@ -2222,10 +2225,8 @@ try_validate_against_roots(DerCert, Chain, [Root | Rest], Count) ->
               DerCert, Chain, Rest, Count + 1)
     end.
 
-validate_against_one_root(DerCert, Intermediates, RootCert) ->
+validate_against_one_root_der(DerCert, Intermediates, RootDer) ->
     try
-        RootDer = public_key:pkix_encode(
-                    'OTPCertificate', RootCert, otp),
         %% CertPath ordering per OTP public_key docs: first
         %% element is signed BY the trust anchor (closest-to-root),
         %% last is the leaf. TCG ships NV chains as
@@ -2277,9 +2278,15 @@ ek_verify_fun(_, {bad_cert, {not_supported_extension, Ext}}, UserState) ->
         #'Extension'{extnID = Id} -> Id;
         _ -> undefined
     end,
+    %% Intel ODCA CAs use additional TCG EK-profile OIDs (for
+    %% example 2.23.133.8.12 on the PTT/Kernel/ROM CA chain) that
+    %% OTP's baseline validator does not know about. Treat the whole
+    %% TCG namespace here the same way we already treat non-critical
+    %% unknown TCG extensions below: metadata is acceptable, the
+    %% cryptographic issuer/signature/path checks still run normally.
     case ExtId of
-        {2, 23, 133, 8, 1}   -> {valid, UserState};
-        {2, 23, 133, 2, 16}  -> {valid, UserState};
+        {2, 23, 133, _, _}    -> {valid, UserState};
+        {2, 23, 133, _, _, _} -> {valid, UserState};
         _ -> {fail, {not_supported_extension, Ext}}
     end;
 ek_verify_fun(_, {bad_cert, Reason}, _UserState) ->
@@ -8380,9 +8387,17 @@ int_pcr(_) -> -1.
 
 decode_cert(<<>>) -> {error, empty};
 decode_cert(Pem) when is_binary(Pem) ->
+    case decode_cert_with_der(Pem) of
+        {ok, Cert, _Der} -> {ok, Cert};
+        Error -> Error
+    end;
+decode_cert(_) -> {error, not_binary}.
+
+decode_cert_with_der(<<>>) -> {error, empty};
+decode_cert_with_der(Pem) when is_binary(Pem) ->
     case public_key:pem_decode(Pem) of
         [{'Certificate', Der, not_encrypted} | _] ->
-            try {ok, public_key:pkix_decode_cert(Der, otp)}
+            try {ok, public_key:pkix_decode_cert(Der, otp), Der}
             catch C:R -> {error, {C, R}}
             end;
         _ -> {error, no_certificate}
@@ -8396,7 +8411,7 @@ decode_cert(Pem) when is_binary(Pem) ->
 %% AGENTS.md demands every claim.* field populate to a concrete
 %% value OR an explicit unknown/absent; a 500 stacktrace is
 %% neither.
-decode_cert(_) -> {error, not_binary}.
+decode_cert_with_der(_) -> {error, not_binary}.
 
 decode_pub_key(<<>>) -> {error, empty};
 decode_pub_key(Pem) when is_binary(Pem) ->
@@ -11344,6 +11359,45 @@ v1_2_lockdown_finding_catches_unknown_test() ->
     ?assertEqual(<<"lockdown-off-or-unknown">>,
                  maps:get(<<"code">>, FAbsent)),
     ok.
+
+%% Intel 11th-gen+ PTT ODCA chains can be split across TPM NV
+%% handles and completed by public OnDieCA intermediates. OTP's
+%% decode->encode path is not byte-preserving for every in-the-wild
+%% cert, so this regression keeps original DER bytes through path
+%% validation.
+v1_2_intel_odca_chain_preserves_original_der_test() ->
+    Path = filename:join([
+        case code:priv_dir(hb) of
+            {error, _} ->
+                filename:join(
+                    filename:dirname(
+                        filename:dirname(code:which(?MODULE))),
+                    "priv");
+            D -> D
+        end,
+        "tpm-interpret", "fixtures",
+        "intel-mtl-odca-tpm-chain.pem"]),
+    case filelib:is_file(Path) of
+        false -> ok;
+        true ->
+            {ok, Pem} = file:read_file(Path),
+            [{Ptt, PttDer}, {Kernel, KernelDer}, {Rom, RomDer}] =
+                decode_cert_bundle_with_der(Pem),
+            Db = hb_db_tpm:load(#{}),
+            Roots = maps:get(<<"cert-roots">>, Db, []),
+            Chain = validate_ek_chain(
+                {Ptt, PttDer},
+                [{Kernel, KernelDer}, {Rom, RomDer}],
+                Roots
+            ),
+            ?assertEqual(true, maps:get(<<"chain-valid">>, Chain)),
+            ?assertEqual(<<"INTEL_ODCA_ROOT_CA">>,
+                         maps:get(<<"validated-by-root-ca">>, Chain)),
+            ?assert(lists:member(
+                <<"INTEL_ODCA_MTL_00003043_CA2">>,
+                maps:get(<<"validated-via-intermediates">>, Chain)
+            ))
+    end.
 
 %% v1.2 batch 9 / paper-to-code MEDIUM-4: ek_finding must emit a
 %% critical for `ek-chain-valid = "unknown"' so an empty roots
