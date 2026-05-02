@@ -6,9 +6,9 @@
 %%% * `init' creates or loads a ring wallet, a 256-bit AES ring secret, and a
 %%%   deeply-nested template.
 %%% * `admit' verifies a candidate peer through `~tpm@2.0a/verify-peer',
-%%%   matches the candidate boot-attestation against the template, then wraps
-%%%   the ring AES secret to the peer's TPM using MakeCredential. The ring
-%%%   wallet is encrypted under that AES key.
+%%%   matches the candidate's nonce-bound fresh attestation against the
+%%%   template, then wraps the ring AES secret to the peer's TPM using
+%%%   MakeCredential. The ring wallet is encrypted under that AES key.
 %%% * `join' asks an existing member for admission, checks the admission
 %%%   envelope, unwraps the AES key through `~tpm@2.0a/activate-credential',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
@@ -91,14 +91,14 @@ admit(_Base, Req, Opts) ->
         RingScope = ring_scope(Template, Wallet, Opts),
         {JoinerURL, PeerAttestation, Publisher} =
             peer_attestation_from_req(Req, RingScope, Opts),
-        Boot = peer_boot_attestation_body(PeerAttestation, Opts),
-        case match_template(Template, Boot, Opts) of
+        PolicyAttestation = peer_policy_attestation_body(PeerAttestation, Opts),
+        case match_template(Template, PolicyAttestation, Opts) of
             true -> ok;
             false ->
                 throw({green_zone_error, #{
                     <<"error">> => <<"template-mismatch">>,
                     <<"mismatch-path">> =>
-                        mismatch_path(Template, Boot, Opts),
+                        mismatch_path(Template, PolicyAttestation, Opts),
                     <<"joiner-url">> => JoinerURL
                 }})
         end,
@@ -223,6 +223,7 @@ existing_or_new_wallet(Req, Opts) ->
 
 install_ring(Template0, AES, Wallet, TrustedPublishers, Opts) ->
     Template = clean_template(Template0, Opts),
+    ok = ensure_nonempty_template(Template),
     Identities = hb_opts:get(identities, #{}, Opts),
     Opts#{
         <<"green-zone-template">> => Template,
@@ -480,13 +481,15 @@ assert_peer_attestation_body(PeerAttestation, RingScope, Opts) ->
     Required = [
         {field_eq, <<"type">>, <<"lapee-peer-attestation">>},
         {field_integer, <<"issued-at-unix">>},
+        {nested_true, <<"boot-verification">>, <<"verified">>},
         {nested_true, <<"verification">>, <<"verified">>},
         {nested_true, <<"freshness">>, <<"verified">>},
         {nested_true, <<"credential-activation">>, <<"verified">>},
         {field_map, <<"validity">>},
         {field_map, <<"peer-scope">>},
         {field_map, <<"peer-credential-subject">>},
-        {field_map, <<"peer-boot-attestation">>}
+        {field_map, <<"peer-boot-attestation">>},
+        {field_map, <<"peer-fresh-attestation">>}
     ],
     lists:foreach(
         fun
@@ -556,6 +559,19 @@ assert_peer_attestation_scope(PeerAttestation, RingScope, Opts) ->
         <<"ring-address">>, ConsumerScope, RingScope, Opts),
     assert_scope_field(
         <<"template-id">>, ConsumerScope, RingScope, Opts),
+    PeerURL = strip_trailing_slash(
+        hb_maps:get(<<"peer-url">>, PeerAttestation, undefined, Opts)),
+    case strip_trailing_slash(
+        hb_maps:get(<<"peer-url">>, Scope, undefined, Opts)) of
+        PeerURL when PeerURL =/= undefined -> ok;
+        _ -> bad_peer_attestation(<<"peer-scope.peer-url">>)
+    end,
+    assert_scope_attestation_id(
+        <<"boot-attestation-id">>, <<"peer-boot-attestation">>,
+        PeerAttestation, Scope, Opts),
+    assert_scope_attestation_id(
+        <<"fresh-attestation-id">>, <<"peer-fresh-attestation">>,
+        PeerAttestation, Scope, Opts),
     Subject = hb_maps:get(
         <<"peer-credential-subject">>, PeerAttestation, #{}, Opts),
     case {
@@ -567,6 +583,22 @@ assert_peer_attestation_scope(PeerAttestation, RingScope, Opts) ->
         {Ek, Ek, Ak, Ak} -> ok;
         _ -> bad_peer_attestation(<<"peer-scope.tpm-material">>)
     end.
+
+assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
+                            Scope, Opts) ->
+    Attestation = response_body(
+        hb_maps:get(AttestationKey, PeerAttestation, undefined, Opts),
+        Opts),
+    Expected = attestation_id(Attestation, Opts),
+    case hb_maps:get(ScopeKey, Scope, undefined, Opts) of
+        Expected -> ok;
+        _ -> bad_peer_attestation(<<"peer-scope.attestation-id">>)
+    end.
+
+attestation_id(Attestation, Opts) when is_map(Attestation) ->
+    hb_message:id(Attestation, all, Opts);
+attestation_id(Other, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
 
 assert_scope_field(Key, Scope, RingScope, Opts) ->
     Expected = hb_maps:get(Key, RingScope, undefined, Opts),
@@ -604,6 +636,12 @@ peer_boot_attestation_body(PeerAttestation, Opts) ->
     response_body(
         hb_maps:get(
             <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+        Opts).
+
+peer_policy_attestation_body(PeerAttestation, Opts) ->
+    response_body(
+        hb_maps:get(
+            <<"peer-fresh-attestation">>, PeerAttestation, undefined, Opts),
         Opts).
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
@@ -738,7 +776,7 @@ assert_expected_ring_address(Admission, Req, Opts) ->
         hb_maps:get(<<"expected-ring-address">>, Req, undefined, Opts),
         hb_opts:get(<<"green-zone-ring-address">>, undefined, Opts)
     ]) of
-        undefined -> ok;
+        undefined -> bad_admission(<<"expected-ring-address">>);
         Expected ->
             case hb_maps:get(<<"ring-address">>, Admission, undefined, Opts) of
                 Expected -> ok;
@@ -863,14 +901,28 @@ match_template(Expected, Expected, _Opts) -> true;
 match_template(_Expected, _Candidate, _Opts) -> false.
 
 clean_template(Template, Opts) when is_map(Template) ->
-    maps:from_list(
-        [
-            {Key, clean_template(Value, Opts)}
-         || {Key, Value} <- hb_maps:to_list(Template, Opts),
-            not lists:member(Key, ?TEMPLATE_META_KEYS)
-        ]);
+    clean_template_map(Template, true, Opts);
 clean_template(Template, _Opts) ->
     Template.
+
+clean_template_map(Template, StripMeta, Opts) ->
+    maps:from_list(
+        [
+            {Key, clean_template_value(Value, Opts)}
+         || {Key, Value} <- hb_maps:to_list(Template, Opts),
+            not (StripMeta andalso lists:member(Key, ?TEMPLATE_META_KEYS))
+        ]).
+
+clean_template_value(Value, Opts) when is_map(Value) ->
+    clean_template_map(Value, false, Opts);
+clean_template_value(Value, _Opts) ->
+    Value.
+
+ensure_nonempty_template(Template) when is_map(Template),
+                                       map_size(Template) > 0 ->
+    ok;
+ensure_nonempty_template(_Template) ->
+    throw({green_zone_error, #{<<"error">> => <<"empty-template">>}}).
 
 mismatch_path(Template, Candidate, Opts) ->
     case mismatch_path(Template, Candidate, [], Opts) of
@@ -944,15 +996,14 @@ wildcard_match_test() ->
         #{}
     )).
 
-template_metadata_is_not_policy_test() ->
+template_envelope_metadata_is_not_policy_test() ->
     Template = clean_template(
         #{
             <<"commitments">> => #{<<"ignored">> => true},
+            <<"ao-types">> => #{<<"ignored">> => true},
             <<"system">> => #{
-                <<"ao-types">> => #{<<"ignored">> => true},
                 <<"kernel">> => #{
-                    <<"cmdline">> => <<"good">>,
-                    <<"commitments">> => #{<<"ignored">> => true}
+                    <<"cmdline">> => <<"good">>
                 }
             }
         },
@@ -1083,6 +1134,74 @@ stored_peer_attestation_scope_mismatch_rejected_test() ->
         }},
         peer_attestation_from_req(Req, RingScope, Opts)).
 
+stored_peer_attestation_peer_scope_url_mismatch_rejected_test() ->
+    PublisherWallet = ar_wallet:new(),
+    Publisher = wallet_address(PublisherWallet),
+    RingScope = test_ring_scope(),
+    Attestation0 = signed_peer_attestation(PublisherWallet, #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+    }, RingScope),
+    Scope0 = hb_maps:get(<<"peer-scope">>, Attestation0, #{}, #{}),
+    Attestation = hb_message:commit(
+        (unsigned_message(Attestation0))#{
+            <<"peer-scope">> =>
+                Scope0#{<<"peer-url">> => <<"http://other.example">>}
+        },
+        #{<<"priv-wallet">> => PublisherWallet}),
+    Req = #{<<"peer-attestation">> => Attestation},
+    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"peer-attestation-invalid">>,
+            <<"field">> := <<"peer-scope.peer-url">>
+        }},
+        peer_attestation_from_req(Req, RingScope, Opts)).
+
+stored_peer_attestation_embedded_id_mismatch_rejected_test() ->
+    PublisherWallet = ar_wallet:new(),
+    Publisher = wallet_address(PublisherWallet),
+    RingScope = test_ring_scope(),
+    Attestation0 = signed_peer_attestation(PublisherWallet, #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+    }, RingScope),
+    Scope0 = hb_maps:get(<<"peer-scope">>, Attestation0, #{}, #{}),
+    Attestation = hb_message:commit(
+        (unsigned_message(Attestation0))#{
+            <<"peer-scope">> =>
+                Scope0#{<<"boot-attestation-id">> => <<"wrong-id">>}
+        },
+        #{<<"priv-wallet">> => PublisherWallet}),
+    Req = #{<<"peer-attestation">> => Attestation},
+    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"peer-attestation-invalid">>,
+            <<"field">> := <<"peer-scope.attestation-id">>
+        }},
+        peer_attestation_from_req(Req, RingScope, Opts)).
+
+green_zone_policy_uses_fresh_attestation_test() ->
+    PublisherWallet = ar_wallet:new(),
+    RingScope = test_ring_scope(),
+    Boot = #{
+        <<"body">> => #{
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
+        }
+    },
+    Fresh = #{
+        <<"body">> => #{
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+        }
+    },
+    Attestation = signed_peer_attestation(
+        PublisherWallet, Boot, RingScope, erlang:system_time(second), Fresh),
+    Template = #{<<"system">> => #{
+        <<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
+    ?assert(match_template(
+        Template, peer_policy_attestation_body(Attestation, #{}), #{})),
+    ?assertNot(match_template(
+        Template, peer_boot_attestation_body(Attestation, #{}), #{})).
+
 expired_peer_attestation_rejected_test() ->
     PublisherWallet = ar_wallet:new(),
     Publisher = wallet_address(PublisherWallet),
@@ -1115,6 +1234,33 @@ admission_body_requires_joiner_binding_test() ->
             #{},
             #{})).
 
+admission_body_requires_expected_ring_test() ->
+    Wallet = ar_wallet:new(),
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"admission-invalid">>,
+            <<"field">> := <<"expected-ring-address">>
+        }},
+        assert_admission_body(
+            test_admission(Wallet),
+            <<"http://peer.example">>,
+            <<"http://self.example">>,
+            <<"nonce">>,
+            #{},
+            #{})).
+
+admission_body_accepts_expected_ring_test() ->
+    Wallet = ar_wallet:new(),
+    RingAddress = wallet_address(Wallet),
+    ?assertEqual(ok,
+        assert_admission_body(
+            test_admission(Wallet),
+            <<"http://peer.example">>,
+            <<"http://self.example">>,
+            <<"nonce">>,
+            #{<<"expected-ring-address">> => RingAddress},
+            #{})).
+
 ring_wallet_address_mismatch_rejected_test() ->
     Wallet = ar_wallet:new(),
     Admission = test_admission(ar_wallet:new()),
@@ -1128,6 +1274,33 @@ sign_without_ring_is_policy_error_test() ->
     ?assertThrow(
         {green_zone_error, #{<<"error">> := <<"green-zone-not-initialized">>}},
         green_zone_signing_opts(#{})).
+
+nested_commitments_template_is_policy_test() ->
+    Template = clean_template(#{
+        <<"system">> => #{<<"commitments">> => <<"required">>},
+        <<"commitments">> => #{<<"ignored-envelope-metadata">> => true}
+    }, #{}),
+    ?assertEqual(
+        #{<<"system">> => #{<<"commitments">> => <<"required">>}},
+        Template),
+    ?assert(match_template(
+        Template,
+        #{<<"system">> => #{<<"commitments">> => <<"required">>}},
+        #{})),
+    ?assertNot(match_template(
+        Template,
+        #{<<"system">> => #{}},
+        #{})).
+
+metadata_only_template_rejected_test() ->
+    ?assertThrow(
+        {green_zone_error, #{<<"error">> := <<"empty-template">>}},
+        install_ring(
+            #{<<"commitments">> => #{<<"only-metadata">> => true}},
+            crypto:strong_rand_bytes(32),
+            ar_wallet:new(),
+            [],
+            #{})).
 
 test_admission(Wallet) ->
     RingScope = test_ring_scope(Wallet),
@@ -1151,15 +1324,28 @@ signed_peer_attestation(Wallet, BootAttestation, RingScope) ->
         Wallet, BootAttestation, RingScope, erlang:system_time(second)).
 
 signed_peer_attestation(Wallet, BootAttestation, RingScope, Now) ->
+    signed_peer_attestation(
+        Wallet, BootAttestation, RingScope, Now, test_fresh_attestation()).
+
+signed_peer_attestation(Wallet, BootAttestation, RingScope, Now,
+                        FreshAttestation) ->
     Subject = test_credential_subject(),
+    BootBody = response_body(BootAttestation, #{}),
+    FreshBody = response_body(FreshAttestation, #{}),
+    PeerURL = <<"http://peer.example">>,
     hb_message:commit(
         #{
             <<"type">> => <<"lapee-peer-attestation">>,
             <<"version">> => <<"1.0">>,
             <<"issued-at-unix">> => Now,
             <<"validity">> => #{<<"not-before-unix">> => Now},
-            <<"peer-url">> => <<"http://peer.example">>,
+            <<"peer-url">> => PeerURL,
             <<"peer-scope">> => #{
+                <<"peer-url">> => PeerURL,
+                <<"boot-attestation-id">> =>
+                    attestation_id(BootBody, #{}),
+                <<"fresh-attestation-id">> =>
+                    attestation_id(FreshBody, #{}),
                 <<"consumer-scope">> => RingScope,
                 <<"ek-public-sha256">> =>
                     encoded_field_sha256(<<"ek-public">>, Subject, #{}),
@@ -1167,7 +1353,9 @@ signed_peer_attestation(Wallet, BootAttestation, RingScope, Now) ->
                     encoded_field_sha256(<<"ak-name">>, Subject, #{})
             },
             <<"peer-boot-attestation">> => BootAttestation,
+            <<"peer-fresh-attestation">> => FreshAttestation,
             <<"peer-credential-subject">> => Subject,
+            <<"boot-verification">> => #{<<"verified">> => true},
             <<"verification">> => #{<<"verified">> => true},
             <<"freshness">> => #{<<"verified">> => true},
             <<"credential-activation">> => #{<<"verified">> => true}
@@ -1190,5 +1378,15 @@ test_credential_subject() ->
         <<"ek-public">> => hb_util:encode(<<"ek-public">>),
         <<"ak-name">> => hb_util:encode(<<"ak-name">>)
     }.
+
+test_fresh_attestation() ->
+    #{
+        <<"body">> => #{
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+        }
+    }.
+
+unsigned_message(Msg) ->
+    maps:without([<<"commitments">>, <<"ao-types">>], Msg).
 
 -endif.

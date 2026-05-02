@@ -186,9 +186,6 @@ info(_Base, _Req, _Opts) ->
                     <<"by-id">> =>
                         <<(?PEER_ATTESTATION_PREFIX)/binary,
                           "/by-id/<signed-message-id>">>,
-                    <<"latest-by-peer-url-sha256">> =>
-                        <<(?PEER_ATTESTATION_PREFIX)/binary,
-                          "/latest-by-peer-url-sha256/<base64url-sha256-url>">>,
                     <<"scoped">> =>
                         <<(?PEER_ATTESTATION_PREFIX)/binary,
                           "/by-peer-url-sha256/<url-sha256>/"
@@ -963,27 +960,39 @@ chk_quote(Envelope, ExpectedNonce) ->
 chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
                 ExpectedQualifiedSigner) ->
     try
-        <<_Magic:4/binary, _Type:2/binary, Rest0/binary>> = Quoted,
+        <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
+          Rest0/binary>> = Quoted,
         {QualifiedSigner, Rest1} = tpm2b(Rest0),
         {ExtraData, Rest2}       = tpm2b(Rest1),
         %% clockInfo (17) + firmwareVersion (8) = 25 bytes
         <<_ClockFwInfo:25/binary, NSel:32/unsigned-big,
           SelAndDigest/binary>> = Rest2,
-        RestAfterSel = skip_pcr_selections(NSel, SelAndDigest),
+        {SignedSelections, RestAfterSel} =
+            parse_pcr_selections(NSel, SelAndDigest),
         {PcrDigest, _} = tpm2b(RestAfterSel),
         case {QualifiedSigner, ExtraData} of
             {ExpectedQualifiedSigner, ExpectedNonce}
                     when byte_size(ExpectedQualifiedSigner) > 0 ->
+                SignedIndices = signed_sha256_pcr_indices(SignedSelections),
+                ReportedIndices = normalize_pcr_indices(SelIndices),
+                case SignedIndices of
+                    ReportedIndices -> ok;
+                    _ ->
+                        throw({tpms_attest_error,
+                               <<"TPMS_ATTEST PCR selection does not match "
+                                 "reported pcr-selection">>})
+                end,
                 %% Verify pcrDigest = sha256(pcr_values concatenated in
-                %% selection order).
-                Computed = compute_pcr_digest(SelIndices, PcrMap),
+                %% the signed TPM PCR selection order.
+                Computed = compute_pcr_digest(SignedIndices, PcrMap),
                 case Computed of
                     PcrDigest ->
                         {ok,
                             iolist_to_binary(io_lib:format(
                                 "sig ok; extraData matches nonce (~B bytes); "
                                 "pcrDigest matches ~B reported PCRs",
-                                [byte_size(ExtraData), length(SelIndices)]))};
+                                [byte_size(ExtraData),
+                                 length(SignedIndices)]))};
                     _ ->
                         {error, <<"quote pcrDigest does not match "
                                   "sha256(pcr_values)">>}
@@ -998,6 +1007,8 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
                         [byte_size(ExtraData), byte_size(ExpectedNonce)]))}
         end
     catch
+        throw:{tpms_attest_error, Reason} ->
+            {error, Reason};
         error:{badmatch, _} ->
             {error, <<"TPMS_ATTEST parse error (truncated or wrong shape)">>}
     end.
@@ -1005,10 +1016,43 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
 tpm2b(<<Size:16/unsigned-big, Payload:Size/binary, Rest/binary>>) ->
     {Payload, Rest}.
 
-skip_pcr_selections(0, Rest) -> Rest;
-skip_pcr_selections(N, <<_Hash:16/unsigned-big, SizeSelect:8/unsigned-big,
-                         _Selection:SizeSelect/binary, Rest/binary>>) ->
-    skip_pcr_selections(N - 1, Rest).
+parse_pcr_selections(Count, Bin) ->
+    parse_pcr_selections(Count, Bin, []).
+
+parse_pcr_selections(0, Rest, Acc) ->
+    {lists:reverse(Acc), Rest};
+parse_pcr_selections(N, <<Hash:16/unsigned-big, SizeSelect:8/unsigned-big,
+                          Selection:SizeSelect/binary, Rest/binary>>, Acc)
+        when N > 0 ->
+    parse_pcr_selections(
+        N - 1, Rest, [{Hash, pcr_select_indices(Selection)} | Acc]).
+
+pcr_select_indices(Selection) ->
+    pcr_select_indices(Selection, 0, []).
+
+pcr_select_indices(<<>>, _Base, Acc) ->
+    lists:reverse(Acc);
+pcr_select_indices(<<Byte:8/unsigned, Rest/binary>>, Base, Acc) ->
+    Bits = [Base + I || I <- lists:seq(0, 7),
+                        (Byte band (1 bsl I)) =/= 0],
+    pcr_select_indices(Rest, Base + 8, lists:reverse(Bits) ++ Acc).
+
+signed_sha256_pcr_indices(Selections) ->
+    case [Indices || {16#000B, Indices} <- Selections] of
+        [] ->
+            throw({tpms_attest_error,
+                   <<"TPMS_ATTEST has no SHA-256 PCR selection">>});
+        Lists ->
+            lists:append(Lists)
+    end.
+
+normalize_pcr_indices(Indices) when is_list(Indices) ->
+    lists:sort([normalize_pcr_index(I) || I <- Indices]);
+normalize_pcr_indices(_) ->
+    [].
+
+normalize_pcr_index(I) when is_integer(I) -> I;
+normalize_pcr_index(B) when is_binary(B) -> binary_to_integer(B).
 
 compute_pcr_digest(Indices, PcrMap) ->
     Concat =
@@ -1643,6 +1687,7 @@ verify_peer_url(Url, Req, Opts) ->
             end,
             ok = ensure_subject_matches_boot(Subject, BootEnv),
             ok = ensure_subject_matches_boot(Subject, FreshEnv),
+            ok = ensure_ak_public_matches_subject(Subject),
             ok = ensure_ek_public_matches_cert(Subject),
             Challenge = crypto:strong_rand_bytes(32),
             Credential = make_credential_for_subject(Subject, Challenge),
@@ -1898,8 +1943,13 @@ credential_activation_proof_context(Credential, AkName, IssuedAt) ->
 ensure_subject_matches_boot(Subject, BootEnv) ->
     Pairs = [
         {<<"ek-public">>, <<"EK public area">>},
+        {<<"ek-pub-pem">>, <<"EK public PEM">>},
+        {<<"ek-name">>, <<"EK name">>},
+        {<<"ek-qualified-name">>, <<"EK qualified name">>},
         {<<"ak-name">>, <<"AK name">>},
-        {<<"ak-public">>, <<"AK public area">>}
+        {<<"ak-public">>, <<"AK public area">>},
+        {<<"ak-pub-pem">>, <<"AK public PEM">>},
+        {<<"ak-qualified-name">>, <<"AK qualified name">>}
     ],
     lists:foreach(
         fun({Key, Label}) ->
@@ -1916,6 +1966,38 @@ ensure_subject_matches_boot(Subject, BootEnv) ->
         end,
         Pairs),
     ok.
+
+ensure_ak_public_matches_subject(Subject) ->
+    AkPublic = hb_maps:get(<<"ak-public">>, Subject, <<>>, #{}),
+    AkPem = hb_maps:get(<<"ak-pub-pem">>, Subject, <<>>, #{}),
+    AkName = safe_decode(hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
+    case {rsa_pub_from_tpm2b_public(safe_decode(AkPublic)),
+          decode_pem_rsa_pub(AkPem),
+          tpm2b_public_name(safe_decode(AkPublic))} of
+        {{ok, Rsa}, {ok, Rsa}, {ok, AkName}} when byte_size(AkName) > 0 ->
+            ok;
+        {{error, Why}, _, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK TPMT_PUBLIC: ~p", [Why]))}});
+        {_, {error, Why}, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-pub-pem">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK public PEM: ~p", [Why]))}});
+        {_, _, {error, Why}} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK name derivation: ~p",
+                                          [Why]))}});
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        <<"AK TPMT_PUBLIC, public PEM, and name do not "
+                          "match">>}})
+    end.
 
 ensure_ek_public_matches_cert(Subject) ->
     EkPublic = hb_maps:get(<<"ek-public">>, Subject, <<>>, #{}),
@@ -1969,8 +2051,6 @@ peer_attestation_cache_paths(Signed, SignedID, Opts) ->
     [
         <<Prefix/binary, "/by-id/", SignedID/binary>>,
         <<Prefix/binary,
-          "/latest-by-peer-url-sha256/", PeerURLHash/binary>>,
-        <<Prefix/binary,
           "/by-peer-url-sha256/", PeerURLHash/binary,
           "/by-ek-public-sha256/", EkHash/binary,
           "/by-boot-attestation-id/", BootID/binary,
@@ -1978,8 +2058,9 @@ peer_attestation_cache_paths(Signed, SignedID, Opts) ->
           "/", SignedID/binary>>
     ].
 
-rsa_pub_from_tpm2b_public(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
+rsa_pub_from_tpm2b_public(Tpm2BPublic) ->
     try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
         <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
           _Attrs:32/unsigned-big, Rest0/binary>> = Public,
         {_AuthPolicy, Rest1} = tpm2b(Rest0),
@@ -1999,9 +2080,31 @@ rsa_pub_from_tpm2b_public(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>
         }}
     catch
         _:_ -> {error, bad_tpm2b_public}
-    end;
-rsa_pub_from_tpm2b_public(_) ->
+    end.
+
+tpm2b_public_body(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
+    {ok, Public};
+tpm2b_public_body(_) ->
     {error, bad_tpm2b_public}.
+
+tpm2b_public_name(Tpm2BPublic) ->
+    case tpm2b_public_body(Tpm2BPublic) of
+        {ok, <<_Type:16/unsigned-big, NameAlg:16/unsigned-big, _/binary>>
+                = Public} ->
+            case tpm_name_hash_alg(NameAlg) of
+                {ok, HashAlg} ->
+                    {ok, <<NameAlg:16/unsigned-big,
+                           (crypto:hash(HashAlg, Public))/binary>>};
+                {error, _} = E -> E
+            end;
+        {error, _} = E -> E
+    end.
+
+tpm_name_hash_alg(16#0004) -> {ok, sha};
+tpm_name_hash_alg(16#000B) -> {ok, sha256};
+tpm_name_hash_alg(16#000C) -> {ok, sha384};
+tpm_name_hash_alg(16#000D) -> {ok, sha512};
+tpm_name_hash_alg(Other) -> {error, {unsupported_name_alg, Other}}.
 
 skip_tpm2_public_symmetric(<<16#0006:16/unsigned-big,
                              _KeyBits:16/unsigned-big,
@@ -3615,8 +3718,6 @@ peer_attestation_cache_paths_test() ->
         [
             <<Prefix/binary, "/by-id/", SignedID/binary>>,
             <<Prefix/binary,
-              "/latest-by-peer-url-sha256/", PeerURLHash/binary>>,
-            <<Prefix/binary,
               "/by-peer-url-sha256/", PeerURLHash/binary,
               "/by-ek-public-sha256/unknown",
               "/by-boot-attestation-id/unknown",
@@ -3696,6 +3797,22 @@ rsa_pub_from_tpm2b_public_test() ->
         }},
         rsa_pub_from_tpm2b_public(Public)).
 
+ensure_ak_public_matches_subject_test() ->
+    ModulusBin = <<1:2048>>,
+    Public = test_rsa_tpm2b_public(ModulusBin, 0),
+    {ok, Rsa} = rsa_pub_from_tpm2b_public(Public),
+    {ok, Name} = tpm2b_public_name(Public),
+    Subject = #{
+        <<"ak-public">> => hb_util:encode(Public),
+        <<"ak-pub-pem">> => test_rsa_public_pem(Rsa),
+        <<"ak-name">> => hb_util:encode(Name)
+    },
+    ?assertEqual(ok, ensure_ak_public_matches_subject(Subject)),
+    ?assertThrow(
+        {boot_attestation_error, #{<<"ak-public">> := _}},
+        ensure_ak_public_matches_subject(
+            Subject#{<<"ak-name">> => hb_util:encode(<<"wrong-name">>)})).
+
 tpms_attest_qualified_signer_must_match_ak_test() ->
     Nonce = crypto:strong_rand_bytes(32),
     QualifiedSigner = <<"ak-qualified-name">>,
@@ -3709,6 +3826,29 @@ tpms_attest_qualified_signer_must_match_ak_test() ->
         {error, <<"TPMS_ATTEST qualifiedSigner does not match "
                   "attested AK qualified name">>},
         chk_tpms_attest(Quoted, Nonce, [0], PcrMap, <<"other-ak">>)).
+
+tpms_attest_rejects_reported_selection_mismatch_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST PCR selection does not match "
+                  "reported pcr-selection">>},
+        chk_tpms_attest(Quoted, Nonce, [1], PcrMap, QualifiedSigner)).
+
+tpms_attest_requires_quote_magic_type_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted0 = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    <<_MagicType:6/binary, Rest/binary>> = Quoted0,
+    Quoted = <<0:32/unsigned-big, 16#8018:16/unsigned-big, Rest/binary>>,
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST parse error (truncated or wrong shape)">>},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)).
 
 test_tpm2b(Bin) ->
     <<(byte_size(Bin)):16/unsigned-big, Bin/binary>>.
@@ -3726,6 +3866,9 @@ test_rsa_tpm2b_public(ModulusBin, Exponent) ->
         (test_tpm2b(ModulusBin))/binary
     >>,
     test_tpm2b(Body).
+
+test_rsa_public_pem(Rsa) ->
+    public_key:pem_encode([public_key:pem_entry_encode('RSAPublicKey', Rsa)]).
 
 test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0) ->
     PcrDigest = crypto:hash(sha256, Pcr0),

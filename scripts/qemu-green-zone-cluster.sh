@@ -324,29 +324,46 @@ start_node 3 "$IMG"
 start_node 4 "$BAD_IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
+for n in 1 2 3 4; do
+    get_json "$n" "/~tpm@2.0a/credential-subject" \
+        "$OUTDIR/responses/node$n-credential-subject.json"
+done
 
 jq -n \
     --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
     --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
     --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
-    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
-    def props($node; $att): {
+    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" \
+    --slurpfile c1 "$OUTDIR/responses/node1-credential-subject.json" \
+    --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
+    --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
+    --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
+    def props($node; $att; $cred): {
         node: $node,
         cmdline: $att.body.system.kernel.cmdline,
         memtotal_kb: $att.body.system.memory.meminfo.memtotal.value,
         dmi_product: $att.body.system.firmware.dmi.fields."product-name",
-        ek_cert_source_kind: $att.body.tpm."ek-cert-source".kind
+        ek_cert_source_kind: $att.body.tpm."ek-cert-source".kind,
+        ek_public: $cred.body."ek-public",
+        ak_name: $cred.body."ak-name"
     };
-    [props(1; $n1[0]), props(2; $n2[0]), props(3; $n3[0]), props(4; $n4[0])]
+    [props(1; $n1[0]; $c1[0]), props(2; $n2[0]; $c2[0]),
+     props(3; $n3[0]; $c3[0]), props(4; $n4[0]; $c4[0])]
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
         distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
         distinct_dmi_products: ([.[].dmi_product] | unique | length),
+        distinct_ek_public: ([.[].ek_public] | unique | length),
+        distinct_ak_name: ([.[].ak_name] | unique | length),
         ek_cert_source_kinds: ([.[].ek_cert_source_kind] | unique)
       }' > "$OUTDIR/responses/security-properties.json"
 jq -e '.distinct_cmdlines >= 2 and .distinct_memtotal_kb == 4 and
-       .distinct_dmi_products == 4 and .ek_cert_source_kinds == ["tpm-nv"]' \
+       .distinct_dmi_products == 4 and .distinct_ek_public == 4 and
+       .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
+       .nodes[0].cmdline == .nodes[1].cmdline and
+       .nodes[1].cmdline == .nodes[2].cmdline and
+       .nodes[3].cmdline != .nodes[0].cmdline' \
     "$OUTDIR/responses/security-properties.json" >/dev/null
 echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
@@ -369,6 +386,13 @@ jq --argjson scope "$ring_scope" \
     "$OUTDIR/requests/verify2.json" \
     > "$OUTDIR/requests/verify2.scoped.json"
 mv "$OUTDIR/requests/verify2.scoped.json" "$OUTDIR/requests/verify2.json"
+for n in 2 3 4; do
+    jq --arg addr "$ring_addr" \
+        '. + {"expected-ring-address": $addr}' \
+        "$OUTDIR/requests/join$n.json" \
+        > "$OUTDIR/requests/join$n.pinned.json"
+    mv "$OUTDIR/requests/join$n.pinned.json" "$OUTDIR/requests/join$n.json"
+done
 echo ">> node 1 initialized green-zone $ring_addr"
 
 post_json 1 "/~tpm@2.0a/verify-peer" \
@@ -422,7 +446,8 @@ if [[ "$join4_rc" != 0 ]]; then
     echo "!! node 4 join request failed at HTTP transport level" >&2
     exit 1
 fi
-if ! jq -e '.status == 400 and .body.error == "template-mismatch"' \
+if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
+            .body."mismatch-path" == "/system/kernel/cmdline"' \
         "$OUTDIR/responses/node4-join.json" >/dev/null; then
     echo "!! node 4 rejection was not the expected template-mismatch" >&2
     cat "$OUTDIR/responses/node4-join.json" >&2

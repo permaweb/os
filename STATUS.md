@@ -834,3 +834,88 @@ The last full appliance/QEMU green-zone pass remains Update 13. The current
 increment is host-validated and staged into `build/hyperbeam/src-edge`; it
 still needs a host with Docker access and swtpm socket permission to rebuild
 images and rerun the strengthened four-node gate.
+
+## Update 18
+
+Re-read the current branch and ran two focused sidecar reviews. Both found
+the same high-risk gap: `verify-peer` produced nonce-bound fresh evidence, but
+green-zone admission still matched templates against the cached
+`peer-boot-attestation`. Additional review found AK public/name binding and
+signed PCR-selection checks that were too trusting.
+
+Fixes in this increment:
+
+- `~green-zone@1.0/admit` now matches the ring template against the signed
+  peer attestation's `peer-fresh-attestation`, not the stable cached
+  boot-attestation.
+- Stored `lapee-peer-attestation` reuse now requires `boot-verification`,
+  `peer-fresh-attestation`, a peer-scope URL matching the signed `peer-url`,
+  and boot/fresh attestation IDs matching the embedded attestation bodies.
+- `~green-zone@1.0/join` now requires a pinned expected ring address, supplied
+  either in the request or node opts. A joiner no longer installs an arbitrary
+  self-signed ring returned by a peer URL.
+- Green-zone templates strip AO envelope metadata (`commitments`, `ao-types`)
+  only at the template envelope boundary. Nested keys with those names remain
+  policy. Metadata-only templates are rejected instead of becoming allow-all.
+- `~tpm@2.0a/verify-peer` now binds the AK used for MakeCredential to the AK
+  used for Quote by checking `ak-public` TPMT_PUBLIC, derived TPM name, and
+  `ak-pub-pem` RSA key all match. Subject, boot, and fresh evidence also must
+  agree on AK/EK public PEMs, names, and qualified names.
+- TPMS_ATTEST parsing now requires quote magic/type, parses the signed PCR
+  selection, compares it with the reported `pcr-selection`, and computes the
+  PCR digest from the signed selection rather than caller-supplied metadata.
+- Removed the mutable-looking `latest-by-peer-url-sha256` peer attestation
+  cache path. Public storage now uses immutable by-id and scoped paths only.
+- The QEMU harness now fetches credential subjects for all four nodes and
+  asserts distinct EK publics, distinct AK names, matching cmdlines for nodes
+  1-3, a differing cmdline for node 4, pinned join ring addresses, and node 4's
+  exact `/system/kernel/cmdline` mismatch path.
+
+Validation evidence at `2026-05-02 09:31 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 22 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 37 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff HEAD --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+```
+
+Fresh target rebuild/QEMU acceptance rerun is still blocked by this Codex
+macOS sandbox:
+
+```text
+$ make buildroot JOBS=18
+permission denied while trying to connect to the docker API at
+unix:///Users/sam/.docker/run/docker.sock
+
+$ OUTDIR=/private/tmp/lapee-qemu-green-zone \
+    bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open TCP socket: Operation not permitted
+
+$ make native-build
+native-build requires a Linux host (Buildroot doesn't run on Darwin).
+```
+
+The last full appliance/QEMU green-zone pass remains Update 13. This increment
+is host-validated and staged into `build/hyperbeam/src-edge`; the strengthened
+gate still needs a host with Docker access and swtpm socket permission.
