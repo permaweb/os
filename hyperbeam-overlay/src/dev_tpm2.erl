@@ -477,8 +477,8 @@ pcr_read(_Base, Req, Opts) ->
 %% what one HyperBEAM node uses to verify a peer, intended to be
 %% reached via:
 %%
-%%   ~relay@1.0/call&relay-path="http://PEER:PORT/~tpm2@2.0a/attestation"
-%%       /verify~tpm2@2.0a
+%%   ~relay@1.0/call&relay-path="http://PEER:PORT/~tpm@2.0a/attestation"
+%%       /verify~tpm@2.0a
 %%
 %% `Base' is the attestation envelope (same shape emitted by
 %% `attestation/3'). Options in `Req':
@@ -648,7 +648,7 @@ safely_run(F, Name, Severity) ->
 %%   3. If Base has a `body' key whose value has
 %%      `lapee_attestation_version', unwrap it (the common case:
 %%      verify is invoked as the second segment of
-%%      `.../attestation/verify~tpm2@2.0a' and Base is the response
+%%      `.../attestation/verify~tpm@2.0a' and Base is the response
 %%      message produced by `attestation/3').
 %% Reviewer pass 10 fuzzer: guard on `is_map(Base)' so a
 %% non-map Base (list, binary, atom) does not crash

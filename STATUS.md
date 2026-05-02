@@ -5,7 +5,9 @@
 Removed the legacy raw-PEM trust-anchor request path from TPM
 verification, peer interpretation, and green-zone admission. The only inline
 trust-anchor shape is now HyperBEAM's base64url `trusted-ca`; malformed inline
-anchors fail closed instead of falling through to node config.
+anchors fail closed instead of falling through to node config. The appliance
+device table now exposes only canonical `tpm@2.0a` and `green-zone@1.0`
+device names, and interpret docs/tests use the same names.
 
 Validation:
 
@@ -27,7 +29,7 @@ $ ./scripts/interpret-local-capture.sh build/qemu-network-test/boot-attestation.
 verdict = untrusted (score 4)
 $ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img build/images/lapee-usb-no-tme.img --timeout 600
 === green-zone QEMU cluster PASSED ===
-ring-address: zaJfvZfCivDKpSRNiSKe5ZRZy_j7sWYH0lzZDjnzCcE
+ring-address: BW4l9iLxUVkaJiAvagB0JF4QPaCh57Hbvj4zSTqPjCc
 ```
 
 ## Update 23
@@ -371,8 +373,7 @@ Added the first LapEE-owned `~green-zone@1.0` overlay:
   4. Returns the ring wallet encrypted under that AES key.
 - Join now activates the credential locally, decrypts the wallet, and installs
   it as the `green-zone` identity.
-- Added `green-zone@1.0` as a real device alias while keeping the existing
-  `greenzone@1.0` alias.
+- Added the `green-zone@1.0` device alias.
 
 Focused tests now passing:
 

@@ -1,7 +1,7 @@
 %%% @doc `~tpm-interpret@1.0' -- turn a verified LapEE TPM attestation
 %%% into rich, human-readable AO-Core fields.
 %%%
-%%% The companion to `~tpm2@2.0a'. `~tpm2@2.0a' is responsible for the
+%%% The companion to `~tpm@2.0a'. `~tpm@2.0a' is responsible for the
 %%% cryptographic chain (EK cert -> AK -> TPM2_Quote -> PCR 15 -> node
 %%% message). This device is responsible for turning that chain into
 %%% *meaning*: the TPM vendor, the firmware identity, the kernel
@@ -18,7 +18,7 @@
 %%%               passes, attach the interpretation. This is the
 %%%               endpoint the user's target URL lands on:
 %%%
-%%%                 ~relay@1.0/call&relay-path="http://PEER/~tpm2@2.0a/attestation"
+%%%                 ~relay@1.0/call&relay-path="http://PEER/~tpm@2.0a/attestation"
 %%%                     /verify~tpm-interpret@1.0
 %%%
 %%% Databases
@@ -63,11 +63,11 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"description">> =>
-                <<"Interpret a `~tpm2@2.0a' attestation envelope into "
+                <<"Interpret a `~tpm@2.0a' attestation envelope into "
                   "named, cross-referenced fields (TPM manufacturer, "
                   "firmware identity, kernel identity, IMA policy, "
                   "LapEE node identity) from a static database shipped "
-                  "in the HyperBEAM release. Composes with `~tpm2@2.0a/"
+                  "in the HyperBEAM release. Composes with `~tpm@2.0a/"
                   "verify': the `verify' export here runs the crypto "
                   "chain first and only interprets on success.">>,
             <<"version">> => <<"1.0">>,
@@ -91,7 +91,7 @@ info(_Base, _Req, _Opts) ->
                 },
                 <<"verify">> => #{
                     <<"description">> =>
-                        <<"Call ~tpm2@2.0a/verify, then if the chain "
+                        <<"Call ~tpm@2.0a/verify, then if the chain "
                           "is accepted, return the verification result "
                           "plus the full interpretation.">>,
                     <<"input">> => <<"Envelope (see interpret).">>,
@@ -100,7 +100,7 @@ info(_Base, _Req, _Opts) ->
                 },
                 <<"verify-peer">> => #{
                     <<"description">> =>
-                        <<"Fetch another HB node's `~tpm2@2.0a/"
+                        <<"Fetch another HB node's `~tpm@2.0a/"
                           "attestation' envelope (GET), verify its "
                           "crypto chain locally, and return the full "
                           "interpretation + a link-free summary. "
@@ -485,7 +485,7 @@ missing_peer_400() ->
 
 fetch_peer_envelope(Base, Opts) ->
     FetchMsg = #{
-        <<"path">>          => <<"/~tpm2@2.0a/attestation">>,
+        <<"path">>          => <<"/~tpm@2.0a/attestation">>,
         <<"accept">>        => <<"application/json@1.0">>,
         <<"accept-bundle">> => <<"true">>
     },
@@ -556,7 +556,7 @@ verify(Base, Req, Opts) ->
 %%%
 %%%   GET /~tpm-interpret@1.0/verify-peer&peer=<base-url>
 %%%
-%%% `peer' is a bare URL; we normalise it + append `/~tpm2@2.0a/
+%%% `peer' is a bare URL; we normalise it + append `/~tpm@2.0a/
 %%% attestation' and fetch with the standard HB content-negotiation
 %%% (`accept: application/json@1.0 + accept-bundle: true') so the
 %%% envelope comes back inline with no body+link references (which
@@ -618,7 +618,7 @@ fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
     NonceBytes = crypto:strong_rand_bytes(32),
     NonceB64 = hb_util:encode(NonceBytes),
     FetchMsg = #{
-        <<"path">>          => <<"/~tpm2@2.0a/attestation">>,
+        <<"path">>          => <<"/~tpm@2.0a/attestation">>,
         <<"accept">>        => <<"application/json@1.0">>,
         <<"accept-bundle">> => <<"true">>,
         <<"nonce">>         => NonceB64
@@ -643,7 +643,7 @@ fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
                             <<"error">> => <<"peer-did-not-return-envelope">>,
                             <<"peer">>  => Base,
                             <<"detail">> =>
-                                <<"GET /~tpm2@2.0a/attestation did not "
+                                <<"GET /~tpm@2.0a/attestation did not "
                                   "return a LapEE attestation envelope; "
                                   "peer may be unreachable, not "
                                   "LapEE-shaped, or returned an error.">>
@@ -7745,7 +7745,7 @@ derived_template_for_pcr(10) ->
         <<"note">>                  =>
             <<"LapEE does not yet transport the IMA per-file event "
               "log in the envelope; only PCR 10's final value is "
-              "signed. Future `~tpm2@2.0a' versions will include it.">>
+              "signed. Future `~tpm@2.0a' versions will include it.">>
     };
 derived_template_for_pcr(11) ->
     %% PCR 11 = UKI kernel image (systemd-stub PE hashes).
@@ -8343,7 +8343,7 @@ interpret_ima(_E, _Db, Pcrs) ->
         <<"note">> =>
             <<"LapEE does not yet transport the kernel IMA event log "
               "in the attestation envelope (PCR 10's final value is "
-              "signed; the per-file chain isn't). Future `~tpm2@2.0a' "
+              "signed; the per-file chain isn't). Future `~tpm@2.0a' "
               "versions will include it; until then, a verifier can "
               "only assert PCR 10 matches a known-good profile.">>
     }.
@@ -10552,13 +10552,13 @@ summary_returns_link_free_map_test() ->
         <<"runtime-event-log">> => [],
         <<"node-message">> =>
             #{<<"on">> => #{<<"start">> =>
-                              #{<<"device">> => <<"tpm2@2.0a">>}}},
+                              #{<<"device">> => <<"tpm@2.0a">>}}},
         <<"node-message-id">> => Zero,
         <<"wallet-address">> => <<"sample-wallet">>
     },
     {ok, #{<<"body">> := S}} = summary(Envelope, #{}, #{}),
     ?assertEqual(<<"0.3">>, maps:get(<<"envelope-version">>, S)),
-    ?assertEqual(<<"tpm2@2.0a">>,
+    ?assertEqual(<<"tpm@2.0a">>,
                  maps:get(<<"on-start-hook-device">>, S)),
     ?assertEqual(<<"sample-wallet">>,
                  maps:get(<<"wallet-address">>, S)),
@@ -10694,7 +10694,7 @@ interpret_handles_partial_envelope_test() ->
             #{<<"port">> => 8734,
               <<"on">> =>
                 #{<<"start">> =>
-                    #{<<"device">> => <<"tpm2@2.0a">>,
+                    #{<<"device">> => <<"tpm@2.0a">>,
                       <<"path">> => <<"extend">>}}},
         <<"node-message-id">> => Zero,
         <<"wallet-address">> => <<"sample-wallet-address-XX">>
@@ -10714,7 +10714,7 @@ interpret_handles_partial_envelope_test() ->
     ?assertEqual(true, maps:get(<<"is-zero">>, Pcr15)),
     %% Node section reads on.start.device
     Node = maps:get(<<"node">>, Body),
-    ?assertEqual(<<"tpm2@2.0a">>,
+    ?assertEqual(<<"tpm@2.0a">>,
                  maps:get(<<"on-start-hook-device">>, Node)).
 
 pcr_role_canonical_mapping_test() ->
