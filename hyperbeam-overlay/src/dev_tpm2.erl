@@ -2332,17 +2332,7 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ak-hierarchy">> => <<"endorsement">>,
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
-                        <<"quote">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)])
-                        },
+                        <<"quote">> => quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                         <<"runtime-event-log">> => event_log(Opts),
                         <<"tcg-event-log">> => hb_util:encode(TcgLogBin),
                         <<"tcg-event-log-source-path">> => TcgLogSource,
@@ -2486,17 +2476,8 @@ attestation(_Base, Req, Opts) ->
                         %; the verifier's paper-P4 check clean).
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
-                        <<"tpm-quote">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)])
-                        },
+                        <<"tpm-quote">> =>
+                            quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                         <<"runtime-event-log">> => EventLog,
                         %% Firmware-side TCG event log (PCRs 0-14
                         %% measurements the kernel exposes).
@@ -2535,6 +2516,18 @@ attestation(_Base, Req, Opts) ->
         {error, Reason} ->
             error_resp(500, <<"ak_unavailable">>, Reason)
     end.
+
+quote_body(Pcrs, Nonce, Quoted, Signature, PcrMap) ->
+    #{
+        <<"pcr-selection">> => Pcrs,
+        <<"nonce">> => hb_util:encode(Nonce),
+        <<"quoted">> => hb_util:encode(Quoted),
+        <<"signature">> => hb_util:encode(Signature),
+        <<"pcr-values">> =>
+            maps:from_list(
+                [{integer_to_binary(I), hb_util:encode(V)}
+                 || {I, V} <- maps:to_list(PcrMap)])
+    }.
 
 %%%============================================================================
 %%% Runtime event log

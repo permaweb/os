@@ -1,5 +1,11 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 32
+
+Deduplicated TPM quote envelope construction between boot and live attestation
+paths. Evidence: `HB_PORT=19159 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_tpm2` passed 40/40 with exit 0.
+
 ## Update 31
 
 TPM HMAC/parameter-encryption session setup now fails closed instead of falling
