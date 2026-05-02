@@ -1,5 +1,12 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 28
+
+Removed public stacktrace fields from unexpected green-zone/TPM error envelopes
+and one duplicate assertion. Evidence at `2026-05-02T23:17:22Z`: 55/55
+`dev_green_zone,dev_tpm2` tests; `make buildroot JOBS=18`; no-TME image
+247463936 bytes; QEMU cluster PASSED, ring `sNhILfkrHSqZdzuI1ZFg5u-CPcWEYWl2ZswTYLBTQtI`.
+
 ## Update 27
 
 Trimmed a duplicate green-zone test helper and made `~system@1.0` reuse one

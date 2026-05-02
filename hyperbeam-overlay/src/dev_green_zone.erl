@@ -240,16 +240,14 @@ with_result(Fun, Opts) ->
     catch
         throw:{green_zone_error, ErrorBody} ->
             {ok, #{<<"status">> => 400, <<"body">> => ErrorBody}};
-        Class:Reason:Stacktrace ->
+        Class:Reason ->
             {ok, #{
                 <<"status">> => 500,
                 <<"body">> => #{
                     <<"error">> => <<"green-zone-failed">>,
                     <<"class">> => hb_util:bin(Class),
                     <<"reason">> =>
-                        iolist_to_binary(io_lib:format("~p", [Reason])),
-                    <<"stacktrace">> =>
-                        iolist_to_binary(io_lib:format("~p", [Stacktrace]))
+                        iolist_to_binary(io_lib:format("~p", [Reason]))
                 }
             }}
     end.
@@ -1342,10 +1340,6 @@ metadata_keys_are_stripped_recursively_test() ->
         <<"commitments">> => #{<<"ignored-envelope-metadata">> => true}
     }, #{}),
     ?assertEqual(#{<<"system">> => #{}}, Template),
-    ?assert(match_template(
-        Template,
-        #{<<"system">> => #{}},
-        #{})),
     ?assert(match_template(
         Template,
         #{<<"system">> => #{}},

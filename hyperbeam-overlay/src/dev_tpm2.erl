@@ -2286,12 +2286,10 @@ with_ok(Fun) ->
     catch
         throw:{boot_attestation_error, Reason} ->
             {error, Reason};
-        Class:Reason:Stacktrace ->
+        Class:Reason ->
             {error, #{
                 <<"class">> => to_bin(Class),
-                <<"reason">> => to_bin(Reason),
-                <<"stacktrace">> =>
-                    iolist_to_binary(io_lib:format("~p", [Stacktrace]))
+                <<"reason">> => to_bin(Reason)
             }}
     end.
 
