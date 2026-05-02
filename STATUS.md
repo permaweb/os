@@ -1304,3 +1304,50 @@ $ ./scripts/qemu-green-zone-cluster.sh --timeout 600
 out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
 ring-address: Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
 ```
+
+## Update 17 - Peer Attestation Subject Binding
+
+`~tpm@2.0a/verify-peer` now rejects a peer-verification response unless the
+cached boot attestation and the fresh nonce-bound attestation name the same
+`node-message-id`. This closes a stale-attestation mixing gap: the AK/EK
+material still had to match, but the admission path now also requires the
+boot-attested runtime subject and the fresh quote subject to be identical
+before credential activation or green-zone admission can proceed.
+
+Validation evidence at `2026-05-02T22:46:27Z`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2
+All 40 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone
+All 16 tests passed.
+
+$ make buildroot JOBS=18
+build/initramfs/initramfs-lapee.cpio.zst 192M May 2 18:39
+build/kernel/vmlinuz-lapee 20M May 2 18:39
+
+$ make hb-usb-no-tme-image WIFI=0 JOBS=18
+USB image ready: .../build/images/lapee-usb-no-tme.img (247463936 bytes)
+
+$ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
+    --img build/images/lapee-usb-no-tme.img --timeout 600
+>> node 1 initialized green-zone ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
+>> node 2 signed as green-zone ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
+>> node 3 signed as green-zone ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
+```

@@ -1765,6 +1765,7 @@ verify_peer_url(Url, Req, Opts) ->
                            #{<<"peer-fresh-verification">> =>
                                 FreshVerifyBody}})
             end,
+            ok = ensure_attestation_subjects_match(BootEnv, FreshEnv),
             ok = ensure_subject_matches_boot(Subject, BootEnv),
             ok = ensure_subject_matches_boot(Subject, FreshEnv),
             ok = ensure_ak_public_matches_subject(Subject),
@@ -2047,6 +2048,18 @@ ensure_subject_matches_boot(Subject, BootEnv) ->
         end,
         Pairs),
     ok.
+
+ensure_attestation_subjects_match(BootEnv, FreshEnv) ->
+    case {
+        hb_maps:get(<<"node-message-id">>, BootEnv, <<>>, #{}),
+        hb_maps:get(<<"node-message-id">>, FreshEnv, <<>>, #{})
+    } of
+        {ID, ID} when is_binary(ID), byte_size(ID) > 0 -> ok;
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"peer-attestation">> =>
+                        <<"boot and fresh attestation subjects differ">>}})
+    end.
 
 ensure_ak_public_matches_subject(Subject) ->
     AkPublic = hb_maps:get(<<"ak-public">>, Subject, <<>>, #{}),
@@ -3893,6 +3906,17 @@ credential_activation_public_proof_rejects_wrong_secret_test() ->
                 <<"activation proof did not match challenge">>
         }},
         ensure_activation_secret(Activation, Credential, <<"secret-b">>, #{})).
+
+verify_peer_requires_boot_fresh_subject_match_test() ->
+    ?assertEqual(ok,
+        ensure_attestation_subjects_match(
+            #{<<"node-message-id">> => <<"subject-a">>},
+            #{<<"node-message-id">> => <<"subject-a">>})),
+    ?assertThrow(
+        {boot_attestation_error, #{<<"peer-attestation">> := _}},
+        ensure_attestation_subjects_match(
+            #{<<"node-message-id">> => <<"subject-a">>},
+            #{<<"node-message-id">> => <<"subject-b">>})).
 
 chk_quote_rejects_verifier_nonce_mismatch_test() ->
     Envelope = #{
