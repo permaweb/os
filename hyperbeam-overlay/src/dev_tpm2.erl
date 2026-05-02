@@ -29,7 +29,8 @@
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
          attestation/3, boot_attestation/3, credential_subject/3,
-         activate_credential/3, verify_peer/3]).
+         activate_credential/3, activate_credential_secret/2,
+         verify_peer/3]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
 -export([event_log/1]).
@@ -154,7 +155,10 @@ info(_Base, _Req, _Opts) ->
                 <<"description">> =>
                     <<"Run TPM2_ActivateCredential with the node's loaded AK "
                       "and EK. Used by verifiers and green-zone admission to "
-                      "prove the AK and EK are resident in the same TPM.">>,
+                      "prove the AK and EK are resident in the same TPM. The "
+                      "HTTP endpoint returns a MAC proof, not the recovered "
+                      "secret; local callers that need the secret use the "
+                      "Erlang activate_credential_secret/2 API.">>,
                 <<"request">> => #{
                     <<"credential-blob">> =>
                         <<"base64url TPM2B_ID_OBJECT from MakeCredential">>,
@@ -914,6 +918,8 @@ ek_chain_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
 chk_quote(Envelope) ->
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
     AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
+    AkQualifiedName =
+        safe_decode(hb_maps:get(<<"ak-qualified-name">>, Envelope, <<>>, #{})),
     Quoted = hb_util:decode(hb_maps:get(<<"quoted">>, Q, <<>>, #{})),
     Sig    = hb_util:decode(hb_maps:get(<<"signature">>, Q, <<>>, #{})),
     Nonce  = hb_util:decode(hb_maps:get(<<"nonce">>, Q, <<>>, #{})),
@@ -925,7 +931,8 @@ chk_quote(Envelope) ->
         {ok, RSAPub} ->
             case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
                 true ->
-                    chk_tpms_attest(Quoted, Nonce, Sel, PcrMap);
+                    chk_tpms_attest(
+                        Quoted, Nonce, Sel, PcrMap, AkQualifiedName);
                 false ->
                     {error, <<"RSA-PSS(SHA256) verify of TPMS_ATTEST failed">>}
             end;
@@ -937,19 +944,20 @@ chk_quote(Envelope) ->
 %% Parse TPMS_ATTEST: magic(4) + type(2) + qualifiedSigner(TPM2B) +
 %% extraData(TPM2B) + clockInfo(17) + firmwareVersion(8) +
 %% attested(TPMS_QUOTE_INFO = TPML_PCR_SELECTION + TPM2B_DIGEST).
-chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap) ->
+chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
+                ExpectedQualifiedSigner) ->
     try
         <<_Magic:4/binary, _Type:2/binary, Rest0/binary>> = Quoted,
         {QualifiedSigner, Rest1} = tpm2b(Rest0),
         {ExtraData, Rest2}       = tpm2b(Rest1),
-        _ = QualifiedSigner,
         %% clockInfo (17) + firmwareVersion (8) = 25 bytes
         <<_ClockFwInfo:25/binary, NSel:32/unsigned-big,
           SelAndDigest/binary>> = Rest2,
         RestAfterSel = skip_pcr_selections(NSel, SelAndDigest),
         {PcrDigest, _} = tpm2b(RestAfterSel),
-        case ExtraData of
-            ExpectedNonce ->
+        case {QualifiedSigner, ExtraData} of
+            {ExpectedQualifiedSigner, ExpectedNonce}
+                    when byte_size(ExpectedQualifiedSigner) > 0 ->
                 %% Verify pcrDigest = sha256(pcr_values concatenated in
                 %% selection order).
                 Computed = compute_pcr_digest(SelIndices, PcrMap),
@@ -964,7 +972,10 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap) ->
                         {error, <<"quote pcrDigest does not match "
                                   "sha256(pcr_values)">>}
                 end;
-            _ ->
+            {_, ExpectedNonce} ->
+                {error, <<"TPMS_ATTEST qualifiedSigner does not match "
+                          "attested AK qualified name">>};
+            {_, _} ->
                 {error,
                     iolist_to_binary(io_lib:format(
                         "extraData != nonce (got ~B bytes, expected ~B)",
@@ -1522,31 +1533,37 @@ credential_subject_body(Opts) ->
 activate_credential(_Base, Req, Opts) ->
     with_ok(
         fun() ->
-            CredentialBlob = decode_required(<<"credential-blob">>, Req, Opts),
-            Secret = decode_required(<<"secret">>, Req, Opts),
-            {ok, AkTr} = ensure_ak(Opts),
-            EKTr = persistent_term:get({dev_tpm2, ek_tr}),
-            case nif_activate_credential(AkTr, EKTr, CredentialBlob, Secret) of
-                {ok, CertInfo} ->
-                    Msg = hb_message:commit(
-                        #{
-                            <<"type">> =>
-                                <<"lapee-tpm-credential-activation">>,
-                            <<"version">> => <<"1.0">>,
-                            <<"issued-at-unix">> =>
-                                erlang:system_time(second),
-                            <<"ak-name">> => ak_name(Opts),
-                            <<"credential-secret">> =>
-                                hb_util:encode(CertInfo)
-                        },
-                        Opts),
-                    #{<<"status">> => 200, <<"body">> => Msg};
-                {error, Reason} ->
-                    throw({boot_attestation_error,
-                           #{<<"activate-credential">> =>
-                                reason_to_text(Reason)}})
-            end
+            {ok, CertInfo} = activate_credential_secret(Req, Opts),
+            Msg = hb_message:commit(
+                credential_activation_public_body(CertInfo, Req, Opts),
+                Opts),
+            #{<<"status">> => 200, <<"body">> => Msg}
         end).
+
+activate_credential_secret(Credential, Opts) ->
+    CredentialBlob = decode_required(<<"credential-blob">>, Credential, Opts),
+    Secret = decode_required(<<"secret">>, Credential, Opts),
+    {ok, AkTr} = ensure_ak(Opts),
+    EKTr = persistent_term:get({dev_tpm2, ek_tr}),
+    case nif_activate_credential(AkTr, EKTr, CredentialBlob, Secret) of
+        {ok, CertInfo} -> {ok, CertInfo};
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"activate-credential">> => reason_to_text(Reason)}})
+    end.
+
+credential_activation_public_body(CertInfo, Credential, Opts) ->
+    #{
+        <<"type">> => <<"lapee-tpm-credential-activation">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => erlang:system_time(second),
+        <<"ak-name">> => ak_name(Opts),
+        <<"credential-secret-sha256">> =>
+            hb_util:encode(crypto:hash(sha256, CertInfo)),
+        <<"proof-alg">> => <<"HMAC-SHA256">>,
+        <<"credential-secret-proof">> =>
+            hb_util:encode(credential_activation_proof(CertInfo, Credential))
+    }.
 
 verify_peer(_Base, Req, Opts) ->
     case peer_url(Req, Opts) of
@@ -1589,7 +1606,8 @@ verify_peer_url(Url, Req, Opts) ->
             Challenge = crypto:strong_rand_bytes(32),
             Credential = make_credential_for_subject(Subject, Challenge),
             Activation = activate_peer_credential(Url, Credential, Opts),
-            ok = ensure_activation_secret(Activation, Challenge, Opts),
+            ok = ensure_activation_secret(
+                Activation, Credential, Challenge, Opts),
             Signed = hb_message:commit(
                 #{
                     <<"type">> => <<"lapee-peer-attestation">>,
@@ -1672,14 +1690,32 @@ activate_peer_credential(Url, Credential, Opts) ->
             Opts),
         Opts).
 
-ensure_activation_secret(Activation, Expected, Opts) ->
-    GotB64 = hb_maps:get(<<"credential-secret">>, Activation, <<>>, Opts),
-    case safe_decode(GotB64) of
-        Expected -> ok;
+ensure_activation_secret(Activation, Credential, Expected, Opts) ->
+    ExpectedHash = hb_util:encode(crypto:hash(sha256, Expected)),
+    ExpectedProof = credential_activation_proof(Expected, Credential),
+    GotHash = hb_maps:get(
+        <<"credential-secret-sha256">>, Activation, <<>>, Opts),
+    GotProof = safe_decode(
+        hb_maps:get(<<"credential-secret-proof">>, Activation, <<>>, Opts)),
+    case {GotHash, GotProof} of
+        {ExpectedHash, ExpectedProof} -> ok;
         _ -> throw({boot_attestation_error,
                     #{<<"credential-activation">> =>
-                        <<"returned secret did not match challenge">>}})
+                        <<"activation proof did not match challenge">>}})
     end.
+
+credential_activation_proof(Secret, Credential) ->
+    crypto:mac(
+        hmac,
+        sha256,
+        Secret,
+        credential_activation_proof_context(Credential)).
+
+credential_activation_proof_context(Credential) ->
+    Blob = hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
+    EncSecret = hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
+    <<"lapee-tpm-credential-activation-v1\n",
+      Blob/binary, "\n", EncSecret/binary>>.
 
 ensure_subject_matches_boot(Subject, BootEnv) ->
     Pairs = [
@@ -1704,16 +1740,24 @@ ensure_subject_matches_boot(Subject, BootEnv) ->
     ok.
 
 ensure_ek_public_matches_cert(Subject) ->
+    EkPublic = hb_maps:get(<<"ek-public">>, Subject, <<>>, #{}),
     EkPem = hb_maps:get(<<"ek-pub-pem">>, Subject, <<>>, #{}),
     CertPem = hb_maps:get(<<"ek-cert-pem">>, Subject, <<>>, #{}),
-    case {decode_pem_rsa_pub(EkPem), cert_rsa_pub(CertPem)} of
-        {{ok, Rsa}, {ok, Rsa}} -> ok;
-        {{error, Why}, _} ->
+    case {rsa_pub_from_tpm2b_public(safe_decode(EkPublic)),
+          decode_pem_rsa_pub(EkPem),
+          cert_rsa_pub(CertPem)} of
+        {{ok, Rsa}, {ok, Rsa}, {ok, Rsa}} -> ok;
+        {{error, Why}, _, _} ->
             throw({boot_attestation_error,
                    #{<<"ek-public">> =>
                         iolist_to_binary(
+                            io_lib:format("bad EK TPMT_PUBLIC: ~p", [Why]))}});
+        {_, {error, Why}, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-pub-pem">> =>
+                        iolist_to_binary(
                             io_lib:format("bad EK public PEM: ~p", [Why]))}});
-        {_, {error, Why}} ->
+        {_, _, {error, Why}} ->
             throw({boot_attestation_error,
                    #{<<"ek-cert-pem">> =>
                         iolist_to_binary(
@@ -1721,7 +1765,8 @@ ensure_ek_public_matches_cert(Subject) ->
         _ ->
             throw({boot_attestation_error,
                    #{<<"ek-public">> =>
-                        <<"EK public area does not match EK certificate">>}})
+                        <<"EK TPMT_PUBLIC, public PEM, and certificate "
+                          "public key do not match">>}})
     end.
 
 store_peer_attestation(Signed, Opts) ->
@@ -1741,6 +1786,48 @@ peer_attestation_cache_paths(Signed, SignedID, Opts) ->
         <<Prefix/binary,
           "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
     ].
+
+rsa_pub_from_tpm2b_public(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
+    try
+        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
+          _Attrs:32/unsigned-big, Rest0/binary>> = Public,
+        {_AuthPolicy, Rest1} = tpm2b(Rest0),
+        Rest2 = skip_tpm2_public_symmetric(Rest1),
+        Rest3 = skip_tpm2_rsa_scheme(Rest2),
+        <<_KeyBits:16/unsigned-big, Exponent0:32/unsigned-big,
+          Rest4/binary>> = Rest3,
+        {ModulusBin, _Rest5} = tpm2b(Rest4),
+        Exponent =
+            case Exponent0 of
+                0 -> 65537;
+                _ -> Exponent0
+            end,
+        {ok, #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = Exponent
+        }}
+    catch
+        _:_ -> {error, bad_tpm2b_public}
+    end;
+rsa_pub_from_tpm2b_public(_) ->
+    {error, bad_tpm2b_public}.
+
+skip_tpm2_public_symmetric(<<16#0006:16/unsigned-big,
+                             _KeyBits:16/unsigned-big,
+                             _Mode:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_public_symmetric(<<16#0010:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_public_symmetric(_) ->
+    throw(bad_tpm2b_public_symmetric).
+
+skip_tpm2_rsa_scheme(<<16#0010:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_rsa_scheme(<<_Scheme:16/unsigned-big,
+                       _HashAlg:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_rsa_scheme(_) ->
+    throw(bad_tpm2b_public_scheme).
 
 cert_rsa_pub(Pem) ->
     case decode_pem_cert(Pem) of
@@ -3327,6 +3414,94 @@ peer_attestation_cache_paths_test() ->
               "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
         ],
         peer_attestation_cache_paths(Signed, SignedID, #{})).
+
+credential_activation_public_body_hides_secret_test() ->
+    Credential = #{
+        <<"credential-blob">> => hb_util:encode(<<"blob">>),
+        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
+    },
+    Secret = <<"ring-secret-must-not-be-exported">>,
+    persistent_term:put({dev_tpm2, ak, name}, <<"ak-name">>),
+    try
+        Body = credential_activation_public_body(Secret, Credential, #{}),
+        ?assertNot(maps:is_key(<<"credential-secret">>, Body)),
+        ?assert(maps:is_key(<<"credential-secret-sha256">>, Body)),
+        ?assert(maps:is_key(<<"credential-secret-proof">>, Body)),
+        ?assertEqual(ok,
+            ensure_activation_secret(Body, Credential, Secret, #{}))
+    after
+        persistent_term:erase({dev_tpm2, ak, name})
+    end.
+
+credential_activation_public_proof_rejects_wrong_secret_test() ->
+    Credential = #{
+        <<"credential-blob">> => hb_util:encode(<<"blob">>),
+        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
+    },
+    Activation = #{
+        <<"credential-secret-sha256">> =>
+            hb_util:encode(crypto:hash(sha256, <<"secret-a">>)),
+        <<"credential-secret-proof">> =>
+            hb_util:encode(
+                credential_activation_proof(<<"secret-a">>, Credential))
+    },
+    ?assertThrow(
+        {boot_attestation_error, #{
+            <<"credential-activation">> :=
+                <<"activation proof did not match challenge">>
+        }},
+        ensure_activation_secret(Activation, Credential, <<"secret-b">>, #{})).
+
+rsa_pub_from_tpm2b_public_test() ->
+    ModulusBin = <<1:2048>>,
+    Public = test_rsa_tpm2b_public(ModulusBin, 0),
+    ?assertEqual(
+        {ok, #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = 65537
+        }},
+        rsa_pub_from_tpm2b_public(Public)).
+
+tpms_attest_qualified_signer_must_match_ak_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    ?assertMatch(
+        {ok, _},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)),
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST qualifiedSigner does not match "
+                  "attested AK qualified name">>},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, <<"other-ak">>)).
+
+test_tpm2b(Bin) ->
+    <<(byte_size(Bin)):16/unsigned-big, Bin/binary>>.
+
+test_rsa_tpm2b_public(ModulusBin, Exponent) ->
+    Body = <<
+        16#0001:16/unsigned-big,
+        16#000B:16/unsigned-big,
+        0:32/unsigned-big,
+        0:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        2048:16/unsigned-big,
+        Exponent:32/unsigned-big,
+        (test_tpm2b(ModulusBin))/binary
+    >>,
+    test_tpm2b(Body).
+
+test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0) ->
+    PcrDigest = crypto:hash(sha256, Pcr0),
+    Selection = <<16#000B:16/unsigned-big, 3:8/unsigned-big, 1, 0, 0>>,
+    QuoteInfo = <<1:32/unsigned-big, Selection/binary,
+                  (test_tpm2b(PcrDigest))/binary>>,
+    <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
+      (test_tpm2b(QualifiedSigner))/binary,
+      (test_tpm2b(Nonce))/binary,
+      0:(25 * 8), QuoteInfo/binary>>.
 
 %% The TCG event log source-path + length + format fields
 %% travel attested alongside tcg-event-log itself, so a

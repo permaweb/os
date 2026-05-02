@@ -651,3 +651,98 @@ $ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
 
 Target rebuild/QEMU rerun for this increment remains blocked by the same local
 Docker/native-Buildroot constraints recorded in Update 14.
+
+## Update 16
+
+Re-read the peer verification and green-zone admission boundary with two
+sidecar reviews. One review found a real oracle bug:
+
+- Before this pass, `~green-zone@1.0/admit` returned a credential wrapping the
+  ring AES key to the joiner's TPM and also returned the wallet encrypted under
+  that AES key. Because `~tpm@2.0a/activate-credential` was public and returned
+  the recovered secret, a third party could request admission for an honest
+  peer, ask that peer's public activation endpoint to unwrap the credential,
+  and decrypt the ring wallet.
+
+Fixes in this increment:
+
+- `~tpm@2.0a/activate-credential` no longer exports the recovered secret over
+  HTTP. It returns `credential-secret-sha256` plus an `HMAC-SHA256` proof over
+  the MakeCredential transcript. `verify-peer` now verifies that proof against
+  its verifier-chosen challenge.
+- `~green-zone@1.0/join` still recovers the ring AES key, but only through the
+  local Erlang API `dev_tpm2:activate_credential_secret/2`; that function is
+  not a HyperBEAM device export.
+- EK certificate binding now checks the actual TPMT_PUBLIC bytes used by
+  MakeCredential. The RSA public key parsed from `ek-public`, the `ek-pub-pem`,
+  and the EK certificate public key must all match.
+- Quote verification now checks TPMS_ATTEST `qualifiedSigner` against the
+  attested AK qualified name instead of discarding it after parsing.
+- Added focused regression tests for public activation proof shape, proof
+  rejection with the wrong secret, TPMT_PUBLIC RSA parsing, and
+  qualified-signer mismatch rejection.
+- Strengthened the QEMU harness so the four nodes have explicit differing
+  boot-attested properties: distinct RAM sizes and distinct DMI product names,
+  with node 4 still carrying the rejected cmdline. The harness writes and
+  asserts `responses/security-properties.json` before admission starts.
+- The harness now defaults swtpm control to TCP (`SWTPM_CTRL=tcp`) while
+  preserving `SWTPM_CTRL=unix`; this avoids relying only on Unix socket
+  support in environments that permit local TCP.
+
+Validation evidence at `2026-05-02 07:28 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 33 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 13 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+```
+
+Target rebuild and fresh QEMU acceptance rerun are still blocked in this
+Codex sandbox:
+
+```text
+$ make buildroot JOBS=18
+permission denied while trying to connect to the docker API at
+unix:///Users/sam/.docker/run/docker.sock
+
+$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open UnixIO socket: Operation not permitted
+
+$ OUTDIR=/private/tmp/lapee-qemu-green-zone \
+    bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open TCP socket: Operation not permitted
+```
+
+The last full appliance/QEMU green-zone pass remains Update 13. The current
+increment is host-validated and staged into `build/hyperbeam/src-edge`, but the
+image rebuild and the strengthened heterogeneity harness still need a host
+that can access Docker and open swtpm sockets.
+
+Residual protocol work from review:
+
+- Add verifier-nonce freshness for `verify-peer`; the current path still
+  verifies a cached boot-attestation plus a fresh credential-activation proof.
+- Scope stored peer attestations more tightly by ring/template/peer/EK and
+  validity window before they are accepted as reusable publisher evidence.

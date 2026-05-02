@@ -127,8 +127,7 @@ join(_Base, Req, Opts) ->
         Admission = request_admission(PeerURL, SelfURL, Req, Opts),
         assert_admission_body(Admission, PeerURL, SelfURL, Opts),
         Credential = hb_maps:get(<<"credential">>, Admission, undefined, Opts),
-        Activation = activate_local_credential(Credential, Opts),
-        AES = decode_required(<<"credential-secret">>, Activation, Opts),
+        AES = activate_local_credential(Credential, Opts),
         Wallet = decrypt_wallet(
             hb_maps:get(<<"encrypted-wallet">>, Admission, undefined, Opts),
             AES,
@@ -558,9 +557,9 @@ bad_admission(Key) ->
     }}).
 
 activate_local_credential(Credential, Opts) ->
-    case dev_tpm2:activate_credential(#{}, Credential, Opts) of
-        {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
-            response_body(Body, Opts);
+    case dev_tpm2:activate_credential_secret(Credential, Opts) of
+        {ok, Secret} when is_binary(Secret) ->
+            Secret;
         Other ->
             throw({green_zone_error, #{
                 <<"error">> => <<"credential-activation-failed">>,

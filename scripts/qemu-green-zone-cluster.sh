@@ -2,8 +2,11 @@
 # qemu-green-zone-cluster.sh -- four-node TPM/green-zone acceptance harness.
 #
 # The harness boots three admissible LapEE nodes and one inadmissible node
-# under QEMU+OVMF+swtpm. Each swtpm is manufactured with a local EK
-# certificate so `~tpm@2.0a/verify-peer' can exercise the real
+# under QEMU+OVMF+swtpm. The nodes intentionally vary observable system
+# properties, currently guest RAM size plus node 4's rejected kernel cmdline,
+# so the green-zone template is tested as a deep subset policy rather than an
+# accidental whole-machine equality check. Each swtpm is manufactured with a
+# local EK certificate so `~tpm@2.0a/verify-peer' can exercise the real
 # MakeCredential/ActivateCredential path instead of a no-cert shortcut.
 #
 # Acceptance checked here:
@@ -28,6 +31,16 @@ SWTPM_LOCALCA_OPTIONS=${SWTPM_LOCALCA_OPTIONS:-/opt/homebrew/etc/swtpm-localca.o
 GUEST_HOST=${GUEST_HOST:-$(ipconfig getifaddr en0 2>/dev/null || echo 10.0.2.2)}
 GOOD_CMDLINE=${GOOD_CMDLINE:-"console=tty0 quiet loglevel=0 vt.global_cursor_default=0 rdinit=/init lapee.mode=prod lapee.wifi=enabled lapee.splash=blue LAPEE_NO_TME=1"}
 BAD_CMDLINE=${BAD_CMDLINE:-"$GOOD_CMDLINE lapee.green-zone=reject"}
+NODE1_MEMORY_MIB=${NODE1_MEMORY_MIB:-2048}
+NODE2_MEMORY_MIB=${NODE2_MEMORY_MIB:-2304}
+NODE3_MEMORY_MIB=${NODE3_MEMORY_MIB:-2560}
+NODE4_MEMORY_MIB=${NODE4_MEMORY_MIB:-1792}
+NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-GZ-admit-1}
+NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-GZ-admit-2}
+NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-GZ-admit-3}
+NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-GZ-reject-4}
+SWTPM_CTRL=${SWTPM_CTRL:-tcp}
+SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
 
 while (($# > 0)); do
     case "$1" in
@@ -149,6 +162,28 @@ node_guest_url() {
     printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + n))"
 }
 
+node_memory_mib() {
+    local n=$1
+    case "$n" in
+        1) echo "$NODE1_MEMORY_MIB";;
+        2) echo "$NODE2_MEMORY_MIB";;
+        3) echo "$NODE3_MEMORY_MIB";;
+        4) echo "$NODE4_MEMORY_MIB";;
+        *) echo "2048";;
+    esac
+}
+
+node_dmi_product() {
+    local n=$1
+    case "$n" in
+        1) echo "$NODE1_DMI_PRODUCT";;
+        2) echo "$NODE2_DMI_PRODUCT";;
+        3) echo "$NODE3_DMI_PRODUCT";;
+        4) echo "$NODE4_DMI_PRODUCT";;
+        *) echo "LapEE-GZ-node-$n";;
+    esac
+}
+
 manufacture_tpm() {
     local n=$1
     local dir="$OUTDIR/nodes/node$n/tpm"
@@ -175,8 +210,28 @@ start_node() {
     cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
     manufacture_tpm "$n"
     local sock="$node_dir/tpm/swtpm-sock"
+    local memory_mib
+    memory_mib=$(node_memory_mib "$n")
+    local dmi_product
+    dmi_product=$(node_dmi_product "$n")
+    local swtpm_ctrl qemu_chardev
+    case "$SWTPM_CTRL" in
+        tcp)
+            local tpm_port=$((SWTPM_CTRL_BASE_PORT + n))
+            swtpm_ctrl="type=tcp,bindaddr=127.0.0.1,port=$tpm_port"
+            qemu_chardev="socket,id=chrtpm,host=127.0.0.1,port=$tpm_port"
+            ;;
+        unix)
+            swtpm_ctrl="type=unixio,path=$sock"
+            qemu_chardev="socket,id=chrtpm,path=$sock"
+            ;;
+        *)
+            echo "unknown SWTPM_CTRL: $SWTPM_CTRL" >&2
+            return 1
+            ;;
+    esac
     if ! swtpm socket --tpm2 --tpmstate "dir=$node_dir/tpm/state" \
-        --ctrl "type=unixio,path=$sock" \
+        --ctrl "$swtpm_ctrl" \
         --flags not-need-init,startup-clear \
         --log "file=$node_dir/tpm/swtpm.log,level=5" \
         --daemon --pid "file=$node_dir/tpm/swtpm.pid"; then
@@ -188,11 +243,12 @@ start_node() {
     qemu-system-x86_64 \
         -machine q35,accel=tcg \
         -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx \
-        -m 2048 -smp 4 \
+        -m "$memory_mib" -smp 4 \
         -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
         -drive "if=pflash,format=raw,file=$node_dir/vars.fd" \
         -drive "file=$node_dir/disk.img,format=raw,if=virtio" \
-        -chardev "socket,id=chrtpm,path=$sock" \
+        -smbios "type=1,product=$dmi_product" \
+        -chardev "$qemu_chardev" \
         -tpmdev emulator,id=tpm0,chardev=chrtpm \
         -device tpm-tis,tpmdev=tpm0 \
         -netdev "user,id=net0,hostfwd=tcp::${port}-:8734" \
@@ -200,7 +256,7 @@ start_node() {
         -nographic \
         > "$node_dir/serial.log" 2>&1 &
     pids+=("$!")
-    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n")"
+    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product"
 }
 
 wait_node() {
@@ -268,6 +324,32 @@ start_node 3 "$IMG"
 start_node 4 "$BAD_IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
+
+jq -n \
+    --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
+    --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
+    --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
+    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
+    def props($node; $att): {
+        node: $node,
+        cmdline: $att.body.system.kernel.cmdline,
+        memtotal_kb: $att.body.system.memory.meminfo.memtotal.value,
+        dmi_product: $att.body.system.firmware.dmi.fields."product-name",
+        ek_cert_source_kind: $att.body.tpm."ek-cert-source".kind
+    };
+    [props(1; $n1[0]), props(2; $n2[0]), props(3; $n3[0]), props(4; $n4[0])]
+    | {
+        nodes: .,
+        distinct_cmdlines: ([.[].cmdline] | unique | length),
+        distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
+        distinct_dmi_products: ([.[].dmi_product] | unique | length),
+        ek_cert_source_kinds: ([.[].ek_cert_source_kind] | unique)
+      }' > "$OUTDIR/responses/security-properties.json"
+jq -e '.distinct_cmdlines >= 2 and .distinct_memtotal_kb == 4 and
+       .distinct_dmi_products == 4 and .ek_cert_source_kinds == ["tpm-nv"]' \
+    "$OUTDIR/responses/security-properties.json" >/dev/null
+echo ">> observed differing boot-attested properties"
+jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
 python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 for req in init verify2 admit2 admit3 admit4 join2 join3 join4 sign1 sign2 sign3 sign4; do
