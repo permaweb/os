@@ -134,7 +134,9 @@ pivots go here. No pushes unless explicitly requested.
     the TCG EK-chain NV range beginning at `0x01C00100`.
 - Fix implemented:
   - `dev_tpm2` now probes both the adjacent chain slot and
-    `0x01C00100..0x01C0010F`.
+    `0x01C00100..0x01C001FF`.
+  - The ODCA range scan stops at the first missing range index, because the
+    chain is provisioned contiguously from `0x01C00100`.
   - The verifier still treats those certs only as intermediates, never as
     trust anchors.
   - Added EUnit coverage for the Intel ODCA chain-handle set.
@@ -143,19 +145,19 @@ pivots go here. No pushes unless explicitly requested.
   - `JOBS=18 make buildroot` passed.
   - Rebuilt images:
     - `build/images/lapee-usb.img`:
-      `3ce1fc6a9d672e8c2978ed77a090a19f68de5f910c4d8a50d09f5dad9360aff5`
+      `213177176d29e56dfe18e3fc07c8b2a3b471a75041f6396104f69515562839ab`
     - `build/images/lapee-usb-no-tme.img`:
-      `170cf584fff8f07e957b24bc0bb809b400130dace91d66d96f986a0d00f12379`
+      `61746cc6380529755dd9962e4d7246a563f7c4a31a4bb3b409757ebd2d676c09`
     - `build/initramfs/initramfs-lapee.cpio.zst`:
-      `6c6c5c0e80b7230b9d9d6b19af1c3bc55f8d99c654c930a0064b5b4c04782686`
+      `1230754a8d021997ba729e745e2f2a33ef8b8a5fb1fc25c1752a77012a230ad2`
     - `build/kernel/vmlinuz-lapee`:
       `1cfe160c491205ac0649c1c76bbdd2d8851c33b1e012e9321a83cdc89d47f872`
   - `IMG=build/images/lapee-usb-no-tme.img ./scripts/boot-usb-image.sh
     --timeout 420` passed.
-  - `./scripts/interpret-local-capture.sh --label qemu-no-tme-odca-chain-fix
+  - `./scripts/interpret-local-capture.sh --label qemu-no-tme-odca-full-chain
     build/qemu-network-test/boot-attestation.json` passed:
     - Dashboard:
-      `build/hyperbeam/src-edge/out/local-capture/qemu-no-tme-odca-chain-fix/dashboard.html`
+      `build/hyperbeam/src-edge/out/local-capture/qemu-no-tme-odca-full-chain/dashboard.html`
     - Expected QEMU verdict: `untrusted`, score `4`.
     - Verified signals include wallet binding, quote signature, PCR replay,
       hashpath continuity, freshness, and no-TME operator override.

@@ -2160,7 +2160,7 @@ ek_cert_source() ->
 %% is provisioned in the TCG EK-chain NV range starting at 0x01C00100.
 %% Intel documents this as the EICA chain path for ODCA PTT certs.
 -define(EK_NV_CHAIN_FIRST, 16#01C00100).
--define(EK_NV_CHAIN_LAST,  16#01C0010F).
+-define(EK_NV_CHAIN_LAST,  16#01C001FF).
 
 %% Fetch the EK certificate from TPM NV storage and cache it. The list
 %% below is iterated in order; the first NV index that yields a valid
@@ -2193,9 +2193,8 @@ fetch_ek_cert_from_nv(Opts) ->
             %% certs are actually present; the verifier treats them as
             %% intermediates only, never as trust anchors.
             ChainHandle = Handle + 1,
-            ChainHandles = ek_cert_chain_handles(Handle),
             {ChainDers, ChainSource, ChainHits} =
-                fetch_ek_cert_chain(ChainHandles),
+                fetch_ek_cert_chain(ChainHandle),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders},
                                 ChainDers),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem},
@@ -2251,12 +2250,80 @@ uniq_preserve_order([H | Rest], Seen, Acc) ->
 %% intermediate; some ship the full chain down to the root. We parse
 %% whatever's there and return all DER cert binaries plus the NV
 %% handles that yielded parseable certificates.
+fetch_ek_cert_chain(ChainHandle) when is_integer(ChainHandle) ->
+    merge_chain_results(
+        [fetch_ek_cert_chain_handles([ChainHandle]),
+         fetch_ek_cert_chain_range(?EK_NV_CHAIN_FIRST,
+                                   ?EK_NV_CHAIN_LAST)]);
 fetch_ek_cert_chain(ChainHandles) when is_list(ChainHandles) ->
-    fetch_ek_cert_chain(ChainHandles, [], [], []);
-fetch_ek_cert_chain(ChainHandle) ->
-    fetch_ek_cert_chain([ChainHandle]).
+    fetch_ek_cert_chain_handles(ChainHandles).
+
+fetch_ek_cert_chain_handles(ChainHandles) ->
+    fetch_ek_cert_chain(ChainHandles, [], [], []).
 
 fetch_ek_cert_chain([], Ders, Hits, Attempts) ->
+    finalize_chain_result(Ders, Hits, Attempts);
+fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts) ->
+    case read_chain_handle(ChainHandle) of
+        {ok, ChainDers} ->
+            fetch_ek_cert_chain(
+                Rest, lists:reverse(ChainDers) ++ Ders,
+                [ChainHandle | Hits], Attempts);
+        {error, Reason} ->
+            fetch_ek_cert_chain(
+                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts])
+    end.
+
+fetch_ek_cert_chain_range(First, Last) ->
+    fetch_ek_cert_chain_range(First, Last, [], [], []).
+
+fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts)
+        when Handle > Last ->
+    finalize_chain_result(Ders, Hits, Attempts);
+fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts) ->
+    case read_chain_handle(Handle) of
+        {ok, ChainDers} ->
+            fetch_ek_cert_chain_range(
+                Handle + 1, Last, lists:reverse(ChainDers) ++ Ders,
+                [Handle | Hits], Attempts);
+        {error, <<"nv_index_undefined">> = Reason} ->
+            %% The EK-chain range is contiguous from 0x01C00100. If
+            %% the first index is missing, this TPM has no range-chain.
+            %% If a later index is missing, the range ended.
+            finalize_chain_result(Ders, Hits, [{Handle, Reason} | Attempts]);
+        {error, Reason} ->
+            fetch_ek_cert_chain_range(
+                Handle + 1, Last, Ders, Hits,
+                [{Handle, Reason} | Attempts])
+    end.
+
+read_chain_handle(ChainHandle) ->
+    case lapee_tpm_nif:nv_read(ChainHandle) of
+        {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
+            case split_concatenated_ders(Bin) of
+                [] -> {error, <<"nv-content-empty-or-non-der">>};
+                ChainDers -> {ok, ChainDers}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+merge_chain_results(Results) ->
+    Ders = lists:append([Ds || {Ds, _Source, _Hits} <- Results]),
+    Hits = lists:append([Hs || {_Ds, _Source, Hs} <- Results]),
+    case Hits of
+        [] ->
+            Sources =
+                [S || {_Ds, S, _Hs} <- Results, S =/= <<"not-probed">>],
+            {Ders, iolist_to_binary(
+                [<<"probe-failed: ">>,
+                 string:join([binary_to_list(S) || S <- Sources], "; ")]),
+             []};
+        _ ->
+            {Ders, chain_hit_source(Hits), Hits}
+    end.
+
+finalize_chain_result(Ders, Hits, Attempts) ->
     case Hits of
         [] ->
             Source = case Attempts of
@@ -2268,30 +2335,15 @@ fetch_ek_cert_chain([], Ders, Hits, Attempts) ->
             end,
             {lists:reverse(Ders), Source, []};
         _ ->
-            Source = iolist_to_binary(
-                [<<"tpm-nv:">>,
-                 string:join([binary_to_list(format_nv_handle(H))
-                              || H <- lists:reverse(Hits)], ",")]),
-            {lists:reverse(Ders), Source, lists:reverse(Hits)}
-    end;
-fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts) ->
-    case lapee_tpm_nif:nv_read(ChainHandle) of
-        {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
-            case split_concatenated_ders(Bin) of
-                [] ->
-                    fetch_ek_cert_chain(
-                        Rest, Ders, Hits,
-                        [{ChainHandle, <<"nv-content-empty-or-non-der">>}
-                         | Attempts]);
-                ChainDers ->
-                    fetch_ek_cert_chain(
-                        Rest, lists:reverse(ChainDers) ++ Ders,
-                        [ChainHandle | Hits], Attempts)
-            end;
-        {error, Reason} ->
-            fetch_ek_cert_chain(
-                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts])
+            OrderedHits = lists:reverse(Hits),
+            {lists:reverse(Ders), chain_hit_source(OrderedHits), OrderedHits}
     end.
+
+chain_hit_source(Hits) ->
+    iolist_to_binary(
+        [<<"tpm-nv:">>,
+         string:join([binary_to_list(format_nv_handle(H)) || H <- Hits],
+                     ",")]).
 
 chain_attempts_text(Attempts) ->
     string:join(
@@ -2799,10 +2851,10 @@ chk_binding_rejects_empty_id_test() ->
 
 ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
-        [16#01C00003 | lists:seq(16#01C00100, 16#01C0010F)],
+        [16#01C00003 | lists:seq(16#01C00100, 16#01C001FF)],
         ek_cert_chain_handles(16#01C00002)),
     ?assertEqual(
-        lists:seq(16#01C00100, 16#01C0010F),
+        lists:seq(16#01C00100, 16#01C001FF),
         ek_cert_chain_handles(16#01C000FF)).
 
 %% Regression test: the verify_fun used in chk_ek_chain must reject
