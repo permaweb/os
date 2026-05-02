@@ -318,8 +318,12 @@ request_admission(PeerURL, SelfURL, Req, Opts) ->
         Req
     ),
     AdmitReq = Body#{<<"joiner-url">> => SelfURL},
-    case hb_http:post(PeerURL, <<"/~green-zone@1.0/admit">>,
-                      AdmitReq, Opts) of
+    case hb_http:post(
+        PeerURL,
+        <<"/~green-zone@1.0/admit">>,
+        AdmitReq,
+        peer_http_opts(Opts)
+    ) of
         {ok, Response} -> response_body(Response, Opts);
         Other ->
             throw({green_zone_error, #{
@@ -327,6 +331,12 @@ request_admission(PeerURL, SelfURL, Req, Opts) ->
                 <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
             }})
     end.
+
+peer_http_opts(Opts) ->
+    Opts#{
+        <<"http-client">> => gun,
+        <<"protocol">> => http1
+    }.
 
 activate_local_credential(Credential, Opts) ->
     case dev_tpm2:activate_credential(#{}, Credential, Opts) of

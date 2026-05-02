@@ -184,3 +184,103 @@ and green-zone overlay. Evidence:
 Next implementation target: QEMU swtpm EK-certificate provisioning and a
 multi-node harness so credential activation can be proven end-to-end across
 four concurrently running nodes.
+
+## Update 6
+
+Added the first four-node QEMU/swtpm green-zone acceptance harness. It boots
+three nodes from the same no-TME image plus one intentionally different image,
+manufactures local EK certificates for each swtpm, initializes a ring on node
+1, admits nodes 2 and 3 through credential activation, rejects node 4 via the
+deep boot-attestation template, and checks that the accepted nodes can sign as
+the same ring wallet.
+
+The first run exposed a harness issue before any LapEE code executed:
+`swtpm_setup` requires its TPM state directory to exist ahead of provisioning.
+Fixed that and made local swtpm config pathing/cleanup less brittle. The
+multi-node run is now the active validation gate.
+
+## Update 7
+
+The harness now boots all four QEMU nodes and reaches green-zone join
+requests. Two peer-call issues surfaced in sequence:
+
+- Default outbound peer calls used HyperBEAM's default HTTP/2-oriented client
+  path, which closed against the local QEMU peers.
+- Forcing `httpc` fixed the protocol direction but caused the minimal rootfs
+  to raise `pubkey_os_cacerts:no_cacerts_found`.
+
+The code now forces peer-verification/admission traffic through `gun` with
+`http1`. That keeps the protocol explicit without requiring an OS CA bundle
+for local HTTP peers. Rebuilding the appliance image again before rerunning the
+four-node acceptance harness.
+
+## Update 8
+
+Focused tests pass against the staged HyperBEAM checkout after the peer-call
+changes:
+
+- `LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2` passes 26 tests.
+- `LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone` passes 3
+  tests.
+
+The first direct QEMU admission preflight then exposed the expected next hard
+edge: swtpm manufactures EK certs with an intermediate local CA, so trusting
+only `issuercert.pem` is not sufficient. The verifier now treats
+`trusted-ca`/`trusted-ca-pem` as PEM bundles, tries each certificate as a trust
+anchor, and uses the remaining bundle entries plus the peer-presented chain as
+intermediate candidates. The cluster harness now supplies the swtpm issuer +
+root bundle via base64url `trusted-ca`.
+
+Also replaced a brittle `true = Verified` peer-verification assertion with an
+explicit verifier-error return so future rejected peers carry their failed
+checks instead of collapsing into `{badmatch,false}`.
+
+Target Buildroot rebuild is running now so the QEMU image contains the latest
+verifier changes.
+
+## Update 9
+
+Second peer-review pass found three real protocol/harness blockers and one
+missing negative assertion. Fixed all four:
+
+- `~tpm@2.0a` boot-attestation normalization now keeps the
+  `tpm.extended-subject` ID as `node-message-id`. The previous code
+  recomputed an ID over the nested `node` message only, while PCR 15 was
+  extended with the ID of the full `#{system,node}` subject. That would reject
+  otherwise-valid peers before green-zone admission.
+- Added a regression test:
+  `normalise_boot_attestation_uses_extended_subject_test`.
+- The QEMU green-zone template now expects the emitted EK-cert provenance
+  `tpm.ek-cert-source.kind = "tpm-nv"` instead of the nonexistent
+  `"nv-index"`.
+- The harness now checks the actual admission shape
+  `body.credential.credential-blob`, and it actively attempts node 4 signing
+  after the rejected join to prove the inadmissible node does not have the
+  green-zone wallet.
+- The harness cleanup and swtpm launch path now report early swtpm failures
+  instead of exiting silently under `set -u` / `set -e`.
+
+Validation evidence at `2026-05-02 03:20:56 EDT`:
+
+- `LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile` passes in
+  `build/hyperbeam/src-edge`.
+- Direct EUnit without starting the HTTP listener:
+  `LAPEE_TPM_ALLOW_NO_NIF=1 erl -noshell -pa _build/test/lib/*/ebin -pa _build/default/lib/*/ebin -eval 'case eunit:test(dev_tpm2, [verbose]) of ok -> halt(0); error -> halt(1) end.'`
+  passes 27/27 tests.
+- Direct EUnit without starting the HTTP listener:
+  `LAPEE_TPM_ALLOW_NO_NIF=1 erl -noshell -pa _build/test/lib/*/ebin -pa _build/default/lib/*/ebin -eval 'case eunit:test(dev_green_zone, [verbose]) of ok -> halt(0); error -> halt(1) end.'`
+  passes 3/3 tests.
+- `bash -n scripts/qemu-green-zone-cluster.sh` passes.
+
+Environment blockers in this Codex desktop sandbox:
+
+- `make buildroot JOBS=18` cannot connect to Docker:
+  `permission denied while trying to connect to the docker API at unix:///Users/sam/.docker/run/docker.sock`.
+- HyperBEAM's normal `rebar3 eunit --module=...` app-start path cannot bind
+  Ranch on port 8734 here: `listen_error ... eperm`.
+- The four-node QEMU harness cannot start swtpm here:
+  `!! swtpm failed for node 1` /
+  `Could not open UnixIO socket: Operation not permitted`.
+
+The code and harness are now ready for the full acceptance run in an
+environment that allows Docker and local listener sockets.

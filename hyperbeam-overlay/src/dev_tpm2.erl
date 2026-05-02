@@ -527,13 +527,20 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
     case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
         Tpm when is_map(Tpm) ->
             Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
-            NodeID =
+            ExtendedSubject =
+                hb_maps:get(<<"extended-subject">>, Tpm, undefined, #{}),
+            LegacyNodeID =
                 case Node of
                     M1 when is_map(M1) ->
                         hb_util:human_id(
                             hb_util:native_id(
                                 hb_message:id(M1, all, Opts)));
                     _ -> undefined
+                end,
+            NodeID =
+                case ExtendedSubject of
+                    B when is_binary(B), byte_size(B) > 0 -> B;
+                    _ -> LegacyNodeID
                 end,
             Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
             Tpm#{
@@ -690,35 +697,16 @@ resolve_trusted_ca_from_config(Opts) ->
 %% would tell it "that's fine", defeating the whole chain check.
 chk_ek_chain(Envelope, TrustedCaPem) ->
     EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, #{}),
-    case {decode_pem_cert(EkPem), decode_pem_cert(TrustedCaPem)} of
-        {{ok, EkDer}, {ok, CaDer}} ->
-            %% pkix_decode_cert on the CA can raise if the PEM
-            %% structurally parsed but the DER is malformed (ASN.1
-            %% decode errors). Catch here so the check cleanly
-            %% returns {error, _} with a useful message instead of
-            %% bubbling as a raw exception.
-            try public_key:pkix_decode_cert(CaDer, otp) of
-                CaOtp ->
-                    case public_key:pkix_path_validation(
-                            CaOtp, [EkDer],
-                            [{verify_fun, ek_chain_verify_fun()}]) of
-                        {ok, _} ->
-                            {ok, <<"OpenSSL pkix_path_validation ok">>};
-                        {error, Why} ->
-                            {error, diagnose_chain_failure(Why, EkDer, CaDer)}
-                    end
-            catch
-                Class:Reason ->
-                    {error,
-                        iolist_to_binary(io_lib:format(
-                            "trusted CA is structurally PEM-shaped but "
-                            "not a valid DER certificate (~p:~p); likely "
-                            "corrupted over the wire (e.g. URL-encoding "
-                            "mangled a PEM boundary). Use the `trusted-ca' "
-                            "key with base64url-encoded PEM bytes for "
-                            "unambiguous transport.",
-                            [Class, Reason]))}
-            end;
+    ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, #{}),
+    case {decode_pem_cert(EkPem), decode_pem_certs(TrustedCaPem)} of
+        {{ok, EkDer}, {ok, TrustedDers}} ->
+            PeerChainDers =
+                case decode_pem_certs(ChainPem) of
+                    {ok, D} -> D;
+                    {error, empty} -> [];
+                    {error, _} -> []
+                end,
+            validate_ek_chain(EkDer, PeerChainDers, TrustedDers);
         {_, {error, _}} ->
             {error, <<"trusted CA missing or unparseable; set "
                       "`lapee_tpm_ca_cert' in node config or pass "
@@ -727,6 +715,51 @@ chk_ek_chain(Envelope, TrustedCaPem) ->
         {{error, Why}, _} ->
             {error, iolist_to_binary(io_lib:format("ek_cert_pem invalid: ~p",
                                                     [Why]))}
+    end.
+
+validate_ek_chain(_EkDer, _PeerChainDers, []) ->
+    {error, <<"trusted CA missing or unparseable">>};
+validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
+    Attempts =
+        [
+            validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, Anchor)
+        ||
+            Anchor <- TrustedDers
+        ],
+    case [Detail || {ok, Detail} <- Attempts] of
+        [Detail | _] -> {ok, Detail};
+        [] ->
+            Reasons = [Reason || {error, Reason} <- Attempts],
+            {error, iolist_to_binary(io_lib:format(
+                "chain invalid for all ~B trusted anchor candidate(s): ~p",
+                [length(TrustedDers), Reasons]))}
+    end.
+
+validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
+    Intermediates =
+        PeerChainDers ++ [Der || Der <- TrustedDers, Der =/= AnchorDer],
+    try public_key:pkix_decode_cert(AnchorDer, otp) of
+        AnchorOtp ->
+            case public_key:pkix_path_validation(
+                    AnchorOtp,
+                    [EkDer | Intermediates],
+                    [{verify_fun, ek_chain_verify_fun()}]) of
+                {ok, _} ->
+                    {ok, iolist_to_binary(io_lib:format(
+                        "pkix_path_validation ok using ~B intermediate "
+                        "candidate(s)", [length(Intermediates)]))};
+                {error, Why} ->
+                    {error, diagnose_chain_failure(Why, EkDer, AnchorDer)}
+            end
+    catch
+        Class:Reason ->
+            {error,
+                iolist_to_binary(io_lib:format(
+                    "trusted CA bundle contains a structurally PEM-shaped "
+                    "entry that is not a valid DER certificate (~p:~p); "
+                    "likely corrupted over the wire. Use `trusted-ca' with "
+                    "base64url-encoded PEM bytes for unambiguous transport.",
+                    [Class, Reason]))}
     end.
 
 %% Produce a targeted error message for common pkix_path_validation
@@ -1229,6 +1262,19 @@ decode_pem_cert(Pem) when is_binary(Pem) ->
         Other -> {error, {unexpected_pem_content, Other}}
     end.
 
+decode_pem_certs(<<>>) -> {error, empty};
+decode_pem_certs(Pem) when is_binary(Pem) ->
+    Certs =
+        [
+            Der
+        ||
+            {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)
+        ],
+    case Certs of
+        [] -> {error, empty};
+        _ -> {ok, Certs}
+    end.
+
 decode_pem_rsa_pub(<<>>) -> {error, empty};
 decode_pem_rsa_pub(Pem) when is_binary(Pem) ->
     %% Reviewer pass 13 (crypto primitives): removed a dead
@@ -1472,7 +1518,12 @@ verify_peer_url(Url, Req, Opts) ->
             BootEnv = normalise_attestation(Boot, Opts),
             VerifyReq = Req#{<<"envelope">> => BootEnv},
             {ok, #{<<"body">> := VerifyBody}} = verify(BootEnv, VerifyReq, Opts),
-            true = hb_maps:get(<<"verified">>, VerifyBody, false, #{}),
+            case hb_maps:get(<<"verified">>, VerifyBody, false, #{}) of
+                true -> ok;
+                false ->
+                    throw({boot_attestation_error,
+                           #{<<"peer-verification">> => VerifyBody}})
+            end,
             ok = ensure_subject_matches_boot(Subject, BootEnv),
             ok = ensure_ek_public_matches_cert(Subject),
             Challenge = crypto:strong_rand_bytes(32),
@@ -1524,7 +1575,7 @@ fetch_peer_message(Url, Path, Opts) ->
         <<"accept">> => <<"application/json@1.0">>,
         <<"accept-bundle">> => <<"true">>
     },
-    case hb_http:get(Url, FetchMsg, Opts) of
+    case hb_http:get(Url, FetchMsg, peer_http_opts(Opts)) of
         {ok, Response} -> resolve_body({ok, Response});
         Other -> throw({boot_attestation_error, #{Path => to_bin(Other)}})
     end.
@@ -1560,12 +1611,23 @@ activate_peer_credential(Url, Credential, Opts) ->
         <<"secret">> =>
             hb_maps:get(<<"secret">>, Credential, <<>>, #{})
     },
-    case hb_http:post(Url, <<"/~tpm@2.0a/activate-credential">>, Req, Opts) of
+    case hb_http:post(
+        Url,
+        <<"/~tpm@2.0a/activate-credential">>,
+        Req,
+        peer_http_opts(Opts)
+    ) of
         {ok, Response} -> resolve_subject_body(resolve_body({ok, Response}), Opts);
         Other ->
             throw({boot_attestation_error,
                    #{<<"activate-peer">> => to_bin(Other)}})
     end.
+
+peer_http_opts(Opts) ->
+    Opts#{
+        <<"http-client">> => gun,
+        <<"protocol">> => http1
+    }.
 
 ensure_activation_secret(Activation, Expected, Opts) ->
     GotB64 = hb_maps:get(<<"credential-secret">>, Activation, <<>>, Opts),
@@ -3489,6 +3551,26 @@ chk_binding_rejects_empty_id_test() ->
             [EmptyDigestEvent#{<<"digest">> => <<"AAAA">>}]
     },
     ?assertMatch({error, _}, chk_binding(EnvelopeShortId)).
+
+normalise_boot_attestation_uses_extended_subject_test() ->
+    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
+    Node = #{<<"address">> => <<"node-address">>},
+    Subject = #{<<"system">> => System, <<"node">> => Node},
+    SubjectID = hb_message:id(Subject, all, #{}),
+    NodeOnlyID =
+        hb_util:human_id(
+            hb_util:native_id(hb_message:id(Node, all, #{}))),
+    Envelope = Subject#{
+        <<"tpm">> => #{
+            <<"extended-subject">> => SubjectID,
+            <<"quote">> => #{}
+        }
+    },
+    Normalised = normalise_attestation(Envelope, #{}),
+    ?assertNotEqual(NodeOnlyID, SubjectID),
+    ?assertEqual(SubjectID,
+                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
+                             #{})).
 
 ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
