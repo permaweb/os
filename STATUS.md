@@ -1,5 +1,19 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 25
+
+Trimmed unused `~tpm-interpret@1.0` compatibility wrappers and a stale debug
+binding. Public device exports are unchanged.
+
+Validation:
+
+```text
+$ cd build/hyperbeam/src-edge && LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm_interpret
+All 117 tests passed.
+$ make buildroot JOBS=18
+artefacts: initramfs-lapee.cpio.zst, vmlinuz-lapee
+```
+
 ## Update 24
 
 Removed the legacy raw-PEM trust-anchor request path from TPM

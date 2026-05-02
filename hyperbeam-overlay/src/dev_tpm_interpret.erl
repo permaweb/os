@@ -1956,11 +1956,6 @@ validate_ek_chain(Cert, Chain, Roots) ->
     validate_ek_chain_1(DerCert, DerIntermediates, Roots,
                         length(Chain)).
 
-%% Legacy 2-arg form for call sites that predate v1.2's chain
-%% threading. Equivalent to calling with an empty intermediate list.
-validate_ek_chain(Cert, Roots) ->
-    validate_ek_chain(Cert, [], Roots).
-
 safe_der_encode(Cert) ->
     try public_key:pkix_encode('OTPCertificate', Cert, otp)
     catch _:_ -> <<>>
@@ -2390,11 +2385,10 @@ tpm_trust_tier(_)                     -> <<"unknown">>.
 
 %% CPU microcode identity -- from EV_CPU_MICROCODE on PCR 1.
 %% Discriminates Intel vs AMD vs unknown via `parsed.format'.
-%% The 2-arg form additionally cross-references
+%% Cross-references
 %% `priv/tpm-interpret/cpu-models.json' to attach a human-readable
 %% `codename', `brand-range', `micro-arch', `year' and the
 %% supported TEE/hardening feature set.
-claim_cpu(Events) -> claim_cpu(Events, #{}, #{}).
 claim_cpu(Events, Db) -> claim_cpu(Events, #{}, Db).
 
 claim_cpu(Events, E, Db) ->
@@ -2520,8 +2514,6 @@ hits_to_cpu_hint(Hits) ->
         _         -> <<"unknown">>
     end,
     Brand = pick_brand_range(Needles),
-    Prov = [{_, Ev} | _] = Hits,
-    _ = Prov,
     FirstEv = element(2, hd(Hits)),
     #{<<"vendor">>            => Vendor,
       <<"vendor-provenance">> => [event_provenance(FirstEv),
@@ -3156,11 +3148,8 @@ event_seq_range(EvList) ->
 %%                 (so a policy engine can inspect the
 %%                  evidence without re-walking the tree)
 %%   version       1  (so callers can reason about evolution)
-%% Two-arity form so callers with the raw envelope can feed it
-%% in. The signature-verification signal requires the raw quoted
+%% The signature-verification signal requires the raw quoted
 %% bytes which the claim tree doesn't preserve.
-claim_policy_verdict(Claim) -> claim_policy_verdict(Claim, #{}).
-
 claim_policy_verdict(Claim, Envelope) ->
     Signals = collect_policy_signals(Claim, Envelope),
     {Warnings, Criticals} = classify_policy_findings(Signals),
@@ -3178,8 +3167,6 @@ claim_policy_verdict(Claim, Envelope) ->
 %% Pull the small set of decisive per-section facts into a
 %% flat signal map -- same keys drive the classify_ and
 %% score_ functions below.
-collect_policy_signals(Claim) -> collect_policy_signals(Claim, #{}).
-
 collect_policy_signals(Claim, Envelope) ->
     SB = maps:get(<<"secure-boot">>, Claim, #{}),
     QI = maps:get(<<"quote-integrity">>, Claim, #{}),
@@ -4581,14 +4568,12 @@ sem_var_name(Ev) ->
     nested(Ev, [<<"parsed">>, <<"variable-name">>], <<>>).
 
 %% Firmware identity from EV_S_CRTM_VERSION.
-%% The 2-arg form additionally cross-references the shipped
-%% firmware-versions DB; when the CRTM string starts with a
+%% Cross-references the shipped firmware-versions DB; when the CRTM
+%% string starts with a
 %% known vendor prefix we project the manifest's full attribute
 %% set (vendor, trust-tier, secure-boot-default, ek-root-ca-
 %% source, virtualization-platform, tpm-vendor-id, platforms)
 %% back onto the claim alongside the raw CRTM string.
-claim_firmware(Events) -> claim_firmware(Events, #{}).
-
 claim_firmware(Events, Db) ->
     Matches = [Ev || Ev <- Events,
                      maps:get(<<"event-type-code">>, Ev, 0) =:= 16#8],
@@ -5248,9 +5233,6 @@ claim_pcr_replay(Events, E) ->
                                    Covered =/= [],
         <<"event-count">>       => length(EvList)
     }.
-
-replay_one_pcr(Pcr, EventsByPcr, PcrVals) ->
-    replay_one_pcr(Pcr, EventsByPcr, PcrVals, #{}).
 
 replay_one_pcr(Pcr, EventsByPcr, PcrVals, AlgByPcr) ->
     Events = maps:get(Pcr, EventsByPcr, []),
@@ -6030,8 +6012,6 @@ hash_alg_strength(<<"sha512">>)   -> 4;
 hash_alg_strength(<<"sha3-512">>) -> 4;
 hash_alg_strength(_)              -> 2.   % assume sha256-equivalent default
 
-claim_boot_chain(Events) -> claim_boot_chain(Events, #{}).
-
 claim_boot_chain(Events, Db) ->
     Codes = [16#80000003, 16#80000004, 16#80000005],
     Sorted = lists:sort(
@@ -6329,10 +6309,6 @@ runtime_cmdline_flags_and_provenance(E) ->
 %% `evidence' list lets policy engines require specific tier
 %% combinations (e.g. "tier 2 + tier 3 + tier 4" for confidential-
 %% compute, "tier 2 only" for development).
-claim_tme(Events, E, Db) ->
-    claim_tme(Events, E, Db,
-              #{<<"kind">> => <<"tcg-pc-client">>, <<"evidence">> => []}).
-
 claim_tme(Events, E, Db, Context) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events, E),
     {RuntimeFlags, RuntimeCmdlineProv} =
@@ -6545,14 +6521,6 @@ uki_db_lookup(Profiles, UkiHash, Events, Key) when is_map(Profiles) ->
     end;
 uki_db_lookup(_, _, _, _) -> false.
 
-%% Backward-compat 3-arg form (used by tests that predate the
-%% Events-aware matcher).
-uki_db_lookup(Profiles, UkiHash, Key) ->
-    case uki_db_lookup(Profiles, UkiHash, [], Key) of
-        {true, _} -> true;
-        _         -> false
-    end.
-
 %% Iterate all profiles, return those that match this envelope.
 %% Each returned map is the profile with an extra `-rule' key
 %% naming the matched rule ("uki-hash" | "known-uki-hashes" |
@@ -6669,41 +6637,11 @@ uki_profile_asserts(P, Key) ->
             maps:get(Key, Claims, false) =:= true
     end.
 
-%% Compose a claim from multiple tiers. Rules:
-%%   * Any tier giving `true' -> claim is true (with all supporting
-%%     tiers' evidence).
-%%   * Any tier giving `false' while none say `true' -> claim is false.
-%%   * All tiers return "unknown" -> claim is "unknown".
-compose_claim(Field, TierResults) ->
-    Values = [V || {V, _} <- TierResults],
-    Evidence = lists:flatten([E || {_, E} <- TierResults]),
-    Verdict = compose_verdict(Values),
-    #{
-        Field                                => Verdict,
-        <<(Field)/binary, "-evidence">>      => Evidence,
-        <<(Field)/binary, "-tier-count">>    =>
-            length([E || E <- Evidence, is_tuple(E),
-                          element(1, E) =:= <<"tier">>])
-    }.
-
-compose_verdict(Values) ->
-    case lists:member(true, Values) of
-        true -> true;
-        false ->
-            case lists:member(false, Values) of
-                true -> false;
-                false -> <<"unknown">>
-            end
-    end.
-
 %% Kernel lockdown mode (paper section Arch line 223:
 %% `lockdown=confidentiality').
 %%
 %% Tier 2: cmdline `lockdown=<mode>'.
 %% Tier 3: UKI-hash claim `lockdown-confidentiality: true' in the DB.
-claim_lockdown(Events) ->
-    claim_lockdown(Events, #{}, #{}).
-
 claim_lockdown(Events, E, Db) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events),
     Mode = maps:get(<<"lockdown">>, Flags, <<"unknown">>),
@@ -6794,8 +6732,6 @@ parse_lockdown_line(_) -> unknown.
 %%   iommu=pt                   -> DMA-remap mode
 %%   iommu.strict=1             -> flushes per-op (no lazy invalidation)
 %%   intel_iommu=on | amd_iommu=on -> vendor-specific enable
-claim_iommu(Events) -> claim_iommu(Events, #{}).
-
 claim_iommu(Events, E) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events),
     Mode  = maps:get(<<"iommu">>, Flags, <<"unknown">>),
@@ -6861,9 +6797,6 @@ claim_iommu(Events, E) ->
 %%                            cache exploitation)
 %%   page_poison=1         -> free pages poisoned
 %%   lockdown=confidentiality -> kernel lockdown in the strictest mode
-claim_kernel_integrity(Events) ->
-    claim_kernel_integrity(Events, #{}).
-
 claim_kernel_integrity(Events, E) ->
     {Flags, Prov} = cmdline_flags_and_provenance(Events),
     Base = case Prov of
