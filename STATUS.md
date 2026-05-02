@@ -506,26 +506,39 @@ $ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
 2 tests passed.
 exit:0
 
+$ make buildroot JOBS=18
+=== artefacts ===
+-rw-r--r--@ ... 192M ... build/initramfs/initramfs-lapee.cpio.zst
+-rw-r--r--@ ...  20M ... build/kernel/vmlinuz-lapee
+
+$ rm -f build/images/lapee-usb-no-tme.img \
+    build/images/lapee-usb-no-tme-bad-ring.img
+
+$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
+>> building admissible no-TME image: build/images/lapee-usb-no-tme.img
+>> building inadmissible no-TME image: build/images/lapee-usb-no-tme-bad-ring.img
+>> node 1 ready
+>> node 2 ready
+>> node 3 ready
+>> node 4 ready
+>> node 1 initialized green-zone x70az3U-VE6gei0nj1gO-0eMR4BNQqF4AJAh3Tjq2sA
+>> node 1 can reuse its signed peer attestation for node 2
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone x70az3U-VE6gei0nj1gO-0eMR4BNQqF4AJAh3Tjq2sA
+>> node 2 signed as green-zone x70az3U-VE6gei0nj1gO-0eMR4BNQqF4AJAh3Tjq2sA
+>> node 3 signed as green-zone x70az3U-VE6gei0nj1gO-0eMR4BNQqF4AJAh3Tjq2sA
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: x70az3U-VE6gei0nj1gO-0eMR4BNQqF4AJAh3Tjq2sA
+
 $ git diff --check
 $ bash -n scripts/qemu-green-zone-cluster.sh
 $ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
     python3 -m py_compile scripts/qemu-green-zone-requests.py
 ```
-
-Fresh target/QEMU validation in this Codex sandbox is currently blocked before
-node boot:
-
-```text
-$ make buildroot JOBS=18
-permission denied while trying to connect to the docker API at
-unix:///Users/sam/.docker/run/docker.sock
-
-$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
-!! swtpm failed for node 1
-Could not open UnixIO socket: Operation not permitted
-```
-
-The previously built images are timestamped after the overlay and request
-generator edits (`05:14 EDT` images, `05:11 EDT` source files), but the current
-sandbox denial prevents refreshing the four-node evidence after this final
-test-only hardening.
