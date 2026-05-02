@@ -138,7 +138,7 @@ admit(_Base, Req, Opts) ->
         RingReference = ring_reference(Name, Template, Wallet, Opts),
         {JoinerURL, PeerAttestation} =
             peer_attestation_from_req(Req, RingReference, Opts),
-        PolicyAttestation = peer_policy_attestation_body(PeerAttestation, Opts),
+        PolicyAttestation = peer_boot_attestation_body(PeerAttestation, Opts),
         ok = assert_template_match(Template, PolicyAttestation, JoinerURL, Opts),
         Subject = hb_maps:get(
             <<"peer-credential-subject">>, PeerAttestation, undefined, Opts),
@@ -203,7 +203,7 @@ join(_Base, Req, Opts) ->
         Definition = hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
         Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
         NewMembers = add_member_to_members(
-            Members, SelfURL, peer_policy_attestation_body(
+            Members, SelfURL, peer_boot_attestation_body(
                 response_body(
                     hb_maps:get(<<"peer-attestation">>, Admission, #{}, Opts),
                     Opts),
@@ -474,13 +474,7 @@ admission_validity(_Req, Opts) ->
     }.
 
 required_url(Req, Opts) ->
-    case first_defined(
-        [
-            hb_maps:get(<<"joiner-url">>, Req, undefined, Opts),
-            hb_maps:get(<<"peer-url">>, Req, undefined, Opts),
-            hb_maps:get(<<"url">>, Req, undefined, Opts)
-        ]
-    ) of
+    case hb_maps:get(<<"joiner-url">>, Req, undefined, Opts) of
         undefined ->
             throw({green_zone_error, #{
                 <<"error">> => <<"missing-joiner-url">>
@@ -492,7 +486,6 @@ required_peer(Req, Opts) ->
     case first_defined(
         [
             hb_maps:get(<<"peer-url">>, Req, undefined, Opts),
-            hb_maps:get(<<"url">>, Req, undefined, Opts),
             hb_opts:get(<<"green-zone-peer-url">>, undefined, Opts)
         ]
     ) of
@@ -524,7 +517,6 @@ required_name(Req, Opts) ->
 optional_name(Req, Opts) ->
     case first_defined([
         hb_maps:get(<<"name">>, Req, undefined, Opts),
-        hb_maps:get(<<"green-zone-name">>, Req, undefined, Opts),
         hb_opts:get(<<"green-zone-name">>, undefined, Opts)
     ]) of
         B when is_binary(B), byte_size(B) > 0 -> B;
@@ -813,9 +805,6 @@ peer_boot_attestation_body(PeerAttestation, Opts) ->
             <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
         Opts).
 
-peer_policy_attestation_body(PeerAttestation, Opts) ->
-    peer_boot_attestation_body(PeerAttestation, Opts).
-
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     Body = maps:with(
         [<<"trusted-ca">>, <<"trusted-ca-pem">>],
@@ -1022,7 +1011,6 @@ assert_admission_validity(Admission, Opts) ->
 
 assert_expected_ring_address(Admission, Req, Opts) ->
     case first_defined([
-        hb_maps:get(<<"ring-address">>, Req, undefined, Opts),
         hb_maps:get(<<"expected-ring-address">>, Req, undefined, Opts),
         hb_opts:get(<<"green-zone-ring-address">>, undefined, Opts)
     ]) of
@@ -1292,7 +1280,7 @@ green_zone_policy_uses_boot_attestation_test() ->
     Template = #{<<"system">> => #{
         <<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
     ?assert(match_template(
-        Template, peer_policy_attestation_body(Attestation, #{}), #{})),
+        Template, peer_boot_attestation_body(Attestation, #{}), #{})),
     ?assertNot(match_template(
         Template,
         response_body(

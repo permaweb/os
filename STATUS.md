@@ -1,5 +1,12 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 23
+
+Trimmed green-zone request parsing: removed unused aliases and replaced the
+policy-attestation wrapper with the direct boot-attestation helper. Validation:
+`dev_green_zone` EUnit, `make buildroot JOBS=18`, no-TME image generation, and
+the four-node QEMU green-zone gate all passed.
+
 ## Update 22
 
 Trimmed the AK policy envelope after the correctness fix:
