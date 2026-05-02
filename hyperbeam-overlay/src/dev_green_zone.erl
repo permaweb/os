@@ -99,7 +99,8 @@ init(_Base, Req, Opts) ->
         ok = assert_template_match(Template, Self, <<"self">>, Opts),
         AES = crypto:strong_rand_bytes(32),
         Wallet = ar_wallet:new(),
-        Members = member_map(
+        Members = add_member_to_members(
+            #{},
             hb_maps:get(<<"self-url">>, Req, undefined, Opts),
             Self,
             <<"initializer">>,
@@ -146,7 +147,13 @@ admit(_Base, Req, Opts) ->
             dev_tpm2:make_credential_for_subject(Subject, AES),
             Opts),
         EncryptedWallet = commit_unsigned_tree(encrypt_wallet(Wallet, AES), Opts),
-        Members = add_member_to_zone(Zone, JoinerURL, PolicyAttestation, Opts),
+        Members = add_member_to_members(
+            hb_maps:get(<<"members">>, Zone, #{}, Opts),
+            JoinerURL,
+            PolicyAttestation,
+            <<"member">>,
+            Opts
+        ),
         NewOpts = install_ring(Name, Template, AES, Wallet, Members, Opts),
         hb_http_server:set_opts(NewOpts),
         Definition = commit_unsigned_tree(
@@ -559,18 +566,6 @@ assert_template_match(Template, Candidate, Subject, Opts) ->
             }})
     end.
 
-member_map(URL, Attestation, Role, Opts) ->
-    add_member_to_members(#{}, URL, Attestation, Role, Opts).
-
-add_member_to_zone(Zone, URL, Attestation, Opts) ->
-    add_member_to_members(
-        hb_maps:get(<<"members">>, Zone, #{}, Opts),
-        URL,
-        Attestation,
-        <<"member">>,
-        Opts
-    ).
-
 add_member_to_members(Members, URL, Attestation, Role, Opts) ->
     Address = attestation_node_address(Attestation, Opts),
     case Address of
@@ -817,7 +812,7 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     },
     try
         admission_response_body(
-            post_admission_request(
+            lapee_http_json:post(
                 PeerURL,
                 <<"/~green-zone@1.0/admit">>,
                 AdmitReq,
@@ -834,9 +829,6 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
                 <<"details">> => hb_util:bin(io_lib:format("~p", [Reason]))
             }})
     end.
-
-post_admission_request(PeerURL, Path, AdmitReq, Opts) ->
-    lapee_http_json:post(PeerURL, Path, AdmitReq, Opts).
 
 admission_response_body(#{<<"status">> := 200, <<"body">> := Body}, Opts) ->
     response_body(Body, Opts);

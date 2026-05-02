@@ -1,5 +1,11 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 26
+
+Removed one-use `~green-zone@1.0` member/admission wrappers.
+Validation: `LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 16 tests.
+
 ## Update 25
 
 Trimmed unused `~tpm-interpret@1.0` compatibility wrappers and a stale debug
