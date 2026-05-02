@@ -1109,11 +1109,6 @@ compute_pcr_digest(Indices, PcrMap) ->
 %%---- check 3: AK authPolicy binds the AK to quoted PCRs ---------------
 chk_ak_policy_bound(Envelope) ->
     AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, #{})),
-    ReportedPolicy =
-        safe_decode(hb_maps:get(<<"ak-policy-digest">>, Envelope, <<>>, #{})),
-    ReportedPcrs =
-        normalize_pcr_indices(
-            hb_maps:get(<<"ak-policy-pcrs">>, Envelope, [], #{})),
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
     PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
     case tpm2b_public_auth_policy(AkPublic) of
@@ -1121,20 +1116,14 @@ chk_ak_policy_bound(Envelope) ->
             {error, <<"AK authPolicy is empty">>};
         {ok, Policy} when byte_size(Policy) =:= 32 ->
             ExpectedPolicy = ak_policy_digest_result(?AK_POLICY_PCRS, PcrMap),
-            case {Policy, ReportedPolicy, ReportedPcrs, ExpectedPolicy} of
-                {P, P, ?AK_POLICY_PCRS, {ok, P}} ->
+            case ExpectedPolicy of
+                {ok, Policy} ->
                     {ok, <<"AK authPolicy matches the LapEE PCR policy">>};
-                {_, _, _, {missing_pcr, I}} ->
+                {missing_pcr, I} ->
                     {error, iolist_to_binary(
                         io_lib:format("quote omitted AK policy PCR ~B", [I]))};
-                {_, _, _, invalid} ->
+                invalid ->
                     {error, <<"could not compute AK policy digest">>};
-                {P, R, _, _} when P =/= R ->
-                    {error, <<"reported AK policy digest does not match "
-                              "AK public authPolicy">>};
-                {_, _, Pcrs, _} when Pcrs =/= ?AK_POLICY_PCRS ->
-                    {error, <<"reported AK policy PCR set does not match "
-                              "LapEE AK policy">>};
                 _ ->
                     {error, <<"AK authPolicy does not match quoted PCR state">>}
             end;
@@ -1706,8 +1695,6 @@ credential_subject_body(Opts) ->
         <<"ak-public">> => ak_public(Opts),
         <<"ak-name">> => ak_name(Opts),
         <<"ak-qualified-name">> => ak_qualified_name(Opts),
-        <<"ak-policy-digest">> => ak_policy_digest(Opts),
-        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
         <<"tpm-properties">> => tpm_properties()
     }.
 
@@ -2070,9 +2057,7 @@ ensure_subject_matches_boot(Subject, BootEnv) ->
         {<<"ak-name">>, <<"AK name">>},
         {<<"ak-public">>, <<"AK public area">>},
         {<<"ak-pub-pem">>, <<"AK public PEM">>},
-        {<<"ak-qualified-name">>, <<"AK qualified name">>},
-        {<<"ak-policy-digest">>, <<"AK policy digest">>},
-        {<<"ak-policy-pcrs">>, <<"AK policy PCR set">>}
+        {<<"ak-qualified-name">>, <<"AK qualified name">>}
     ],
     lists:foreach(
         fun({Key, Label}) ->
@@ -2371,8 +2356,6 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ak-public">> => ak_public(Opts),
                         <<"ak-name">> => ak_name(Opts),
                         <<"ak-qualified-name">> => ak_qualified_name(Opts),
-                        <<"ak-policy-digest">> => ak_policy_digest(Opts),
-                        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
                         <<"ak-hierarchy">> => <<"endorsement">>,
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
@@ -2486,8 +2469,6 @@ attestation(_Base, Req, Opts) ->
                         <<"ak-public">> => ak_public(Opts),
                         <<"ak-name">> => ak_name(Opts),
                         <<"ak-qualified-name">> => ak_qualified_name(Opts),
-                        <<"ak-policy-digest">> => ak_policy_digest(Opts),
-                        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
                         %% v1.2.2 paper P3: AK is a primary under
                         %% the Endorsement hierarchy (see
                         %% native/lapee_tpm_nif/lapee_tpm_nif.c
@@ -2886,9 +2867,7 @@ cache_tpm_public_terms(Prefix, Info) ->
         end,
         [{tpm2b_public, public},
          {name, name},
-         {qualified_name, qualified_name},
-         {policy_digest, policy_digest},
-         {policy_pcrs, policy_pcrs}]).
+         {qualified_name, qualified_name}]).
 
 ek_cert_pem(Opts) ->
     case persistent_term:get({dev_tpm2, ek_cert_pem}, undefined) of
@@ -2920,12 +2899,6 @@ ek_qualified_name(Opts) -> encoded_cached(ek, qualified_name, Opts).
 ak_public(Opts) -> encoded_cached(ak, public, Opts).
 ak_name(Opts) -> encoded_cached(ak, name, Opts).
 ak_qualified_name(Opts) -> encoded_cached(ak, qualified_name, Opts).
-ak_policy_digest(Opts) -> encoded_cached(ak, policy_digest, Opts).
-ak_policy_pcrs(Opts) ->
-    case raw_cached(ak, policy_pcrs, Opts) of
-        L when is_list(L) -> L;
-        _ -> []
-    end.
 
 encoded_cached(Prefix, Slot, Opts) ->
     case raw_cached(Prefix, Slot, Opts) of
@@ -4003,8 +3976,6 @@ ak_policy_bound_test() ->
     ?assertEqual({ok, Policy}, tpm2b_public_auth_policy(Public)),
     Envelope = #{
         <<"ak-public">> => hb_util:encode(Public),
-        <<"ak-policy-digest">> => hb_util:encode(Policy),
-        <<"ak-policy-pcrs">> => ?AK_POLICY_PCRS,
         <<"tpm-quote">> => #{<<"pcr-values">> => PcrMap}
     },
     ?assertMatch({ok, _}, chk_ak_policy_bound(Envelope)),
@@ -4016,10 +3987,12 @@ ak_policy_bound_test() ->
                     hb_util:encode(test_rsa_tpm2b_public(ModulusBin, 0))
             })),
     ?assertMatch(
-        {error, <<"reported AK policy digest does not match", _/binary>>},
+        {error, <<"AK authPolicy does not match quoted PCR state">>},
         chk_ak_policy_bound(
-            Envelope#{<<"ak-policy-digest">> =>
-                hb_util:encode(crypto:strong_rand_bytes(32))})).
+            Envelope#{<<"ak-public">> =>
+                hb_util:encode(
+                    test_rsa_tpm2b_public(
+                        ModulusBin, 0, crypto:strong_rand_bytes(32)))})).
 
 tpms_attest_qualified_signer_must_match_ak_test() ->
     Nonce = crypto:strong_rand_bytes(32),

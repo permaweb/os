@@ -1,5 +1,48 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 22
+
+Trimmed the AK policy envelope after the correctness fix:
+
+- Removed reported `ak-policy-digest` / `ak-policy-pcrs` fields from the
+  public TPM messages and NIF cache. They duplicated data already committed
+  by the TPM `TPMT_PUBLIC.authPolicy`.
+- `~tpm@2.0a/verify` now derives the AK policy solely from `ak-public`, the
+  locally expected LapEE AK PCR set, and the quoted PCR values.
+- Removed stale native comments from the old pre-credential-activation AK
+  implementation.
+
+Validation after trimming:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+$ cd build/hyperbeam/src-edge && rebar3 eunit --module=dev_tpm2
+All 39 tests passed.
+
+$ make buildroot JOBS=18
+artefacts: initramfs-lapee.cpio.zst, vmlinuz-lapee
+
+$ make hb-usb-no-tme-image WIFI=0
+build/images/lapee-usb-no-tme.img: 247463936 bytes
+
+$ ./scripts/boot-usb-image.sh --img build/images/lapee-usb-no-tme.img --timeout 420
+=== QEMU boot test PASSED ===
+
+$ jq -r '.body | [has("ak-policy-digest"), has("ak-policy-pcrs"),
+    (.tpm | has("ak-policy-digest")), (.tpm | has("ak-policy-pcrs"))] | @tsv' \
+    build/qemu-network-test/boot-attestation.json
+false   false   false   false
+
+$ ./scripts/interpret-local-capture.sh \
+    build/qemu-network-test/boot-attestation.json \
+    --label qemu-trimmed-ak-policy
+verdict = untrusted (score 4)
+
+$ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
+    --img build/images/lapee-usb-no-tme.img --timeout 600
+=== green-zone QEMU cluster PASSED ===
+```
+
 ## Update 21
 
 Implemented and verified the AK/PCR policy fix from

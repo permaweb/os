@@ -327,17 +327,6 @@ lapee_ak_policy_session(TPM2_SE type, bool activate_credential,
     return TSS2_RC_SUCCESS;
 }
 
-static ERL_NIF_TERM
-lapee_policy_pcrs_term(ErlNifEnv *env)
-{
-    ERL_NIF_TERM list = enif_make_list(env, 0);
-    for (int i = (int)LAPEE_AK_POLICY_PCR_COUNT - 1; i >= 0; i--) {
-        list = enif_make_list_cell(
-            env, enif_make_int(env, g_ak_policy_pcrs[i]), list);
-    }
-    return list;
-}
-
 static int
 lapee_name_to_term(ErlNifEnv *env, const TPM2B_NAME *name, ERL_NIF_TERM *out)
 {
@@ -742,13 +731,6 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 
 /*-------------------------------- create_signing_key/1 ----------------------*/
 
-/* RSA-2048 SHA-256 RSASSA-PSS signing key, created under a primary (EK).
- * Note: real EK-AK binding requires a policy session (TPM2_PolicySecret with
- * endorsement auth). For first-cut correctness against swtpm, we instead
- * create the AK under the Owner hierarchy primary or Null hierarchy. Here
- * we actually make a fresh primary under the Owner hierarchy — simpler and
- * still proves end-to-end quote+verify. The parent handle argument is
- * accepted but ignored for this milestone; see RESULT.md. */
 static ERL_NIF_TERM
 nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -879,16 +861,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "qualified_name"),
                       qname_term, &map);
-    ERL_NIF_TERM policy_term;
-    unsigned char *policy_out =
-        enif_make_new_binary(env, ak_policy.size, &policy_term);
-    memcpy(policy_out, ak_policy.buffer, ak_policy.size);
-    enif_make_map_put(env, map,
-                      enif_make_atom(env, "policy_digest"),
-                      policy_term, &map);
-    enif_make_map_put(env, map,
-                      enif_make_atom(env, "policy_pcrs"),
-                      lapee_policy_pcrs_term(env), &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
