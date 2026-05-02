@@ -1,5 +1,13 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 31
+
+TPM HMAC/parameter-encryption session setup now fails closed instead of falling
+back to unauthenticated/no-encryption session handles for EK/AK creation, quote,
+and ActivateCredential. Evidence: `make buildroot JOBS=18`; no-TME image
+247463936 bytes; QEMU cluster PASSED, ring
+`vzZNgvh_iTRjrV7xLbsTAWgC72OktdrcSKDsXEgsr0Y`.
+
 ## Update 30
 
 Removed stale internal peer-attestation cache-path docs from `~tpm@2.0a/info`.

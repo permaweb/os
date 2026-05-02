@@ -19,32 +19,8 @@
 
 #include "tpm_helpers.h"
 
-/*
- * v1.2.2 paper P4 -- HMAC + parameter-encryption sessions for all
- * sensitive TPM operations.
- *
- * The paper's section Arch commits to:
- *   "All TPM sessions touching sensitive state use encrypted sessions
- *    (HMAC + parameter encryption)."
- *
- * On LapEE's threat model (Nuvoton NPCT75x dTPM on LPC bus), a
- * physical attacker with bus-level access can sniff plaintext
- * requests / responses. HMAC sessions bind each command in the
- * request stream with a key-derived MAC (an attacker cannot modify
- * a request without knowing the session key derived from caller +
- * TPM nonces), and parameter encryption wraps the first TPM2B
- * parameter in each direction under AES-128-CFB.
- *
- * Implementation: one shared unsalted HMAC session at file scope.
- * Created lazily on first use via lapee_ensure_auth_session().
- * Attached as shandle2 to sensitive ops so shandle1 can remain
- * hierarchy/object-auth (ESYS_TR_PASSWORD for empty-auth hierarchies)
- * while shandle2 provides the encrypt/decrypt/integrity coverage.
- *
- * Uses TPMA_SESSION_CONTINUESESSION so one session covers every
- * command; the TPM auto-updates the session's rolling nonce between
- * calls. No app-level bookkeeping.
- */
+/* Shared HMAC session with AES-CFB parameter encryption for TPM2B-valued
+ * sensitive operations. Commands fail closed if this session cannot start. */
 static ESYS_TR g_auth_session = ESYS_TR_NONE;
 static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14};
 #define LAPEE_AK_POLICY_PCR_COUNT \
@@ -59,11 +35,8 @@ lapee_ensure_auth_session(void)
         .keyBits = { .aes = 128 },
         .mode = { .aes = TPM2_ALG_CFB },
     };
-    /* Unsalted (tpmKey = NONE), unbound (bind = NONE). The session
-     * still authenticates command integrity via rolling HMAC; its
-     * key-derivation is seeded by the TPM-generated nonceTPM plus
-     * our nonceCaller. Parameter encryption applies to the first
-     * TPM2B in the marked direction. */
+    /* Unsalted and unbound: the TPM and caller nonces still derive the
+     * rolling HMAC key, and parameter encryption covers the first TPM2B. */
     TSS2_RC rc = Esys_StartAuthSession(
         g_esys_ctx,
         ESYS_TR_NONE,  /* tpmKey */
@@ -75,23 +48,8 @@ lapee_ensure_auth_session(void)
         TPM2_ALG_SHA256,
         &g_auth_session);
     if (rc != TSS2_RC_SUCCESS) return rc;
-    /* Session is HMAC + parameter-encrypt/decrypt + continues.
-     *
-     * Applied only to ops whose first cmd-param AND first rsp-
-     * param are TPM2B_* structures: Esys_CreatePrimary (EK + AK)
-     * and Esys_Quote. On those ops the TPM accepts ENCRYPT +
-     * DECRYPT attributes and actually wraps the TPM2B payload
-     * under AES-128-CFB for transit over the LPC bus.
-     *
-     * Ops with list-struct first parameters (PCR_Extend takes
-     * TPML_DIGEST_VALUES, PCR_Read returns TPML_DIGEST,
-     * GetCapability uses TPMS_CAPABILITY_DATA) do NOT support
-     * parameter encryption per TPM 2.0 spec, and any session
-     * with a non-auth "purpose" attribute fails RC_ATTRIBUTES
-     * in a non-auth slot. Those ops run without this session;
-     * their responses carry public values (PCR digests, TPM
-     * vendor / fw-version readback) that the paper's threat
-     * model explicitly marks as attester-intended-public. */
+    /* Only TPM2B first-parameter operations receive this session; list-struct
+     * PCR/capability calls reject ENCRYPT/DECRYPT by spec. */
     TPMA_SESSION attrs = TPMA_SESSION_ENCRYPT |
                          TPMA_SESSION_DECRYPT |
                          TPMA_SESSION_CONTINUESESSION;
@@ -99,19 +57,12 @@ lapee_ensure_auth_session(void)
                                       attrs, 0xFF);
 }
 
-/* Returns g_auth_session when the HMAC session is available, or
- * ESYS_TR_NONE as a safe fallback if session creation fails. The
- * fallback preserves pre-P4 behaviour (no encryption) on TPMs that
- * somehow refuse HMAC sessions -- paper P4 grades by the session's
- * actual attributes, not by whether the helper returned the live
- * handle. */
-static ESYS_TR
-lapee_enc_session(void)
+static TSS2_RC
+lapee_enc_session(ESYS_TR *out_session)
 {
-    if (lapee_ensure_auth_session() == TSS2_RC_SUCCESS) {
-        return g_auth_session;
-    }
-    return ESYS_TR_NONE;
+    TSS2_RC rc = lapee_ensure_auth_session();
+    if (rc == TSS2_RC_SUCCESS) *out_session = g_auth_session;
+    return rc;
 }
 
 static TSS2_RC
@@ -652,20 +603,22 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    /* Paper P4: hierarchy auth (empty password) via shandle1, HMAC-
-     * encrypted session via shandle2 covers the TPM2B_SENSITIVE_CREATE
-     * (empty here, but in principle could hold auth values) and
-     * encrypts the TPM2B_PUBLIC response in transit on the LPC bus. */
-    TSS2_RC rc = Esys_CreatePrimary(g_esys_ctx,
-                                    ESYS_TR_RH_ENDORSEMENT,
-                                    ESYS_TR_PASSWORD,
-                                    lapee_enc_session(),
-                                    ESYS_TR_NONE,
-                                    &in_sensitive, &ek_template,
-                                    &outside_info, &creation_pcr,
-                                    &ek_tr, &out_public,
-                                    &creation_data, &creation_hash,
-                                    &creation_ticket);
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
+    rc = Esys_CreatePrimary(g_esys_ctx,
+                            ESYS_TR_RH_ENDORSEMENT,
+                            ESYS_TR_PASSWORD,
+                            enc_session,
+                            ESYS_TR_NONE,
+                            &in_sensitive, &ek_template,
+                            &outside_info, &creation_pcr,
+                            &ek_tr, &out_public,
+                            &creation_data, &creation_hash,
+                            &creation_ticket);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_CreatePrimary(EK)", rc);
     }
@@ -786,23 +739,16 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    /* v1.2.2 paper P3 -- AK lives under the Endorsement hierarchy.
-     * Previously this used ESYS_TR_RH_OWNER as a swtpm-compat
-     * shortcut; the paper requires Endorsement so that the AK's
-     * qualifiedSigner chain in every TPMS_ATTEST roots at the
-     * same primary-seed tree as the EK (same TPM -- a verifier
-     * walking the qualifiedSigner name path can validate the AK
-     * originated in the same physical TPM as the EK in the cert
-     * chain). Factory Nuvoton NPCT75x ships with empty
-     * endorsement auth so the null-password session still works;
-     * provisioned owner-password-only TPMs are out of scope. */
-    /* Paper P4 as with the EK primary creation -- shandle1=PASSWORD
-     * authenticates the Endorsement hierarchy, shandle2=HMAC session
-     * integrity-protects + encrypts sensitive parameters. */
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
     rc = Esys_CreatePrimary(g_esys_ctx,
                             ESYS_TR_RH_ENDORSEMENT,
                             ESYS_TR_PASSWORD,
-                            lapee_enc_session(),
+                            enc_session,
                             ESYS_TR_NONE,
                             &in_sensitive, &in_public,
                             &outside_info, &creation_pcr,
@@ -1012,6 +958,14 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             env, "Esys_PolicySecret(ENDORSEMENT)", rc);
     }
 
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
+        Esys_FlushContext(g_esys_ctx, ek_policy_session);
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
     TPM2B_DIGEST *cert_info = NULL;
     rc = Esys_ActivateCredential(
         g_esys_ctx,
@@ -1019,7 +973,7 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         (ESYS_TR)ek_tr,
         ak_policy_session,
         ek_policy_session,
-        lapee_enc_session(),
+        enc_session,
         &credential_blob,
         &enc_secret,
         &cert_info);
@@ -1099,10 +1053,17 @@ nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
     }
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
     rc = Esys_Quote(g_esys_ctx,
                     (ESYS_TR)esys_tr,
                     ak_policy_session,
-                    lapee_enc_session(),
+                    enc_session,
                     ESYS_TR_NONE,
                     &qual, &scheme, &sel,
                     &quoted, &signature);
