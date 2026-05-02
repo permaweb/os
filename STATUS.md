@@ -542,3 +542,69 @@ $ bash -n scripts/qemu-green-zone-cluster.sh
 $ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
     python3 -m py_compile scripts/qemu-green-zone-requests.py
 ```
+
+## Update 14
+
+Tightened the join/admission boundary after re-reading the current
+green-zone protocol surface:
+
+- Stored `lapee-peer-attestation` reuse now binds the request to the URL that
+  was actually attested. A caller cannot relabel a signed attestation for
+  `peer-url = A` as an admission request for `joiner-url = B`.
+- `~green-zone@1.0/join` now validates the admission envelope before using
+  it: expected protocol type, `template-matched = true`, joiner URL, peer
+  attestation, credential, encrypted wallet, and non-empty ring address.
+- After decrypting the furnished wallet, join verifies that the wallet's
+  address equals the admission's advertised `ring-address` before installing
+  it as the local `green-zone` identity.
+- `~green-zone@1.0/sign` now returns structured
+  `green-zone-not-initialized` instead of a generic 500 when a node has not
+  joined the ring.
+- The QEMU acceptance harness now asserts node 4's negative sign path returns
+  `status = 400`, `body.error = "green-zone-not-initialized"` before checking
+  that no green-zone commitment exists.
+
+Validation evidence at `2026-05-02 06:20 EDT`:
+
+```text
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 13 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 28 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+```
+
+Target rebuild/QEMU rerun for this increment is blocked in this Codex macOS
+sandbox:
+
+```text
+$ make buildroot JOBS=18
+permission denied while trying to connect to the docker API at
+unix:///Users/sam/.docker/run/docker.sock
+
+$ make native-build
+native-build requires a Linux host (Buildroot doesn't run on Darwin).
+```
+
+The last full target acceptance gate remains the Update 13 run above. This
+increment is staged and host-validated, but the appliance images in
+`build/images` are still from `2026-05-02 05:14 EDT` and do not contain Update
+14 until Buildroot can run again.

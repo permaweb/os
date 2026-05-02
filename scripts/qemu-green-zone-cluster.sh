@@ -350,6 +350,8 @@ echo ">> node 4 status has no green-zone wallet"
 post_json 4 "/~green-zone@1.0/sign" \
     "$OUTDIR/requests/sign4.json" \
     "$OUTDIR/responses/node4-sign.json"
+jq -e '.status == 400 and .body.error == "green-zone-not-initialized"' \
+    "$OUTDIR/responses/node4-sign.json" >/dev/null
 if jq -e --arg addr "$ring_addr" \
         '.status == 200 and
          any([(.body.commitments? // {}), (.body.body.commitments? // {})][] |
