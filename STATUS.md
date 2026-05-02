@@ -153,7 +153,7 @@ Implemented the first TPM credential-activation pass in the overlay:
   and `verify-peer`.
 - `verify-peer` fetches peer boot-attestation and credential subject, checks
   the attestation, checks subject/boot AK+EK consistency, runs credential
-  activation, then signs a `lapee-peer-attestation` message.
+  activation, then signs a `green-zone-peer-attestation` message.
 
 First compile found one Erlang unsafe-variable issue; fixed locally and
 restaging now.
@@ -337,7 +337,7 @@ environment that allows Docker and local listener sockets.
 Second unattended pass tightened the current branch in three places:
 
 - `~tpm@2.0a/verify-peer` now stores the unwrapped boot-attestation body in
-  the signed `lapee-peer-attestation`. This keeps later green-zone template
+  the signed `green-zone-peer-attestation`. This keeps later green-zone template
   matching aligned with the `system`/`tpm` shape produced by the verifier and
   by the QEMU harness.
 - Green-zone admission now supports the intended reusable peer-attestation
@@ -475,7 +475,7 @@ Extended the QEMU acceptance harness to cover the commander's-intent
 stored-attestation flow, not just live admission:
 
 1. Node 1 calls `~tpm@2.0a/verify-peer` for node 2.
-2. Node 1 receives a signed `lapee-peer-attestation` whose verification and
+2. Node 1 receives a signed `green-zone-peer-attestation` whose verification and
    credential-activation checks are true.
 3. The harness submits that signed peer attestation back to
    `~green-zone@1.0/admit` with node 1's address as `trusted-publisher`.
@@ -595,7 +595,7 @@ $ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
 Tightened the join/admission boundary after re-reading the current
 green-zone protocol surface:
 
-- Stored `lapee-peer-attestation` reuse now binds the request to the URL that
+- Stored `green-zone-peer-attestation` reuse now binds the request to the URL that
   was actually attested. A caller cannot relabel a signed attestation for
   `peer-url = A` as an admission request for `joiner-url = B`.
 - `~green-zone@1.0/join` now validates the admission envelope before using
@@ -659,7 +659,7 @@ increment is staged and host-validated, but the appliance images in
 ## Update 15
 
 Closed a protocol gap in `~tpm@2.0a/verify-peer`: the endpoint now does not
-only return a signed `lapee-peer-attestation`; it writes that signed artifact
+only return a signed `green-zone-peer-attestation`; it writes that signed artifact
 to the local HyperBEAM cache and links it under deterministic public paths:
 
 - `~tpm@2.0a/peer-attestations/by-id/<signed-message-id>`
@@ -802,7 +802,7 @@ replay protection:
 - `~tpm@2.0a/verify-peer` now fetches both the cached boot-attestation and a
   fresh `/~tpm@2.0a/attestation?nonce=<verifier-nonce>`. The verifier checks
   the fresh quote nonce explicitly, verifies both attestations against the same
-  credential subject, and signs the resulting `lapee-peer-attestation` with a
+  credential subject, and signs the resulting `green-zone-peer-attestation` with a
   `freshness` proof.
 - Public `~tpm@2.0a/activate-credential` responses now validate as a typed
   `lapee-tpm-credential-activation` envelope. The HMAC proof is bound to the
@@ -819,7 +819,7 @@ replay protection:
   validity, and a bounded max age (`green-zone-peer-attestation-max-age-seconds`,
   default 3600s).
 - `~green-zone@1.0/admit` signs admissions as the ring wallet and includes
-  `admission-nonce`, `validity`, and `ring-scope`. `join` generates the nonce,
+  `admission-nonce`, `validity`, and `ring-reference`. `join` generates the nonce,
   verifies the admission signer is the advertised ring address, checks expiry
   and optional expected ring address, then decrypts and address-checks the
   furnished wallet before installing it.
@@ -895,7 +895,7 @@ Fixes in this increment:
 - `~green-zone@1.0/admit` now matches the ring template against the signed
   peer attestation's `peer-fresh-attestation`, not the stable cached
   boot-attestation.
-- Stored `lapee-peer-attestation` reuse now requires `boot-verification`,
+- Stored `green-zone-peer-attestation` reuse now requires `boot-verification`,
   `peer-fresh-attestation`, a peer-scope URL matching the signed `peer-url`,
   and boot/fresh attestation IDs matching the embedded attestation bodies.
 - `~green-zone@1.0/join` now requires a pinned expected ring address, supplied
@@ -1036,4 +1036,66 @@ All 37 tests passed.
 $ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m lapee_http_json
 All 4 tests passed. The Codex exec wrapper reported code -1 twice after
 printing the successful EUnit result and normal os_mon shutdown lines.
+```
+
+## Update 16 - Green-Zone Protocol Naming And Docs
+
+The public green-zone protocol terms now read from the ring's perspective:
+
+- The peer-attestation envelope type is `green-zone-peer-attestation`.
+- The ring identity object is `ring-reference`.
+- The ring reference is the durable reference object built from the named zone,
+  ring address, and template ID. The TPM layer still uses generic
+  `peer-scope` / `consumer-scope` terms because those are not ring-specific.
+
+The `~green-zone@1.0` module docs now include the current registration and
+admission protocol: local zone initialization, live peer verification through
+`~tpm@2.0a/verify-peer`, template matching against the peer boot attestation,
+TPM MakeCredential/ActivateCredential delivery of the ring AES key, encrypted
+ring-wallet transfer, and final installation of the named identity.
+
+Validation evidence at `2026-05-02T19:54:25Z`:
+
+```text
+Deprecated-name scan across the repository: no results.
+
+$ git diff --check
+
+$ bash -n scripts/qemu-green-zone-cluster.sh
+
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m dev_green_zone
+All 16 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m dev_tpm2
+All 37 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m lapee_http_json
+All 4 tests passed. The Codex exec wrapper reported code -1 after printing
+the successful EUnit result and normal os_mon shutdown lines.
+
+$ make hb-usb-no-tme-image WIFI=0 JOBS=18
+USB image ready: .../build/images/lapee-usb-no-tme.img (247463936 bytes)
+
+$ ./scripts/qemu-green-zone-cluster.sh --timeout 600
+>> node 1 initialized green-zone Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
+>> node 2 signed as green-zone Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
+>> node 3 signed as green-zone Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: Lyc7r23hrZwvmct7ym-SwbTAz--Waay5X61f28NJd0s
 ```

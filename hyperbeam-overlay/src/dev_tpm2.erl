@@ -1697,7 +1697,7 @@ verify_peer_url(Url, Req, Opts) ->
             Now = erlang:system_time(second),
             Signed = hb_message:commit(
                 #{
-                    <<"type">> => <<"lapee-peer-attestation">>,
+                    <<"type">> => <<"green-zone-peer-attestation">>,
                     <<"version">> => <<"1.0">>,
                     <<"issued-at-unix">> => Now,
                     <<"validity">> =>

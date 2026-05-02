@@ -369,9 +369,9 @@ jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "tr
        (.body."green-zone"."ring-address" | type == "string" and length > 0)' \
     "$OUTDIR/responses/node1-init.json" >/dev/null
 ring_addr=$(jq -r '.body."green-zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
-ring_scope=$(jq -c '.body."green-zone"."ring-scope"' "$OUTDIR/responses/node1-init.json")
-jq --argjson scope "$ring_scope" \
-    '. + {"peer-attestation-scope": $scope}' \
+ring_reference=$(jq -c '.body."green-zone"."ring-reference"' "$OUTDIR/responses/node1-init.json")
+jq --argjson reference "$ring_reference" \
+    '. + {"peer-attestation-scope": $reference}' \
     "$OUTDIR/requests/verify2.json" \
     > "$OUTDIR/requests/verify2.scoped.json"
 mv "$OUTDIR/requests/verify2.scoped.json" "$OUTDIR/requests/verify2.json"
@@ -387,7 +387,7 @@ echo ">> node 1 initialized green-zone $ring_addr"
 post_json 1 "/~tpm@2.0a/verify-peer" \
     "$OUTDIR/requests/verify2.json" \
     "$OUTDIR/responses/node1-verify2.json"
-jq -e '.status == 200 and .body.type == "lapee-peer-attestation" and
+jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
        (.body.verification.verified == true or
         .body.verification.verified == "true") and
        (.body.freshness.verified == true or
