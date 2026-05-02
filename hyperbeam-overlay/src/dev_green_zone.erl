@@ -807,7 +807,7 @@ peer_boot_attestation_body(PeerAttestation, Opts) ->
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     Body = maps:with(
-        [<<"trusted-ca">>, <<"trusted-ca-pem">>],
+        [<<"trusted-ca">>],
         Req
     ),
     AdmitReq = Body#{

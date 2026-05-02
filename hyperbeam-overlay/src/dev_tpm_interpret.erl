@@ -115,14 +115,7 @@ info(_Base, _Req, _Opts) ->
                         <<"trusted-ca">> =>
                             <<"Optional. base64url-encoded PEM of the "
                               "TPM vendor root CA to trust for this "
-                              "request. Overrides node config. Preferred "
-                              "inline form.">>,
-                        <<"trusted-ca-pem">> =>
-                            <<"Optional (back-compat). Raw PEM as a "
-                              "string. Unsafe over URL-encoded GET -- "
-                              "the `+' in base64 base-64 values and in "
-                              "the PEM BEGIN header get mangled. Use "
-                              "`trusted-ca' instead.">>
+                              "request. Overrides node config.">>
                     },
                     <<"response">> =>
                         <<"{peer, verified, verdict, checks, summary, "
@@ -585,22 +578,8 @@ verify_peer(_Base, Req, Opts) ->
         PeerUrl when is_binary(PeerUrl) ->
             %% Optional inline trust anchor. If absent, we fall back
             %% to this verifier's configured `lapee_tpm_ca_cert' via
-            %% dev_tpm2's `resolve_trusted_ca/2'. Two inline forms
-            %% are accepted:
-            %%
-            %%   `trusted-ca'      -- base64url-encoded PEM bytes
-            %%                       (HyperBEAM wire convention; the
-            %%                       safe form over HTTP/URL).
-            %%   `trusted-ca-pem'  -- raw PEM text. *Only* works when
-            %%                       the request carries an
-            %%                       unambiguous binary (e.g. POST
-            %%                       body, not GET query string),
-            %%                       because the URL form treats `+'
-            %%                       as space and mangles the PEM
-            %%                       header "BEGIN CERTIFICATE".
-            %%
-            %% Both mechanisms resolve to raw PEM bytes before we
-            %% hand them to dev_tpm2.
+            %% dev_tpm2's `resolve_trusted_ca/2'. Inline trust anchors
+            %% use HyperBEAM's base64url wire convention.
             InlineCa = resolve_inline_ca(Req, Opts),
             fetch_and_verify_peer(PeerUrl, InlineCa, Opts);
         Other ->
@@ -616,9 +595,8 @@ verify_peer(_Base, Req, Opts) ->
             }}
     end.
 
-%% Pull an inline trust anchor out of Req, normalising whichever of
-%% the two supported forms the caller used. Returns raw PEM bytes
-%% (a binary) or undefined.
+%% Pull an inline trust anchor out of Req. Returns raw PEM bytes or
+%% undefined.
 resolve_inline_ca(Req, Opts) ->
     case hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 ->
@@ -628,11 +606,7 @@ resolve_inline_ca(Req, Opts) ->
                 _ -> undefined
             catch _:_ -> undefined
             end;
-        _ ->
-            case hb_maps:get(<<"trusted-ca-pem">>, Req, undefined, Opts) of
-                Pem when is_binary(Pem), byte_size(Pem) > 0 -> Pem;
-                _ -> undefined
-            end
+        _ -> undefined
     end.
 
 fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
@@ -784,14 +758,10 @@ envelope_quote_nonce(Envelope, Opts) ->
     end.
 
 do_verify_summary(Envelope, InlineCa, Opts) ->
-    %% Pass both keys through so dev_tpm2:resolve_trusted_ca can
-    %% classify the source itself (and return it to us via body.
-    %% trust_anchor_source). Avoids duplicating the priority rule
-    %% here.
     Req0 = #{<<"envelope">> => Envelope},
     Req  = case InlineCa of
                undefined -> Req0;
-               _         -> Req0#{<<"trusted-ca-pem">> => InlineCa}
+               _         -> Req0#{<<"trusted-ca">> => hb_util:encode(InlineCa)}
            end,
     case dev_tpm2:verify(Envelope, Req, Opts) of
         {ok, #{<<"body">> := Body}} ->
@@ -10686,26 +10656,17 @@ peer_endpoints_reject_missing_peer_test() ->
      || F <- [fun peer_summary/3, fun peer_status/3]],
     ok.
 
-%% `resolve_inline_ca/2' normalises both accepted forms of the
-%% inline trust anchor -- base64url `trusted-ca' wins over raw PEM
-%% `trusted-ca-pem', and undefined/empty inputs stay undefined.
+%% `resolve_inline_ca/2' normalises the base64url inline trust anchor;
+%% undefined, empty, and malformed inputs stay undefined.
 resolve_inline_ca_normalises_forms_test() ->
     Pem = <<"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----">>,
     B64u = hb_util:encode(Pem),
-    %% base64url form decodes back to the raw PEM bytes
     ?assertEqual(Pem, resolve_inline_ca(#{<<"trusted-ca">> => B64u}, #{})),
-    %% raw-PEM form passes through
-    ?assertEqual(Pem, resolve_inline_ca(#{<<"trusted-ca-pem">> => Pem}, #{})),
-    %% both keys -- base64url wins
-    B64u2 = hb_util:encode(<<"OTHER">>),
-    ?assertEqual(<<"OTHER">>,
-                 resolve_inline_ca(#{<<"trusted-ca">> => B64u2,
-                                     <<"trusted-ca-pem">> => Pem}, #{})),
-    %% neither: undefined
     ?assertEqual(undefined, resolve_inline_ca(#{}, #{})),
-    %% empty string: undefined
     ?assertEqual(undefined,
                  resolve_inline_ca(#{<<"trusted-ca">> => <<>>}, #{})),
+    ?assertEqual(undefined,
+                 resolve_inline_ca(#{<<"trusted-ca">> => <<"%%%">>}, #{})),
     ok.
 
 %% Interpret a hand-built envelope with NO valid EK cert -- we still

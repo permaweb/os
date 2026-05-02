@@ -1,5 +1,35 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 24
+
+Removed the legacy raw-PEM trust-anchor request path from TPM
+verification, peer interpretation, and green-zone admission. The only inline
+trust-anchor shape is now HyperBEAM's base64url `trusted-ca`; malformed inline
+anchors fail closed instead of falling through to node config.
+
+Validation:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+$ cd build/hyperbeam/src-edge && LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2
+All 39 tests passed.
+$ cd build/hyperbeam/src-edge && LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm_interpret
+All 117 tests passed.
+$ cd build/hyperbeam/src-edge && LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone
+All 16 tests passed.
+$ make buildroot JOBS=18
+artefacts: initramfs-lapee.cpio.zst, vmlinuz-lapee
+$ make hb-usb-no-tme-image WIFI=0
+build/images/lapee-usb-no-tme.img: 247463936 bytes
+$ ./scripts/boot-usb-image.sh --img build/images/lapee-usb-no-tme.img --timeout 420
+=== QEMU boot test PASSED ===
+$ ./scripts/interpret-local-capture.sh build/qemu-network-test/boot-attestation.json --label qemu-trust-anchor-cleanup
+verdict = untrusted (score 4)
+$ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img build/images/lapee-usb-no-tme.img --timeout 600
+=== green-zone QEMU cluster PASSED ===
+ring-address: zaJfvZfCivDKpSRNiSKe5ZRZy_j7sWYH0lzZDjnzCcE
+```
+
 ## Update 23
 
 Trimmed green-zone request parsing: removed unused aliases and replaced the
@@ -426,10 +456,10 @@ changes:
 
 The first direct QEMU admission preflight then exposed the expected next hard
 edge: swtpm manufactures EK certs with an intermediate local CA, so trusting
-only `issuercert.pem` is not sufficient. The verifier now treats
-`trusted-ca`/`trusted-ca-pem` as PEM bundles, tries each certificate as a trust
-anchor, and uses the remaining bundle entries plus the peer-presented chain as
-intermediate candidates. The cluster harness now supplies the swtpm issuer +
+only `issuercert.pem` is not sufficient. The verifier now treats inline CA
+anchors as PEM bundles, tries each certificate as a trust anchor, and uses the
+remaining bundle entries plus the peer-presented chain as intermediate
+candidates. The cluster harness now supplies the swtpm issuer +
 root bundle via base64url `trusted-ca`.
 
 Also replaced a brittle `true = Verified` peer-verification assertion with an
