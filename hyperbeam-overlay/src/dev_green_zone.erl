@@ -49,7 +49,11 @@ info(_Base, _Req, _Opts) ->
                 <<"TPM-backed green-zone ring admission and shared identity">>,
             <<"version">> => <<"1.0">>,
             <<"template-semantics">> =>
-                <<"Deep map subset match; non-map values exact; '$any' wildcard">>
+                <<"Deep map subset match; non-map values exact; '$any' wildcard">>,
+            <<"peer-attestation-trust">> =>
+                <<"Admission can verify a live joiner-url, or reuse a signed "
+                  "lapee-peer-attestation when one of its signers is listed "
+                  "in trusted-publisher/trusted-publishers.">>
         }
     }}.
 
@@ -79,11 +83,10 @@ match(_Base, Req, Opts) ->
 
 admit(_Base, Req, Opts) ->
     with_result(fun() ->
-        JoinerURL = required_url(Req, Opts),
         {AES, Wallet, Template} = require_ring(Opts),
-        PeerAttestation = verify_joiner(JoinerURL, Req, Opts),
-        Boot = hb_maps:get(
-            <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+        {JoinerURL, PeerAttestation, Publisher} =
+            peer_attestation_from_req(Req, Opts),
+        Boot = peer_boot_attestation_body(PeerAttestation, Opts),
         case match_template(Template, Boot, Opts) of
             true -> ok;
             false ->
@@ -102,6 +105,7 @@ admit(_Base, Req, Opts) ->
             <<"joiner-url">> => JoinerURL,
             <<"template">> => Template,
             <<"template-matched">> => true,
+            <<"peer-attestation-publisher">> => Publisher,
             <<"peer-attestation">> => PeerAttestation,
             <<"credential">> => Credential,
             <<"encrypted-wallet">> => encrypt_wallet(Wallet, AES),
@@ -311,32 +315,156 @@ verify_joiner(JoinerURL, Req, Opts) ->
             }})
     end.
 
-request_admission(PeerURL, SelfURL, Req, Opts) ->
-    Body = maps:without(
-        [<<"path">>, <<"device">>, <<"method">>, <<"peer-url">>,
-         <<"self-url">>, <<"url">>],
-        Req
-    ),
-    AdmitReq = Body#{<<"joiner-url">> => SelfURL},
-    case hb_http:post(
-        PeerURL,
-        <<"/~green-zone@1.0/admit">>,
-        AdmitReq,
-        peer_http_opts(Opts)
-    ) of
-        {ok, Response} -> response_body(Response, Opts);
-        Other ->
+peer_attestation_from_req(Req, Opts) ->
+    case hb_maps:get(<<"peer-attestation">>, Req, undefined, Opts) of
+        PeerAttestation0 when is_map(PeerAttestation0) ->
+            PeerAttestation = response_body(PeerAttestation0, Opts),
+            Publisher = require_trusted_publisher(PeerAttestation, Req, Opts),
+            assert_peer_attestation_body(PeerAttestation, Opts),
+            JoinerURL = first_defined([
+                hb_maps:get(<<"joiner-url">>, Req, undefined, Opts),
+                hb_maps:get(<<"peer-url">>, PeerAttestation, undefined, Opts)
+            ]),
+            case JoinerURL of
+                undefined ->
+                    throw({green_zone_error, #{
+                        <<"error">> => <<"missing-peer-attestation-url">>
+                    }});
+                URL ->
+                    {strip_trailing_slash(URL), PeerAttestation, Publisher}
+            end;
+        _ ->
+            JoinerURL = required_url(Req, Opts),
+            {JoinerURL, verify_joiner(JoinerURL, Req, Opts), null}
+    end.
+
+require_trusted_publisher(PeerAttestation, Req, Opts) ->
+    Signers = peer_attestation_signers(PeerAttestation, Opts),
+    case hb_message:verify(PeerAttestation, Signers, Opts) of
+        true -> ok;
+        false ->
             throw({green_zone_error, #{
-                <<"error">> => <<"admission-request-failed">>,
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
+                <<"error">> => <<"peer-attestation-signature-invalid">>
+            }})
+    end,
+    Trusted = trusted_publishers(Req, Opts),
+    case [S || S <- Signers, lists:member(S, Trusted)] of
+        [Publisher | _] -> Publisher;
+        [] ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"peer-attestation-publisher-untrusted">>,
+                <<"signers">> => Signers,
+                <<"trusted-publishers">> => Trusted
             }})
     end.
 
-peer_http_opts(Opts) ->
-    Opts#{
-        <<"http-client">> => gun,
-        <<"protocol">> => http1
-    }.
+peer_attestation_signers(PeerAttestation, Opts) ->
+    try hb_message:signers(PeerAttestation, Opts) of
+        [] ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"peer-attestation-unsigned">>
+            }});
+        Signers -> Signers
+    catch
+        throw:{green_zone_error, _} = Error -> throw(Error);
+        _:_ ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"peer-attestation-signers-unreadable">>
+            }})
+    end.
+
+trusted_publishers(Req, Opts) ->
+    normalize_publishers(first_defined([
+        hb_maps:get(<<"trusted-publishers">>, Req, undefined, Opts),
+        hb_maps:get(<<"trusted-publisher">>, Req, undefined, Opts),
+        hb_opts:get(<<"green-zone-trusted-publishers">>, undefined, Opts),
+        hb_opts:get(<<"green-zone-trusted-publisher">>, undefined, Opts)
+    ])).
+
+normalize_publishers(undefined) -> [];
+normalize_publishers(B) when is_binary(B), byte_size(B) > 0 -> [B];
+normalize_publishers(L) when is_list(L) ->
+    [B || B <- L, is_binary(B), byte_size(B) > 0];
+normalize_publishers(_) -> [].
+
+assert_peer_attestation_body(PeerAttestation, Opts) ->
+    Required = [
+        {field_eq, <<"type">>, <<"lapee-peer-attestation">>},
+        {nested_true, <<"verification">>, <<"verified">>},
+        {nested_true, <<"credential-activation">>, <<"verified">>},
+        {field_map, <<"peer-credential-subject">>},
+        {field_map, <<"peer-boot-attestation">>}
+    ],
+    lists:foreach(
+        fun
+            ({field_eq, Key, Expected}) ->
+                case hb_maps:get(Key, PeerAttestation, undefined, Opts) of
+                    Expected -> ok;
+                    _ -> bad_peer_attestation(Key)
+                end;
+            ({nested_true, Outer, Inner}) ->
+                case hb_maps:get(Outer, PeerAttestation, undefined, Opts) of
+                    M when is_map(M) ->
+                        case hb_maps:get(Inner, M, false, Opts) of
+                            true -> ok;
+                            _ -> bad_peer_attestation(Outer)
+                        end;
+                    _ -> bad_peer_attestation(Outer)
+                end;
+            ({field_map, Key}) ->
+                case hb_maps:get(Key, PeerAttestation, undefined, Opts) of
+                    M when is_map(M) -> ok;
+                    _ -> bad_peer_attestation(Key)
+                end
+        end,
+        Required).
+
+bad_peer_attestation(Key) ->
+    throw({green_zone_error, #{
+        <<"error">> => <<"peer-attestation-invalid">>,
+        <<"field">> => Key
+    }}).
+
+peer_boot_attestation_body(PeerAttestation, Opts) ->
+    response_body(
+        hb_maps:get(
+            <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+        Opts).
+
+request_admission(PeerURL, SelfURL, Req, Opts) ->
+    Body = maps:without(
+        [<<"path">>, <<"device">>, <<"method">>, <<"peer-url">>,
+         <<"self-url">>, <<"url">>, <<"peer-attestation">>],
+        Req
+    ),
+    AdmitReq = Body#{<<"joiner-url">> => SelfURL},
+    try
+        admission_response_body(
+            lapee_http_json:post(
+                PeerURL,
+                <<"/~green-zone@1.0/admit">>,
+                AdmitReq,
+                Opts),
+            Opts
+        )
+    catch
+        throw:{green_zone_error, ErrorBody} ->
+            throw({green_zone_error, ErrorBody});
+        Class:Reason ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"admission-request-failed">>,
+                <<"class">> => hb_util:bin(Class),
+                <<"details">> => hb_util:bin(io_lib:format("~p", [Reason]))
+            }})
+    end.
+
+admission_response_body(#{<<"status">> := 200, <<"body">> := Body}, Opts) ->
+    response_body(Body, Opts);
+admission_response_body(#{<<"status">> := Status, <<"body">> := Body}, _Opts)
+        when is_integer(Status), Status >= 400, is_map(Body) ->
+    throw({green_zone_error, Body});
+admission_response_body(Other, Opts) ->
+    response_body(Other, Opts).
 
 activate_local_credential(Credential, Opts) ->
     case dev_tpm2:activate_credential(#{}, Credential, Opts) of
@@ -349,6 +477,8 @@ activate_local_credential(Credential, Opts) ->
             }})
     end.
 
+response_body(Link, Opts) when ?IS_LINK(Link) ->
+    response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
 response_body(#{<<"body">> := Body}, Opts) ->
     response_body(Body, Opts);
 response_body(Body, _Opts) ->
@@ -472,5 +602,62 @@ wallet_encryption_roundtrip_test() ->
     Enc = encrypt_wallet(Wallet, AES),
     Dec = decrypt_wallet(Enc, AES, #{}),
     ?assertEqual(wallet_address(Wallet), wallet_address(Dec)).
+
+admission_response_body_preserves_policy_rejection_test() ->
+    Rejection = #{
+        <<"status">> => 400,
+        <<"body">> => #{<<"error">> => <<"template-mismatch">>}
+    },
+    ?assertThrow(
+        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        admission_response_body(Rejection, #{})).
+
+trusted_peer_attestation_can_be_reused_test() ->
+    PublisherWallet = ar_wallet:new(),
+    Publisher = wallet_address(PublisherWallet),
+    Attestation = signed_peer_attestation(PublisherWallet, #{
+        <<"body">> => #{
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
+            <<"tpm">> => #{<<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>}}
+        }
+    }),
+    Req = #{
+        <<"peer-attestation">> => Attestation,
+        <<"trusted-publisher">> => Publisher
+    },
+    {<<"http://peer.example">>, TrustedAttestation, Publisher} =
+        peer_attestation_from_req(Req, #{}),
+    ?assert(match_template(
+        #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
+        peer_boot_attestation_body(TrustedAttestation, #{}),
+        #{})).
+
+untrusted_peer_attestation_publisher_rejected_test() ->
+    PublisherWallet = ar_wallet:new(),
+    Attestation = signed_peer_attestation(PublisherWallet, #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+    }),
+    Req = #{
+        <<"peer-attestation">> => Attestation,
+        <<"trusted-publisher">> => <<"not-the-signer">>
+    },
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"peer-attestation-publisher-untrusted">>
+        }},
+        peer_attestation_from_req(Req, #{})).
+
+signed_peer_attestation(Wallet, BootAttestation) ->
+    hb_message:commit(
+        #{
+            <<"type">> => <<"lapee-peer-attestation">>,
+            <<"version">> => <<"1.0">>,
+            <<"peer-url">> => <<"http://peer.example">>,
+            <<"peer-boot-attestation">> => BootAttestation,
+            <<"peer-credential-subject">> => #{<<"ak-name">> => <<"ak">>},
+            <<"verification">> => #{<<"verified">> => true},
+            <<"credential-activation">> => #{<<"verified">> => true}
+        },
+        #{<<"priv-wallet">> => Wallet}).
 
 -endif.

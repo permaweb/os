@@ -280,9 +280,9 @@ brew install qemu swtpm erlang rebar3 python@3
 ```
 
 Docker Desktop must be running for the default source-build path and
-for ESP-edit helpers such as `hb-wifi-apply`. QEMU and swtpm are only
-needed for `make hb-usb-qemu`; Erlang/rebar3/Python are needed by the
-attestation dashboard wrapper.
+for ESP-edit helpers such as `hb-wifi-apply`. QEMU and swtpm are needed
+for `make hb-usb-qemu` and the four-node green-zone acceptance harness;
+Erlang/rebar3/Python are needed by the attestation dashboard wrapper.
 
 Build with all useful local cores:
 
@@ -308,6 +308,17 @@ Smoke-test the image in QEMU:
 ```sh
 make hb-usb-qemu
 ```
+
+Run the TPM-backed green-zone acceptance gate:
+
+```sh
+make qemu-green-zone-cluster
+```
+
+That boots four QEMU+swtpm nodes. Three nodes share the measured
+configuration and must join the green-zone and sign with the same ring
+wallet; the fourth carries a different measured command line and must
+fail admission with `template-mismatch` and fail to sign as the ring.
 
 Write a freshly built image directly to USB:
 
@@ -346,6 +357,7 @@ make kernel
 make hb-usb-image
 make hb-usb-qemu
 make hb-usb-qemu-gui
+make qemu-green-zone-cluster
 make gather-wifi-creds
 make hb-wifi-apply
 make hb-usb-debug-write DEV=/dev/diskN

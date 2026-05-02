@@ -68,6 +68,10 @@
 #                             over the forwarded network port.
 #   make hb-usb-qemu-gui    — same with a Cocoa window so the
 #                             operator can watch the splash.
+#   make qemu-green-zone-cluster
+#                           — boot four QEMU+swtpm nodes, admit three
+#                             into a green-zone, and prove the fourth is
+#                             rejected and cannot sign as the ring.
 #   make hb-fetch           — populate build/hyperbeam/src-edge
 #                             with the pinned verifier source.
 #   make hb-wifi-apply      — inject host-side wifi.conf into the
@@ -163,7 +167,8 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         hb-usb-no-tme-signed-image hb-usb-no-tme-signed-write \
         hb-sb-keys hb-sb-provisioner-image hb-sb-provisioner-write \
         hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
-        hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
+        hb-usb-qemu hb-usb-qemu-gui qemu-green-zone-cluster hb-fetch \
+        gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
 
 help:
@@ -481,6 +486,9 @@ hb-usb-qemu:
 
 hb-usb-qemu-gui:
 	./scripts/boot-usb-image.sh --gui
+
+qemu-green-zone-cluster:
+	./scripts/qemu-green-zone-cluster.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \

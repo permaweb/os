@@ -728,7 +728,13 @@ nif_make_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
         &empty_private,
         &ek_public,
-        ESYS_TR_RH_ENDORSEMENT,
+        /*
+         * MakeCredential runs on the verifier's TPM using only the
+         * joiner's EK public area. Public-only external objects are
+         * loaded under TPM_RH_NULL; endorsement is for resident
+         * objects in the local endorsement hierarchy.
+         */
+        ESYS_TR_RH_NULL,
         &ek_tr);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_LoadExternal(EK)", rc);

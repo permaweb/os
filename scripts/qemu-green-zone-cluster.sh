@@ -97,6 +97,16 @@ rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 
+echo "=== green-zone QEMU cluster ==="
+echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+git status --short 2>/dev/null || true
+echo "qemu: $(qemu-system-x86_64 --version | head -n 1)"
+echo "swtpm: $(swtpm --version | head -n 1)"
+echo "guest-host: $GUEST_HOST"
+echo "base-port: $BASE_PORT"
+echo "outdir: $OUTDIR"
+ls -lhT "$IMG" "$BAD_IMG" 2>/dev/null || ls -lh "$IMG" "$BAD_IMG"
+
 cat > "$OUTDIR/localca.conf" <<EOF
 statedir = $OUTDIR/ca
 signingkey = $OUTDIR/ca/signkey.pem
@@ -217,13 +227,27 @@ wait_node() {
 }
 
 post_json() {
-    local n=$1 path=$2 req=$3 out=$4
+    local n="${1:?node index required}"
+    local path="${2:?request path required}"
+    local req="${3:?request JSON path required}"
+    local out="${4:?response JSON path required}"
     curl -sSL \
         -X POST \
         -H "content-type: application/json" \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         --data-binary "@$req" \
+        "$(node_host_url "$n")$path" \
+        -o "$out"
+}
+
+get_json() {
+    local n="${1:?node index required}"
+    local path="${2:?request path required}"
+    local out="${3:?response JSON path required}"
+    curl -sSL \
+        -H "accept: application/json" \
+        -H "accept-bundle: true" \
         "$(node_host_url "$n")$path" \
         -o "$out"
 }
@@ -240,6 +264,11 @@ python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 post_json 1 "/~green-zone@1.0/init" \
     "$OUTDIR/requests/init.json" \
     "$OUTDIR/responses/node1-init.json"
+jq -e '.status == 200 and .body.initialized == true and
+       (.body."ring-address" | type == "string" and length > 0)' \
+    "$OUTDIR/responses/node1-init.json" >/dev/null
+ring_addr=$(jq -r '.body."ring-address"' "$OUTDIR/responses/node1-init.json")
+echo ">> node 1 initialized green-zone $ring_addr"
 
 post_json 1 "/~green-zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
@@ -263,15 +292,26 @@ post_json 4 "/~green-zone@1.0/join" \
     "$OUTDIR/responses/node4-join.json"
 join4_rc=$?
 set -e
-if [[ "$join4_rc" = 0 ]] &&
-        jq -e '.status == 200 and .body.initialized == true' \
-            "$OUTDIR/responses/node4-join.json" >/dev/null; then
-    echo "!! node 4 was admitted but should have been rejected" >&2
+if [[ "$join4_rc" != 0 ]]; then
+    echo "!! node 4 join request failed at HTTP transport level" >&2
+    exit 1
+fi
+if ! jq -e '.status == 400 and .body.error == "template-mismatch"' \
+        "$OUTDIR/responses/node4-join.json" >/dev/null; then
+    echo "!! node 4 rejection was not the expected template-mismatch" >&2
+    cat "$OUTDIR/responses/node4-join.json" >&2
     exit 1
 fi
 echo ">> node 4 rejected as expected"
 
-ring_addr=$(jq -r '.body."ring-address"' "$OUTDIR/responses/node1-init.json")
+get_json 4 "/~green-zone@1.0/status" \
+    "$OUTDIR/responses/node4-status.json"
+jq -e --arg addr "$ring_addr" \
+    '.status == 200 and .body.initialized == false and
+     (.body."ring-address" != $addr)' \
+    "$OUTDIR/responses/node4-status.json" >/dev/null
+echo ">> node 4 status has no green-zone wallet"
+
 post_json 4 "/~green-zone@1.0/sign" \
     "$OUTDIR/requests/sign4.json" \
     "$OUTDIR/responses/node4-sign.json"

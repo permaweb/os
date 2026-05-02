@@ -284,3 +284,65 @@ Environment blockers in this Codex desktop sandbox:
 
 The code and harness are now ready for the full acceptance run in an
 environment that allows Docker and local listener sockets.
+
+## Update 10
+
+Second unattended pass tightened the current branch in three places:
+
+- `~tpm@2.0a/verify-peer` now stores the unwrapped boot-attestation body in
+  the signed `lapee-peer-attestation`. This keeps later green-zone template
+  matching aligned with the `system`/`tpm` shape produced by the verifier and
+  by the QEMU harness.
+- Green-zone admission now supports the intended reusable peer-attestation
+  path. `admit` accepts either a live `joiner-url` or a supplied signed
+  `peer-attestation`; supplied attestations are only reused when their
+  HyperBEAM commitment verifies and at least one signer is explicitly listed
+  in `trusted-publisher`, `trusted-publishers`, or green-zone opts. The
+  attestation must also carry `verification.verified = true`,
+  `credential-activation.verified = true`, a peer boot-attestation, and a
+  credential subject.
+- The peer HTTP path now uses the LapEE-owned minimal HTTP/1.1 JSON client for
+  plain local peer calls. It preserves structured device-level HTTP errors so
+  a remote `template-mismatch` is not collapsed into an opaque transport
+  failure.
+
+Harness/docs updates:
+
+- `scripts/qemu-green-zone-cluster.sh` now prints git/image/QEMU/swtpm
+  provenance at start.
+- Node 1 initialization must now prove a non-empty ring address before
+  admission proceeds.
+- Node 4 rejection must now be the expected structured
+  `status = 400`, `body.error = "template-mismatch"`, and node 4 status must
+  remain uninitialized without the ring address before the negative signing
+  check runs.
+- Added `make qemu-green-zone-cluster` and README coverage for the four-node
+  green-zone gate.
+
+Validation evidence at `2026-05-02 04:24:12 EDT`:
+
+- Staged overlay into `build/hyperbeam/src-edge`.
+- `LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile` passes in
+  `build/hyperbeam/src-edge`.
+- Direct EUnit without starting the HTTP listener:
+  `LAPEE_TPM_ALLOW_NO_NIF=1 erl -noshell -pa _build/test/lib/*/ebin -pa _build/default/lib/*/ebin -eval 'case eunit:test(dev_green_zone, [verbose]) of ok -> halt(0); error -> halt(1) end.'`
+  passes 6/6 tests.
+- Direct EUnit without starting the HTTP listener:
+  `LAPEE_TPM_ALLOW_NO_NIF=1 erl -noshell -pa _build/test/lib/*/ebin -pa _build/default/lib/*/ebin -eval 'case eunit:test(dev_tpm2, [verbose]) of ok -> halt(0); error -> halt(1) end.'`
+  passes 28/28 tests.
+- Direct EUnit without starting the HTTP listener:
+  `LAPEE_TPM_ALLOW_NO_NIF=1 erl -noshell -pa _build/test/lib/*/ebin -pa _build/default/lib/*/ebin -eval 'case eunit:test(lapee_http_json, [verbose]) of ok -> halt(0); error -> halt(1) end.'`
+  passes 2/2 tests.
+- `bash -n scripts/qemu-green-zone-cluster.sh` passes.
+- `PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache python3 -m py_compile scripts/qemu-green-zone-requests.py`
+  passes.
+- `git diff --check` passes.
+
+Remaining environment blockers in this Codex desktop sandbox:
+
+- `make buildroot JOBS=18` still cannot connect to Docker:
+  `permission denied while trying to connect to the docker API at unix:///Users/sam/.docker/run/docker.sock`.
+- The four-node QEMU harness still fails before node boot because `swtpm`
+  cannot create its UnixIO socket here:
+  `!! swtpm failed for node 1` /
+  `Could not open UnixIO socket: Operation not permitted`.

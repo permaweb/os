@@ -524,6 +524,18 @@ verify(Base, Req, Opts) ->
     }}.
 
 normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
+    case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
+        Body when is_map(Body) ->
+            case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
+                Tpm when is_map(Tpm) -> normalise_attestation(Body, Opts);
+                _ -> normalise_attestation_body(Envelope, Opts)
+            end;
+        _ -> normalise_attestation_body(Envelope, Opts)
+    end;
+normalise_attestation(Other, _Opts) ->
+    Other.
+
+normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
     case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
         Tpm when is_map(Tpm) ->
             Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
@@ -558,9 +570,7 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                     end
             };
         _ -> Envelope
-    end;
-normalise_attestation(Other, _Opts) ->
-    Other.
+    end.
 
 %% Classify which source produced the trust anchor actually used
 %% by `resolve_trusted_ca/2'. Returns a binary: "request", "node_config",
@@ -736,21 +746,14 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
     end.
 
 validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
-    Intermediates =
-        PeerChainDers ++ [Der || Der <- TrustedDers, Der =/= AnchorDer],
     try public_key:pkix_decode_cert(AnchorDer, otp) of
         AnchorOtp ->
-            case public_key:pkix_path_validation(
-                    AnchorOtp,
-                    [EkDer | Intermediates],
-                    [{verify_fun, ek_chain_verify_fun()}]) of
-                {ok, _} ->
-                    {ok, iolist_to_binary(io_lib:format(
-                        "pkix_path_validation ok using ~B intermediate "
-                        "candidate(s)", [length(Intermediates)]))};
-                {error, Why} ->
-                    {error, diagnose_chain_failure(Why, EkDer, AnchorDer)}
-            end
+            validate_ek_chain_paths(
+                AnchorOtp,
+                EkDer,
+                candidate_intermediate_chains(
+                    PeerChainDers, TrustedDers, AnchorDer),
+                AnchorDer)
     catch
         Class:Reason ->
             {error,
@@ -760,6 +763,52 @@ validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
                     "likely corrupted over the wire. Use `trusted-ca' with "
                     "base64url-encoded PEM bytes for unambiguous transport.",
                     [Class, Reason]))}
+    end.
+
+candidate_intermediate_chains(PeerChainDers, TrustedDers, AnchorDer) ->
+    ExtraTrusted = [Der || Der <- TrustedDers, Der =/= AnchorDer],
+    unique_chains([
+        PeerChainDers,
+        PeerChainDers ++ ExtraTrusted
+    ]).
+
+unique_chains(Chains) ->
+    lists:foldl(
+        fun(Chain, Acc) ->
+            case lists:member(Chain, Acc) of
+                true -> Acc;
+                false -> Acc ++ [Chain]
+            end
+        end,
+        [],
+        Chains).
+
+validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
+    Attempts =
+        [
+            {Intermediates,
+             public_key:pkix_path_validation(
+                AnchorOtp,
+                [EkDer | Intermediates],
+                [{verify_fun, ek_chain_verify_fun()}])}
+        ||
+            Intermediates <- IntermediateChains
+        ],
+    case [{Intermediates, Result} || {Intermediates, {ok, _} = Result}
+                                <- Attempts] of
+        [{Intermediates, {ok, _}} | _] ->
+            {ok, iolist_to_binary(io_lib:format(
+                "pkix_path_validation ok using ~B intermediate "
+                "candidate(s)", [length(Intermediates)]))};
+        [] ->
+            Reasons = [
+                diagnose_chain_failure(Why, EkDer, AnchorDer)
+            ||
+                {_Intermediates, {error, Why}} <- Attempts
+            ],
+            {error, iolist_to_binary(io_lib:format(
+                "chain invalid across ~B path candidate(s): ~p",
+                [length(Attempts), Reasons]))}
     end.
 
 %% Produce a targeted error message for common pkix_path_validation
@@ -1509,8 +1558,9 @@ verify_peer(_Base, Req, Opts) ->
 verify_peer_url(Url, Req, Opts) ->
     with_ok(
         fun() ->
-            Boot = fetch_peer_message(Url, <<"/~tpm@2.0a/boot-attestation">>,
-                                      Opts),
+            Boot0 = fetch_peer_message(Url, <<"/~tpm@2.0a/boot-attestation">>,
+                                       Opts),
+            Boot = resolve_subject_body(Boot0, Opts),
             Subject0 =
                 fetch_peer_message(Url, <<"/~tpm@2.0a/credential-subject">>,
                                    Opts),
@@ -1570,15 +1620,7 @@ strip_trailing_slash(B) ->
     B.
 
 fetch_peer_message(Url, Path, Opts) ->
-    FetchMsg = #{
-        <<"path">> => Path,
-        <<"accept">> => <<"application/json@1.0">>,
-        <<"accept-bundle">> => <<"true">>
-    },
-    case hb_http:get(Url, FetchMsg, peer_http_opts(Opts)) of
-        {ok, Response} -> resolve_body({ok, Response});
-        Other -> throw({boot_attestation_error, #{Path => to_bin(Other)}})
-    end.
+    lapee_http_json:get(Url, Path, Opts).
 
 resolve_subject_body(Msg, Opts) when is_map(Msg) ->
     case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
@@ -1611,23 +1653,13 @@ activate_peer_credential(Url, Credential, Opts) ->
         <<"secret">> =>
             hb_maps:get(<<"secret">>, Credential, <<>>, #{})
     },
-    case hb_http:post(
-        Url,
-        <<"/~tpm@2.0a/activate-credential">>,
-        Req,
-        peer_http_opts(Opts)
-    ) of
-        {ok, Response} -> resolve_subject_body(resolve_body({ok, Response}), Opts);
-        Other ->
-            throw({boot_attestation_error,
-                   #{<<"activate-peer">> => to_bin(Other)}})
-    end.
-
-peer_http_opts(Opts) ->
-    Opts#{
-        <<"http-client">> => gun,
-        <<"protocol">> => http1
-    }.
+    resolve_subject_body(
+        lapee_http_json:post(
+            Url,
+            <<"/~tpm@2.0a/activate-credential">>,
+            Req,
+            Opts),
+        Opts).
 
 ensure_activation_secret(Activation, Expected, Opts) ->
     GotB64 = hb_maps:get(<<"credential-secret">>, Activation, <<>>, Opts),
@@ -3594,6 +3626,21 @@ split_concatenated_ders_reports_offsets_test() ->
         [{0, Der}, {byte_size(Der) + byte_size(Gap), Der}],
         split_concatenated_ders_with_offsets(
           <<Der/binary, Gap/binary, Der/binary>>)).
+
+candidate_intermediate_chains_keeps_direct_anchor_path_test() ->
+    Peer = <<"peer-chain-cert">>,
+    Anchor = <<"issuer-anchor">>,
+    OtherTrusted = <<"root-anchor">>,
+    ?assertEqual(
+        [[Peer], [Peer, OtherTrusted]],
+        candidate_intermediate_chains([Peer],
+                                      [Anchor, OtherTrusted],
+                                      Anchor)),
+    ?assertEqual(
+        [[], [OtherTrusted]],
+        candidate_intermediate_chains([],
+                                      [Anchor, OtherTrusted],
+                                      Anchor)).
 
 parse_chain_group_reads_cert_across_nv_boundary_test() ->
     Der = root_ca_fixture_der(),
