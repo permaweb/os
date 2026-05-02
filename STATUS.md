@@ -1,5 +1,11 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 30
+
+Removed stale internal peer-attestation cache-path docs from `~tpm@2.0a/info`.
+Evidence: `HB_PORT=19149 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_tpm2` passed 40/40 with exit 0.
+
 ## Update 29
 
 Removed the stale machine-local macOS TPM simulator library path; dev defaults

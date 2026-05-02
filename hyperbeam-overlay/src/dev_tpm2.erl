@@ -189,16 +189,6 @@ info(_Base, _Req, _Opts) ->
                     <<"peer-attestation-ttl-seconds">> =>
                         <<"Optional positive integer validity window. If "
                           "absent, the signed attestation has no upper expiry.">>
-                },
-                <<"cache-paths">> => #{
-                    <<"by-id">> =>
-                        <<(?PEER_ATTESTATION_PREFIX)/binary,
-                          "/by-id/<signed-message-id>">>,
-                    <<"scoped">> =>
-                        <<(?PEER_ATTESTATION_PREFIX)/binary,
-                          "/by-peer-url-sha256/<url-sha256>/"
-                          "by-ek-public-sha256/<ek-sha256>/"
-                          "by-boot-attestation-id/<boot-id>/<signed-id>">>
                 }
             }
         }
