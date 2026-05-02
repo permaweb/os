@@ -52,6 +52,9 @@ all(_Base, _Req, _Opts) ->
 
 report_from_root(Root0) ->
     Root = normalise_root(Root0),
+    BootGuard = boot_guard_report(Root),
+    Edac = edac_report(Root),
+    MemoryController = memory_controller_probe_report(Root, Edac),
     #{
         <<"device">> => <<"system@1.0">>,
         <<"schema">> => <<"lapee-system-report@1">>,
@@ -60,9 +63,9 @@ report_from_root(Root0) ->
         <<"evidence-model">> => evidence_model(),
         <<"kernel">> => kernel_report(Root),
         <<"cpu">> => cpu_report(Root),
-        <<"memory">> => memory_report(Root),
-        <<"firmware">> => firmware_report(Root),
-        <<"hardware-probes">> => hardware_probes_report(Root),
+        <<"memory">> => memory_report(Root, Edac, MemoryController),
+        <<"firmware">> => firmware_report(Root, BootGuard),
+        <<"hardware-probes">> => hardware_probes_report(BootGuard, MemoryController),
         <<"tpm">> => tpm_report(Root),
         <<"iommu">> => iommu_report(Root),
         <<"integrity">> => integrity_report(Root),
@@ -128,9 +131,7 @@ cpu_report(Root) ->
         }
     }.
 
-memory_report(Root) ->
-    Edac = edac_report(Root),
-    ControllerProbes = memory_controller_probe_report(Root, Edac),
+memory_report(Root, Edac, ControllerProbes) ->
     #{
         <<"meminfo">> => meminfo_report(Root),
         <<"sysfs-memory">> => sysfs_memory_report(Root),
@@ -146,20 +147,18 @@ memory_report(Root) ->
         }
     }.
 
-firmware_report(Root) ->
+firmware_report(Root, BootGuard) ->
     #{
         <<"dmi">> => dmi_report(Root),
         <<"efi">> => efi_report(Root),
-        <<"boot-guard">> => boot_guard_report(Root)
+        <<"boot-guard">> => BootGuard
     }.
 
-hardware_probes_report(Root) ->
-    Edac = edac_report(Root),
+hardware_probes_report(BootGuard, MemoryController) ->
     #{
         <<"schema">> => <<"lapee-hardware-probes@1">>,
-        <<"boot-guard">> => boot_guard_report(Root),
-        <<"memory-controller">> =>
-            memory_controller_probe_report(Root, Edac),
+        <<"boot-guard">> => BootGuard,
+        <<"memory-controller">> => MemoryController,
         <<"collection">> => #{
             <<"userspace-pcode-mailbox-writes">> => false,
             <<"notes">> =>

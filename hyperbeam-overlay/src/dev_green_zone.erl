@@ -1139,13 +1139,6 @@ ensure_nonempty_template(Template) when is_map(Template),
 ensure_nonempty_template(_Template) ->
     throw({green_zone_error, #{<<"error">> => <<"empty-template">>}}).
 
-mismatch_path(Template, Candidate, Opts) ->
-    case hb_message:match(Template, Candidate, primary, Opts) of
-        {mismatch, _Type, Path, _Expected, _Actual} ->
-            canonical_mismatch_path(Path);
-        _ -> <<"/">>
-    end.
-
 canonical_mismatch_path(<<"/", _/binary>> = Path) ->
     Path;
 canonical_mismatch_path(Path) when is_binary(Path) ->
@@ -1215,17 +1208,6 @@ template_envelope_metadata_is_not_policy_test() ->
         #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
         Template),
     ?assert(match_template(Template, Candidate, #{})).
-
-mismatch_path_test() ->
-    Template = #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    },
-    Candidate = #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
-    },
-    ?assertEqual(
-        <<"/system/kernel/cmdline">>,
-        mismatch_path(Template, Candidate, #{})).
 
 wallet_encryption_roundtrip_test() ->
     Wallet = ar_wallet:new(),

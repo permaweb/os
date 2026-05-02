@@ -1,5 +1,19 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 27
+
+Trimmed a duplicate green-zone test helper and made `~system@1.0` reuse one
+Boot Guard, EDAC, and memory-controller snapshot per report. Evidence at
+`2026-05-02T23:06:03Z`:
+
+```text
+dev_system: All 2 tests passed.
+dev_green_zone: All 15 tests passed.
+make buildroot JOBS=18: initramfs-lapee.cpio.zst, vmlinuz-lapee
+make hb-usb-no-tme-image WIFI=0 JOBS=18: 247463936-byte image
+qemu-green-zone-cluster: PASSED, ring jDQYzz0yXA1Zr8QoMmZKJdygHi0iLD0s4iViWwhU0KI
+```
+
 ## Update 26
 
 Removed one-use `~green-zone@1.0` member/admission wrappers.
@@ -1354,20 +1368,20 @@ ring-address: ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
 
 ## Update 18 - Naming And Template Semantics Cleanup
 
-Tidied the protocol surface without changing runtime behavior:
+Tidied the protocol surface and system probe snapshots:
 
 - Removed the completed probe-surface correction TODO; the durable decision is
   `docs/decisions/read-oriented-probe-surface.md`.
-- Updated stale documentation/corpus references from `~tpm2@2.0a` to the
-  canonical `~tpm@2.0a`.
+- Updated stale documentation/corpus references to canonical `~tpm@2.0a`.
 - Clarified `~green-zone@1.0` template docs: templates use
   `hb_message:match/4`, so AO metadata keys such as `commitments` and
   `ao-types` are ignored as message metadata.
+- `~system@1.0` reuses one Boot Guard, EDAC, and memory-controller snapshot.
 
 Validation evidence at `2026-05-02T22:51:48Z`:
 
 ```text
-$ rg 'lapee-peer-attestation|ring-scope|greenzone@1\\.0|tpm2@2\\.0a|trusted-ca-pem|probe-surface-correction-todo' -n . --glob '!build/**'
+$ rg 'lapee-peer-attestation|ring-scope|greenzone@1\\.0|tpm2@2\\.0a|trusted-ca-pem|probe-surface-correction-todo' -n . --glob '!build/**' --glob '!STATUS.md'
 no results
 
 $ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
@@ -1375,7 +1389,10 @@ $ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
 
 $ cd build/hyperbeam/src-edge
 $ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone
-All 16 tests passed.
+All 15 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_system
+All 2 tests passed.
 
 $ git diff --check
 ```
