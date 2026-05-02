@@ -109,6 +109,142 @@ lapee_enc_session(void)
     return ESYS_TR_NONE;
 }
 
+static TSS2_RC
+lapee_policy_secret_endorsement_session(ESYS_TR *out_session)
+{
+    TPMT_SYM_DEF symmetric = {
+        .algorithm = TPM2_ALG_NULL,
+    };
+    ESYS_TR session = ESYS_TR_NONE;
+    TSS2_RC rc = Esys_StartAuthSession(
+        g_esys_ctx,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        TPM2_SE_POLICY,
+        &symmetric,
+        TPM2_ALG_SHA256,
+        &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    TPM2B_TIMEOUT *timeout = NULL;
+    TPMT_TK_AUTH *ticket = NULL;
+    rc = Esys_PolicySecret(
+        g_esys_ctx,
+        ESYS_TR_RH_ENDORSEMENT,
+        session,
+        ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL, NULL, NULL, 0,
+        &timeout, &ticket);
+    if (timeout) Esys_Free(timeout);
+    if (ticket) Esys_Free(ticket);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, session);
+        return rc;
+    }
+    *out_session = session;
+    return TSS2_RC_SUCCESS;
+}
+
+static int
+lapee_name_to_term(ErlNifEnv *env, const TPM2B_NAME *name, ERL_NIF_TERM *out)
+{
+    if (!name) return -1;
+    unsigned char *buf = enif_make_new_binary(env, name->size, out);
+    memcpy(buf, name->name, name->size);
+    return 0;
+}
+
+static int
+lapee_public_to_terms(ErlNifEnv *env, const TPM2B_PUBLIC *public,
+                      ERL_NIF_TERM *pem_term, ERL_NIF_TERM *tpm2b_term)
+{
+    unsigned char *pem = NULL; size_t pem_len = 0;
+    if (lapee_tpm2b_public_to_pem(public, &pem, &pem_len) != 0) return -1;
+
+    unsigned char *marshalled = NULL; size_t marshalled_len = 0;
+    if (lapee_marshal_public(public, &marshalled, &marshalled_len) != 0) {
+        enif_free(pem);
+        return -1;
+    }
+
+    unsigned char *pem_out = enif_make_new_binary(env, pem_len, pem_term);
+    memcpy(pem_out, pem, pem_len);
+    unsigned char *mb_out =
+        enif_make_new_binary(env, marshalled_len, tpm2b_term);
+    memcpy(mb_out, marshalled, marshalled_len);
+
+    enif_free(pem);
+    enif_free(marshalled);
+    return 0;
+}
+
+static int
+lapee_read_names(ErlNifEnv *env, ESYS_TR tr,
+                 ERL_NIF_TERM *name_term, ERL_NIF_TERM *qname_term,
+                 ERL_NIF_TERM *error_term)
+{
+    TPM2B_PUBLIC *ignored_public = NULL;
+    TPM2B_NAME *name = NULL;
+    TPM2B_NAME *qname = NULL;
+    TSS2_RC rc = Esys_ReadPublic(
+        g_esys_ctx,
+        tr,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &ignored_public, &name, &qname);
+    if (rc != TSS2_RC_SUCCESS) {
+        if (error_term) {
+            *error_term = lapee_make_tss_error(env, "Esys_ReadPublic", rc);
+        }
+        return -1;
+    }
+    int ok = lapee_name_to_term(env, name, name_term) == 0 &&
+             lapee_name_to_term(env, qname, qname_term) == 0;
+    if (ignored_public) Esys_Free(ignored_public);
+    if (name) Esys_Free(name);
+    if (qname) Esys_Free(qname);
+    if (!ok && error_term) {
+        *error_term = lapee_make_error(env, "name_encode_failed");
+    }
+    return ok ? 0 : -1;
+}
+
+static int
+lapee_marshal_id_object(const TPM2B_ID_OBJECT *obj,
+                        unsigned char **out, size_t *outlen)
+{
+    size_t off = 0;
+    unsigned char *buf = enif_alloc(4096);
+    if (!buf) return -1;
+    TSS2_RC rc = Tss2_MU_TPM2B_ID_OBJECT_Marshal(obj, buf, 4096, &off);
+    if (rc != TSS2_RC_SUCCESS || off == 0) {
+        enif_free(buf);
+        return -1;
+    }
+    *out = buf;
+    *outlen = off;
+    return 0;
+}
+
+static int
+lapee_marshal_encrypted_secret(const TPM2B_ENCRYPTED_SECRET *secret,
+                               unsigned char **out, size_t *outlen)
+{
+    size_t off = 0;
+    unsigned char *buf = enif_alloc(4096);
+    if (!buf) return -1;
+    TSS2_RC rc =
+        Tss2_MU_TPM2B_ENCRYPTED_SECRET_Marshal(secret, buf, 4096, &off);
+    if (rc != TSS2_RC_SUCCESS || off == 0) {
+        enif_free(buf);
+        return -1;
+    }
+    *out = buf;
+    *outlen = off;
+    return 0;
+}
+
 /*-------------------------------- Load / Unload -----------------------------*/
 
 static TSS2_RC
@@ -365,8 +501,8 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle", rc);
     }
 
-    unsigned char *pem = NULL; size_t pem_len = 0;
-    if (lapee_tpm2b_public_to_pem(out_public, &pem, &pem_len) != 0) {
+    ERL_NIF_TERM pem_term, tpm2b_term, name_term, qname_term, err_term;
+    if (lapee_public_to_terms(env, out_public, &pem_term, &tpm2b_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ek_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
@@ -374,11 +510,14 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         if (creation_ticket) Esys_Free(creation_ticket);
         return lapee_make_error(env, "pem_encode_failed");
     }
-
-    ERL_NIF_TERM pem_term;
-    unsigned char *pem_out = enif_make_new_binary(env, pem_len, &pem_term);
-    memcpy(pem_out, pem, pem_len);
-    enif_free(pem);
+    if (lapee_read_names(env, ek_tr, &name_term, &qname_term, &err_term) != 0) {
+        Esys_FlushContext(g_esys_ctx, ek_tr);
+        if (out_public) Esys_Free(out_public);
+        if (creation_data) Esys_Free(creation_data);
+        if (creation_hash) Esys_Free(creation_hash);
+        if (creation_ticket) Esys_Free(creation_ticket);
+        return err_term;
+    }
 
     /* We deliberately store ESYS_TR in the map too under 'esys_tr' so the
      * caller can re-use it for Esys_* calls without a re-load. */
@@ -392,6 +531,15 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "public_pem"),
                       pem_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "tpm2b_public"),
+                      tpm2b_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "name"),
+                      name_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "qualified_name"),
+                      qname_term, &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
@@ -499,8 +647,8 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle(AK)", rc);
     }
 
-    unsigned char *pem = NULL; size_t pem_len = 0;
-    if (lapee_tpm2b_public_to_pem(out_public, &pem, &pem_len) != 0) {
+    ERL_NIF_TERM pem_term, mb_term, name_term, qname_term, err_term;
+    if (lapee_public_to_terms(env, out_public, &pem_term, &mb_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ak_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
@@ -508,25 +656,14 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         if (creation_ticket) Esys_Free(creation_ticket);
         return lapee_make_error(env, "pem_encode_failed");
     }
-
-    unsigned char *marshalled = NULL; size_t marshalled_len = 0;
-    if (lapee_marshal_public(out_public, &marshalled, &marshalled_len) != 0) {
-        enif_free(pem);
+    if (lapee_read_names(env, ak_tr, &name_term, &qname_term, &err_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ak_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
         if (creation_hash) Esys_Free(creation_hash);
         if (creation_ticket) Esys_Free(creation_ticket);
-        return lapee_make_error(env, "marshal_failed");
+        return err_term;
     }
-
-    ERL_NIF_TERM pem_term, mb_term;
-    unsigned char *pem_out = enif_make_new_binary(env, pem_len, &pem_term);
-    memcpy(pem_out, pem, pem_len);
-    unsigned char *mb_out = enif_make_new_binary(env, marshalled_len, &mb_term);
-    memcpy(mb_out, marshalled, marshalled_len);
-    enif_free(pem);
-    enif_free(marshalled);
 
     ERL_NIF_TERM map = enif_make_new_map(env);
     enif_make_map_put(env, map,
@@ -541,6 +678,12 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "tpm2b_public"),
                       mb_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "name"),
+                      name_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "qualified_name"),
+                      qname_term, &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
@@ -549,6 +692,156 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 
     (void)parent_handle;
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
+}
+
+/*-------------------------------- make_credential/3 -------------------------*/
+
+static ERL_NIF_TERM
+nif_make_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    ErlNifBinary ek_public_bin, ak_name_bin, secret_bin;
+    if (!enif_inspect_binary(env, argv[0], &ek_public_bin) ||
+        !enif_inspect_binary(env, argv[1], &ak_name_bin) ||
+        !enif_inspect_binary(env, argv[2], &secret_bin)) {
+        return enif_make_badarg(env);
+    }
+    if (secret_bin.size == 0 ||
+        secret_bin.size > sizeof(((TPM2B_DIGEST *)0)->buffer) ||
+        ak_name_bin.size == 0 ||
+        ak_name_bin.size > sizeof(((TPM2B_NAME *)0)->name)) {
+        return enif_make_badarg(env);
+    }
+
+    TPM2B_PUBLIC ek_public;
+    size_t off = 0;
+    TSS2_RC rc = Tss2_MU_TPM2B_PUBLIC_Unmarshal(
+        ek_public_bin.data, ek_public_bin.size, &off, &ek_public);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Tss2_MU_TPM2B_PUBLIC_Unmarshal", rc);
+    }
+
+    TPM2B_SENSITIVE empty_private = { .size = 0 };
+    ESYS_TR ek_tr = ESYS_TR_NONE;
+    rc = Esys_LoadExternal(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &empty_private,
+        &ek_public,
+        ESYS_TR_RH_ENDORSEMENT,
+        &ek_tr);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_LoadExternal(EK)", rc);
+    }
+
+    TPM2B_DIGEST credential = { .size = (UINT16)secret_bin.size };
+    memcpy(credential.buffer, secret_bin.data, secret_bin.size);
+    TPM2B_NAME object_name = { .size = (UINT16)ak_name_bin.size };
+    memcpy(object_name.name, ak_name_bin.data, ak_name_bin.size);
+
+    TPM2B_ID_OBJECT *credential_blob = NULL;
+    TPM2B_ENCRYPTED_SECRET *enc_secret = NULL;
+    rc = Esys_MakeCredential(
+        g_esys_ctx,
+        ek_tr,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &credential, &object_name,
+        &credential_blob, &enc_secret);
+    Esys_FlushContext(g_esys_ctx, ek_tr);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_MakeCredential", rc);
+    }
+
+    unsigned char *blob = NULL, *secret = NULL;
+    size_t blob_len = 0, secret_len = 0;
+    if (lapee_marshal_id_object(credential_blob, &blob, &blob_len) != 0 ||
+        lapee_marshal_encrypted_secret(enc_secret, &secret, &secret_len) != 0) {
+        if (blob) enif_free(blob);
+        if (secret) enif_free(secret);
+        Esys_Free(credential_blob);
+        Esys_Free(enc_secret);
+        return lapee_make_error(env, "marshal_failed");
+    }
+
+    ERL_NIF_TERM blob_term, secret_term;
+    unsigned char *blob_out = enif_make_new_binary(env, blob_len, &blob_term);
+    memcpy(blob_out, blob, blob_len);
+    unsigned char *secret_out =
+        enif_make_new_binary(env, secret_len, &secret_term);
+    memcpy(secret_out, secret, secret_len);
+    enif_free(blob);
+    enif_free(secret);
+    Esys_Free(credential_blob);
+    Esys_Free(enc_secret);
+
+    ERL_NIF_TERM map = enif_make_new_map(env);
+    enif_make_map_put(env, map, enif_make_atom(env, "credential_blob"),
+                      blob_term, &map);
+    enif_make_map_put(env, map, enif_make_atom(env, "secret"),
+                      secret_term, &map);
+    return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
+}
+
+/*-------------------------------- activate_credential/4 ---------------------*/
+
+static ERL_NIF_TERM
+nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    unsigned ak_tr, ek_tr;
+    ErlNifBinary blob_bin, secret_bin;
+    if (!enif_get_uint(env, argv[0], &ak_tr) ||
+        !enif_get_uint(env, argv[1], &ek_tr) ||
+        !enif_inspect_binary(env, argv[2], &blob_bin) ||
+        !enif_inspect_binary(env, argv[3], &secret_bin)) {
+        return enif_make_badarg(env);
+    }
+
+    TPM2B_ID_OBJECT credential_blob;
+    size_t off = 0;
+    TSS2_RC rc = Tss2_MU_TPM2B_ID_OBJECT_Unmarshal(
+        blob_bin.data, blob_bin.size, &off, &credential_blob);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(
+            env, "Tss2_MU_TPM2B_ID_OBJECT_Unmarshal", rc);
+    }
+    TPM2B_ENCRYPTED_SECRET enc_secret;
+    off = 0;
+    rc = Tss2_MU_TPM2B_ENCRYPTED_SECRET_Unmarshal(
+        secret_bin.data, secret_bin.size, &off, &enc_secret);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(
+            env, "Tss2_MU_TPM2B_ENCRYPTED_SECRET_Unmarshal", rc);
+    }
+
+    ESYS_TR policy_session = ESYS_TR_NONE;
+    rc = lapee_policy_secret_endorsement_session(&policy_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(
+            env, "Esys_PolicySecret(ENDORSEMENT)", rc);
+    }
+
+    TPM2B_DIGEST *cert_info = NULL;
+    rc = Esys_ActivateCredential(
+        g_esys_ctx,
+        (ESYS_TR)ak_tr,
+        (ESYS_TR)ek_tr,
+        ESYS_TR_PASSWORD,
+        policy_session,
+        lapee_enc_session(),
+        &credential_blob,
+        &enc_secret,
+        &cert_info);
+    Esys_FlushContext(g_esys_ctx, policy_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_ActivateCredential", rc);
+    }
+
+    ERL_NIF_TERM out;
+    unsigned char *buf = enif_make_new_binary(env, cert_info->size, &out);
+    memcpy(buf, cert_info->buffer, cert_info->size);
+    Esys_Free(cert_info);
+    return enif_make_tuple2(env, enif_make_atom(env, "ok"), out);
 }
 
 /*-------------------------------- quote/3 -----------------------------------*/
@@ -1206,6 +1499,10 @@ static ErlNifFunc nif_funcs[] = {
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"create_signing_key", 1, nif_create_signing_key,
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"make_credential", 3, nif_make_credential,
+                            ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"activate_credential", 4, nif_activate_credential,
+                                ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"quote", 3, nif_quote, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"sign", 2, nif_sign, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"tpm_properties", 0, nif_tpm_properties,

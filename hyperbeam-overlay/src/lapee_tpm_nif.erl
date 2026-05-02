@@ -12,6 +12,8 @@
     pcr_extend/2,
     create_primary_ek/0,
     create_signing_key/1,
+    make_credential/3,
+    activate_credential/4,
     quote/3,
     sign/2,
     tpm_properties/0,
@@ -95,6 +97,20 @@ pcr_extend(_Idx, _Data) -> erlang:nif_error(nif_not_loaded).
 create_primary_ek() -> erlang:nif_error(nif_not_loaded).
 
 create_signing_key(_ParentHandle) -> erlang:nif_error(nif_not_loaded).
+
+%% Build a TPM2 credential blob for `AkName' under `EkPublic'.
+%% `EkPublic' is a marshalled TPM2B_PUBLIC, `AkName' is the raw
+%% TPM2B_NAME payload returned by ReadPublic, and `Secret' is the
+%% verifier-chosen 32-byte credential. Returns
+%% `{ok, #{credential_blob, secret}}', both marshalled TPM2B binaries.
+make_credential(_EkPublic, _AkName, _Secret) ->
+    erlang:nif_error(nif_not_loaded).
+
+%% Recover a MakeCredential secret using the loaded AK and EK handles.
+%% The recovered certInfo is the verifier's original secret iff the AK
+%% and EK live in the same TPM and match the names used by the verifier.
+activate_credential(_AkHandle, _EkHandle, _CredentialBlob, _Secret) ->
+    erlang:nif_error(nif_not_loaded).
 
 quote(_SignHandle, _PcrList, _Nonce) -> erlang:nif_error(nif_not_loaded).
 

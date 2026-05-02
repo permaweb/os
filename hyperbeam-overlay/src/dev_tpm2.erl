@@ -28,8 +28,10 @@
 %%% integration with AO-Core hook dispatch.
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
-         attestation/3, boot_attestation/3]).
+         attestation/3, boot_attestation/3, credential_subject/3,
+         activate_credential/3, verify_peer/3]).
 -export([verify/3]).
+-export([make_credential_for_subject/2]).
 -export([event_log/1]).
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -56,6 +58,9 @@ info(_) ->
                 <<"pcr-read">>,
                 <<"attestation">>,
                 <<"boot-attestation">>,
+                <<"credential-subject">>,
+                <<"activate-credential">>,
+                <<"verify-peer">>,
                 <<"verify">>
             ]
     }.
@@ -137,6 +142,36 @@ info(_Base, _Req, _Opts) ->
                       "subject ID, quotes the selected PCRs, signs the full "
                       "message, stores it by signed ID, and links the stable "
                       "boot-attestation path to that signed ID.">>
+            },
+            <<"credential-subject">> => #{
+                <<"description">> =>
+                    <<"Return the public TPM material needed for "
+                      "TPM2_MakeCredential: EK certificate and public area, "
+                      "AK public area, and the AK Name.">>
+            },
+            <<"activate-credential">> => #{
+                <<"description">> =>
+                    <<"Run TPM2_ActivateCredential with the node's loaded AK "
+                      "and EK. Used by verifiers and green-zone admission to "
+                      "prove the AK and EK are resident in the same TPM.">>,
+                <<"request">> => #{
+                    <<"credential-blob">> =>
+                        <<"base64url TPM2B_ID_OBJECT from MakeCredential">>,
+                    <<"secret">> =>
+                        <<"base64url TPM2B_ENCRYPTED_SECRET from "
+                          "MakeCredential">>
+                }
+            },
+            <<"verify-peer">> => #{
+                <<"description">> =>
+                    <<"Fetch a peer boot-attestation and credential subject, "
+                      "verify the attestation, check EK certificate/public "
+                      "consistency, complete MakeCredential/ActivateCredential, "
+                      "then sign a public peer-attestation containing the "
+                      "verified peer material and activation transcript.">>,
+                <<"request">> => #{
+                    <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>
+                }
             }
         }
     },
@@ -429,7 +464,7 @@ pcr_read(_Base, Req, Opts) ->
 %%   checks   : list of per-check reports in stable order
 %%   Each check: #{ name, ok, detail }
 verify(Base, Req, Opts) ->
-    Envelope = resolve_envelope(Base, Req, Opts),
+    Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
     TrustedCaPem = resolve_trusted_ca(Req, Opts),
     CaSource = trust_anchor_source(Req, Opts, TrustedCaPem),
     Checks = [
@@ -487,6 +522,38 @@ verify(Base, Req, Opts) ->
             <<"trust-anchor-source">> => CaSource
         }
     }}.
+
+normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
+    case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
+        Tpm when is_map(Tpm) ->
+            Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
+            NodeID =
+                case Node of
+                    M1 when is_map(M1) ->
+                        hb_util:human_id(
+                            hb_util:native_id(
+                                hb_message:id(M1, all, Opts)));
+                    _ -> undefined
+                end,
+            Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
+            Tpm#{
+                <<"lapee-attestation-version">> =>
+                    hb_maps:get(<<"lapee-attestation-version">>,
+                                Envelope, <<"1.0">>, #{}),
+                <<"tpm-quote">> => Quote,
+                <<"node-message">> => Node,
+                <<"node-message-id">> => NodeID,
+                <<"wallet-address">> =>
+                    case Node of
+                        M2 when is_map(M2) ->
+                            hb_maps:get(<<"address">>, M2, null, #{});
+                        _ -> null
+                    end
+            };
+        _ -> Envelope
+    end;
+normalise_attestation(Other, _Opts) ->
+    Other.
 
 %% Classify which source produced the trust anchor actually used
 %% by `resolve_trusted_ca/2'. Returns a binary: "request", "node_config",
@@ -1315,6 +1382,273 @@ boot_attestation_locked(Opts) ->
             end
     end.
 
+credential_subject(_Base, _Req, Opts) ->
+    case ensure_ak(Opts) of
+        {ok, _AkTr} ->
+            Subject = credential_subject_body(Opts),
+            {ok, #{
+                <<"status">> => 200,
+                <<"body">> => hb_message:commit(Subject, Opts)
+            }};
+        {error, Reason} ->
+            error_resp(500, <<"credential_subject_failed">>, Reason)
+    end.
+
+credential_subject_body(Opts) ->
+    #{
+        <<"type">> => <<"lapee-tpm-credential-subject">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => erlang:system_time(second),
+        <<"ek-cert-pem">> => ek_cert_pem(Opts),
+        <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
+        <<"ek-cert-source">> => ek_cert_source(),
+        <<"ek-cert-chain-diagnostics">> => ek_cert_chain_diagnostics(),
+        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+        <<"ek-public">> => ek_public(Opts),
+        <<"ek-name">> => ek_name(Opts),
+        <<"ek-qualified-name">> => ek_qualified_name(Opts),
+        <<"ak-pub-pem">> => ak_pub_pem(Opts),
+        <<"ak-public">> => ak_public(Opts),
+        <<"ak-name">> => ak_name(Opts),
+        <<"ak-qualified-name">> => ak_qualified_name(Opts),
+        <<"tpm-properties">> => tpm_properties()
+    }.
+
+activate_credential(_Base, Req, Opts) ->
+    with_ok(
+        fun() ->
+            CredentialBlob = decode_required(<<"credential-blob">>, Req, Opts),
+            Secret = decode_required(<<"secret">>, Req, Opts),
+            {ok, AkTr} = ensure_ak(Opts),
+            EKTr = persistent_term:get({dev_tpm2, ek_tr}),
+            case nif_activate_credential(AkTr, EKTr, CredentialBlob, Secret) of
+                {ok, CertInfo} ->
+                    Msg = hb_message:commit(
+                        #{
+                            <<"type">> =>
+                                <<"lapee-tpm-credential-activation">>,
+                            <<"version">> => <<"1.0">>,
+                            <<"issued-at-unix">> =>
+                                erlang:system_time(second),
+                            <<"ak-name">> => ak_name(Opts),
+                            <<"credential-secret">> =>
+                                hb_util:encode(CertInfo)
+                        },
+                        Opts),
+                    #{<<"status">> => 200, <<"body">> => Msg};
+                {error, Reason} ->
+                    throw({boot_attestation_error,
+                           #{<<"activate-credential">> =>
+                                reason_to_text(Reason)}})
+            end
+        end).
+
+verify_peer(_Base, Req, Opts) ->
+    case peer_url(Req, Opts) of
+        undefined ->
+            error_resp(400, <<"missing_peer_url">>,
+                       <<"verify-peer requires `url' or `peer'.">>);
+        Url0 ->
+            Url = strip_trailing_slash(Url0),
+            case verify_peer_url(Url, Req, Opts) of
+                {ok, Signed} ->
+                    {ok, #{<<"status">> => 200, <<"body">> => Signed}};
+                {error, #{<<"status">> := _} = Body} ->
+                    {ok, Body};
+                {error, Reason} ->
+                    error_resp(502, <<"verify_peer_failed">>, Reason)
+            end
+    end.
+
+verify_peer_url(Url, Req, Opts) ->
+    with_ok(
+        fun() ->
+            Boot = fetch_peer_message(Url, <<"/~tpm@2.0a/boot-attestation">>,
+                                      Opts),
+            Subject0 =
+                fetch_peer_message(Url, <<"/~tpm@2.0a/credential-subject">>,
+                                   Opts),
+            Subject = resolve_subject_body(Subject0, Opts),
+            BootEnv = normalise_attestation(Boot, Opts),
+            VerifyReq = Req#{<<"envelope">> => BootEnv},
+            {ok, #{<<"body">> := VerifyBody}} = verify(BootEnv, VerifyReq, Opts),
+            true = hb_maps:get(<<"verified">>, VerifyBody, false, #{}),
+            ok = ensure_subject_matches_boot(Subject, BootEnv),
+            ok = ensure_ek_public_matches_cert(Subject),
+            Challenge = crypto:strong_rand_bytes(32),
+            Credential = make_credential_for_subject(Subject, Challenge),
+            Activation = activate_peer_credential(Url, Credential, Opts),
+            ok = ensure_activation_secret(Activation, Challenge, Opts),
+            Signed = hb_message:commit(
+                #{
+                    <<"type">> => <<"lapee-peer-attestation">>,
+                    <<"version">> => <<"1.0">>,
+                    <<"issued-at-unix">> => erlang:system_time(second),
+                    <<"peer-url">> => Url,
+                    <<"peer-boot-attestation">> => Boot,
+                    <<"peer-credential-subject">> => Subject,
+                    <<"verification">> => VerifyBody,
+                    <<"credential-activation">> => #{
+                        <<"verified">> => true,
+                        <<"challenge-sha256">> =>
+                            hb_util:encode(crypto:hash(sha256, Challenge)),
+                        <<"credential-blob">> =>
+                            hb_maps:get(<<"credential-blob">>,
+                                        Credential, <<>>, #{}),
+                        <<"secret">> =>
+                            hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
+                        <<"response">> => Activation
+                    }
+                },
+                Opts),
+            Signed
+        end).
+
+peer_url(Req, Opts) ->
+    case hb_maps:get(<<"url">>, Req, undefined, Opts) of
+        undefined -> hb_maps:get(<<"peer">>, Req, undefined, Opts);
+        V -> V
+    end.
+
+strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
+    case binary:last(B) of
+        $/ -> binary:part(B, 0, byte_size(B) - 1);
+        _  -> B
+    end;
+strip_trailing_slash(B) ->
+    B.
+
+fetch_peer_message(Url, Path, Opts) ->
+    FetchMsg = #{
+        <<"path">> => Path,
+        <<"accept">> => <<"application/json@1.0">>,
+        <<"accept-bundle">> => <<"true">>
+    },
+    case hb_http:get(Url, FetchMsg, Opts) of
+        {ok, Response} -> resolve_body({ok, Response});
+        Other -> throw({boot_attestation_error, #{Path => to_bin(Other)}})
+    end.
+
+resolve_subject_body(Msg, Opts) when is_map(Msg) ->
+    case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
+        Body when is_map(Body) -> Body;
+        _ -> Msg
+    end;
+resolve_subject_body(Other, _Opts) ->
+    Other.
+
+make_credential_for_subject(Subject, Secret) ->
+    EkPublic = hb_util:decode(
+        hb_maps:get(<<"ek-public">>, Subject, <<>>, #{})),
+    AkName = hb_util:decode(
+        hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
+    case nif_make_credential(EkPublic, AkName, Secret) of
+        {ok, #{credential_blob := Blob, secret := EncSecret}} ->
+            #{
+                <<"credential-blob">> => hb_util:encode(Blob),
+                <<"secret">> => hb_util:encode(EncSecret)
+            };
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"make-credential">> => reason_to_text(Reason)}})
+    end.
+
+activate_peer_credential(Url, Credential, Opts) ->
+    Req = #{
+        <<"credential-blob">> =>
+            hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
+        <<"secret">> =>
+            hb_maps:get(<<"secret">>, Credential, <<>>, #{})
+    },
+    case hb_http:post(Url, <<"/~tpm@2.0a/activate-credential">>, Req, Opts) of
+        {ok, Response} -> resolve_subject_body(resolve_body({ok, Response}), Opts);
+        Other ->
+            throw({boot_attestation_error,
+                   #{<<"activate-peer">> => to_bin(Other)}})
+    end.
+
+ensure_activation_secret(Activation, Expected, Opts) ->
+    GotB64 = hb_maps:get(<<"credential-secret">>, Activation, <<>>, Opts),
+    case safe_decode(GotB64) of
+        Expected -> ok;
+        _ -> throw({boot_attestation_error,
+                    #{<<"credential-activation">> =>
+                        <<"returned secret did not match challenge">>}})
+    end.
+
+ensure_subject_matches_boot(Subject, BootEnv) ->
+    Pairs = [
+        {<<"ek-public">>, <<"EK public area">>},
+        {<<"ak-name">>, <<"AK name">>},
+        {<<"ak-public">>, <<"AK public area">>}
+    ],
+    lists:foreach(
+        fun({Key, Label}) ->
+            case {hb_maps:get(Key, Subject, <<>>, #{}),
+                  hb_maps:get(Key, BootEnv, <<>>, #{})} of
+                {V, V} when is_binary(V), byte_size(V) > 0 -> ok;
+                _ ->
+                    throw({boot_attestation_error,
+                           #{<<"credential-subject">> =>
+                                <<Label/binary,
+                                  " mismatch between subject and "
+                                  "boot-attestation">>}})
+            end
+        end,
+        Pairs),
+    ok.
+
+ensure_ek_public_matches_cert(Subject) ->
+    EkPem = hb_maps:get(<<"ek-pub-pem">>, Subject, <<>>, #{}),
+    CertPem = hb_maps:get(<<"ek-cert-pem">>, Subject, <<>>, #{}),
+    case {decode_pem_rsa_pub(EkPem), cert_rsa_pub(CertPem)} of
+        {{ok, Rsa}, {ok, Rsa}} -> ok;
+        {{error, Why}, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad EK public PEM: ~p", [Why]))}});
+        {_, {error, Why}} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-cert-pem">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad EK cert PEM: ~p", [Why]))}});
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"ek-public">> =>
+                        <<"EK public area does not match EK certificate">>}})
+    end.
+
+cert_rsa_pub(Pem) ->
+    case decode_pem_cert(Pem) of
+        {ok, Der} ->
+            try public_key:pkix_decode_cert(Der, otp) of
+                #'OTPCertificate'{tbsCertificate = Tbs} ->
+                    case Tbs#'OTPTBSCertificate'.subjectPublicKeyInfo of
+                        #'OTPSubjectPublicKeyInfo'{
+                            subjectPublicKey = #'RSAPublicKey'{} = Rsa} ->
+                            {ok, Rsa};
+                        Other -> {error, {unsupported_cert_pubkey, Other}}
+                    end
+            catch C:R -> {error, {C, R}}
+            end;
+        {error, _} = E -> E
+    end.
+
+decode_required(Key, Req, Opts) ->
+    case hb_maps:get(Key, Req, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 ->
+            hb_util:decode(B);
+        _ ->
+            throw({boot_attestation_error,
+                   #{Key => <<"missing required base64url field">>}})
+    end.
+
+safe_decode(B) when is_binary(B) ->
+    try hb_util:decode(B) catch _:_ -> <<>> end;
+safe_decode(_) ->
+    <<>>.
+
 generate_boot_attestation(Opts) ->
     with_ok(
         fun() ->
@@ -1390,7 +1724,14 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ek-cert-chain-diagnostics">> =>
                             ek_cert_chain_diagnostics(),
                         <<"tpm-properties">> => tpm_properties(),
+                        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+                        <<"ek-public">> => ek_public(Opts),
+                        <<"ek-name">> => ek_name(Opts),
+                        <<"ek-qualified-name">> => ek_qualified_name(Opts),
                         <<"ak-pub-pem">> => ak_pub_pem(Opts),
+                        <<"ak-public">> => ak_public(Opts),
+                        <<"ak-name">> => ak_name(Opts),
+                        <<"ak-qualified-name">> => ak_qualified_name(Opts),
                         <<"ak-hierarchy">> => <<"endorsement">>,
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
@@ -1496,6 +1837,10 @@ attestation(_Base, Req, Opts) ->
                         %% "what chip is this" from ground truth.
                         <<"tpm-properties">> =>
                             tpm_properties(),
+                        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+                        <<"ek-public">> => ek_public(Opts),
+                        <<"ek-name">> => ek_name(Opts),
+                        <<"ek-qualified-name">> => ek_qualified_name(Opts),
                         %% Runtime kernel + SMBIOS snapshot so
                         %% claim.cpu / claim.iommu / claim.lockdown
                         %% resolve to concrete values even when the
@@ -1505,6 +1850,9 @@ attestation(_Base, Req, Opts) ->
                         <<"platform-probes">> =>
                             platform_probes(),
                         <<"ak-pub-pem">> => AKPubPem,
+                        <<"ak-public">> => ak_public(Opts),
+                        <<"ak-name">> => ak_name(Opts),
+                        <<"ak-qualified-name">> => ak_qualified_name(Opts),
                         %% v1.2.2 paper P3: AK is a primary under
                         %% the Endorsement hierarchy (see
                         %% native/lapee_tpm_nif/lapee_tpm_nif.c
@@ -1795,9 +2143,10 @@ init_chain(Opts) ->
             %% snapshot (important for reproducible claim digests).
             capture_platform_probes(),
             case nif_create_ek() of
-                {ok, #{esys_tr := EKTr, public_pem := EKPem}} ->
+                {ok, #{esys_tr := EKTr, public_pem := EKPem} = EKInfo} ->
                     persistent_term:put({dev_tpm2, ek_tr}, EKTr),
                     persistent_term:put({dev_tpm2, ek_pub_pem}, EKPem),
+                    cache_tpm_public_terms(ek, EKInfo),
                     %% Pull the TPM's real EK certificate out of NV
                     %% storage. If no EK cert is provisioned we record
                     %% the absence explicitly -- we do NOT fabricate a
@@ -1806,9 +2155,10 @@ init_chain(Opts) ->
                     %% over. See fetch_ek_cert_from_nv/1.
                     fetch_ek_cert_from_nv(Opts),
                     case nif_create_signing_key(EKTr) of
-                        {ok, #{esys_tr := AKTr, public_pem := AKPem}} ->
+                        {ok, #{esys_tr := AKTr, public_pem := AKPem} = AKInfo} ->
                             persistent_term:put({dev_tpm2, ak_tr}, AKTr),
                             persistent_term:put({dev_tpm2, ak_pub_pem}, AKPem),
+                            cache_tpm_public_terms(ak, AKInfo),
                             %% Paper ephemeral-node-key-binding P5:
                             %% "as the last step before attestation,
                             %% HyperBEAM extends PCR 15 with the public
@@ -1840,6 +2190,18 @@ init_chain(Opts) ->
         {error, _} = E -> E
     end.
 
+cache_tpm_public_terms(Prefix, Info) ->
+    lists:foreach(
+        fun({Key, Slot}) ->
+            case maps:get(Key, Info, undefined) of
+                undefined -> ok;
+                V -> persistent_term:put({dev_tpm2, Prefix, Slot}, V)
+            end
+        end,
+        [{tpm2b_public, public},
+         {name, name},
+         {qualified_name, qualified_name}]).
+
 ek_cert_pem(Opts) ->
     case persistent_term:get({dev_tpm2, ek_cert_pem}, undefined) of
         undefined ->
@@ -1854,6 +2216,35 @@ ak_pub_pem(Opts) ->
             _ = ensure_ak(Opts),
             persistent_term:get({dev_tpm2, ak_pub_pem}, <<>>);
         P -> P
+    end.
+
+ek_pub_pem(Opts) ->
+    case persistent_term:get({dev_tpm2, ek_pub_pem}, undefined) of
+        undefined ->
+            _ = ensure_ak(Opts),
+            persistent_term:get({dev_tpm2, ek_pub_pem}, <<>>);
+        P -> P
+    end.
+
+ek_public(Opts) -> encoded_cached(ek, public, Opts).
+ek_name(Opts) -> encoded_cached(ek, name, Opts).
+ek_qualified_name(Opts) -> encoded_cached(ek, qualified_name, Opts).
+ak_public(Opts) -> encoded_cached(ak, public, Opts).
+ak_name(Opts) -> encoded_cached(ak, name, Opts).
+ak_qualified_name(Opts) -> encoded_cached(ak, qualified_name, Opts).
+
+encoded_cached(Prefix, Slot, Opts) ->
+    case raw_cached(Prefix, Slot, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> hb_util:encode(B);
+        _ -> <<>>
+    end.
+
+raw_cached(Prefix, Slot, Opts) ->
+    case persistent_term:get({dev_tpm2, Prefix, Slot}, undefined) of
+        undefined ->
+            _ = ensure_ak(Opts),
+            persistent_term:get({dev_tpm2, Prefix, Slot}, <<>>);
+        V -> V
     end.
 
 %% Capture TPM identity via TPM2_GetCapability (TPM_PT_MANUFACTURER,
@@ -2747,6 +3138,18 @@ nif_create_signing_key(EKTr) ->
         M -> catch M:create_signing_key(EKTr)
     end.
 
+nif_make_credential(EKPublic, AKName, Secret) ->
+    case nif_module() of
+        not_loaded -> {error, nif_not_loaded};
+        M -> catch M:make_credential(EKPublic, AKName, Secret)
+    end.
+
+nif_activate_credential(AKTr, EKTr, CredentialBlob, Secret) ->
+    case nif_module() of
+        not_loaded -> {error, nif_not_loaded};
+        M -> catch M:activate_credential(AKTr, EKTr, CredentialBlob, Secret)
+    end.
+
 nif_quote(AKTr, Pcrs, Nonce) ->
     case nif_module() of
         not_loaded -> {error, nif_not_loaded};
@@ -2767,6 +3170,9 @@ info_shape_test() ->
     ?assert(lists:member(<<"quote">>, Exports)),
     ?assert(lists:member(<<"pcr-read">>, Exports)),
     ?assert(lists:member(<<"attestation">>, Exports)),
+    ?assert(lists:member(<<"credential-subject">>, Exports)),
+    ?assert(lists:member(<<"activate-credential">>, Exports)),
+    ?assert(lists:member(<<"verify-peer">>, Exports)),
     %% No standalone tcg-event-log endpoint -- the log travels
     %% INSIDE the attested attestation envelope. A standalone
     %% un-attested path would let a malicious node serve one
@@ -2780,7 +3186,10 @@ info_docs_test() ->
     ?assert(maps:is_key(<<"api">>, Body)),
     Api = maps:get(<<"api">>, Body),
     ?assert(maps:is_key(<<"extend">>, Api)),
-    ?assert(maps:is_key(<<"attestation">>, Api)).
+    ?assert(maps:is_key(<<"attestation">>, Api)),
+    ?assert(maps:is_key(<<"credential-subject">>, Api)),
+    ?assert(maps:is_key(<<"activate-credential">>, Api)),
+    ?assert(maps:is_key(<<"verify-peer">>, Api)).
 
 %% The TCG event log source-path + length + format fields
 %% travel attested alongside tcg-event-log itself, so a
