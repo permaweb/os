@@ -49,7 +49,7 @@ PCR 0 + PCR 7 and leave PCR 1 free for kernel-command-line variance.
 ## Contributing new profiles
 
 1. Boot the target hardware into a trusted state.
-2. Run `GET /~tpm2@2.0a/attestation/verify~tpm-interpret@1.0` against
+2. Run `GET /~tpm@2.0a/attestation/verify~tpm-interpret@1.0` against
    the node and copy the `digest` values straight out of the `pcrs`
    section of the response. They are already base64url.
    (If you are measuring outside HB: the raw 32-byte SHA-256 digest

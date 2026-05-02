@@ -491,7 +491,7 @@ quirk). Every fixture is parse-tested by the eunit harness in
 
 - **IMA per-file runtime event log (PCR 10)** — only the final PCR
   10 digest is in the attestation envelope. Per-file chain
-  transport requires an envelope schema bump in `~tpm2@2.0a`.
+  transport requires an envelope schema bump in `~tpm@2.0a`.
 - **Per-platform PCR 0/7 profiles** — `pcr-profiles/` has 1
   populated entry (QEMU). Additional real-hardware profiles
   require captures from the deployer's specific hardware mix.

@@ -1351,3 +1351,31 @@ $ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
 out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
 ring-address: ikJ7HRAVfkKTRNem2IbcbAREcjHu3aAGsk2JAFS4BXU
 ```
+
+## Update 18 - Naming And Template Semantics Cleanup
+
+Tidied the protocol surface without changing runtime behavior:
+
+- Removed the completed probe-surface correction TODO; the durable decision is
+  `docs/decisions/read-oriented-probe-surface.md`.
+- Updated stale documentation/corpus references from `~tpm2@2.0a` to the
+  canonical `~tpm@2.0a`.
+- Clarified `~green-zone@1.0` template docs: templates use
+  `hb_message:match/4`, so AO metadata keys such as `commitments` and
+  `ao-types` are ignored as message metadata.
+
+Validation evidence at `2026-05-02T22:51:48Z`:
+
+```text
+$ rg 'lapee-peer-attestation|ring-scope|greenzone@1\\.0|tpm2@2\\.0a|trusted-ca-pem|probe-surface-correction-todo' -n . --glob '!build/**'
+no results
+
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone
+All 16 tests passed.
+
+$ git diff --check
+```

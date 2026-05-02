@@ -19,9 +19,9 @@ Envelope shape (kebab-case keys, base64url 32-byte IDs):
   node-message-id           : 32-byte native id (base64url, 43 chars)
   wallet-address            : operator wallet address (AR human-id)
 
-The bundle endpoint `/~tpm2@2.0a/attestation' returns the envelope
+The bundle endpoint `/~tpm@2.0a/attestation' returns the envelope
 inside `{"body": <env>, ...}'. The plain endpoint
-`/~tpm2@2.0a/attestation-json' returns the envelope at the top level
+`/~tpm@2.0a/attestation-json' returns the envelope at the top level
 (when not 500-ing). We accept either by unwrapping `body' if present.
 
 Checks:

@@ -36,7 +36,7 @@ Five checks, in order:
 ## Intentional limitations
 
 - Envelope shape: currently handles `lapee-attestation-version = "0.4"`,
-  the live shape emitted by `~tpm2@2.0a/attestation`.
+  the live shape emitted by `~tpm@2.0a/attestation`.
 - No hardware introspection — this tool never talks to a TPM; it only
   validates cryptographic evidence in the envelope itself.
 - Trust anchor selection is operator-supplied via `--roots-dir`. A

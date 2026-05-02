@@ -18,10 +18,10 @@
 %%%   it as a local green-zone identity.
 %%% * `sign' signs an arbitrary message with a named shared ring wallet.
 %%%
-%%% Ring templates are normal HyperBEAM message match templates: the template
-%%% keys must be present in the candidate, non-map values match exactly, and
-%%% the atom `_' is a wildcard. JSON callers can send the string `"_"', which
-%%% is normalized to that atom before matching.
+%%% Ring templates are normal HyperBEAM message match templates: AO metadata
+%%% keys are ignored, template keys must be present in the candidate, non-map
+%%% values match exactly, and the atom `_' is a wildcard. JSON callers can send
+%%% the string `"_"', which is normalized to that atom before matching.
 %%%
 %%% The admission protocol is:
 %%%
@@ -1354,7 +1354,7 @@ sign_without_ring_is_policy_error_test() ->
         {green_zone_error, #{<<"error">> := <<"green-zone-not-initialized">>}},
         green_zone_signing_opts(test_name(), #{})).
 
-nested_commitments_template_is_policy_test() ->
+metadata_keys_are_stripped_recursively_test() ->
     Template = clean_template(#{
         <<"system">> => #{<<"commitments">> => <<"required">>},
         <<"commitments">> => #{<<"ignored-envelope-metadata">> => true}
