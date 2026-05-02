@@ -421,3 +421,46 @@ exit:0
 $ git diff --check
 $ bash -n scripts/qemu-green-zone-cluster.sh
 ```
+
+## Update 12
+
+Extended the QEMU acceptance harness to cover the commander's-intent
+stored-attestation flow, not just live admission:
+
+1. Node 1 calls `~tpm@2.0a/verify-peer` for node 2.
+2. Node 1 receives a signed `lapee-peer-attestation` whose verification and
+   credential-activation checks are true.
+3. The harness submits that signed peer attestation back to
+   `~green-zone@1.0/admit` with node 1's address as `trusted-publisher`.
+4. Green-zone admission reuses the signed artifact and still returns the
+   ring credential/wallet payload.
+5. The original four-node gate then continues: nodes 2 and 3 join live,
+   node 4 is rejected, and only nodes 1-3 can sign as the ring wallet.
+
+Evidence at `2026-05-02 05:14 EDT`:
+
+```text
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
+>> node 1 ready
+>> node 2 ready
+>> node 3 ready
+>> node 4 ready
+>> node 1 initialized green-zone cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
+>> node 1 can reuse its signed peer attestation for node 2
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
+>> node 2 signed as green-zone cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
+>> node 3 signed as green-zone cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
+```

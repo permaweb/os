@@ -270,6 +270,30 @@ jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "tr
 ring_addr=$(jq -r '.body."ring-address"' "$OUTDIR/responses/node1-init.json")
 echo ">> node 1 initialized green-zone $ring_addr"
 
+post_json 1 "/~tpm@2.0a/verify-peer" \
+    "$OUTDIR/requests/verify2.json" \
+    "$OUTDIR/responses/node1-verify2.json"
+jq -e '.status == 200 and .body.type == "lapee-peer-attestation" and
+       (.body.verification.verified == true or
+        .body.verification.verified == "true") and
+       (.body."credential-activation".verified == true or
+        .body."credential-activation".verified == "true")' \
+    "$OUTDIR/responses/node1-verify2.json" >/dev/null
+node1_publisher=$(jq -r '.body.node.address' \
+    "$OUTDIR/responses/node1-boot-attestation.json")
+jq -n \
+    --slurpfile att "$OUTDIR/responses/node1-verify2.json" \
+    --arg publisher "$node1_publisher" \
+    '{"peer-attestation": $att[0], "trusted-publisher": $publisher}' \
+    > "$OUTDIR/requests/admit2-published.json"
+post_json 1 "/~green-zone@1.0/admit" \
+    "$OUTDIR/requests/admit2-published.json" \
+    "$OUTDIR/responses/node1-admit2-published.json"
+jq -e '.status == 200 and .body.credential."credential-blob" and
+       .body."encrypted-wallet"' \
+    "$OUTDIR/responses/node1-admit2-published.json" >/dev/null
+echo ">> node 1 can reuse its signed peer attestation for node 2"
+
 post_json 1 "/~green-zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
     "$OUTDIR/responses/node1-admit2.json"

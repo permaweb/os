@@ -38,6 +38,11 @@ def main() -> int:
             "trusted-ca": trusted_ca,
         }))
 
+    (out / "requests/verify2.json").write_text(json.dumps({
+        "url": f"http://{guest_host}:{base_port + 2}",
+        "trusted-ca": trusted_ca,
+    }))
+
     for n in (1, 2, 3, 4):
         (out / f"requests/sign{n}.json").write_text(json.dumps({
             "body": {
