@@ -44,18 +44,8 @@ init() ->
             Dir ->
                 filename:join(Dir, ?LIBNAME)
         end,
-    %% Default TCTI: swtpm on TCP port 2321 (matches scripts/swtpm.sh).
-    %% On macOS we pass the full library path so dlopen doesn't need the
-    %% loader search path to include the tss2 prefix.
-    DefaultTcti =
-        case os:type() of
-            {unix, darwin} ->
-                Lib = "/Users/sam/src/hyperbeam/.claude/worktrees/sharp-lichterman/"
-                      "lapee-baremetal/work/tss2-prefix/lib/libtss2-tcti-swtpm.0.dylib",
-                Lib ++ ":host=127.0.0.1,port=2321";
-            _ ->
-                "swtpm:host=127.0.0.1,port=2321"
-        end,
+    %% Default TCTI for dev; appliance init overrides this with /dev/tpm0.
+    DefaultTcti = "swtpm:host=127.0.0.1,port=2321",
     Tcti =
         case os:getenv("LAPEE_TPM_TCTI") of
             false -> DefaultTcti;

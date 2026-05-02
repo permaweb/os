@@ -1,5 +1,12 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 29
+
+Removed the stale machine-local macOS TPM simulator library path; dev defaults
+to `swtpm`, while appliance init still supplies `device:/dev/tpm0`. Evidence:
+`dev_tpm2` 40/40; `make buildroot JOBS=18`; no-TME image 247463936 bytes;
+QEMU cluster PASSED, ring `oRzwW03JJaBKbj5-dvReziJ-eMsXyQsxtMswTmx8ly4`.
+
 ## Update 28
 
 Removed public stacktrace fields from unexpected green-zone/TPM error envelopes
