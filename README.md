@@ -5,10 +5,10 @@ with a TPM 2.0 into a single-purpose HyperBEAM node. HyperBEAM is the
 AO-Core runtime: it executes messages, produces signed results, and
 participates in AO's distributed compute network. Boot LapEE from a USB
 stick and the laptop starts that runtime, shows a QR code for the node
-URL, and serves a TPM-backed attestation envelope at:
+URL, and serves a TPM-backed boot attestation at:
 
 ```text
-http://<node-ip>:8734/~tpm2@2.0a/attestation
+http://<node-ip>:8734/~tpm@2.0a/boot-attestation
 ```
 
 The point is simple: people should be able to contribute useful AO-Core
@@ -109,8 +109,8 @@ make hb-fetch
   --label "Framework 13"
 ```
 
-The verifier fetches a freshly fetched network attestation envelope,
-interprets it, and writes an HTML dashboard under:
+The verifier fetches the node's attestation evidence, interprets it,
+and writes an HTML dashboard under:
 
 ```text
 build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
@@ -119,9 +119,10 @@ build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
 Useful live endpoints:
 
 ```text
-http://<node-ip>:8734/~tpm2@2.0a/info
-http://<node-ip>:8734/~tpm2@2.0a/pcr-read&pcr=0
-http://<node-ip>:8734/~tpm2@2.0a/attestation
+http://<node-ip>:8734/~tpm@2.0a/info
+http://<node-ip>:8734/~tpm@2.0a/pcr-read&pcr=0
+http://<node-ip>:8734/~tpm@2.0a/boot-attestation
+http://<node-ip>:8734/~system@1.0/all
 http://<node-ip>:8734/~hyperbuddy@1.0/index
 ```
 
@@ -222,11 +223,41 @@ make hb-sb-apply
 make hb-image-write DEV=/dev/diskN
 ```
 
+For the no-TME test/runtime image, use the signed no-TME wrapper target:
+
+```sh
+make hb-sb-keys
+make hb-usb-no-tme-signed-write DEV=/dev/diskN
+```
+
 On Framework firmware, Secure Boot controls usually require setting a
 supervisor/admin password. Enroll `db`, then `KEK`, then `PK`; enrolling
 `PK` exits setup mode. Entering setup mode clears factory Microsoft keys
 and may affect booting other operating systems until factory keys are
 restored.
+
+Some firmware exposes Secure Boot Setup Mode but does not expose a useful
+UI for enrolling keys or image hashes. For those machines, LapEE can build
+a one-shot provisioning image. This image contains only public enrollment
+artifacts on the ESP and enrolls the operator `db`, `KEK`, then `PK` while
+the firmware is already in Setup Mode:
+
+```sh
+make hb-sb-keys
+make hb-sb-provisioner-write DEV=/dev/diskN
+```
+
+Boot that USB once with firmware in Secure Boot Setup Mode. It should print
+the enrollment progress and then stop. Power off, enable Secure Boot if the
+firmware did not do so automatically, then flash and boot the signed runtime
+image:
+
+```sh
+make hb-usb-no-tme-signed-write DEV=/dev/diskN
+```
+
+Keep `secureboot/*.key` private. They are operator keys and are ignored by
+git. The files under `secureboot/enrol/` are public enrollment artifacts.
 
 A downloaded `.img` alone is not enough for the `sb-setup.sh sign`
 workflow unless the release also provides the UKI or a signed-image

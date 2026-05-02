@@ -1,0 +1,7 @@
+config BR2_PACKAGE_LAPEE_SB_PROVISIONER
+	bool "lapee-sb-provisioner"
+	help
+	  One-shot Secure Boot setup-mode provisioner for machines whose
+	  firmware exposes no key/hash enrollment UI. This package is for
+	  the dedicated provisioning image only; production LapEE images do
+	  not include EFI-variable write tooling.

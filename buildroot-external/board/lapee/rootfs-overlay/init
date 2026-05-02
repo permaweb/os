@@ -59,7 +59,7 @@ cmdline_flag_set() {
 
 LAPEE_MODE=$(cmdline_value lapee.mode || echo prod)
 case "$LAPEE_MODE" in
-    debug|prod) ;;
+    debug|prod|sb-provision) ;;
     *) LAPEE_MODE=prod ;;
 esac
 
@@ -88,6 +88,10 @@ if [ "$LAPEE_DEBUG" = "1" ]; then
     debug_log ""
     debug_log "=== LAPEE DEBUG CONSOLE (lapee.debug=1) ==="
     debug_log "[debug] splash disabled; boot stage logs are visible on /dev/console"
+elif [ "$LAPEE_MODE" = "sb-provision" ]; then
+    dmesg -n 4 2>/dev/null || true
+    printf '%s\n' "=== LAPEE SECURE BOOT PROVISIONER ===" > /dev/console 2>/dev/null || true
+    printf '%s\n' "This image enrolls LapEE operator Secure Boot keys, then stops." > /dev/console 2>/dev/null || true
 else
     # Calm /dev/console down so the splash daemon's 12 fps redraw isn't
     # fighting kernel printk. With `dmesg -n 1' only KERN_ALERT/EMERG
@@ -118,6 +122,8 @@ case "$SPLASH_LAYOUT" in
 esac
 if [ "$LAPEE_DEBUG" = "1" ]; then
     SPLASH_PID=""
+elif [ "$LAPEE_MODE" = "sb-provision" ]; then
+    SPLASH_PID=""
 else
     ERL=$(ls -1 /usr/lib/hyperbeam/erts-*/bin/erl 2>/dev/null | head -1)
     HB_BOOT=$(ls -1 /usr/lib/hyperbeam/releases/*/start_clean.boot 2>/dev/null | head -1)
@@ -137,7 +143,9 @@ fi
 # From here on the splash daemon owns /dev/console. Production init
 # remains silent; debug keeps its visible console traces.
 if [ "$LAPEE_DEBUG" != "1" ]; then
-    exec < /dev/null > /dev/null 2>&1
+    if [ "$LAPEE_MODE" != "sb-provision" ]; then
+        exec < /dev/null > /dev/null 2>&1
+    fi
 fi
 
 # trace MSG
@@ -171,6 +179,74 @@ halt_boot() {
     exec < /dev/null > /dev/null 2>&1
     exec sh -c 'while :; do sleep 3600; done'
 }
+
+sbp_log() {
+    printf '%s\n' "$*" > /dev/console 2>/dev/null || true
+}
+
+run_secure_boot_provisioner() {
+    sbp_log ""
+    sbp_log "Secure Boot provisioning mode."
+    sbp_log "Firmware must be in Setup Mode before running this image."
+
+    mkdir -p /mnt/esp /sys/firmware/efi/efivars 2>/dev/null || true
+    if ! grep -q ' /sys/firmware/efi/efivars ' /proc/mounts 2>/dev/null; then
+        if ! mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; then
+            sbp_log "ERROR: efivarfs could not be mounted."
+            sbp_log "This kernel/firmware path cannot provision Secure Boot variables."
+            exec sh -c 'while :; do sleep 3600; done'
+        fi
+    fi
+
+    sbp_log "Looking for the LapEE provisioning USB."
+    _esp_found=""
+    for _i in 1 2 3 4 5 6 7 8 9 10 \
+              11 12 13 14 15 16 17 18 19 20; do
+        for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
+                    /dev/nvme[0-9]n[0-9]p[0-9]* \
+                    /dev/mmcblk[0-9]p[0-9]*; do
+            [ -b "$_dev" ] || continue
+            if mount -t vfat -o ro,nosuid,nodev,noexec,noatime "$_dev" /mnt/esp 2>/dev/null; then
+                if [ -f /mnt/esp/LAPEE.MARKER ] && \
+                   [ -f /mnt/esp/db.auth ] && \
+                   [ -f /mnt/esp/KEK.auth ] && \
+                   [ -f /mnt/esp/PK.auth ]; then
+                    _esp_found="$_dev"
+                    break 2
+                fi
+                umount /mnt/esp 2>/dev/null || true
+            fi
+        done
+        sbp_log "Still looking for provisioning files ($_i/20)."
+        sleep 1
+    done
+
+    if [ -z "$_esp_found" ]; then
+        sbp_log "ERROR: provisioning files were not found on this USB."
+        exec sh -c 'while :; do sleep 3600; done'
+    fi
+
+    sbp_log "Found provisioning bundle on $_esp_found."
+    sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
+    if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
+            > /dev/console 2>&1; then
+        sync 2>/dev/null || true
+        sbp_log ""
+        sbp_log "Secure Boot keys enrolled."
+        sbp_log "Power off, enable Secure Boot, then boot the signed LapEE image."
+    else
+        _rc=$?
+        sbp_log ""
+        sbp_log "ERROR: Secure Boot provisioning failed with status $_rc."
+        sbp_log "No private keys were present on this USB."
+    fi
+    umount /mnt/esp 2>/dev/null || true
+    exec sh -c 'while :; do sleep 3600; done'
+}
+
+if [ "$LAPEE_MODE" = "sb-provision" ]; then
+    run_secure_boot_provisioner
+fi
 
 debug_dump_hardware() {
     [ "${LAPEE_DEBUG:-0}" = "1" ] || return 0

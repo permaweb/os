@@ -152,18 +152,19 @@ if (( GUI )); then
 fi
 
 # Poll the forwarded HTTP port until HB answers. The cheap /info
-# endpoint is readiness; /attestation is the actual end-to-end proof.
+# endpoint is readiness; /boot-attestation is the end-to-end proof.
 BASE_URL=http://127.0.0.1:18734
 INFO_OUT="$OUTDIR/info.json"
-ATT_OUT="$OUTDIR/attestation.json"
-rm -f "$INFO_OUT" "$ATT_OUT"
+ATT_OUT="$OUTDIR/boot-attestation.json"
+PROBE_OUT="$OUTDIR/system.json"
+rm -f "$INFO_OUT" "$ATT_OUT" "$PROBE_OUT"
 
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
     if curl -fsSL \
             -H "accept: application/json" \
             -H "accept-bundle: true" \
-            "$BASE_URL/~tpm2@2.0a/info" \
+            "$BASE_URL/~tpm@2.0a/info" \
             -o "$INFO_OUT" 2>/dev/null && [[ -s "$INFO_OUT" ]]; then
         echo ">> HB /info answered on $BASE_URL"
         break
@@ -183,19 +184,35 @@ if [[ ! -s "$INFO_OUT" ]]; then
     exit 1
 fi
 
-echo ">> fetching full attestation envelope"
+echo ">> fetching boot attestation"
 if ! curl -fsSL \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
-        "$BASE_URL/~tpm2@2.0a/attestation" \
+        "$BASE_URL/~tpm@2.0a/boot-attestation" \
         -o "$ATT_OUT"; then
-    echo "!! attestation fetch failed from $BASE_URL" >&2
+    echo "!! boot-attestation fetch failed from $BASE_URL" >&2
     echo "!! last 80 lines of serial log:" >&2
     tail -80 "$LOGFILE" >&2
     exit 1
 fi
 if [[ ! -s "$ATT_OUT" ]]; then
-    echo "!! empty attestation envelope from $BASE_URL" >&2
+    echo "!! empty boot attestation from $BASE_URL" >&2
+    exit 1
+fi
+
+echo ">> fetching system report"
+if ! curl -fsSL \
+        -H "accept: application/json" \
+        -H "accept-bundle: true" \
+        "$BASE_URL/~system@1.0/all" \
+        -o "$PROBE_OUT"; then
+    echo "!! system report fetch failed from $BASE_URL" >&2
+    echo "!! last 80 lines of serial log:" >&2
+    tail -80 "$LOGFILE" >&2
+    exit 1
+fi
+if [[ ! -s "$PROBE_OUT" ]]; then
+    echo "!! empty system report from $BASE_URL" >&2
     exit 1
 fi
 
@@ -207,10 +224,9 @@ echo ""
 echo "=== QEMU boot test PASSED ==="
 ls -lh "$OUTDIR"/
 echo ""
-echo "Interpret the saved QEMU envelope (fetched over the network):"
-echo "  ./scripts/interpret-local-capture.sh \\"
-echo "      --label 'QEMU USB image self-test' \\"
-echo "      $ATT_OUT"
+echo "Saved boot attestation and system report:"
+echo "  $ATT_OUT"
+echo "  $PROBE_OUT"
 echo ""
 echo "For physical hardware, prefer the live network path:"
 echo "  ./scripts/interpret-local-capture.sh --url http://NODE-IP:8734 --label LABEL"

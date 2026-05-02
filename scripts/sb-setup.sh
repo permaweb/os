@@ -45,13 +45,13 @@ SB_DIR="$LAPEE/secureboot"
 # /EFI/Boot/BootX64.efi inside the ESP by build-usb-image.sh
 # (UEFI's fallback boot path). Sign the host-side file; the rename
 # happens automatically when the image is re-wrapped.
-BUILD_UKI="$BUILD_DIR/usb-build/lapee.efi"
+BUILD_UKI="${BUILD_UKI:-$BUILD_DIR/usb-build/lapee.efi}"
 # Keep the signed UKI one level up from usb-build/ because
 # build-usb-image.sh --uki does `rm -rf build/usb-build/` before
 # re-populating it (which would wipe the signed file if it lived
 # inside).
-SIGNED_UKI="$BUILD_DIR/images/lapee.signed.efi"
-USB_IMAGE="$BUILD_DIR/images/lapee-usb.img"
+SIGNED_UKI="${SIGNED_UKI:-$BUILD_DIR/images/lapee.signed.efi}"
+USB_IMAGE="${USB_IMAGE:-$BUILD_DIR/images/lapee-usb.img}"
 
 # Honor the Makefile's BUILD_IMAGE if exported, fall back to the
 # local-build default.
@@ -209,7 +209,7 @@ if [ "$cmd" = "check" ]; then
         && echo "$SIGNED_UKI ($(stat -f %z "$SIGNED_UKI") bytes)" \
         || echo "MISSING (run: $0 sign)"
     for name in PK KEK db; do
-        for ext in auth cer; do
+        for ext in auth cer esl; do
             f="$SB_DIR/enrol/$name.$ext"
             printf "  enrol/%-10s " "$name.$ext:"
             [ -f "$f" ] \
@@ -295,7 +295,7 @@ if [ "$cmd" = "enrol" ]; then
     echo "=== producing UEFI enrolment bundle ==="
     echo "    GUID: $GUID"
     cd "$SB_DIR"
-    # Two artefacts per slot:
+    # Three public artefacts per slot:
     #   *.auth -- PKCS7-authenticated EFI_VARIABLE_AUTHENTICATION_2
     #             envelope; for the command-line efi-updatevar /
     #             Linux kernel path where the firmware checks
@@ -304,17 +304,24 @@ if [ "$cmd" = "enrol" ]; then
     #             (Framework Insyde H2O + many others) which
     #             expects a cert file extension like .cer/.der
     #             and does not recognise .auth.
+    #   *.esl  -- EFI Signature List; used by the dedicated
+    #             lapee.mode=sb-provision image while firmware is in
+    #             Setup Mode. These are public; private keys remain
+    #             under secureboot/*.key on the build host.
     # PK (top of the chain, self-signed with the PK key itself).
     run_tool cert-to-efi-sig-list -g "$GUID" PK.crt PK.esl
     run_tool sign-efi-sig-list -k PK.key -c PK.crt PK PK.esl enrol/PK.auth
+    cp PK.esl enrol/PK.esl
     openssl x509 -in PK.crt -outform DER -out enrol/PK.cer 2>/dev/null
     # KEK (chains under PK).
     run_tool cert-to-efi-sig-list -g "$GUID" KEK.crt KEK.esl
     run_tool sign-efi-sig-list -k PK.key -c PK.crt KEK KEK.esl enrol/KEK.auth
+    cp KEK.esl enrol/KEK.esl
     openssl x509 -in KEK.crt -outform DER -out enrol/KEK.cer 2>/dev/null
     # db (chains under KEK).
     run_tool cert-to-efi-sig-list -g "$GUID" db.crt db.esl
     run_tool sign-efi-sig-list -k KEK.key -c KEK.crt db db.esl enrol/db.auth
+    cp db.esl enrol/db.esl
     openssl x509 -in db.crt -outform DER -out enrol/db.cer 2>/dev/null
     rm -f PK.esl KEK.esl db.esl
     cd "$LAPEE"
@@ -323,7 +330,7 @@ if [ "$cmd" = "enrol" ]; then
 
 Enrolment procedure on the Framework 13:
   1. If you haven't yet: `./scripts/sb-setup.sh sign' -- this
-     bakes the six enrolment files above into the ESP root of
+     bakes the enrolment files above into the ESP root of
      build/images/lapee-usb.img alongside the signed UKI, so one stick
      covers both boot and enrolment. (Running `sign' after
      `enrol' picks up the newly-produced files; running `sign'
@@ -351,6 +358,7 @@ Format notes:
   .cer = X509 DER, ~870 bytes, for the BIOS UI file browser
   .auth = PKCS7-signed EFI_VARIABLE_AUTHENTICATION_2, ~2.2 KB,
           for the command-line `efi-updatevar' path on Linux
+  .esl = EFI Signature List, for the LapEE setup-mode provisioner
 
 If you prefer a separate enrolment stick: the files live at
 secureboot/enrol/ on the host; copy to any FAT USB at root.

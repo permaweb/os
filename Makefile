@@ -52,6 +52,13 @@
 #   make hb-usb-no-tme-debug-write DEV=
 #                           — flash a debug-console image with
 #                             LAPEE_NO_TME=1 on the cmdline.
+#   make hb-usb-no-tme-signed-write DEV=
+#                           — flash a no-TME image signed by the
+#                             operator Secure Boot db key.
+#   make hb-sb-provisioner-write DEV=
+#                           — flash a one-shot Setup Mode key
+#                             enrollment image for firmware with no
+#                             Secure Boot enrollment UI.
 #   make hb-usb-no-tme-verify DEV=
 #                           — byte-compare the no-TME image against
 #                             the beginning of the USB device.
@@ -123,6 +130,15 @@ NO_TME_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme.img
 NO_TME_CMDLINE = $(PROD_CMDLINE) LAPEE_NO_TME=1
 NO_TME_DEBUG_OUT = $(BUILD_DIR)/images/lapee-usb-wifi-debug-no-tme.img
 NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
+NO_TME_SIGNED_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme-signed.img
+NO_TME_SIGNED_UKI = $(BUILD_DIR)/images/lapee-no-tme.signed.efi
+SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
+SB_PROVISION_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner.img
+SB_PROVISION_KERNEL = $(SB_PROVISION_BUILD_DIR)/kernel/vmlinuz-lapee
+SB_PROVISION_INITRAMFS = $(SB_PROVISION_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
+SB_PROVISION_CMDLINE = console=ttyS0 console=tty0 fbcon=nodefer \
+                       loglevel=7 panic=10 rdinit=/init \
+                       lapee.mode=sb-provision
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
@@ -144,6 +160,8 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         hb-usb-image hb-usb-write hb-image-write hb-usb-debug-image hb-usb-debug-write \
         hb-usb-no-tme-image hb-usb-no-tme-write hb-usb-no-tme-verify \
         hb-usb-no-tme-debug-image hb-usb-no-tme-debug-write hb-usb-no-tme-debug-verify \
+        hb-usb-no-tme-signed-image hb-usb-no-tme-signed-write \
+        hb-sb-keys hb-sb-provisioner-image hb-sb-provisioner-write \
         hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
         hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
@@ -378,6 +396,58 @@ hb-usb-no-tme-debug-verify:
 	$(MAKE) hb-usb-no-tme-verify DEV="$(DEV)" \
 	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
 
+hb-sb-keys:
+	./scripts/sb-setup.sh keys
+	./scripts/sb-setup.sh enrol
+
+hb-usb-no-tme-signed-image:
+	@test -f secureboot/db.key || { \
+	    echo "secureboot/db.key missing. Run: make hb-sb-keys"; exit 1; }
+	@test -f secureboot/enrol/db.esl || { \
+	    echo "secureboot/enrol/db.esl missing. Run: make hb-sb-keys"; exit 1; }
+	$(MAKE) hb-usb-no-tme-image
+	BUILD_UKI="$(LAPEE_BUILD_DIR)/usb-build/lapee.efi" \
+	SIGNED_UKI="$(abspath $(NO_TME_SIGNED_UKI))" \
+	USB_IMAGE="$(abspath $(NO_TME_SIGNED_OUT))" \
+	WIFI="$(WIFI)" \
+	    ./scripts/sb-setup.sh sign
+
+hb-usb-no-tme-signed-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-usb-no-tme-signed-write DEV=/dev/diskN"; exit 1; }
+	@if [ "$(WIFI)" != "0" ]; then \
+	    ./scripts/gather-wifi-creds.sh --if-missing; \
+	else \
+	    echo ">> skipping wifi credential gather (WIFI=0)"; \
+	fi
+	$(MAKE) hb-usb-no-tme-signed-image WIFI="$(WIFI)"
+	$(MAKE) hb-image-write OUT="$(NO_TME_SIGNED_OUT)" DEV="$(DEV)"
+
+hb-sb-provisioner-image: toolchain
+	@test -f secureboot/enrol/db.auth || { \
+	    echo "secureboot/enrol/db.auth missing. Run: make hb-sb-keys"; exit 1; }
+	@test -f secureboot/enrol/KEK.auth || { \
+	    echo "secureboot/enrol/KEK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	@test -f secureboot/enrol/PK.auth || { \
+	    echo "secureboot/enrol/PK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	$(MAKE) buildroot \
+	    BUILDROOT_VOLUME=lapee-buildroot-sb-provisioner \
+	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
+	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-sb-provisioner-fragment.config" \
+	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-sb-provisioner.extra"
+	$(MAKE) hb-usb-image WIFI=0 \
+	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
+	    KERNEL="$(SB_PROVISION_KERNEL)" \
+	    INITRAMFS="$(SB_PROVISION_INITRAMFS)" \
+	    CMDLINE='$(SB_PROVISION_CMDLINE)' \
+	    OUT="$(SB_PROVISION_OUT)"
+
+hb-sb-provisioner-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make hb-sb-provisioner-write DEV=/dev/diskN"; exit 1; }
+	$(MAKE) hb-sb-provisioner-image
+	$(MAKE) hb-image-write OUT="$(SB_PROVISION_OUT)" DEV="$(DEV)"
+
 hb-usb-lenovo-intel-debug-image:
 	$(MAKE) buildroot \
 	    BUILDROOT_VOLUME=lapee-buildroot-intel-gfx \
@@ -489,7 +559,7 @@ hb-sb-apply: toolchain
 	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$4); print \$$4}"); \
 	        dd if=/w/$(OUT) of=/tmp/esp.img \
 	            bs=512 skip=$$START count=$$SECT status=none; \
-	        for f in PK.cer KEK.cer db.cer PK.auth KEK.auth db.auth; do \
+	        for f in PK.cer KEK.cer db.cer PK.auth KEK.auth db.auth PK.esl KEK.esl db.esl; do \
 	            if [[ -f /w/secureboot/enrol/$$f ]]; then \
 	                mcopy -i /tmp/esp.img -o /w/secureboot/enrol/$$f ::/$$f; \
 	            fi; \

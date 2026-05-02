@@ -2,8 +2,8 @@
     "render_index_page": false,
     "on": {
         "start": {
-            "device": "tpm2@2.0a",
-            "path": "extend",
+            "device": "tpm@2.0a",
+            "path": "boot-attestation",
             "method": "POST",
             "target": "body",
             "hook": {
@@ -72,7 +72,9 @@
         {"name": "wasi@1.0", "module": "dev_wasi", "ao-types": "module=\"atom\""},
         {"name": "wasm-64@1.0", "module": "dev_wasm", "ao-types": "module=\"atom\""},
         {"name": "whois@1.0", "module": "dev_whois", "ao-types": "module=\"atom\""},
+        {"name": "tpm@2.0a", "module": "dev_tpm2", "ao-types": "module=\"atom\""},
         {"name": "tpm2@2.0a", "module": "dev_tpm2", "ao-types": "module=\"atom\""},
-        {"name": "tpm-interpret@1.0", "module": "dev_tpm_interpret", "ao-types": "module=\"atom\""}
+        {"name": "tpm-interpret@1.0", "module": "dev_tpm_interpret", "ao-types": "module=\"atom\""},
+        {"name": "system@1.0", "module": "dev_system", "ao-types": "module=\"atom\""}
     ]
 }

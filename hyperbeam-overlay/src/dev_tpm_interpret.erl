@@ -869,9 +869,10 @@ summarise_interp(_) -> #{}.
 
 %% The response from `hb_http:get' is a full HB message. The
 %% attestation envelope may be returned directly (top-level
-%% `lapee_attestation_version' key) or wrapped under `body' (the
-%% usual device-response shape). Peel until we find something that
-%% looks like our envelope.
+%% `lapee_attestation_version' key or the newer boot-attestation
+%% {system,node,tpm} shape) or wrapped under `body' (the usual
+%% device-response shape). Peel until we find something that looks
+%% like one of our envelopes.
 unwrap_envelope(M, Opts) ->
     case is_envelope(M) of
         true -> M;
@@ -904,18 +905,20 @@ interpret(Base, Req, Opts) ->
 %% only path through `interpret/3' / `claim/3' that reaches this
 %% without a `safely_run' shield is the direct-call one.
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
-    case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
-        E when is_map(E) -> E;
-        _ ->
-            case is_envelope(Base) of
-                true -> Base;
-                false ->
-                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                        Inner when is_map(Inner) -> Inner;
-                        _ -> Base
-                    end
-            end
-    end;
+    Envelope =
+        case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
+            E when is_map(E) -> E;
+            _ ->
+                case is_envelope(Base) of
+                    true -> Base;
+                    false ->
+                        case hb_maps:get(<<"body">>, Base, undefined, Opts) of
+                            Inner when is_map(Inner) -> Inner;
+                            _ -> Base
+                        end
+                end
+        end,
+    normalize_envelope(Envelope);
 resolve_envelope(_Base, _Req, _Opts) ->
     %% Non-map Base (list, binary, integer, atom, etc.). No
     %% envelope can be extracted; fall through to an empty map so
@@ -925,8 +928,114 @@ resolve_envelope(_Base, _Req, _Opts) ->
 
 is_envelope(M) when is_map(M) ->
     hb_maps:get(<<"lapee-attestation-version">>, M, undefined, #{}) /=
-        undefined;
+        undefined
+        orelse is_boot_attestation(M);
 is_envelope(_) -> false.
+
+is_boot_attestation(M) when is_map(M) ->
+    is_map(hb_maps:get(<<"system">>, M, undefined, #{}))
+        andalso is_map(hb_maps:get(<<"node">>, M, undefined, #{}))
+        andalso is_map(hb_maps:get(<<"tpm">>, M, undefined, #{}));
+is_boot_attestation(_) -> false.
+
+normalize_envelope(E) when is_map(E) ->
+    case is_boot_attestation(E) of
+        true -> normalize_boot_attestation(E);
+        false -> E
+    end;
+normalize_envelope(E) -> E.
+
+%% The on-node `~tpm@2.0a/boot-attestation' endpoint returns the new
+%% canonical shape:
+%%
+%%     #{ <<"system">> => System, <<"node">> => Node, <<"tpm">> => Tpm }
+%%
+%% Most of the verifier predates that shape and expects the legacy
+%% top-level fields. Keep this adapter small and mechanical: it does
+%% not decide policy, it only projects the same evidence under the
+%% keys the existing parser already understands.
+normalize_boot_attestation(E) ->
+    System = hb_maps:get(<<"system">>, E, #{}, #{}),
+    Node = hb_maps:get(<<"node">>, E, #{}, #{}),
+    Tpm = hb_maps:get(<<"tpm">>, E, #{}, #{}),
+    Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
+    NodeID = message_human_id(Node),
+    PlatformProbes = system_platform_probes(System),
+    E#{
+        <<"lapee-attestation-version">> =>
+            hb_maps:get(<<"version">>, E, <<"boot-attestation@1.0">>, #{}),
+        <<"wallet-address">> =>
+            hb_maps:get(<<"address">>, Node, null, #{}),
+        <<"node-message">> => Node,
+        <<"node-message-id">> => NodeID,
+        <<"boot-subject">> => #{<<"system">> => System, <<"node">> => Node},
+        <<"boot-subject-id">> =>
+            hb_maps:get(<<"extended-subject">>, Tpm, null, #{}),
+        <<"boot-subject-digest">> =>
+            hb_maps:get(<<"extended-subject-digest">>, Tpm, null, #{}),
+        <<"platform-probes">> => PlatformProbes,
+        <<"tpm-quote">> => Quote,
+        <<"ek-cert-pem">> =>
+            hb_maps:get(<<"ek-cert-pem">>, Tpm, <<>>, #{}),
+        <<"ek-cert-chain-pem">> =>
+            hb_maps:get(<<"ek-cert-chain-pem">>, Tpm, [], #{}),
+        <<"ek-cert-source">> =>
+            hb_maps:get(<<"ek-cert-source">>, Tpm, null, #{}),
+        <<"tpm-properties">> =>
+            hb_maps:get(<<"tpm-properties">>, Tpm, #{}, #{}),
+        <<"ak-pub-pem">> =>
+            hb_maps:get(<<"ak-pub-pem">>, Tpm, <<>>, #{}),
+        <<"ak-hierarchy">> =>
+            hb_maps:get(<<"ak-hierarchy">>, Tpm, null, #{}),
+        <<"tpm-session-mode">> =>
+            hb_maps:get(<<"tpm-session-mode">>, Tpm, null, #{}),
+        <<"runtime-event-log">> =>
+            hb_maps:get(<<"runtime-event-log">>, Tpm, [], #{}),
+        <<"tcg-event-log">> =>
+            hb_maps:get(<<"tcg-event-log">>, Tpm, <<>>, #{}),
+        <<"tcg-event-log-source-path">> =>
+            hb_maps:get(<<"tcg-event-log-source-path">>, Tpm, null, #{}),
+        <<"tcg-event-log-length-bytes">> =>
+            hb_maps:get(<<"tcg-event-log-length-bytes">>, Tpm, null, #{}),
+        <<"tcg-event-log-format">> =>
+            hb_maps:get(<<"tcg-event-log-format">>, Tpm, null, #{})
+    }.
+
+message_human_id(Msg) when is_map(Msg) ->
+    try hb_util:human_id(hb_message:id(Msg, all, #{}))
+    catch _:_ -> null
+    end;
+message_human_id(_) -> null.
+
+system_platform_probes(System) ->
+    Kernel = hb_maps:get(<<"kernel">>, System, #{}, #{}),
+    Cpu = hb_maps:get(<<"cpu">>, System, #{}, #{}),
+    CpuInfo = hb_maps:get(<<"cpuinfo">>, Cpu, #{}, #{}),
+    FirstCpu = hb_maps:get(<<"first-processor">>, CpuInfo, #{}, #{}),
+    Firmware = hb_maps:get(<<"firmware">>, System, #{}, #{}),
+    Dmi = hb_maps:get(<<"dmi">>, Firmware, #{}, #{}),
+    DmiFields = hb_maps:get(<<"fields">>, Dmi, #{}, #{}),
+    Iommu = hb_maps:get(<<"iommu">>, System, #{}, #{}),
+    Integrity = hb_maps:get(<<"integrity">>, System, #{}, #{}),
+    #{
+        <<"cpuinfo">> => FirstCpu,
+        <<"kernel-cmdline">> =>
+            hb_maps:get(<<"cmdline">>, Kernel, null, #{}),
+        <<"lockdown">> =>
+            hb_maps:get(<<"lockdown">>, Integrity, null, #{}),
+        <<"iommu-groups-count">> =>
+            hb_maps:get(<<"group-count">>, Iommu, null, #{}),
+        <<"dmi-sys-vendor">> =>
+            hb_maps:get(<<"sys-vendor">>, DmiFields, null, #{}),
+        <<"dmi-product-name">> =>
+            hb_maps:get(<<"product-name">>, DmiFields, null, #{}),
+        <<"dmi-board-name">> =>
+            hb_maps:get(<<"board-name">>, DmiFields, null, #{}),
+        <<"dmi-bios-version">> =>
+            hb_maps:get(<<"bios-version">>, DmiFields, null, #{}),
+        <<"dmi-bios-release">> =>
+            hb_maps:get(<<"bios-release">>, DmiFields, null, #{})
+    }.
 
 %% Reviewer pass 10 fuzzer: three sites read `platform-probes'
 %% as a map and then index into it. An adversarial envelope that
@@ -968,6 +1077,7 @@ interpret_envelope(E, Opts) ->
     Kernel = interpret_kernel(E, Db, Pcrs),
     Ima = interpret_ima(E, Db, Pcrs),
     Node = interpret_node(E),
+    System = interpret_system(E),
     Env = interpret_envelope_meta(E),
     Claim = interpret_claim(Events, E, Db),
     #{
@@ -980,6 +1090,7 @@ interpret_envelope(E, Opts) ->
         <<"kernel">>   => Kernel,
         <<"ima">>      => Ima,
         <<"node">>     => Node,
+        <<"system">>   => System,
         <<"events">>   => Events,
         <<"claim">>    => Claim
     }.
@@ -1230,6 +1341,7 @@ interpret_claim_body(Events, EvList, E, Db, Context) ->
         <<"boot-chain">>         => claim_boot_chain(EvList, Db),
         <<"kernel">>             => claim_kernel(EvList, E),
         <<"cpu">>                => claim_cpu(EvList, E, Db),
+        <<"system">>             => claim_system(E),
         <<"shim">>               => claim_shim(EvList),
         %% Paper section Architecture -- the quote itself carries freshness
         %% (reset-count / restart-count / clock-ms), TPM firmware
@@ -1641,9 +1753,9 @@ lookup_vendor_by_ascii(_, _) -> #{}.
 %%   evidence            provenance list
 claim_ek(E, Db) ->
     Pem = hb_maps:get(<<"ek-cert-pem">>, E, <<>>, #{}),
-    case decode_cert(Pem) of
+    case decode_cert_with_der(Pem) of
         {error, _} -> unknown_ek_claim();
-        {ok, Cert} ->
+        {ok, Cert, DerCert} ->
             Attrs = tpm_attrs_from_cert(Cert),
             {KeyAlg, KeyBits, RsaExp, PubDerSha256} =
                 cert_public_key_summary(Cert),
@@ -1654,8 +1766,8 @@ claim_ek(E, Db) ->
             %% EK Credential Profile section 2.2.1.4). Decode each
             %% one into an OTPCertificate for pkix_path_validation.
             ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, E, <<>>, #{}),
-            ChainCerts = decode_cert_bundle(ChainPem),
-            Chain = validate_ek_chain(Cert, ChainCerts, Roots),
+            ChainCerts = decode_cert_bundle_with_der(ChainPem),
+            Chain = validate_ek_chain({Cert, DerCert}, ChainCerts, Roots),
             From = maps:get(valid_from, Attrs, undefined),
             To   = maps:get(valid_to, Attrs, undefined),
             #{
@@ -1835,22 +1947,22 @@ parse_dt_tail(<<Mo:2/binary, D:2/binary, H:2/binary,
     end;
 parse_dt_tail(_) -> error.
 
-%% Decode a concatenated PEM bundle of one or more certs into a
-%% list of OTPCertificate records. Used to consume the
+%% Decode a concatenated PEM bundle of one or more certs into
+%% `{OTPCertificate, OriginalDer}' pairs. Used to consume the
 %% `ek-cert-chain-pem' field that v1.2's dev_tpm2 stamps onto the
 %% envelope (it's the concatenation of every DER cert found in
 %% TPM NV at `<ek-handle>+1'). Returns `[]' on any error -- the
 %% chain is always best-effort; a missing or malformed bundle
 %% does not break the leaf-level claim.
-decode_cert_bundle(<<>>) -> [];
-decode_cert_bundle(Pem) when is_binary(Pem) ->
+decode_cert_bundle_with_der(<<>>) -> [];
+decode_cert_bundle_with_der(Pem) when is_binary(Pem) ->
     try
         Entries = public_key:pem_decode(Pem),
-        [public_key:pkix_decode_cert(Der, otp)
+        [{public_key:pkix_decode_cert(Der, otp), Der}
          || {'Certificate', Der, not_encrypted} <- Entries]
     catch _:_ -> []
     end;
-decode_cert_bundle(_) -> [].
+decode_cert_bundle_with_der(_) -> [].
 
 %% Validate the EK cert chain against shipped root CAs, optionally
 %% threading the envelope-supplied intermediates through the
@@ -1869,8 +1981,8 @@ decode_cert_bundle(_) -> [].
 %% When no roots are loaded we return `unknown' (not a failure)
 %% since the caller may be operating in a dev environment.
 validate_ek_chain(Cert, Chain, Roots) ->
-    DerCert = safe_der_encode(Cert),
-    DerIntermediates = [safe_der_encode(C) || C <- Chain],
+    DerCert = cert_der(Cert),
+    DerIntermediates = [cert_der(C) || C <- Chain],
     validate_ek_chain_1(DerCert, DerIntermediates, Roots,
                         length(Chain)).
 
@@ -1883,6 +1995,9 @@ safe_der_encode(Cert) ->
     try public_key:pkix_encode('OTPCertificate', Cert, otp)
     catch _:_ -> <<>>
     end.
+
+cert_der({_Cert, Der}) when is_binary(Der) -> Der;
+cert_der(Cert) -> safe_der_encode(Cert).
 
 validate_ek_chain_1(_DerCert, _Intermediates, [], _ChainLen) ->
     #{
@@ -1910,9 +2025,7 @@ validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
     %% any EK the LeafCA happens to have signed, stopping the chain
     %% short of the real manufacturer root).
     {TrueRoots, BundleIntermediates} = partition_self_signed_roots(Roots),
-    %% Filter on-TPM intermediates down to valid DER. Keep order --
-    %% TCG convention is leaf-to-root, which is also the order
-    %% `pkix_path_validation/3' expects for CertPath.
+    %% Filter on-TPM intermediates down to valid DER. Keep order.
     Cleaned = [D || D <- DerIntermediates, D =/= <<>>],
     %% First pass: try each self-signed root directly, using the
     %% on-TPM intermediates (if any) as the chain. This covers the
@@ -1921,17 +2034,17 @@ validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
     Direct = try_validate_against_roots(DerCert, Cleaned, TrueRoots, 0),
     Result = case maps:get(<<"chain-valid">>, Direct, false) of
         true  -> Direct;
-        _ when Cleaned =:= [] ->
-            %% Fallback when the on-TPM chain is empty (seen on
-            %% Nuvoton NPCT75x Framework builds where NV 0x01C00003
-            %% is undefined). For each real root, try each shipped
-            %% non-self-signed cert as the missing intermediate. See
-            %% TCG EK Credential Profile -- the manufacturer's
-            %% intermediate CA cert is itself published separately
-            %% from NV.
-            try_validate_with_bundle_intermediates(
-              DerCert, TrueRoots, BundleIntermediates, Direct);
-        _ -> Direct
+        _ ->
+            %% Fallback for partial chains. Intel ODCA PTT supplies
+            %% PTT/Kernel/ROM EICAs in TPM NV, while the ROM cert
+            %% points via AIA to public Intel OnDie intermediates. We
+            %% may need both sources. Build an issuer/subject path
+            %% across TPM-supplied intermediates and bundled public
+            %% intermediates, while keeping self-signed roots as the
+            %% only trust anchors.
+            try_validate_with_candidate_intermediates(
+              DerCert, Cleaned, TrueRoots, BundleIntermediates,
+              Direct)
     end,
     Result#{<<"intermediates-used">> => ChainLen}.
 
@@ -1952,61 +2065,132 @@ partition_self_signed_roots(Roots) ->
             end
         end, Roots).
 
-%% @doc Pair-walk the shipped anchors: for each self-signed root try
-%% each shipped non-self-signed cert as a single intermediate. Stops
-%% on the first successful chain; otherwise returns the original
-%% direct-attempt result unchanged so reason strings bubble up.
-try_validate_with_bundle_intermediates(DerCert, TrueRoots,
-                                       BundleIntermediates,
-                                       FallbackResult) ->
-    %% Pre-decode anchors.
+%% @doc Build a candidate path from the EK leaf to each real root by
+%% matching issuer->subject across on-TPM intermediates and shipped
+%% public intermediates. This handles both sparse chains (Nuvoton leaf
+%% CA lives only in our bundle) and split chains (Intel ODCA PTT/Kernel
+%%/ROM live in TPM NV while Product/CSME intermediates come from Intel).
+try_validate_with_candidate_intermediates(DerCert, TpmIntermediates,
+                                          TrueRoots,
+                                          BundleIntermediates,
+                                          FallbackResult) ->
+    case decode_der_cert(DerCert) of
+        {ok, LeafCert} ->
+            Candidates =
+                named_der_intermediates(
+                  <<"tpm-nv">>, TpmIntermediates) ++
+                named_bundle_intermediates(BundleIntermediates),
+            try_validate_built_paths(
+              DerCert, LeafCert, TrueRoots, Candidates,
+              FallbackResult);
+        error ->
+            FallbackResult
+    end.
+
+decode_der_cert(Der) ->
+    try {ok, public_key:pkix_decode_cert(Der, otp)}
+    catch _:_ -> error
+    end.
+
+named_der_intermediates(Source, Ders) ->
+    [{Source, Der, Cert}
+     || Der <- Ders,
+        {ok, Cert} <- [decode_der_cert(Der)]].
+
+named_bundle_intermediates(BundleIntermediates) ->
+    [{IName, IDer, ICert}
+     || I <- BundleIntermediates,
+        IName <- [maps:get(<<"name">>, I, <<"unknown-intermediate">>)],
+        IPem <- [maps:get(<<"pem">>, I, <<>>)],
+        {ok, ICert, IDer} <- [decode_cert_with_der(IPem)],
+        IDer =/= <<>>].
+
+try_validate_built_paths(DerCert, LeafCert, TrueRoots,
+                         Candidates, FallbackResult) ->
     DecodedRoots = [
-        {Name, Cert} ||
+        {Name, Cert, Der} ||
         R <- TrueRoots,
         Name <- [maps:get(<<"name">>, R, <<"unknown-root">>)],
         Pem  <- [maps:get(<<"pem">>, R, <<>>)],
-        {ok, Cert} <- [decode_cert(Pem)]
+        {ok, Cert, Der} <- [decode_cert_with_der(Pem)]
     ],
-    %% Pre-decode intermediates to DER once.
-    DecodedInters = [
-        {IName, IDer} ||
-        I <- BundleIntermediates,
-        IName <- [maps:get(<<"name">>, I, <<"unknown-intermediate">>)],
-        IPem <- [maps:get(<<"pem">>, I, <<>>)],
-        {ok, ICert} <- [decode_cert(IPem)],
-        IDer <- [safe_der_encode(ICert)],
-        IDer =/= <<>>
-    ],
-    walk_bundle_pairs(DerCert, DecodedRoots, DecodedInters, FallbackResult).
+    walk_built_paths(
+      DerCert, LeafCert, DecodedRoots, length(DecodedRoots),
+      Candidates, FallbackResult).
 
-walk_bundle_pairs(_DerCert, [], _Inters, FallbackResult) ->
+walk_built_paths(_DerCert, _LeafCert, [], _RootCount, _Candidates,
+                 FallbackResult) ->
     FallbackResult;
-walk_bundle_pairs(DerCert, [{AnchorName, AnchorCert} | Rest],
-                  Inters, FallbackResult) ->
-    case try_pair_chain(DerCert, AnchorCert, AnchorName, Inters) of
-        {ok, Hit} -> Hit;
-        not_found -> walk_bundle_pairs(DerCert, Rest, Inters,
-                                        FallbackResult)
+walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert, AnchorDer} | Rest],
+                 RootCount, Candidates, FallbackResult) ->
+    case build_intermediate_path(LeafCert, AnchorCert, Candidates) of
+        {ok, PathDers, PathNames} ->
+            case validate_against_one_root_der(
+                   DerCert, PathDers, AnchorDer) of
+                true ->
+                    #{
+                        <<"validated-by-root-ca">> => AnchorName,
+                        <<"validated-via-intermediates">> => PathNames,
+                        <<"root-ca-count">> => RootCount,
+                        <<"chain-valid">> => true,
+                        <<"reason">> =>
+                            iolist_to_binary(
+                              io_lib:format(
+                                "chain validates against ~s using ~B "
+                                "intermediates",
+                                [binary_to_list(AnchorName),
+                                 length(PathDers)]))
+                    };
+                false ->
+                    walk_built_paths(
+                      DerCert, LeafCert, Rest, RootCount, Candidates,
+                      FallbackResult)
+            end;
+        not_found ->
+            walk_built_paths(
+              DerCert, LeafCert, Rest, RootCount, Candidates,
+              FallbackResult)
     end.
 
-try_pair_chain(_DerCert, _AnchorCert, _AnchorName, []) ->
-    not_found;
-try_pair_chain(DerCert, AnchorCert, AnchorName,
-               [{InterName, InterDer} | Rest]) ->
-    case validate_against_one_root(DerCert, [InterDer], AnchorCert) of
+build_intermediate_path(LeafCert, RootCert, Candidates) ->
+    build_intermediate_path(LeafCert, RootCert, Candidates, [], []).
+
+build_intermediate_path(CurrentCert, RootCert, Candidates,
+                        AccDers, AccNames) ->
+    Issuer = cert_issuer(CurrentCert),
+    case same_name(Issuer, cert_subject(RootCert)) of
         true ->
-            {ok, #{
-                <<"validated-by-root-ca">> => AnchorName,
-                <<"validated-via-intermediate">> => InterName,
-                <<"root-ca-count">>        => 0,
-                <<"chain-valid">>          => true,
-                <<"reason">>               =>
-                    <<"chain validates against ", AnchorName/binary,
-                      " via bundled intermediate ", InterName/binary>>
-            }};
+            {ok, AccDers, AccNames};
         false ->
-            try_pair_chain(DerCert, AnchorCert, AnchorName, Rest)
+            Matches =
+                [C || C = {_Name, _Der, Cert} <- Candidates,
+                      same_name(cert_subject(Cert), Issuer)],
+            try_candidate_paths(
+              Matches, RootCert, Candidates, AccDers, AccNames)
     end.
+
+try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->
+    not_found;
+try_candidate_paths([{Name, Der, Cert} = Candidate | Rest],
+                    RootCert, Candidates, AccDers, AccNames) ->
+    Remaining = [C || C <- Candidates, C =/= Candidate],
+    case build_intermediate_path(
+           Cert, RootCert, Remaining, [Der | AccDers],
+           [Name | AccNames]) of
+        {ok, _PathDers, _PathNames} = Hit ->
+            Hit;
+        not_found ->
+            try_candidate_paths(
+              Rest, RootCert, Candidates, AccDers, AccNames)
+    end.
+
+cert_subject(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.subject).
+
+cert_issuer(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.issuer).
+
+same_name(A, B) -> A =:= B.
 
 try_validate_against_roots(_DerCert, _Chain, [], Count) ->
     #{
@@ -2020,9 +2204,9 @@ try_validate_against_roots(_DerCert, _Chain, [], Count) ->
 try_validate_against_roots(DerCert, Chain, [Root | Rest], Count) ->
     Name = maps:get(<<"name">>, Root, <<"unknown-root">>),
     RootPem = maps:get(<<"pem">>, Root, <<>>),
-    case decode_cert(RootPem) of
-        {ok, RootCert} ->
-            case validate_against_one_root(DerCert, Chain, RootCert) of
+    case decode_cert_with_der(RootPem) of
+        {ok, _RootCert, RootDer} ->
+            case validate_against_one_root_der(DerCert, Chain, RootDer) of
                 true ->
                     #{
                         <<"validated-by-root-ca">> => Name,
@@ -2041,10 +2225,8 @@ try_validate_against_roots(DerCert, Chain, [Root | Rest], Count) ->
               DerCert, Chain, Rest, Count + 1)
     end.
 
-validate_against_one_root(DerCert, Intermediates, RootCert) ->
+validate_against_one_root_der(DerCert, Intermediates, RootDer) ->
     try
-        RootDer = public_key:pkix_encode(
-                    'OTPCertificate', RootCert, otp),
         %% CertPath ordering per OTP public_key docs: first
         %% element is signed BY the trust anchor (closest-to-root),
         %% last is the leaf. TCG ships NV chains as
@@ -2096,9 +2278,15 @@ ek_verify_fun(_, {bad_cert, {not_supported_extension, Ext}}, UserState) ->
         #'Extension'{extnID = Id} -> Id;
         _ -> undefined
     end,
+    %% Intel ODCA CAs use additional TCG EK-profile OIDs (for
+    %% example 2.23.133.8.12 on the PTT/Kernel/ROM CA chain) that
+    %% OTP's baseline validator does not know about. Treat the whole
+    %% TCG namespace here the same way we already treat non-critical
+    %% unknown TCG extensions below: metadata is acceptable, the
+    %% cryptographic issuer/signature/path checks still run normally.
     case ExtId of
-        {2, 23, 133, 8, 1}   -> {valid, UserState};
-        {2, 23, 133, 2, 16}  -> {valid, UserState};
+        {2, 23, 133, _, _}    -> {valid, UserState};
+        {2, 23, 133, _, _, _} -> {valid, UserState};
         _ -> {fail, {not_supported_extension, Ext}}
     end;
 ek_verify_fun(_, {bad_cert, Reason}, _UserState) ->
@@ -3036,6 +3224,8 @@ collect_policy_signals(Claim, Envelope) ->
             length(maps:get(<<"known-cves">>, TPM, [])),
         <<"tme-enabled">> =>
             maps:get(<<"enabled">>, TME, <<"unknown">>),
+        <<"tme-operator-override">> =>
+            tme_operator_override(TME),
         %% v1.2.2 paper P3: AK under Endorsement hierarchy gives
         %% the verifier cryptographic knowledge that AK and EK
         %% share a primary seed -> same physical TPM. Envelope
@@ -3121,7 +3311,9 @@ collect_policy_signals(Claim, Envelope) ->
         %% The critical end-to-end binding the paper asks for:
         %% the HB operator wallet (which signs every AO-Core
         %% result) must be provably linked to the TPM's
-        %% measured-boot session. Chain:
+        %% measured-boot session. Legacy envelopes bind the node
+        %% message directly; boot-attestation envelopes bind the
+        %% whole subject #{system,node}. Chain:
         %%
         %%   wallet W  \in  node-message
         %%        |
@@ -3143,11 +3335,10 @@ collect_policy_signals(Claim, Envelope) ->
         %; produced by a LapEE-bound key ... the chain binds the
         %; transcript to the boot conditional on A1."
         %%
-        %% Verifier: re-compute hb_message:id(node-message) and
-        %% confirm it matches node-message-id, then check that
-        %; wallet-address is a value inside node-message, then
-        %; check that a PCR-15 event carries the decoded node-
-        %; message-id as its digest. All three must hold.
+        %% Verifier: re-compute the attested message ID and confirm
+        %% it matches the declared ID, then check that wallet-address
+        %; is a value inside node-message, then check that a PCR-15
+        %; event carries the same digest. All three must hold.
         <<"wallet-tpm-binding-verified">> =>
             verify_wallet_tpm_binding(Envelope)
     }.
@@ -3460,6 +3651,16 @@ tme_finding(#{<<"tme-enabled">> := <<"unknown">>}) ->
             <<"TME state could not be determined; no "
               "tier-2/3/4/5 evidence fired.">>);
 tme_finding(_) -> ok.
+
+tme_operator_override(TME) ->
+    Evidence = maps:get(<<"enabled-evidence">>, TME, []),
+    lists:any(
+        fun
+            ({<<"operator-override">>, <<"LAPEE_NO_TME">>}) -> true;
+            ([<<"operator-override">>, <<"LAPEE_NO_TME">>]) -> true;
+            (_) -> false
+        end,
+        Evidence).
 
 runtime_driver_finding(#{<<"has-runtime-driver">> := true}) ->
     finding(warn, <<"boot-chain-has-runtime-driver">>,
@@ -3896,19 +4097,55 @@ verify_ak_pubkey_extend(E) ->
 %%
 %% Returns:
 %%   true           all three sub-checks hold:
-%;                  (a) node-message-id == hb_message:id(node-message)
-%;                      (recomputed by the verifier from node-message)
+%;                  (a) attested-id == hb_message:id(attested-message)
+%;                      (legacy node-message or boot-subject)
 %;                  (b) wallet-address appears as a value inside
 %;                      node-message (direct or nested)
 %;                  (c) a runtime event on PCR 15 carries the
-%;                      decoded node-message-id as its digest
-%;                      (same check the producer self-verification
-%;                      chk_binding/1 performs)
+%;                      attested-message digest
 %;   false          envelope has all inputs but at least one check
 %;                  failed
 %;   <<"unknown">>  envelope missing wallet-address, node-message,
-%;                  node-message-id, or runtime-event-log
+%;                  attested-message-id, or runtime-event-log
 verify_wallet_tpm_binding(E) ->
+    case hb_maps:get(<<"boot-subject">>, E, undefined, #{}) of
+        Subject when is_map(Subject) ->
+            verify_boot_subject_tpm_binding(E, Subject);
+        _ ->
+            verify_node_message_tpm_binding(E)
+    end.
+
+verify_boot_subject_tpm_binding(E, Subject) ->
+    Wallet = hb_maps:get(<<"wallet-address">>, E, null, #{}),
+    NodeMap = hb_maps:get(<<"node">>, Subject,
+                          hb_maps:get(<<"node-message">>, E,
+                                      undefined, #{}), #{}),
+    ClaimedId = hb_maps:get(<<"boot-subject-id">>, E, null, #{}),
+    ClaimedDigest = hb_maps:get(<<"boot-subject-digest">>, E, null, #{}),
+    Log = hb_maps:get(<<"runtime-event-log">>, E, [], #{}),
+    case {Wallet, NodeMap, ClaimedId, Log} of
+        {null, _, _, _}       -> <<"unknown">>;
+        {_, undefined, _, _}  -> <<"unknown">>;
+        {_, _, null, _}       -> <<"unknown">>;
+        {_, _, _, []}         -> <<"unknown">>;
+        {W, Nm, Id, Events}
+            when is_map(Nm), is_binary(W), is_binary(Id) ->
+            SubjectIds = message_id_candidates(Subject),
+            IdMatchesHash = id_value_matches_any(Id, SubjectIds),
+            WalletInNm = map_contains_value(Nm, W),
+            IdInLog = boot_subject_event_matches(
+                Events,
+                SubjectIds,
+                [ClaimedDigest, Id]
+            ),
+            case {IdMatchesHash, WalletInNm, IdInLog} of
+                {true, true, true} -> true;
+                _                  -> false
+            end;
+        _ -> <<"unknown">>
+    end.
+
+verify_node_message_tpm_binding(E) ->
     Wallet = hb_maps:get(<<"wallet-address">>, E, null, #{}),
     Nm     = hb_maps:get(<<"node-message">>, E, undefined, #{}),
     Id     = hb_maps:get(<<"node-message-id">>, E, null, #{}),
@@ -3923,16 +4160,10 @@ verify_wallet_tpm_binding(E) ->
             %% (a) Recompute hb_message:id(node-message) and
             %; compare to the declared node-message-id.
             IdMatchesHash =
-                try
-                    %% hb_message:id returns the native (raw) id.
-                    %; Envelope carries the human_id form.
-                    Native = hb_message:id(NodeMap, all, #{}),
-                    Human = hb_util:human_id(Native),
-                    Human =:= ClaimedId
-                        orelse Native =:= ClaimedId
-                        orelse hb_util:encode(Native) =:= ClaimedId
-                catch _:_ -> false
-                end,
+                id_value_matches_any(
+                    ClaimedId,
+                    message_id_candidates(NodeMap)
+                ),
             %% (b) Wallet must appear somewhere in node-message.
             WalletInNm = map_contains_value(NodeMap, W),
             %% (c) Runtime log has PCR-15 event whose digest
@@ -3959,8 +4190,113 @@ verify_wallet_tpm_binding(E) ->
                 {true, true, true} -> true;
                 _                  -> false
             end;
-        _ -> <<"unknown">>
+	        _ -> <<"unknown">>
+	    end.
+
+boot_subject_event_matches(Events, SubjectIds, DigestValues) ->
+    DigestCandidates = raw_digest_candidates(SubjectIds ++ DigestValues),
+    lists:any(
+        fun(Ev) ->
+            is_map(Ev)
+                andalso ev_pcr(Ev) =:= 15
+                andalso
+                    maps:get(<<"event-type">>, Ev, <<>>) =:=
+                        <<"EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT">>
+                andalso event_subject_id_matches(Ev, SubjectIds)
+                andalso event_digest_matches(Ev, DigestCandidates)
+        end,
+        Events
+    ).
+
+event_subject_id_matches(Ev, SubjectIds) ->
+    case maps:get(<<"subject-id">>, Ev, null) of
+        null -> false;
+        SubjectId -> id_value_matches_any(SubjectId, SubjectIds)
     end.
+
+event_digest_matches(Ev, DigestCandidates) ->
+    case maps:get(<<"digest">>, Ev, <<>>) of
+        <<>> -> false;
+        Digest -> raw_value_matches_any(Digest, DigestCandidates)
+    end.
+
+message_id_candidates(Msg) when is_map(Msg) ->
+    try
+        ID = hb_message:id(Msg, all, #{}),
+        Native = hb_util:native_id(ID),
+        unique_binaries([ID, Native, hb_util:human_id(ID),
+                         hb_util:encode(Native)])
+    catch _:_ -> []
+    end;
+message_id_candidates(_) -> [].
+
+id_value_matches_any(Value, Candidates) when is_binary(Value) ->
+    lists:any(fun(Candidate) -> id_value_matches(Value, Candidate) end,
+              Candidates);
+id_value_matches_any(_, _) -> false.
+
+id_value_matches(A, B) when is_binary(A), is_binary(B) ->
+    A =:= B orelse raw_value_matches_any(A, raw_digest_candidates([B]));
+id_value_matches(_, _) -> false.
+
+raw_value_matches_any(Value, Candidates) when is_binary(Value) ->
+    lists:any(fun(Candidate) -> raw_value_matches(Value, Candidate) end,
+              Candidates);
+raw_value_matches_any(_, _) -> false.
+
+raw_value_matches(A, B) when is_binary(A), is_binary(B) ->
+    case {raw_digest_candidates([A]), raw_digest_candidates([B])} of
+        {[], _} -> false;
+        {_, []} -> false;
+        {As, Bs} ->
+            lists:any(fun(X) -> lists:member(X, Bs) end, As)
+    end;
+raw_value_matches(_, _) -> false.
+
+raw_digest_candidates(Values) ->
+    unique_binaries(lists:flatmap(fun raw_digest_candidates1/1, Values)).
+
+raw_digest_candidates1(V) when is_binary(V) ->
+    Direct =
+        case byte_size(V) of
+            32 -> [V];
+            _ -> []
+        end,
+    Decoded =
+        try
+            D = hb_util:decode(V),
+            case byte_size(D) of
+                32 -> [D];
+                _ -> []
+            end
+        catch _:_ -> []
+        end,
+    Native =
+        try
+            N = hb_util:native_id(V),
+            case byte_size(N) of
+                32 -> [N];
+                _ -> []
+            end
+        catch _:_ -> []
+        end,
+    Direct ++ Decoded ++ Native;
+raw_digest_candidates1(_) -> [].
+
+unique_binaries(Values) ->
+    lists:reverse(
+        lists:foldl(
+            fun(V, Acc) when is_binary(V) ->
+                    case lists:member(V, Acc) of
+                        true -> Acc;
+                        false -> [V | Acc]
+                    end;
+               (_, Acc) -> Acc
+            end,
+            [],
+            Values
+        )
+    ).
 
 %% Recursive search for a value in a HyperBEAM-style map. Returns
 %% true iff `Target' appears as a leaf binary, list element, or
@@ -5938,10 +6274,10 @@ cmdline_from_events_or_runtime(Events, E) ->
           ipl_kv_matches(Events, <<"kernel-cmdline">>),
     case Evs of
         [] -> runtime_cmdline_and_flags(E);
-        [E | _] ->
-            Cmdline = nested(E, [<<"parsed">>, <<"value">>], <<"unknown">>),
-            Flags = nested(E, [<<"parsed">>, <<"cmdline-flags">>], #{}),
-            {Cmdline, Flags, [event_provenance(E)]}
+        [Ev | _] ->
+            Cmdline = nested(Ev, [<<"parsed">>, <<"value">>], <<"unknown">>),
+            Flags = nested(Ev, [<<"parsed">>, <<"cmdline-flags">>], #{}),
+            {Cmdline, Flags, [event_provenance(Ev)]}
     end.
 
 runtime_cmdline_and_flags(E) ->
@@ -8029,7 +8365,17 @@ interpret_node(E) ->
         <<"pcr15-event-types">> =>
             [hb_maps:get(<<"event-type">>, Ev, null, #{})
              || Ev <- Pcr15Events]
-    }.
+	    }.
+
+interpret_system(E) ->
+    hb_maps:get(<<"system">>, E, #{}, #{}).
+
+claim_system(E) ->
+    System = interpret_system(E),
+    case is_map(System) of
+        true -> System;
+        false -> #{}
+    end.
 
 int_pcr(V) when is_integer(V) -> V;
 int_pcr(V) when is_binary(V)  -> binary_to_integer(V);
@@ -8041,9 +8387,17 @@ int_pcr(_) -> -1.
 
 decode_cert(<<>>) -> {error, empty};
 decode_cert(Pem) when is_binary(Pem) ->
+    case decode_cert_with_der(Pem) of
+        {ok, Cert, _Der} -> {ok, Cert};
+        Error -> Error
+    end;
+decode_cert(_) -> {error, not_binary}.
+
+decode_cert_with_der(<<>>) -> {error, empty};
+decode_cert_with_der(Pem) when is_binary(Pem) ->
     case public_key:pem_decode(Pem) of
         [{'Certificate', Der, not_encrypted} | _] ->
-            try {ok, public_key:pkix_decode_cert(Der, otp)}
+            try {ok, public_key:pkix_decode_cert(Der, otp), Der}
             catch C:R -> {error, {C, R}}
             end;
         _ -> {error, no_certificate}
@@ -8057,7 +8411,7 @@ decode_cert(Pem) when is_binary(Pem) ->
 %% AGENTS.md demands every claim.* field populate to a concrete
 %% value OR an explicit unknown/absent; a 500 stacktrace is
 %% neither.
-decode_cert(_) -> {error, not_binary}.
+decode_cert_with_der(_) -> {error, not_binary}.
 
 decode_pub_key(<<>>) -> {error, empty};
 decode_pub_key(Pem) when is_binary(Pem) ->
@@ -10693,15 +11047,17 @@ v1_2_freshness_safe_false_first_boot_warns_test() ->
     ?assertEqual(<<"freshness-safe-false-first-boot">>,
                  maps:get(<<"code">>, F)).
 
-v1_2_freshness_safe_false_tamper_stays_critical_test() ->
-    %% Non-first-boot TPM (> 1 reset AND > 1 restart) with safe=false
-    %% -- this IS the tamper pattern.
+v1_2_freshness_safe_false_stale_counters_warns_test() ->
+    %% LapEE does not issue TPM2_Shutdown(STATE) at node shutdown, so
+    %% plausible non-first-boot counters with safe=false are expected
+    %% on appliance power cycles. This remains visible, but is not a
+    %% critical failure when the quote carries a fresh nonce.
     S = #{<<"freshness-indicator">> => <<"safe-false">>,
           <<"reset-count">>         => 5,
           <<"restart-count">>       => 17},
     F = freshness_finding(S),
-    ?assertEqual(critical, maps:get(<<"severity">>, F)),
-    ?assertEqual(<<"freshness-safe-false">>,
+    ?assertEqual(warn, maps:get(<<"severity">>, F)),
+    ?assertEqual(<<"freshness-safe-false-stale-counters">>,
                  maps:get(<<"code">>, F)).
 
 v1_2_freshness_safe_false_missing_counts_is_critical_test() ->
@@ -11003,6 +11359,45 @@ v1_2_lockdown_finding_catches_unknown_test() ->
     ?assertEqual(<<"lockdown-off-or-unknown">>,
                  maps:get(<<"code">>, FAbsent)),
     ok.
+
+%% Intel 11th-gen+ PTT ODCA chains can be split across TPM NV
+%% handles and completed by public OnDieCA intermediates. OTP's
+%% decode->encode path is not byte-preserving for every in-the-wild
+%% cert, so this regression keeps original DER bytes through path
+%% validation.
+v1_2_intel_odca_chain_preserves_original_der_test() ->
+    Path = filename:join([
+        case code:priv_dir(hb) of
+            {error, _} ->
+                filename:join(
+                    filename:dirname(
+                        filename:dirname(code:which(?MODULE))),
+                    "priv");
+            D -> D
+        end,
+        "tpm-interpret", "fixtures",
+        "intel-mtl-odca-tpm-chain.pem"]),
+    case filelib:is_file(Path) of
+        false -> ok;
+        true ->
+            {ok, Pem} = file:read_file(Path),
+            [{Ptt, PttDer}, {Kernel, KernelDer}, {Rom, RomDer}] =
+                decode_cert_bundle_with_der(Pem),
+            Db = hb_db_tpm:load(#{}),
+            Roots = maps:get(<<"cert-roots">>, Db, []),
+            Chain = validate_ek_chain(
+                {Ptt, PttDer},
+                [{Kernel, KernelDer}, {Rom, RomDer}],
+                Roots
+            ),
+            ?assertEqual(true, maps:get(<<"chain-valid">>, Chain)),
+            ?assertEqual(<<"INTEL_ODCA_ROOT_CA">>,
+                         maps:get(<<"validated-by-root-ca">>, Chain)),
+            ?assert(lists:member(
+                <<"INTEL_ODCA_MTL_00003043_CA2">>,
+                maps:get(<<"validated-via-intermediates">>, Chain)
+            ))
+    end.
 
 %% v1.2 batch 9 / paper-to-code MEDIUM-4: ek_finding must emit a
 %% critical for `ek-chain-valid = "unknown"' so an empty roots

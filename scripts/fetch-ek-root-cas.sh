@@ -141,6 +141,13 @@ EXTRA=(
   # block, not by TLS to Nuvoton.
   "NUVOTON_NPCTxxx_ECC384_LeafCA_012110.pem|insecure:https://www.nuvoton.com/security/NTC-TPM-EK-Cert/NPCTxxxECC384LeafCA012110.cer"
   "NUVOTON_NPCTxxx_ECC521_RootCA.pem|insecure:https://www.nuvoton.com/security/NTC-TPM-EK-Cert/NPCTxxxECC521RootCA.cer"
+  # Intel 11th-gen+ PTT ODCA chain anchors. The PTT/Kernel/ROM
+  # EICAs are embedded in TPM NV 0x01c00100+, while the ROM EICA
+  # points via AIA to product/intermediate/root certs published under
+  # Intel's OnDieCA endpoint.
+  "INTEL_ODCA_ROOT_CA.pem|https://tsci.intel.com/content/OnDieCA/certs/OnDie_CA_RootCA_Certificate.cer"
+  "INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem|https://tsci.intel.com/content/OnDieCA/certs/ODCA_CA2_CSME_Intermediate.cer"
+  "INTEL_ODCA_MTL_00003043_CA2.pem|https://tsci.intel.com/content/OnDieCA/certs/MTL_00003043_ODCA_CA2.cer"
 )
 for spec in "${EXTRA[@]}"; do
     IFS='|' read -r name url <<< "$spec"
