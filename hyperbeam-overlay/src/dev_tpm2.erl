@@ -2155,6 +2155,12 @@ ek_cert_source() ->
 %% High-range (vendor-specific templates) -- checked as a fallback.
 -define(EK_NV_HIGH_RSA_2048, 16#01C00012).
 -define(EK_NV_HIGH_RSA_3072, 16#01C0001A).
+%% Intel PTT 11th-gen+ uses ODCA. The EK leaf may still live at the
+%% standard EK-cert NV handle, while the embedded intermediate CA chain
+%% is provisioned in the TCG EK-chain NV range starting at 0x01C00100.
+%% Intel documents this as the EICA chain path for ODCA PTT certs.
+-define(EK_NV_CHAIN_FIRST, 16#01C00100).
+-define(EK_NV_CHAIN_LAST,  16#01C0010F).
 
 %% Fetch the EK certificate from TPM NV storage and cache it. The list
 %% below is iterated in order; the first NV index that yields a valid
@@ -2179,16 +2185,17 @@ fetch_ek_cert_from_nv(Opts) ->
         {ok, Handle, Der} ->
             Pem = der_to_pem(Der),
             persistent_term:put({dev_tpm2, ek_cert_pem}, Pem),
-            %% TCG EK Credential Profile section 2.2.1.4: adjacent
-            %% NV slot (handle + 1) holds the EK cert's INTERMEDIATE
-            %% chain as concatenated DER certs. Probe it. On Sam's
-            %% Nuvoton Framework the leaf cert is issued by
-            %% `NPCTxxx ECC384 LeafCA 012110' -- without this chain
-            %% we get chain-valid=false against the vendor-root
-            %% bundle we already ship.
+            %% TCG EK Credential Profile section 2.2.1.4: some TPMs
+            %% put the EK cert's INTERMEDIATE chain in the adjacent NV
+            %% slot (handle + 1). Intel PTT 11th-gen+ instead uses
+            %% the EK-chain NV range beginning at 0x01C00100 for its
+            %% ODCA EICA chain. Probe both shapes and carry whatever
+            %% certs are actually present; the verifier treats them as
+            %% intermediates only, never as trust anchors.
             ChainHandle = Handle + 1,
-            {ChainDers, ChainSource} =
-                fetch_ek_cert_chain(ChainHandle),
+            ChainHandles = ek_cert_chain_handles(Handle),
+            {ChainDers, ChainSource, ChainHits} =
+                fetch_ek_cert_chain(ChainHandles),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders},
                                 ChainDers),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem},
@@ -2201,6 +2208,7 @@ fetch_ek_cert_from_nv(Opts) ->
                   bytes => byte_size(Der),
                   chain_handle => iolist_to_binary(
                       io_lib:format("0x~8.16.0B", [ChainHandle])),
+                  chain_handles => format_nv_handles(ChainHits),
                   chain_cert_count => length(ChainDers),
                   chain_source => ChainSource}),
             ok;
@@ -2219,24 +2227,83 @@ fetch_ek_cert_from_nv(Opts) ->
             ok
     end.
 
-%% Read + parse the EK-cert chain slot. TCG format: one or more
-%% concatenated DER-encoded certs. Some vendors ship one
-%% intermediate; some ship the full chain down to the root. We
-%% parse whatever's there and return a list of DER cert binaries.
+%% Candidate EK-chain NV handles for a leaf EK cert at `EkHandle`.
+%% Keep adjacent first for older TPMs, then the standardized EK-chain
+%% range used by Intel ODCA PTT. De-dupe so a caller that points
+%% directly into the chain range does not double-read.
+ek_cert_chain_handles(EkHandle) ->
+    uniq_preserve_order(
+        [EkHandle + 1 | lists:seq(?EK_NV_CHAIN_FIRST, ?EK_NV_CHAIN_LAST)]).
+
+uniq_preserve_order(List) ->
+    uniq_preserve_order(List, #{}, []).
+
+uniq_preserve_order([], _Seen, Acc) ->
+    lists:reverse(Acc);
+uniq_preserve_order([H | Rest], Seen, Acc) ->
+    case maps:is_key(H, Seen) of
+        true -> uniq_preserve_order(Rest, Seen, Acc);
+        false -> uniq_preserve_order(Rest, Seen#{H => true}, [H | Acc])
+    end.
+
+%% Read + parse EK-cert chain slots. TCG format: one or more
+%% concatenated DER-encoded certs per NV index. Some vendors ship one
+%% intermediate; some ship the full chain down to the root. We parse
+%% whatever's there and return all DER cert binaries plus the NV
+%% handles that yielded parseable certificates.
+fetch_ek_cert_chain(ChainHandles) when is_list(ChainHandles) ->
+    fetch_ek_cert_chain(ChainHandles, [], [], []);
 fetch_ek_cert_chain(ChainHandle) ->
+    fetch_ek_cert_chain([ChainHandle]).
+
+fetch_ek_cert_chain([], Ders, Hits, Attempts) ->
+    case Hits of
+        [] ->
+            Source = case Attempts of
+                [] -> <<"not-probed">>;
+                _ ->
+                    iolist_to_binary(
+                        io_lib:format("probe-failed: ~s",
+                                      [chain_attempts_text(Attempts)]))
+            end,
+            {lists:reverse(Ders), Source, []};
+        _ ->
+            Source = iolist_to_binary(
+                [<<"tpm-nv:">>,
+                 string:join([binary_to_list(format_nv_handle(H))
+                              || H <- lists:reverse(Hits)], ",")]),
+            {lists:reverse(Ders), Source, lists:reverse(Hits)}
+    end;
+fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts) ->
     case lapee_tpm_nif:nv_read(ChainHandle) of
         {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
             case split_concatenated_ders(Bin) of
                 [] ->
-                    {[], <<"nv-content-empty-or-non-der">>};
-                Ders ->
-                    {Ders, <<"tpm-nv">>}
+                    fetch_ek_cert_chain(
+                        Rest, Ders, Hits,
+                        [{ChainHandle, <<"nv-content-empty-or-non-der">>}
+                         | Attempts]);
+                ChainDers ->
+                    fetch_ek_cert_chain(
+                        Rest, lists:reverse(ChainDers) ++ Ders,
+                        [ChainHandle | Hits], Attempts)
             end;
         {error, Reason} ->
-            {[], iolist_to_binary(
-                io_lib:format("probe-failed: ~s",
-                              [reason_to_text(Reason)]))}
+            fetch_ek_cert_chain(
+                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts])
     end.
+
+chain_attempts_text(Attempts) ->
+    string:join(
+        [binary_to_list(format_nv_handle(H)) ++ "="
+         ++ binary_to_list(reason_to_text(Reason))
+         || {H, Reason} <- lists:reverse(Attempts)], ",").
+
+format_nv_handles(Handles) ->
+    [format_nv_handle(H) || H <- Handles].
+
+format_nv_handle(Handle) ->
+    iolist_to_binary(io_lib:format("0x~8.16.0B", [Handle])).
 
 %% Walk a binary that should be a concatenation of DER-encoded
 %% X.509 certificates. Each cert starts with ASN.1 tag `0x30'
@@ -2729,6 +2796,14 @@ chk_binding_rejects_empty_id_test() ->
             [EmptyDigestEvent#{<<"digest">> => <<"AAAA">>}]
     },
     ?assertMatch({error, _}, chk_binding(EnvelopeShortId)).
+
+ek_cert_chain_handles_include_intel_odca_range_test() ->
+    ?assertEqual(
+        [16#01C00003 | lists:seq(16#01C00100, 16#01C0010F)],
+        ek_cert_chain_handles(16#01C00002)),
+    ?assertEqual(
+        lists:seq(16#01C00100, 16#01C0010F),
+        ek_cert_chain_handles(16#01C000FF)).
 
 %% Regression test: the verify_fun used in chk_ek_chain must reject
 %% every structural / trust failure pkix can report, while letting

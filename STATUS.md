@@ -106,3 +106,56 @@ pivots go here. No pushes unless explicitly requested.
     `pcr-replay-consistent=true`, `hashpath-continuity-verified=true`,
     `ak-pubkey-extend-verified=true`, `freshness-indicator=ok`, and
     `tme-operator-override=true`.
+
+## Live `.210` Follow-Up
+
+- Live node `http://192.168.1.210:8734` answered:
+  - `~system@1.0/all`
+  - `~tpm@2.0a/boot-attestation`
+- Live system report showed:
+  - `body.cpu.cpuid.available = true`
+  - `body.firmware.boot-guard.source = dev-cpu-msr`
+  - `body.firmware.boot-guard.raw-hex = 0x000000030000007F`
+  - Boot Guard decoded as capability=true, measured=true, verified=true,
+    tpm-success=true.
+  - EDAC reported LPDDR-class memory:
+    `Low-Power-DDR3-RAM`.
+- Live analyzer output:
+  - Dashboard:
+    `build/hyperbeam/src-edge/out/local-capture/live-210-boot-attestation/dashboard.html`
+  - Verdict remained `untrusted` because:
+    - Secure Boot is disabled/setup-mode on this boot.
+    - EK issuer is `ODCA 2 CSME MTL SOC SVN 01 PTT   CA`, but the live
+      attestation carried no intermediate EK chain bytes.
+- Root cause found:
+  - The attester read the EK leaf from `0x01C00002` and only probed the
+    adjacent chain slot `0x01C00003`.
+  - Intel PTT 11th-gen+ ODCA stores the embedded intermediate CA chain in
+    the TCG EK-chain NV range beginning at `0x01C00100`.
+- Fix implemented:
+  - `dev_tpm2` now probes both the adjacent chain slot and
+    `0x01C00100..0x01C0010F`.
+  - The verifier still treats those certs only as intermediates, never as
+    trust anchors.
+  - Added EUnit coverage for the Intel ODCA chain-handle set.
+- Validation after fix:
+  - `HB_PORT=0 rebar3 as test eunit --module=dev_tpm2`: 23 tests passed.
+  - `JOBS=18 make buildroot` passed.
+  - Rebuilt images:
+    - `build/images/lapee-usb.img`:
+      `3ce1fc6a9d672e8c2978ed77a090a19f68de5f910c4d8a50d09f5dad9360aff5`
+    - `build/images/lapee-usb-no-tme.img`:
+      `170cf584fff8f07e957b24bc0bb809b400130dace91d66d96f986a0d00f12379`
+    - `build/initramfs/initramfs-lapee.cpio.zst`:
+      `6c6c5c0e80b7230b9d9d6b19af1c3bc55f8d99c654c930a0064b5b4c04782686`
+    - `build/kernel/vmlinuz-lapee`:
+      `1cfe160c491205ac0649c1c76bbdd2d8851c33b1e012e9321a83cdc89d47f872`
+  - `IMG=build/images/lapee-usb-no-tme.img ./scripts/boot-usb-image.sh
+    --timeout 420` passed.
+  - `./scripts/interpret-local-capture.sh --label qemu-no-tme-odca-chain-fix
+    build/qemu-network-test/boot-attestation.json` passed:
+    - Dashboard:
+      `build/hyperbeam/src-edge/out/local-capture/qemu-no-tme-odca-chain-fix/dashboard.html`
+    - Expected QEMU verdict: `untrusted`, score `4`.
+    - Verified signals include wallet binding, quote signature, PCR replay,
+      hashpath continuity, freshness, and no-TME operator override.
