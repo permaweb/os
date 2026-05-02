@@ -42,6 +42,7 @@
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
 -define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
+-define(PEER_ATTESTATION_PREFIX, <<"~tpm@2.0a/peer-attestations">>).
 
 %%%============================================================================
 %%% Device API information
@@ -167,10 +168,19 @@ info(_Base, _Req, _Opts) ->
                     <<"Fetch a peer boot-attestation and credential subject, "
                       "verify the attestation, check EK certificate/public "
                       "consistency, complete MakeCredential/ActivateCredential, "
-                      "then sign a public peer-attestation containing the "
-                      "verified peer material and activation transcript.">>,
+                      "then sign and cache a public peer-attestation "
+                      "containing the verified peer material and activation "
+                      "transcript.">>,
                 <<"request">> => #{
                     <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>
+                },
+                <<"cache-paths">> => #{
+                    <<"by-id">> =>
+                        <<(?PEER_ATTESTATION_PREFIX)/binary,
+                          "/by-id/<signed-message-id>">>,
+                    <<"latest-by-peer-url-sha256">> =>
+                        <<(?PEER_ATTESTATION_PREFIX)/binary,
+                          "/latest-by-peer-url-sha256/<base64url-sha256-url>">>
                 }
             }
         }
@@ -1602,6 +1612,7 @@ verify_peer_url(Url, Req, Opts) ->
                     }
                 },
                 Opts),
+            ok = store_peer_attestation(Signed, Opts),
             Signed
         end).
 
@@ -1712,6 +1723,24 @@ ensure_ek_public_matches_cert(Subject) ->
                    #{<<"ek-public">> =>
                         <<"EK public area does not match EK certificate">>}})
     end.
+
+store_peer_attestation(Signed, Opts) ->
+    SignedID = hb_message:id(Signed, signed, Opts),
+    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
+    lists:foreach(
+        fun(Path) -> ok = hb_cache:link(SignedID, Path, Opts) end,
+        peer_attestation_cache_paths(Signed, SignedID, Opts)),
+    ok.
+
+peer_attestation_cache_paths(Signed, SignedID, Opts) ->
+    Prefix = ?PEER_ATTESTATION_PREFIX,
+    PeerURL = hb_maps:get(<<"peer-url">>, Signed, <<>>, Opts),
+    PeerURLHash = hb_util:encode(crypto:hash(sha256, PeerURL)),
+    [
+        <<Prefix/binary, "/by-id/", SignedID/binary>>,
+        <<Prefix/binary,
+          "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
+    ].
 
 cert_rsa_pub(Pem) ->
     case decode_pem_cert(Pem) of
@@ -3284,6 +3313,20 @@ info_docs_test() ->
     ?assert(maps:is_key(<<"credential-subject">>, Api)),
     ?assert(maps:is_key(<<"activate-credential">>, Api)),
     ?assert(maps:is_key(<<"verify-peer">>, Api)).
+
+peer_attestation_cache_paths_test() ->
+    Signed = #{<<"peer-url">> => <<"http://peer.example:8734">>},
+    SignedID = <<"signed-id">>,
+    PeerURLHash = hb_util:encode(
+        crypto:hash(sha256, <<"http://peer.example:8734">>)),
+    Prefix = ?PEER_ATTESTATION_PREFIX,
+    ?assertEqual(
+        [
+            <<Prefix/binary, "/by-id/", SignedID/binary>>,
+            <<Prefix/binary,
+              "/latest-by-peer-url-sha256/", PeerURLHash/binary>>
+        ],
+        peer_attestation_cache_paths(Signed, SignedID, #{})).
 
 %% The TCG event log source-path + length + format fields
 %% travel attested alongside tcg-event-log itself, so a

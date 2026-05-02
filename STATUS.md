@@ -608,3 +608,46 @@ The last full target acceptance gate remains the Update 13 run above. This
 increment is staged and host-validated, but the appliance images in
 `build/images` are still from `2026-05-02 05:14 EDT` and do not contain Update
 14 until Buildroot can run again.
+
+## Update 15
+
+Closed a protocol gap in `~tpm@2.0a/verify-peer`: the endpoint now does not
+only return a signed `lapee-peer-attestation`; it writes that signed artifact
+to the local HyperBEAM cache and links it under deterministic public paths:
+
+- `~tpm@2.0a/peer-attestations/by-id/<signed-message-id>`
+- `~tpm@2.0a/peer-attestations/latest-by-peer-url-sha256/<base64url-sha256-url>`
+
+That keeps the artifact itself simple and self-verifying while making the
+publisher's latest attestation for a peer discoverable by a stable path.
+
+Validation evidence at `2026-05-02 06:24 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 29 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 13 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+```
+
+Target rebuild/QEMU rerun for this increment remains blocked by the same local
+Docker/native-Buildroot constraints recorded in Update 14.
