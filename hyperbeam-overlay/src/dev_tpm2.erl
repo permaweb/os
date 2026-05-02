@@ -1387,6 +1387,8 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ek-cert-pem">> => ek_cert_pem(Opts),
                         <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
                         <<"ek-cert-source">> => ek_cert_source(),
+                        <<"ek-cert-chain-diagnostics">> =>
+                            ek_cert_chain_diagnostics(),
                         <<"tpm-properties">> => tpm_properties(),
                         <<"ak-pub-pem">> => ak_pub_pem(Opts),
                         <<"ak-hierarchy">> => <<"endorsement">>,
@@ -1484,6 +1486,8 @@ attestation(_Base, Req, Opts) ->
                         %% source.kind is "absent".
                         <<"ek-cert-source">> =>
                             ek_cert_source(),
+                        <<"ek-cert-chain-diagnostics">> =>
+                            ek_cert_chain_diagnostics(),
                         %% Real TPM identity straight from
                         %% TPM2_GetCapability -- manufacturer, vendor
                         %% string, spec level/revision, firmware
@@ -2066,6 +2070,16 @@ tpm_properties() ->
 ek_cert_chain_pem() ->
     persistent_term:get({dev_tpm2, ek_cert_chain_pem}, <<>>).
 
+%% Return the cached EK-chain NV diagnostics. This is non-secret TPM
+%% public-NV metadata: which handles were probed, byte counts, parsed
+%% certificate offsets, and issuer/subject key identifiers.
+ek_cert_chain_diagnostics() ->
+    persistent_term:get(
+        {dev_tpm2, ek_cert_chain_diagnostics},
+        #{<<"available">> => false,
+          <<"reason">> =>
+              <<"ensure_ak/1 has not executed yet">>}).
+
 %% Return the cached platform-probes map (captured at init_chain)
 %% formatted for the wire -- binary keys, null for unknown, ints
 %% preserved as ints. Not present if init_chain hasn't run yet.
@@ -2193,12 +2207,14 @@ fetch_ek_cert_from_nv(Opts) ->
             %% certs are actually present; the verifier treats them as
             %% intermediates only, never as trust anchors.
             ChainHandle = Handle + 1,
-            {ChainDers, ChainSource, ChainHits} =
+            {ChainDers, ChainSource, ChainHits, ChainDiagnostics} =
                 fetch_ek_cert_chain(ChainHandle),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders},
                                 ChainDers),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem},
                                 ders_to_pem(ChainDers)),
+            persistent_term:put({dev_tpm2, ek_cert_chain_diagnostics},
+                                ChainDiagnostics),
             persistent_term:put(
                 {dev_tpm2, ek_cert_source},
                 #{kind => <<"tpm-nv">>,
@@ -2215,6 +2231,12 @@ fetch_ek_cert_from_nv(Opts) ->
             persistent_term:put({dev_tpm2, ek_cert_pem}, <<>>),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders}, []),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem}, <<>>),
+            persistent_term:put(
+                {dev_tpm2, ek_cert_chain_diagnostics},
+                #{<<"available">> => false,
+                  <<"reason">> =>
+                      <<"no EK certificate was found, so no EK-chain "
+                        "handles were probed">>}),
             persistent_term:put(
                 {dev_tpm2, ek_cert_source},
                 #{kind => <<"absent">>,
@@ -2259,71 +2281,89 @@ fetch_ek_cert_chain(ChainHandles) when is_list(ChainHandles) ->
     fetch_ek_cert_chain_handles(ChainHandles).
 
 fetch_ek_cert_chain_handles(ChainHandles) ->
-    fetch_ek_cert_chain(ChainHandles, [], [], []).
+    fetch_ek_cert_chain(ChainHandles, [], [], [], []).
 
-fetch_ek_cert_chain([], Ders, Hits, Attempts) ->
-    finalize_chain_result(Ders, Hits, Attempts);
-fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts) ->
+fetch_ek_cert_chain([], Ders, Hits, Attempts, Diagnostics) ->
+    finalize_chain_result(Ders, Hits, Attempts, Diagnostics);
+fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts,
+                    Diagnostics) ->
     case read_chain_handle(ChainHandle) of
-        {ok, ChainDers} ->
+        {ok, ChainDers, Diagnostic} ->
             fetch_ek_cert_chain(
                 Rest, lists:reverse(ChainDers) ++ Ders,
-                [ChainHandle | Hits], Attempts);
-        {error, Reason} ->
+                [ChainHandle | Hits], Attempts,
+                [Diagnostic | Diagnostics]);
+        {error, Reason, Diagnostic} ->
             fetch_ek_cert_chain(
-                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts])
+                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts],
+                [Diagnostic | Diagnostics])
     end.
 
 fetch_ek_cert_chain_range(First, Last) ->
-    fetch_ek_cert_chain_range(First, Last, [], [], []).
+    fetch_ek_cert_chain_range(First, Last, [], [], [], []).
 
-fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts)
+fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts, Diagnostics)
         when Handle > Last ->
-    finalize_chain_result(Ders, Hits, Attempts);
-fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts) ->
+    finalize_chain_result(Ders, Hits, Attempts, Diagnostics);
+fetch_ek_cert_chain_range(Handle, Last, Ders, Hits, Attempts,
+                          Diagnostics) ->
     case read_chain_handle(Handle) of
-        {ok, ChainDers} ->
+        {ok, ChainDers, Diagnostic} ->
             fetch_ek_cert_chain_range(
                 Handle + 1, Last, lists:reverse(ChainDers) ++ Ders,
-                [Handle | Hits], Attempts);
-        {error, <<"nv_index_undefined">> = Reason} ->
-            %% The EK-chain range is contiguous from 0x01C00100. If
-            %% the first index is missing, this TPM has no range-chain.
-            %% If a later index is missing, the range ended.
-            finalize_chain_result(Ders, Hits, [{Handle, Reason} | Attempts]);
-        {error, Reason} ->
+                [Handle | Hits], Attempts, [Diagnostic | Diagnostics]);
+        {error, Reason, Diagnostic} ->
+            %% Do not assume the ODCA range is dense. Real machines
+            %% have already shown enough vendor-specific shape here
+            %% that probing the whole public EK-chain range once at
+            %% boot is more useful than stopping at the first missing
+            %% NV index.
             fetch_ek_cert_chain_range(
                 Handle + 1, Last, Ders, Hits,
-                [{Handle, Reason} | Attempts])
+                [{Handle, Reason} | Attempts],
+                [Diagnostic | Diagnostics])
     end.
 
 read_chain_handle(ChainHandle) ->
     case lapee_tpm_nif:nv_read(ChainHandle) of
         {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
-            case split_concatenated_ders(Bin) of
-                [] -> {error, <<"nv-content-empty-or-non-der">>};
-                ChainDers -> {ok, ChainDers}
+            Certs = split_concatenated_ders_with_offsets(Bin),
+            Diagnostic = chain_handle_diagnostic(ChainHandle, Bin, Certs),
+            case [Der || {_Offset, Der} <- Certs] of
+                [] -> {error, <<"nv-content-empty-or-non-der">>,
+                       Diagnostic};
+                ChainDers -> {ok, ChainDers, Diagnostic}
             end;
         {error, Reason} ->
-            {error, Reason}
+            {error, Reason,
+             #{
+                <<"handle">> => format_nv_handle(ChainHandle),
+                <<"status">> => <<"error">>,
+                <<"reason">> => reason_to_text(Reason),
+                <<"bytes">> => 0,
+                <<"cert-count">> => 0
+              }}
     end.
 
 merge_chain_results(Results) ->
-    Ders = lists:append([Ds || {Ds, _Source, _Hits} <- Results]),
-    Hits = lists:append([Hs || {_Ds, _Source, Hs} <- Results]),
+    Ders = lists:append([Ds || {Ds, _Source, _Hits, _Diag} <- Results]),
+    Hits = lists:append([Hs || {_Ds, _Source, Hs, _Diag} <- Results]),
+    Diagnostics = [D || {_Ds, _Source, _Hs, D} <- Results],
     case Hits of
         [] ->
             Sources =
-                [S || {_Ds, S, _Hs} <- Results, S =/= <<"not-probed">>],
+                [S || {_Ds, S, _Hs, _Diag} <- Results,
+                      S =/= <<"not-probed">>],
             {Ders, iolist_to_binary(
                 [<<"probe-failed: ">>,
                  string:join([binary_to_list(S) || S <- Sources], "; ")]),
-             []};
+             [], chain_diagnostics(Diagnostics, Ders, Hits)};
         _ ->
-            {Ders, chain_hit_source(Hits), Hits}
+            {Ders, chain_hit_source(Hits), Hits,
+             chain_diagnostics(Diagnostics, Ders, Hits)}
     end.
 
-finalize_chain_result(Ders, Hits, Attempts) ->
+finalize_chain_result(Ders, Hits, Attempts, Diagnostics) ->
     case Hits of
         [] ->
             Source = case Attempts of
@@ -2333,10 +2373,18 @@ finalize_chain_result(Ders, Hits, Attempts) ->
                         io_lib:format("probe-failed: ~s",
                                       [chain_attempts_text(Attempts)]))
             end,
-            {lists:reverse(Ders), Source, []};
+            OrderedDers = lists:reverse(Ders),
+            {OrderedDers, Source, [],
+             chain_diagnostics([#{
+                 <<"probes">> => lists:reverse(Diagnostics)
+             }], OrderedDers, [])};
         _ ->
             OrderedHits = lists:reverse(Hits),
-            {lists:reverse(Ders), chain_hit_source(OrderedHits), OrderedHits}
+            OrderedDers = lists:reverse(Ders),
+            {OrderedDers, chain_hit_source(OrderedHits), OrderedHits,
+             chain_diagnostics([#{
+                 <<"probes">> => lists:reverse(Diagnostics)
+             }], OrderedDers, OrderedHits)}
     end.
 
 chain_hit_source(Hits) ->
@@ -2357,6 +2405,90 @@ format_nv_handles(Handles) ->
 format_nv_handle(Handle) ->
     iolist_to_binary(io_lib:format("0x~8.16.0B", [Handle])).
 
+chain_diagnostics(Groups, Ders, Hits) ->
+    Probes = lists:append([maps:get(<<"probes">>, G, []) || G <- Groups]),
+    #{
+        <<"available">> => true,
+        <<"description">> =>
+            <<"Public TPM NV EK-chain diagnostics. Contains only handle "
+              "numbers, byte counts, parsed X.509 metadata, and TPM read "
+              "statuses; no private TPM material is exposed.">>,
+        <<"cert-count">> => length(Ders),
+        <<"hit-handles">> => format_nv_handles(Hits),
+        <<"probe-count">> => length(Probes),
+        <<"probes">> => Probes
+    }.
+
+chain_handle_diagnostic(Handle, Bin, Certs) ->
+    #{
+        <<"handle">> => format_nv_handle(Handle),
+        <<"status">> => case Certs of [] -> <<"no-x509-der">>; _ -> <<"ok">> end,
+        <<"bytes">> => byte_size(Bin),
+        <<"cert-count">> => length(Certs),
+        <<"certs">> => [cert_diagnostic(Offset, Der)
+                         || {Offset, Der} <- Certs]
+    }.
+
+cert_diagnostic(Offset, Der) ->
+    Base = #{
+        <<"offset">> => Offset,
+        <<"bytes">> => byte_size(Der),
+        <<"sha256">> => hb_util:encode(crypto:hash(sha256, Der))
+    },
+    try
+        Cert = public_key:pkix_decode_cert(Der, otp),
+        Tbs = Cert#'OTPCertificate'.tbsCertificate,
+        Extensions = cert_extensions(Tbs),
+        Base#{
+            <<"subject">> =>
+                cert_name_text(Tbs#'OTPTBSCertificate'.subject),
+            <<"issuer">> =>
+                cert_name_text(Tbs#'OTPTBSCertificate'.issuer),
+            <<"subject-key-identifier">> =>
+                key_identifier_text(
+                  extension_value(
+                    ?'id-ce-subjectKeyIdentifier', Extensions)),
+            <<"authority-key-identifier">> =>
+                authority_key_identifier_text(
+                  extension_value(
+                    ?'id-ce-authorityKeyIdentifier', Extensions))
+        }
+    catch Class:Reason ->
+        Base#{
+            <<"decode-error">> =>
+                iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
+        }
+    end.
+
+cert_extensions(#'OTPTBSCertificate'{extensions = Extensions})
+        when is_list(Extensions) ->
+    Extensions;
+cert_extensions(_) ->
+    [].
+
+extension_value(Oid, Extensions) ->
+    case [Value || #'Extension'{extnID = ExtOid, extnValue = Value}
+                       <- Extensions,
+                   ExtOid =:= Oid] of
+        [Value | _] -> Value;
+        [] -> null
+    end.
+
+cert_name_text(Name) ->
+    iolist_to_binary(
+        io_lib:format("~p", [public_key:pkix_normalize_name(Name)])).
+
+key_identifier_text(Identifier) when is_binary(Identifier) ->
+    hb_util:encode(Identifier);
+key_identifier_text(_) ->
+    null.
+
+authority_key_identifier_text(
+  #'AuthorityKeyIdentifier'{keyIdentifier = Identifier}) ->
+    key_identifier_text(Identifier);
+authority_key_identifier_text(Identifier) ->
+    key_identifier_text(Identifier).
+
 %% Walk a binary that should contain DER-encoded X.509 certificates.
 %% Each cert starts with ASN.1 tag `0x30' (SEQUENCE) followed by a
 %% length encoding: short form (`0x00..0x7F') or long form (`0x80 | N',
@@ -2365,11 +2497,15 @@ format_nv_handle(Handle) ->
 %% after unrecognised bytes instead of stopping at the first gap. A
 %% candidate SEQUENCE is accepted only if OTP can decode it as X.509.
 split_concatenated_ders(Bin) ->
-    split_concatenated_ders(Bin, []).
+    [Der || {_Offset, Der} <- split_concatenated_ders_with_offsets(Bin)].
 
-split_concatenated_ders(<<>>, Acc) ->
+split_concatenated_ders_with_offsets(Bin) ->
+    split_concatenated_ders_with_offsets(Bin, 0, []).
+
+split_concatenated_ders_with_offsets(<<>>, _Offset, Acc) ->
     lists:reverse(Acc);
-split_concatenated_ders(<<16#30, Rest/binary>> = Full, Acc) ->
+split_concatenated_ders_with_offsets(<<16#30, Rest/binary>> = Full,
+                                     Offset, Acc) ->
     case der_seq_total_len(Rest) of
         {ok, TotalInner, HeaderLen} ->
             CertLen = 1 + HeaderLen + TotalInner,
@@ -2377,10 +2513,13 @@ split_concatenated_ders(<<16#30, Rest/binary>> = Full, Acc) ->
                 <<Cert:CertLen/binary, Tail/binary>> ->
                     case is_x509_der(Cert) of
                         true ->
-                            split_concatenated_ders(Tail, [Cert | Acc]);
+                            split_concatenated_ders_with_offsets(
+                                Tail, Offset + CertLen,
+                                [{Offset, Cert} | Acc]);
                         false ->
                             <<_Skip, Tail2/binary>> = Full,
-                            split_concatenated_ders(Tail2, Acc)
+                            split_concatenated_ders_with_offsets(
+                                Tail2, Offset + 1, Acc)
                     end;
                 _ ->
                     %% Length reaches past the end; no complete cert
@@ -2389,10 +2528,11 @@ split_concatenated_ders(<<16#30, Rest/binary>> = Full, Acc) ->
             end;
         error ->
             <<_Skip, Tail/binary>> = Full,
-            split_concatenated_ders(Tail, Acc)
+            split_concatenated_ders_with_offsets(
+                Tail, Offset + 1, Acc)
     end;
-split_concatenated_ders(<<_Skip, Tail/binary>>, Acc) ->
-    split_concatenated_ders(Tail, Acc).
+split_concatenated_ders_with_offsets(<<_Skip, Tail/binary>>, Offset, Acc) ->
+    split_concatenated_ders_with_offsets(Tail, Offset + 1, Acc).
 
 is_x509_der(Der) ->
     try
@@ -2878,6 +3018,14 @@ split_concatenated_ders_skips_non_cert_gaps_test() ->
         [Der, Der, Der],
         split_concatenated_ders(
           <<Der/binary, 0:32/little, "gap", Der/binary, Der/binary>>)).
+
+split_concatenated_ders_reports_offsets_test() ->
+    Der = root_ca_fixture_der(),
+    Gap = <<0:32/little, "gap">>,
+    ?assertEqual(
+        [{0, Der}, {byte_size(Der) + byte_size(Gap), Der}],
+        split_concatenated_ders_with_offsets(
+          <<Der/binary, Gap/binary, Der/binary>>)).
 
 root_ca_fixture_der() ->
     Paths = [
