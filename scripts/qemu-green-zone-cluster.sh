@@ -252,6 +252,16 @@ get_json() {
         -o "$out"
 }
 
+require_request() {
+    local name="${1:?request name required}"
+    local file="$OUTDIR/requests/$name.json"
+    [[ -s "$file" ]] || {
+        echo "!! missing generated request: $file" >&2
+        ls -la "$OUTDIR/requests" >&2 || true
+        exit 1
+    }
+}
+
 start_node 1 "$IMG"
 start_node 2 "$IMG"
 start_node 3 "$IMG"
@@ -260,6 +270,9 @@ start_node 4 "$BAD_IMG"
 for n in 1 2 3 4; do wait_node "$n"; done
 
 python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+for req in init verify2 admit2 admit3 admit4 join2 join3 join4 sign1 sign2 sign3 sign4; do
+    require_request "$req"
+done
 
 post_json 1 "/~green-zone@1.0/init" \
     "$OUTDIR/requests/init.json" \
@@ -279,13 +292,11 @@ jq -e '.status == 200 and .body.type == "lapee-peer-attestation" and
        (.body."credential-activation".verified == true or
         .body."credential-activation".verified == "true")' \
     "$OUTDIR/responses/node1-verify2.json" >/dev/null
-node1_publisher=$(jq -r '.body.node.address' \
-    "$OUTDIR/responses/node1-boot-attestation.json")
 jq -n \
     --slurpfile att "$OUTDIR/responses/node1-verify2.json" \
-    --arg publisher "$node1_publisher" \
-    '{"peer-attestation": $att[0], "trusted-publisher": $publisher}' \
+    '{"peer-attestation": $att[0]}' \
     > "$OUTDIR/requests/admit2-published.json"
+require_request admit2-published
 post_json 1 "/~green-zone@1.0/admit" \
     "$OUTDIR/requests/admit2-published.json" \
     "$OUTDIR/responses/node1-admit2-published.json"

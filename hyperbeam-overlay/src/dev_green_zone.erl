@@ -53,8 +53,8 @@ info(_Base, _Req, _Opts) ->
                 <<"Deep map subset match; non-map values exact; '$any' wildcard">>,
             <<"peer-attestation-trust">> =>
                 <<"Admission can verify a live joiner-url, or reuse a signed "
-                  "lapee-peer-attestation when one of its signers is listed "
-                  "in trusted-publisher/trusted-publishers.">>
+                  "lapee-peer-attestation when one of its signers is listed in "
+                  "the ring's configured trusted publishers.">>
         }
     }}.
 
@@ -63,7 +63,8 @@ init(_Base, Req, Opts) ->
         Template = template_from(Req, Opts),
         AES = existing_or_new_aes(Req, Opts),
         Wallet = existing_or_new_wallet(Req, Opts),
-        NewOpts = install_ring(Template, AES, Wallet, Opts),
+        TrustedPublishers = trusted_publishers_from_req(Req, Opts),
+        NewOpts = install_ring(Template, AES, Wallet, TrustedPublishers, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(NewOpts)
     end, Opts).
@@ -113,7 +114,8 @@ admit(_Base, Req, Opts) ->
             <<"peer-attestation">> => PeerAttestation,
             <<"credential">> => Credential,
             <<"encrypted-wallet">> => encrypt_wallet(Wallet, AES),
-            <<"ring-address">> => wallet_address(Wallet)
+            <<"ring-address">> => wallet_address(Wallet),
+            <<"trusted-publishers">> => trusted_publishers(Opts)
         }
     end, Opts).
 
@@ -131,7 +133,11 @@ join(_Base, Req, Opts) ->
             Opts
         ),
         Template = hb_maps:get(<<"template">>, Admission, #{}, Opts),
-        NewOpts = install_ring(Template, AES, Wallet, Opts),
+        TrustedPublishers =
+            normalize_publishers(
+                hb_maps:get(<<"trusted-publishers">>, Admission, [], Opts)),
+        NewOpts = install_ring(
+            Template, AES, Wallet, TrustedPublishers, Opts),
         hb_http_server:set_opts(NewOpts#{
             <<"green-zone-last-admission">> => Admission
         }),
@@ -205,12 +211,14 @@ existing_or_new_wallet(Req, Opts) ->
             )
     end.
 
-install_ring(Template0, AES, Wallet, Opts) ->
+install_ring(Template0, AES, Wallet, TrustedPublishers, Opts) ->
     Template = clean_template(Template0, Opts),
     Identities = hb_opts:get(identities, #{}, Opts),
     Opts#{
         <<"green-zone-template">> => Template,
         <<"green-zone-initialized">> => true,
+        <<"green-zone-trusted-publishers">> =>
+            normalize_publishers(TrustedPublishers),
         <<"priv-green-zone-aes">> => AES,
         <<"priv-green-zone-wallet">> => Wallet,
         <<"identities">> => Identities#{
@@ -248,6 +256,7 @@ status_body(Opts) ->
             hb_opts:get(<<"green-zone-initialized">>, false, Opts),
         <<"identity">> => ?DEFAULT_IDENTITY,
         <<"ring-address">> => Address,
+        <<"trusted-publishers">> => trusted_publishers(Opts),
         <<"template">> =>
             hb_opts:get(<<"green-zone-template">>, #{}, Opts)
     }.
@@ -344,7 +353,7 @@ peer_attestation_from_req(Req, Opts) ->
             {JoinerURL, verify_joiner(JoinerURL, Req, Opts), null}
     end.
 
-require_trusted_publisher(PeerAttestation, Req, Opts) ->
+require_trusted_publisher(PeerAttestation, _Req, Opts) ->
     Signers = peer_attestation_signers(PeerAttestation, Opts),
     case hb_message:verify(PeerAttestation, Signers, Opts) of
         true -> ok;
@@ -353,7 +362,7 @@ require_trusted_publisher(PeerAttestation, Req, Opts) ->
                 <<"error">> => <<"peer-attestation-signature-invalid">>
             }})
     end,
-    Trusted = trusted_publishers(Req, Opts),
+    Trusted = trusted_publishers(Opts),
     case [S || S <- Signers, lists:member(S, Trusted)] of
         [Publisher | _] -> Publisher;
         [] ->
@@ -379,7 +388,13 @@ peer_attestation_signers(PeerAttestation, Opts) ->
             }})
     end.
 
-trusted_publishers(Req, Opts) ->
+trusted_publishers(Opts) ->
+    normalize_publishers(first_defined([
+        hb_opts:get(<<"green-zone-trusted-publishers">>, undefined, Opts),
+        hb_opts:get(<<"green-zone-trusted-publisher">>, undefined, Opts)
+    ])).
+
+trusted_publishers_from_req(Req, Opts) ->
     normalize_publishers(first_defined([
         hb_maps:get(<<"trusted-publishers">>, Req, undefined, Opts),
         hb_maps:get(<<"trusted-publisher">>, Req, undefined, Opts),
@@ -704,15 +719,15 @@ trusted_peer_attestation_can_be_reused_test() ->
         }
     }),
     Req = #{
-        <<"peer-attestation">> => Attestation,
-        <<"trusted-publisher">> => Publisher
+        <<"peer-attestation">> => Attestation
     },
+    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
     {<<"http://peer.example">>, TrustedAttestation, Publisher} =
-        peer_attestation_from_req(Req, #{}),
+        peer_attestation_from_req(Req, Opts),
     ?assert(match_template(
         #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
-        peer_boot_attestation_body(TrustedAttestation, #{}),
-        #{})).
+        peer_boot_attestation_body(TrustedAttestation, Opts),
+        Opts)).
 
 untrusted_peer_attestation_publisher_rejected_test() ->
     PublisherWallet = ar_wallet:new(),
@@ -720,8 +735,24 @@ untrusted_peer_attestation_publisher_rejected_test() ->
         <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
     }),
     Req = #{
+        <<"peer-attestation">> => Attestation
+    },
+    Opts = #{<<"green-zone-trusted-publishers">> => [<<"not-the-signer">>]},
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"peer-attestation-publisher-untrusted">>
+        }},
+        peer_attestation_from_req(Req, Opts)).
+
+request_supplied_publisher_trust_is_ignored_test() ->
+    PublisherWallet = ar_wallet:new(),
+    Publisher = wallet_address(PublisherWallet),
+    Attestation = signed_peer_attestation(PublisherWallet, #{
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+    }),
+    Req = #{
         <<"peer-attestation">> => Attestation,
-        <<"trusted-publisher">> => <<"not-the-signer">>
+        <<"trusted-publisher">> => Publisher
     },
     ?assertThrow(
         {green_zone_error, #{

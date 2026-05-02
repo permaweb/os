@@ -14,7 +14,9 @@ def main() -> int:
 
     att = json.loads((out / "responses/node1-boot-attestation.json").read_text())
     cmdline = att["body"]["system"]["kernel"]["cmdline"]
+    publisher = att["body"]["node"]["address"]
     (out / "requests/init.json").write_text(json.dumps({
+        "trusted-publishers": [publisher],
         "template": {
             "system": {"kernel": {"cmdline": cmdline}},
             "tpm": {"ek-cert-source": {"kind": "tpm-nv"}},

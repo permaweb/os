@@ -464,3 +464,68 @@ $ bash scripts/qemu-green-zone-cluster.sh --timeout 600
 out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
 ring-address: cWc8haLTOJLiL9ZTBVzSDkdP3j3CUs9Be_Nb7N_JGbM
 ```
+
+## Update 13
+
+Tightened stored peer-attestation trust so it is ring policy, not request
+policy:
+
+- `~green-zone@1.0/init` now stores `trusted-publishers` in the ring state.
+- Stored peer attestations are accepted only when one of their verified
+  signers is in the ring's configured publisher allow-list.
+- `admit` returns that allow-list and `join` carries it into newly admitted
+  members, keeping future reusable-attestation admissions on the same ring
+  policy.
+- The QEMU request generator configures node 1 as the trusted publisher at
+  ring initialization. The harness no longer sends `trusted-publisher` with
+  the reusable attestation admission request.
+- The harness now asserts all generated request JSON files exist before it
+  starts mutating node state, so generator failures stop at the source.
+- Added a regression test proving a caller cannot make an otherwise untrusted
+  stored attestation admissible by supplying `trusted-publisher` in the request.
+
+Validation evidence at `2026-05-02 05:19 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 9 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 28 tests passed.
+exit:0
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+exit:0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+```
+
+Fresh target/QEMU validation in this Codex sandbox is currently blocked before
+node boot:
+
+```text
+$ make buildroot JOBS=18
+permission denied while trying to connect to the docker API at
+unix:///Users/sam/.docker/run/docker.sock
+
+$ bash scripts/qemu-green-zone-cluster.sh --timeout 600
+!! swtpm failed for node 1
+Could not open UnixIO socket: Operation not permitted
+```
+
+The previously built images are timestamped after the overlay and request
+generator edits (`05:14 EDT` images, `05:11 EDT` source files), but the current
+sandbox denial prevents refreshing the four-node evidence after this final
+test-only hardening.
