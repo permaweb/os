@@ -235,43 +235,7 @@ start_node 4 "$BAD_IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
 
-python3 - "$OUTDIR" "$BASE_PORT" "$GUEST_HOST" <<'PY'
-import base64, json, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-base_port = int(sys.argv[2])
-guest_host = sys.argv[3]
-att = json.loads((out / "responses/node1-boot-attestation.json").read_text())
-cmdline = att["body"]["system"]["kernel"]["cmdline"]
-template = {
-    "system": {"kernel": {"cmdline": cmdline}},
-    "tpm": {"ek-cert-source": {"kind": "tpm-nv"}},
-}
-(out / "requests/init.json").write_text(json.dumps({"template": template}))
-ca_bundle = (
-    (out / "ca/issuercert.pem").read_text() +
-    (out / "ca/swtpm-localca-rootca-cert.pem").read_text()
-).encode()
-trusted_ca = base64.urlsafe_b64encode(ca_bundle).decode().rstrip("=")
-for n in (2, 3, 4):
-    req = {
-        "peer-url": f"http://{guest_host}:{base_port + 1}",
-        "self-url": f"http://{guest_host}:{base_port + n}",
-        "trusted-ca": trusted_ca,
-    }
-    (out / f"requests/join{n}.json").write_text(json.dumps(req))
-    (out / f"requests/admit{n}.json").write_text(json.dumps({
-        "joiner-url": f"http://{guest_host}:{base_port + n}",
-        "trusted-ca": trusted_ca,
-    }))
-for n in (1, 2, 3, 4):
-    (out / f"requests/sign{n}.json").write_text(json.dumps({
-        "body": {
-            "type": "green-zone-acceptance-signature",
-            "node": n,
-            "message": "LapEE green-zone acceptance"
-        }
-    }))
-PY
+python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 
 post_json 1 "/~green-zone@1.0/init" \
     "$OUTDIR/requests/init.json" \
