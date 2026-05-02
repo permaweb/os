@@ -2357,13 +2357,13 @@ format_nv_handles(Handles) ->
 format_nv_handle(Handle) ->
     iolist_to_binary(io_lib:format("0x~8.16.0B", [Handle])).
 
-%% Walk a binary that should be a concatenation of DER-encoded
-%% X.509 certificates. Each cert starts with ASN.1 tag `0x30'
-%% (SEQUENCE) followed by a length encoding: short form
-%% (`0x00..0x7F', length fits in the byte) or long form
-%% (`0x80 | N' where N is the number of length bytes, then N
-%% big-endian bytes of length). Return the list of whole-cert
-%% binaries. Garbage at the end (non-0x30 bytes) terminates parsing.
+%% Walk a binary that should contain DER-encoded X.509 certificates.
+%% Each cert starts with ASN.1 tag `0x30' (SEQUENCE) followed by a
+%% length encoding: short form (`0x00..0x7F') or long form (`0x80 | N',
+%% then N big-endian length bytes). Intel ODCA EK-chain NV blobs have
+%% been observed with non-cert bytes between certs, so we scan forward
+%% after unrecognised bytes instead of stopping at the first gap. A
+%% candidate SEQUENCE is accepted only if OTP can decode it as X.509.
 split_concatenated_ders(Bin) ->
     split_concatenated_ders(Bin, []).
 
@@ -2375,17 +2375,32 @@ split_concatenated_ders(<<16#30, Rest/binary>> = Full, Acc) ->
             CertLen = 1 + HeaderLen + TotalInner,
             case Full of
                 <<Cert:CertLen/binary, Tail/binary>> ->
-                    split_concatenated_ders(Tail, [Cert | Acc]);
+                    case is_x509_der(Cert) of
+                        true ->
+                            split_concatenated_ders(Tail, [Cert | Acc]);
+                        false ->
+                            <<_Skip, Tail2/binary>> = Full,
+                            split_concatenated_ders(Tail2, Acc)
+                    end;
                 _ ->
-                    %% Length lied; stop.
+                    %% Length reaches past the end; no complete cert
+                    %% starts here.
                     lists:reverse(Acc)
             end;
         error ->
-            lists:reverse(Acc)
+            <<_Skip, Tail/binary>> = Full,
+            split_concatenated_ders(Tail, Acc)
     end;
-split_concatenated_ders(_, Acc) ->
-    %% Non-0x30 byte = not a DER cert start; end of chain.
-    lists:reverse(Acc).
+split_concatenated_ders(<<_Skip, Tail/binary>>, Acc) ->
+    split_concatenated_ders(Tail, Acc).
+
+is_x509_der(Der) ->
+    try
+        public_key:pkix_decode_cert(Der, otp),
+        true
+    catch _:_ ->
+        false
+    end.
 
 %% Parse the ASN.1 length encoding at the start of `Bin' (the
 %% byte AFTER the 0x30 tag). Returns `{ok, ContentLen, LenBytes}'
@@ -2856,6 +2871,25 @@ ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
         lists:seq(16#01C00100, 16#01C001FF),
         ek_cert_chain_handles(16#01C000FF)).
+
+split_concatenated_ders_skips_non_cert_gaps_test() ->
+    Der = root_ca_fixture_der(),
+    ?assertEqual(
+        [Der, Der, Der],
+        split_concatenated_ders(
+          <<Der/binary, 0:32/little, "gap", Der/binary, Der/binary>>)).
+
+root_ca_fixture_der() ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "root-cas",
+                       "INTEL_RT.pem"]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "root-cas", "INTEL_RT.pem"])
+    ],
+    Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
+    [{'Certificate', Der, not_encrypted} | _] =
+        public_key:pem_decode(hd(Pems)),
+    Der.
 
 %% Regression test: the verify_fun used in chk_ek_chain must reject
 %% every structural / trust failure pkix can report, while letting

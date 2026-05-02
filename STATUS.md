@@ -161,3 +161,70 @@ pivots go here. No pushes unless explicitly requested.
     - Expected QEMU verdict: `untrusted`, score `4`.
     - Verified signals include wallet binding, quote signature, PCR replay,
       hashpath continuity, freshness, and no-TME operator override.
+
+## Live `.210` Disk/ODCA Chain Validation
+
+- Sam rebooted `.210` and reinserted the USB stick into this machine.
+- macOS currently reports no external physical disk in `diskutil list`, so I
+  could not do a fresh raw `cmp` against the stick without the device
+  reappearing.
+- The live `.210` attestation is still enough to rule out "wrong stale disk":
+  it contains fields added by `397b93d`, including:
+  - `chain_source = tpm-nv:0x01C00100`
+  - `chain_handles = ["0x01C00100"]`
+  - `chain_cert_count = 2`
+- Extracted live EK data showed:
+  - EK leaf issuer:
+    `ODCA 2 CSME MTL SOC SVN 01 PTT   CA`
+  - TPM-supplied chain cert 1:
+    `ODCA 2 CSME MTL SOC ROM CA`
+  - TPM-supplied chain cert 2:
+    `ODCA 2 CSME MTL SOC SVN 01 Kernel CA`
+- Diagnosis:
+  - The latest flashed image did boot.
+  - The remaining EK-chain failure is not a disk-selection problem.
+  - The Intel ODCA NV blob is still missing the PTT CA in the parsed chain.
+  - The previous parser stopped trusting raw concatenation shape too much; Intel
+    ODCA chain NV blobs may include non-cert bytes between DER certificates.
+- Fix implemented:
+  - `split_concatenated_ders/1` now scans for X.509 DER certs across non-cert
+    gaps and accepts a SEQUENCE only if OTP decodes it as an X.509 certificate.
+  - `dev_tpm_interpret` now validates EK chains by building issuer/subject paths
+    across both TPM-supplied intermediates and bundled public intermediates,
+    while keeping only self-signed roots as trust anchors.
+  - Added Intel OnDie ODCA public certs from Intel's `tsci.intel.com` AIA
+    endpoints:
+    - OnDie CA Root
+    - ODCA CA2 CSME Intermediate
+    - MTL `00003043` ODCA CA2 product CA
+- Validation:
+  - `./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge` passed.
+  - `HB_PORT=0 rebar3 as test eunit --module=dev_tpm2`: 24 tests passed.
+  - `HB_PORT=0 rebar3 as test eunit --module=dev_tpm_interpret`: 116 tests
+    passed.
+  - `JOBS=18 make buildroot && make hb-usb-image &&
+    make hb-usb-no-tme-image` passed.
+  - Final image hashes:
+    - `build/images/lapee-usb.img`:
+      `41e615b9c97bb89953d103cb578c804d93dc27bfe6f9abc86cd02cc2c6f498ae`
+    - `build/images/lapee-usb-no-tme.img`:
+      `3197142c483560b7f6386d435ef00e9c7cc0ecee40b7dede1706a2470843cdc1`
+    - `build/kernel/vmlinuz-lapee`:
+      `1cfe160c491205ac0649c1c76bbdd2d8851c33b1e012e9321a83cdc89d47f872`
+    - `build/initramfs/initramfs-lapee.cpio.zst`:
+      `bdf40dac921a18edf123918365c5fd5060daaa99494081242627b813ca0524a1`
+  - `IMG=build/images/lapee-usb-no-tme.img ./scripts/boot-usb-image.sh
+    --timeout 420` passed.
+  - `./scripts/interpret-local-capture.sh
+    --label qemu-no-tme-odca-parser-path-fix-final
+    build/qemu-network-test/boot-attestation.json` passed:
+    - Dashboard:
+      `build/hyperbeam/src-edge/out/local-capture/qemu-no-tme-odca-parser-path-fix-final/dashboard.html`
+    - Expected QEMU verdict: `untrusted`, score `4`.
+    - Verified signals include wallet binding, quote signature, PCR replay,
+      hashpath continuity, freshness, and no-TME operator override.
+- Remaining physical validation:
+  - QEMU cannot prove the Intel ODCA NV parser because `swtpm` does not expose
+    the Lenovo's real ODCA blob layout.
+  - Next real-hardware boot should show whether the gap-tolerant parser recovers
+    the missing PTT CA from `0x01C00100`.

@@ -2022,9 +2022,7 @@ validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
     %% any EK the LeafCA happens to have signed, stopping the chain
     %% short of the real manufacturer root).
     {TrueRoots, BundleIntermediates} = partition_self_signed_roots(Roots),
-    %% Filter on-TPM intermediates down to valid DER. Keep order --
-    %% TCG convention is leaf-to-root, which is also the order
-    %% `pkix_path_validation/3' expects for CertPath.
+    %% Filter on-TPM intermediates down to valid DER. Keep order.
     Cleaned = [D || D <- DerIntermediates, D =/= <<>>],
     %% First pass: try each self-signed root directly, using the
     %% on-TPM intermediates (if any) as the chain. This covers the
@@ -2033,17 +2031,17 @@ validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
     Direct = try_validate_against_roots(DerCert, Cleaned, TrueRoots, 0),
     Result = case maps:get(<<"chain-valid">>, Direct, false) of
         true  -> Direct;
-        _ when Cleaned =:= [] ->
-            %% Fallback when the on-TPM chain is empty (seen on
-            %% Nuvoton NPCT75x Framework builds where NV 0x01C00003
-            %% is undefined). For each real root, try each shipped
-            %% non-self-signed cert as the missing intermediate. See
-            %% TCG EK Credential Profile -- the manufacturer's
-            %% intermediate CA cert is itself published separately
-            %% from NV.
-            try_validate_with_bundle_intermediates(
-              DerCert, TrueRoots, BundleIntermediates, Direct);
-        _ -> Direct
+        _ ->
+            %% Fallback for partial chains. Intel ODCA PTT supplies
+            %% PTT/Kernel/ROM EICAs in TPM NV, while the ROM cert
+            %% points via AIA to public Intel OnDie intermediates. We
+            %% may need both sources. Build an issuer/subject path
+            %% across TPM-supplied intermediates and bundled public
+            %% intermediates, while keeping self-signed roots as the
+            %% only trust anchors.
+            try_validate_with_candidate_intermediates(
+              DerCert, Cleaned, TrueRoots, BundleIntermediates,
+              Direct)
     end,
     Result#{<<"intermediates-used">> => ChainLen}.
 
@@ -2064,14 +2062,49 @@ partition_self_signed_roots(Roots) ->
             end
         end, Roots).
 
-%% @doc Pair-walk the shipped anchors: for each self-signed root try
-%% each shipped non-self-signed cert as a single intermediate. Stops
-%% on the first successful chain; otherwise returns the original
-%% direct-attempt result unchanged so reason strings bubble up.
-try_validate_with_bundle_intermediates(DerCert, TrueRoots,
-                                       BundleIntermediates,
-                                       FallbackResult) ->
-    %% Pre-decode anchors.
+%% @doc Build a candidate path from the EK leaf to each real root by
+%% matching issuer->subject across on-TPM intermediates and shipped
+%% public intermediates. This handles both sparse chains (Nuvoton leaf
+%% CA lives only in our bundle) and split chains (Intel ODCA PTT/Kernel
+%%/ROM live in TPM NV while Product/CSME intermediates come from Intel).
+try_validate_with_candidate_intermediates(DerCert, TpmIntermediates,
+                                          TrueRoots,
+                                          BundleIntermediates,
+                                          FallbackResult) ->
+    case decode_der_cert(DerCert) of
+        {ok, LeafCert} ->
+            Candidates =
+                named_der_intermediates(
+                  <<"tpm-nv">>, TpmIntermediates) ++
+                named_bundle_intermediates(BundleIntermediates),
+            try_validate_built_paths(
+              DerCert, LeafCert, TrueRoots, Candidates,
+              FallbackResult);
+        error ->
+            FallbackResult
+    end.
+
+decode_der_cert(Der) ->
+    try {ok, public_key:pkix_decode_cert(Der, otp)}
+    catch _:_ -> error
+    end.
+
+named_der_intermediates(Source, Ders) ->
+    [{Source, Der, Cert}
+     || Der <- Ders,
+        {ok, Cert} <- [decode_der_cert(Der)]].
+
+named_bundle_intermediates(BundleIntermediates) ->
+    [{IName, IDer, ICert}
+     || I <- BundleIntermediates,
+        IName <- [maps:get(<<"name">>, I, <<"unknown-intermediate">>)],
+        IPem <- [maps:get(<<"pem">>, I, <<>>)],
+        {ok, ICert} <- [decode_cert(IPem)],
+        IDer <- [safe_der_encode(ICert)],
+        IDer =/= <<>>].
+
+try_validate_built_paths(DerCert, LeafCert, TrueRoots,
+                         Candidates, FallbackResult) ->
     DecodedRoots = [
         {Name, Cert} ||
         R <- TrueRoots,
@@ -2079,46 +2112,82 @@ try_validate_with_bundle_intermediates(DerCert, TrueRoots,
         Pem  <- [maps:get(<<"pem">>, R, <<>>)],
         {ok, Cert} <- [decode_cert(Pem)]
     ],
-    %% Pre-decode intermediates to DER once.
-    DecodedInters = [
-        {IName, IDer} ||
-        I <- BundleIntermediates,
-        IName <- [maps:get(<<"name">>, I, <<"unknown-intermediate">>)],
-        IPem <- [maps:get(<<"pem">>, I, <<>>)],
-        {ok, ICert} <- [decode_cert(IPem)],
-        IDer <- [safe_der_encode(ICert)],
-        IDer =/= <<>>
-    ],
-    walk_bundle_pairs(DerCert, DecodedRoots, DecodedInters, FallbackResult).
+    walk_built_paths(
+      DerCert, LeafCert, DecodedRoots, length(DecodedRoots),
+      Candidates, FallbackResult).
 
-walk_bundle_pairs(_DerCert, [], _Inters, FallbackResult) ->
+walk_built_paths(_DerCert, _LeafCert, [], _RootCount, _Candidates,
+                 FallbackResult) ->
     FallbackResult;
-walk_bundle_pairs(DerCert, [{AnchorName, AnchorCert} | Rest],
-                  Inters, FallbackResult) ->
-    case try_pair_chain(DerCert, AnchorCert, AnchorName, Inters) of
-        {ok, Hit} -> Hit;
-        not_found -> walk_bundle_pairs(DerCert, Rest, Inters,
-                                        FallbackResult)
+walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert} | Rest],
+                 RootCount, Candidates, FallbackResult) ->
+    case build_intermediate_path(LeafCert, AnchorCert, Candidates) of
+        {ok, PathDers, PathNames} ->
+            case validate_against_one_root(DerCert, PathDers, AnchorCert) of
+                true ->
+                    #{
+                        <<"validated-by-root-ca">> => AnchorName,
+                        <<"validated-via-intermediates">> => PathNames,
+                        <<"root-ca-count">> => RootCount,
+                        <<"chain-valid">> => true,
+                        <<"reason">> =>
+                            iolist_to_binary(
+                              io_lib:format(
+                                "chain validates against ~s using ~B "
+                                "intermediates",
+                                [binary_to_list(AnchorName),
+                                 length(PathDers)]))
+                    };
+                false ->
+                    walk_built_paths(
+                      DerCert, LeafCert, Rest, RootCount, Candidates,
+                      FallbackResult)
+            end;
+        not_found ->
+            walk_built_paths(
+              DerCert, LeafCert, Rest, RootCount, Candidates,
+              FallbackResult)
     end.
 
-try_pair_chain(_DerCert, _AnchorCert, _AnchorName, []) ->
-    not_found;
-try_pair_chain(DerCert, AnchorCert, AnchorName,
-               [{InterName, InterDer} | Rest]) ->
-    case validate_against_one_root(DerCert, [InterDer], AnchorCert) of
+build_intermediate_path(LeafCert, RootCert, Candidates) ->
+    build_intermediate_path(LeafCert, RootCert, Candidates, [], []).
+
+build_intermediate_path(CurrentCert, RootCert, Candidates,
+                        AccDers, AccNames) ->
+    Issuer = cert_issuer(CurrentCert),
+    case same_name(Issuer, cert_subject(RootCert)) of
         true ->
-            {ok, #{
-                <<"validated-by-root-ca">> => AnchorName,
-                <<"validated-via-intermediate">> => InterName,
-                <<"root-ca-count">>        => 0,
-                <<"chain-valid">>          => true,
-                <<"reason">>               =>
-                    <<"chain validates against ", AnchorName/binary,
-                      " via bundled intermediate ", InterName/binary>>
-            }};
+            {ok, AccDers, AccNames};
         false ->
-            try_pair_chain(DerCert, AnchorCert, AnchorName, Rest)
+            Matches =
+                [C || C = {_Name, _Der, Cert} <- Candidates,
+                      same_name(cert_subject(Cert), Issuer)],
+            try_candidate_paths(
+              Matches, RootCert, Candidates, AccDers, AccNames)
     end.
+
+try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->
+    not_found;
+try_candidate_paths([{Name, Der, Cert} = Candidate | Rest],
+                    RootCert, Candidates, AccDers, AccNames) ->
+    Remaining = [C || C <- Candidates, C =/= Candidate],
+    case build_intermediate_path(
+           Cert, RootCert, Remaining, [Der | AccDers],
+           [Name | AccNames]) of
+        {ok, _PathDers, _PathNames} = Hit ->
+            Hit;
+        not_found ->
+            try_candidate_paths(
+              Rest, RootCert, Candidates, AccDers, AccNames)
+    end.
+
+cert_subject(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.subject).
+
+cert_issuer(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.issuer).
+
+same_name(A, B) -> A =:= B.
 
 try_validate_against_roots(_DerCert, _Chain, [], Count) ->
     #{
