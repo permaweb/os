@@ -10,10 +10,12 @@
 #include <tss2/tss2_mu.h>
 #include <tss2/tss2_rc.h>
 #include <tss2/tss2_tctildr.h>
+#include <openssl/evp.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "tpm_helpers.h"
 
@@ -44,6 +46,9 @@
  * calls. No app-level bookkeeping.
  */
 static ESYS_TR g_auth_session = ESYS_TR_NONE;
+static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14};
+#define LAPEE_AK_POLICY_PCR_COUNT \
+    (sizeof(g_ak_policy_pcrs) / sizeof(g_ak_policy_pcrs[0]))
 
 static TSS2_RC
 lapee_ensure_auth_session(void)
@@ -145,6 +150,192 @@ lapee_policy_secret_endorsement_session(ESYS_TR *out_session)
     }
     *out_session = session;
     return TSS2_RC_SUCCESS;
+}
+
+static TPML_PCR_SELECTION
+lapee_ak_policy_selection(void)
+{
+    TPML_PCR_SELECTION sel = {
+        .count = 1,
+        .pcrSelections = {
+            {
+                .hash = TPM2_ALG_SHA256,
+                .sizeofSelect = 3,
+                .pcrSelect = {0, 0, 0},
+            }
+        }
+    };
+    for (size_t i = 0; i < LAPEE_AK_POLICY_PCR_COUNT; i++) {
+        int pcr = g_ak_policy_pcrs[i];
+        sel.pcrSelections[0].pcrSelect[pcr / 8] |= (1 << (pcr % 8));
+    }
+    return sel;
+}
+
+static TSS2_RC
+lapee_ak_policy_pcr_digest(TPM2B_DIGEST *out)
+{
+    TPML_PCR_SELECTION sel = lapee_ak_policy_selection();
+    UINT32 update_counter = 0;
+    TPML_PCR_SELECTION *out_sel = NULL;
+    TPML_DIGEST *digests = NULL;
+    TSS2_RC rc = Esys_PCR_Read(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &sel, &update_counter, &out_sel, &digests);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+    if (!digests || digests->count != LAPEE_AK_POLICY_PCR_COUNT) {
+        if (out_sel) Esys_Free(out_sel);
+        if (digests) Esys_Free(digests);
+        return TSS2_ESYS_RC_BAD_VALUE;
+    }
+
+    EVP_MD_CTX *md = EVP_MD_CTX_new();
+    if (!md) {
+        if (out_sel) Esys_Free(out_sel);
+        Esys_Free(digests);
+        return TSS2_ESYS_RC_MEMORY;
+    }
+    unsigned int len = 0;
+    int ok = EVP_DigestInit_ex(md, EVP_sha256(), NULL) == 1;
+    for (size_t i = 0; ok && i < LAPEE_AK_POLICY_PCR_COUNT; i++) {
+        ok = EVP_DigestUpdate(md, digests->digests[i].buffer,
+                              digests->digests[i].size) == 1;
+    }
+    ok = ok && EVP_DigestFinal_ex(md, out->buffer, &len) == 1;
+    EVP_MD_CTX_free(md);
+    if (out_sel) Esys_Free(out_sel);
+    Esys_Free(digests);
+    if (!ok || len > sizeof(out->buffer)) return TSS2_ESYS_RC_GENERAL_FAILURE;
+    out->size = (UINT16)len;
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC
+lapee_policy_session_start(TPM2_SE type, ESYS_TR *out_session)
+{
+    TPMT_SYM_DEF symmetric = { .algorithm = TPM2_ALG_NULL };
+    return Esys_StartAuthSession(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        type,
+        &symmetric,
+        TPM2_ALG_SHA256,
+        out_session);
+}
+
+static TSS2_RC
+lapee_policy_pcr_step(ESYS_TR session)
+{
+    TPM2B_DIGEST pcr_digest = { .size = 0 };
+    TPML_PCR_SELECTION sel = lapee_ak_policy_selection();
+    TSS2_RC rc = lapee_ak_policy_pcr_digest(&pcr_digest);
+    if (rc == TSS2_RC_SUCCESS) {
+        rc = Esys_PolicyPCR(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            &pcr_digest,
+            &sel);
+    }
+    return rc;
+}
+
+static TSS2_RC
+lapee_policy_digest(ESYS_TR session, TPM2B_DIGEST *out)
+{
+    TPM2B_DIGEST *policy_digest = NULL;
+    TSS2_RC rc = Esys_PolicyGetDigest(
+        g_esys_ctx,
+        session,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &policy_digest);
+    if (rc == TSS2_RC_SUCCESS) {
+        *out = *policy_digest;
+        Esys_Free(policy_digest);
+    }
+    return rc;
+}
+
+static TSS2_RC
+lapee_ak_policy_branch_digest(bool activate_credential, TPM2B_DIGEST *out)
+{
+    ESYS_TR session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_policy_session_start(TPM2_SE_TRIAL, &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    rc = lapee_policy_pcr_step(session);
+    if (rc == TSS2_RC_SUCCESS && activate_credential) {
+        rc = Esys_PolicyCommandCode(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            TPM2_CC_ActivateCredential);
+    }
+    if (rc == TSS2_RC_SUCCESS) rc = lapee_policy_digest(session, out);
+    Esys_FlushContext(g_esys_ctx, session);
+    return rc;
+}
+
+static TSS2_RC
+lapee_ak_policy_branches(TPML_DIGEST *out)
+{
+    out->count = 2;
+    TSS2_RC rc = lapee_ak_policy_branch_digest(false, &out->digests[0]);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+    return lapee_ak_policy_branch_digest(true, &out->digests[1]);
+}
+
+static TSS2_RC
+lapee_ak_policy_session(TPM2_SE type, bool activate_credential,
+                        ESYS_TR *out_session,
+                        TPM2B_DIGEST *out_policy_digest)
+{
+    TPML_DIGEST branches;
+    TSS2_RC rc = lapee_ak_policy_branches(&branches);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    ESYS_TR session = ESYS_TR_NONE;
+    rc = lapee_policy_session_start(type, &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    rc = lapee_policy_pcr_step(session);
+    if (rc == TSS2_RC_SUCCESS && activate_credential) {
+        rc = Esys_PolicyCommandCode(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            TPM2_CC_ActivateCredential);
+    }
+    if (rc == TSS2_RC_SUCCESS) {
+        rc = Esys_PolicyOR(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            &branches);
+    }
+    if (rc == TSS2_RC_SUCCESS && out_policy_digest) {
+        rc = lapee_policy_digest(session, out_policy_digest);
+    }
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, session);
+        return rc;
+    }
+    *out_session = session;
+    return TSS2_RC_SUCCESS;
+}
+
+static ERL_NIF_TERM
+lapee_policy_pcrs_term(ErlNifEnv *env)
+{
+    ERL_NIF_TERM list = enif_make_list(env, 0);
+    for (int i = (int)LAPEE_AK_POLICY_PCR_COUNT - 1; i >= 0; i--) {
+        list = enif_make_list_cell(
+            env, enif_make_int(env, g_ak_policy_pcrs[i]), list);
+    }
+    return list;
 }
 
 static int
@@ -567,14 +758,16 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return enif_make_badarg(env);
     }
 
-    /* Template for restricted RSA-2048 signing key (PSS, SHA-256).
-     *
-     * NODA is important for appliance attestations: this AK uses the
-     * build's empty object auth and must keep serving quotes even if the
-     * TPM's dictionary-attack counter is locked by unrelated firmware/user
-     * activity. Without TPMA_OBJECT_NODA, real Framework TPMs reject Quote
-     * with TPM_RC_LOCKOUT once global DA lockout is active.
-     */
+    TPM2B_DIGEST ak_policy = { .size = 0 };
+    ESYS_TR trial_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_ak_policy_session(
+        TPM2_SE_TRIAL, false, &trial_session, &ak_policy);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK trial)", rc);
+    }
+    Esys_FlushContext(g_esys_ctx, trial_session);
+
+    /* Template for restricted RSA-2048 signing key (PSS, SHA-256). */
     TPM2B_PUBLIC in_public = {
         .size = 0,
         .publicArea = {
@@ -582,7 +775,8 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             .nameAlg = TPM2_ALG_SHA256,
             .objectAttributes =
                 TPMA_OBJECT_FIXEDTPM | TPMA_OBJECT_FIXEDPARENT |
-                TPMA_OBJECT_SENSITIVEDATAORIGIN | TPMA_OBJECT_USERWITHAUTH |
+                TPMA_OBJECT_SENSITIVEDATAORIGIN |
+                TPMA_OBJECT_ADMINWITHPOLICY |
                 TPMA_OBJECT_NODA | TPMA_OBJECT_RESTRICTED |
                 TPMA_OBJECT_SIGN_ENCRYPT,
             .authPolicy = { .size = 0 },
@@ -598,6 +792,7 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             .unique.rsa = { .size = 0, .buffer = {0} }
         }
     };
+    in_public.publicArea.authPolicy = ak_policy;
 
     TPM2B_SENSITIVE_CREATE in_sensitive = { .size = 0 };
     TPM2B_DATA outside_info = { .size = 0 };
@@ -622,16 +817,16 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     /* Paper P4 as with the EK primary creation -- shandle1=PASSWORD
      * authenticates the Endorsement hierarchy, shandle2=HMAC session
      * integrity-protects + encrypts sensitive parameters. */
-    TSS2_RC rc = Esys_CreatePrimary(g_esys_ctx,
-                                    ESYS_TR_RH_ENDORSEMENT,
-                                    ESYS_TR_PASSWORD,
-                                    lapee_enc_session(),
-                                    ESYS_TR_NONE,
-                                    &in_sensitive, &in_public,
-                                    &outside_info, &creation_pcr,
-                                    &ak_tr, &out_public,
-                                    &creation_data, &creation_hash,
-                                    &creation_ticket);
+    rc = Esys_CreatePrimary(g_esys_ctx,
+                            ESYS_TR_RH_ENDORSEMENT,
+                            ESYS_TR_PASSWORD,
+                            lapee_enc_session(),
+                            ESYS_TR_NONE,
+                            &in_sensitive, &in_public,
+                            &outside_info, &creation_pcr,
+                            &ak_tr, &out_public,
+                            &creation_data, &creation_hash,
+                            &creation_ticket);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_CreatePrimary(AK)", rc);
     }
@@ -684,6 +879,16 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "qualified_name"),
                       qname_term, &map);
+    ERL_NIF_TERM policy_term;
+    unsigned char *policy_out =
+        enif_make_new_binary(env, ak_policy.size, &policy_term);
+    memcpy(policy_out, ak_policy.buffer, ak_policy.size);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "policy_digest"),
+                      policy_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "policy_pcrs"),
+                      lapee_policy_pcrs_term(env), &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
@@ -821,9 +1026,16 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             env, "Tss2_MU_TPM2B_ENCRYPTED_SECRET_Unmarshal", rc);
     }
 
-    ESYS_TR policy_session = ESYS_TR_NONE;
-    rc = lapee_policy_secret_endorsement_session(&policy_session);
+    ESYS_TR ak_policy_session = ESYS_TR_NONE;
+    rc = lapee_ak_policy_session(
+        TPM2_SE_POLICY, true, &ak_policy_session, NULL);
     if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
+    }
+    ESYS_TR ek_policy_session = ESYS_TR_NONE;
+    rc = lapee_policy_secret_endorsement_session(&ek_policy_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
         return lapee_make_tss_error(
             env, "Esys_PolicySecret(ENDORSEMENT)", rc);
     }
@@ -833,13 +1045,14 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         g_esys_ctx,
         (ESYS_TR)ak_tr,
         (ESYS_TR)ek_tr,
-        ESYS_TR_PASSWORD,
-        policy_session,
+        ak_policy_session,
+        ek_policy_session,
         lapee_enc_session(),
         &credential_blob,
         &enc_secret,
         &cert_info);
-    Esys_FlushContext(g_esys_ctx, policy_session);
+    Esys_FlushContext(g_esys_ctx, ak_policy_session);
+    Esys_FlushContext(g_esys_ctx, ek_policy_session);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_ActivateCredential", rc);
     }
@@ -908,19 +1121,20 @@ nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_ATTEST *quoted = NULL;
     TPMT_SIGNATURE *signature = NULL;
 
-    /* Paper P4: shandle1=PASSWORD authorizes use of the AK's user
-     * auth (empty), shandle2=HMAC session integrity-protects the
-     * request and encrypts the TPMS_ATTEST response. Matters for
-     * attestation because an attacker on the LPC bus could
-     * otherwise silently substitute a stale-but-valid quote from
-     * a prior nonce into a current request's response. */
-    TSS2_RC rc = Esys_Quote(g_esys_ctx,
-                            (ESYS_TR)esys_tr,
-                            ESYS_TR_PASSWORD,
-                            lapee_enc_session(),
-                            ESYS_TR_NONE,
-                            &qual, &scheme, &sel,
-                            &quoted, &signature);
+    ESYS_TR ak_policy_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_ak_policy_session(
+        TPM2_SE_POLICY, false, &ak_policy_session, NULL);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
+    }
+    rc = Esys_Quote(g_esys_ctx,
+                    (ESYS_TR)esys_tr,
+                    ak_policy_session,
+                    lapee_enc_session(),
+                    ESYS_TR_NONE,
+                    &qual, &scheme, &sel,
+                    &quoted, &signature);
+    Esys_FlushContext(g_esys_ctx, ak_policy_session);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_Quote", rc);
     }
@@ -1029,10 +1243,19 @@ nif_sign(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     };
 
     TPMT_SIGNATURE *sig = NULL;
+    ESYS_TR ak_policy_session = ESYS_TR_NONE;
+    rc = lapee_ak_policy_session(
+        TPM2_SE_POLICY, false, &ak_policy_session, NULL);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_Free(digest);
+        Esys_Free(validation);
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
+    }
     rc = Esys_Sign(g_esys_ctx,
                    (ESYS_TR)esys_tr,
-                   ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                   ak_policy_session, ESYS_TR_NONE, ESYS_TR_NONE,
                    digest, &scheme, validation, &sig);
+    Esys_FlushContext(g_esys_ctx, ak_policy_session);
     Esys_Free(digest);
     Esys_Free(validation);
     if (rc != TSS2_RC_SUCCESS) {

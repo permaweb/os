@@ -1,5 +1,109 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 21
+
+Implemented and verified the AK/PCR policy fix from
+`AK_PCR_POLICY_ISSUE.md`.
+
+- The AK is no longer authorized by empty password auth. It is created with a
+  non-empty `authPolicy` under `ADMINWITHPOLICY`.
+- The AK policy is a TPM `PolicyOR` over two branches:
+  1. `PolicyPCR([0,1,7,10,11,14])` for quote/sign operations.
+  2. `PolicyPCR([0,1,7,10,11,14])` plus
+     `PolicyCommandCode(ActivateCredential)` for credential activation.
+- PCR15 remains excluded from AK creation policy because LapEE extends PCR15
+  later with runtime node/subject evidence.
+- `~tpm@2.0a/verify` now rejects empty AK policies, mismatched reported
+  policy digests, wrong policy PCR sets, and AK policies that cannot be
+  recomputed from the quoted PCRs.
+
+Validation:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge && rebar3 eunit --module=dev_tpm2
+All 39 tests passed.
+
+$ make buildroot JOBS=18 && make hb-usb-no-tme-image WIFI=0
+build/images/lapee-usb-no-tme.img: 247463936 bytes
+
+$ ./scripts/boot-usb-image.sh --img build/images/lapee-usb-no-tme.img --timeout 420
+>> HB /info answered on http://127.0.0.1:18734
+>> fetching boot attestation
+>> fetching system report
+=== QEMU boot test PASSED ===
+
+$ python3 /tmp/check-ak-policy-or.py
+AK policy PCRs [0, 1, 7, 10, 11, 14]
+authPolicy bytes 32
+authPolicy == reported True
+authPolicy == recomputed PCR/PCR+ActivateCredential PolicyOR True
+
+$ ./scripts/interpret-local-capture.sh \
+    build/qemu-network-test/boot-attestation.json \
+    --label qemu-ak-policy-or
+verdict = untrusted (score 4)
+criticals=2 warnings=2
+```
+
+The QEMU verdict is expected for swtpm/OVMF, but the analyzer completed and
+the failure is not the AK/PCR policy.
+
+Four-node green-zone acceptance gate:
+
+```text
+$ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
+    --img build/images/lapee-usb-no-tme.img --timeout 600
+>> node 1 initialized green-zone R0nd-auQLeIUFKKfMZacmIGN8pwQB1cUt-Htr09csbo
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone R0nd-auQLeIUFKKfMZacmIGN8pwQB1cUt-Htr09csbo
+>> node 2 signed as green-zone R0nd-auQLeIUFKKfMZacmIGN8pwQB1cUt-Htr09csbo
+>> node 3 signed as green-zone R0nd-auQLeIUFKKfMZacmIGN8pwQB1cUt-Htr09csbo
+
+=== green-zone QEMU cluster PASSED ===
+```
+
+## Update 20
+
+Resumed in unattended mode after the real-hardware `.207` / `.210` retry.
+
+- Pushed `20fe561 Fix TPM EK chain validation for peer admission` to
+  `origin/feat/ak-ek-trust`.
+- Confirmed the live no-TME image can fetch both boot attestations and that
+  both nodes report the same PCR11 / kernel cmdline. Both also expose
+  `secure-boot-measured=true` when `~tpm-interpret@1.0/summary` is run over
+  the boot-attestation envelope, although the current green-zone template
+  surface still matches the raw boot-attestation body rather than derived
+  interpret claims.
+- The real-hardware join now passes the previous EK-chain blocker and reaches
+  admission validation. It currently fails on `validity` because one laptop's
+  hardware clock is badly skewed. I am leaving the clock check intact; for
+  testing, use a deliberately large `green-zone-clock-skew-seconds` configured
+  in node opts or fix the hardware RTC before retrying.
+- Read `AK_PCR_POLICY_ISSUE.md`. Current priority is binding the deterministic
+  AK to measured boot state by putting a TPM PolicyPCR digest into the AK
+  public template and using a live PolicyPCR session for AK operations.
+
+Implementation direction for the AK/PCR fix:
+
+1. Keep the existing EK/AK credential-activation protocol shape.
+2. Add minimal native helpers for:
+   - building the security PCR selection,
+   - computing a trial-session PolicyPCR digest,
+   - starting a live PolicyPCR session for AK authorization.
+3. Create the AK without `USERWITHAUTH` and with `authPolicy =
+   PolicyPCR(current security PCRs)`.
+4. Authorize `Quote` and `ActivateCredential` with the live PolicyPCR session,
+   not password auth.
+5. Do not weaken admission freshness or clock policy while doing this.
+
 ## Update 19
 
 Reworked `~green-zone@1.0` around named ring definitions rather than one

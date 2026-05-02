@@ -40,8 +40,15 @@
 
 %% Default PCR that HyperBEAM extends with the node-message identity.
 -define(NODE_IDENTITY_PCR, 15).
+%% PCRs that gate the AK. PCR 15 is deliberately excluded because LapEE
+%% extends it with runtime node/subject evidence after AK creation.
+-define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14]).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
+-define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
+-define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
+-define(TPM_CC_POLICY_OR, 16#00000171).
+-define(TPM_CC_POLICY_PCR, 16#0000017F).
 -define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
 -define(PEER_ATTESTATION_PREFIX, <<"~tpm@2.0a/peer-attestations">>).
 -define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
@@ -494,6 +501,9 @@ verify(Base, Req, Opts) ->
                    <<"core">>),
         safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
                    <<"TPM2_Quote signature + pcrDigest + nonce all valid">>,
+                   <<"core">>),
+        safely_run(fun() -> chk_ak_policy_bound(Envelope) end,
+                   <<"AK authPolicy is PCR-bound to the quoted boot state">>,
                    <<"core">>),
         safely_run(fun() -> chk_event_log_replay(Envelope) end,
                    <<"Runtime event log replay of PCR 15 matches quoted value">>,
@@ -1096,6 +1106,87 @@ compute_pcr_digest(Indices, PcrMap) ->
             <<>>, Indices),
     crypto:hash(sha256, Concat).
 
+%%---- check 3: AK authPolicy binds the AK to quoted PCRs ---------------
+chk_ak_policy_bound(Envelope) ->
+    AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, #{})),
+    ReportedPolicy =
+        safe_decode(hb_maps:get(<<"ak-policy-digest">>, Envelope, <<>>, #{})),
+    ReportedPcrs =
+        normalize_pcr_indices(
+            hb_maps:get(<<"ak-policy-pcrs">>, Envelope, [], #{})),
+    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
+    case tpm2b_public_auth_policy(AkPublic) of
+        {ok, <<>>} ->
+            {error, <<"AK authPolicy is empty">>};
+        {ok, Policy} when byte_size(Policy) =:= 32 ->
+            ExpectedPolicy = ak_policy_digest_result(?AK_POLICY_PCRS, PcrMap),
+            case {Policy, ReportedPolicy, ReportedPcrs, ExpectedPolicy} of
+                {P, P, ?AK_POLICY_PCRS, {ok, P}} ->
+                    {ok, <<"AK authPolicy matches the LapEE PCR policy">>};
+                {_, _, _, {missing_pcr, I}} ->
+                    {error, iolist_to_binary(
+                        io_lib:format("quote omitted AK policy PCR ~B", [I]))};
+                {_, _, _, invalid} ->
+                    {error, <<"could not compute AK policy digest">>};
+                {P, R, _, _} when P =/= R ->
+                    {error, <<"reported AK policy digest does not match "
+                              "AK public authPolicy">>};
+                {_, _, Pcrs, _} when Pcrs =/= ?AK_POLICY_PCRS ->
+                    {error, <<"reported AK policy PCR set does not match "
+                              "LapEE AK policy">>};
+                _ ->
+                    {error, <<"AK authPolicy does not match quoted PCR state">>}
+            end;
+        {ok, _} ->
+            {error, <<"AK authPolicy has unexpected size">>};
+        {error, Why} ->
+            {error, iolist_to_binary(
+                io_lib:format("bad AK TPMT_PUBLIC authPolicy: ~p", [Why]))}
+    end.
+
+ak_policy_digest(Pcrs, PcrMap) ->
+    PcrPolicy = policy_pcr_digest(Pcrs, PcrMap),
+    ActivatePolicy =
+        crypto:hash(
+            sha256,
+            <<PcrPolicy/binary,
+              ?TPM_CC_POLICY_COMMAND_CODE:32/unsigned-big,
+              ?TPM_CC_ACTIVATE_CREDENTIAL:32/unsigned-big>>),
+    crypto:hash(
+        sha256,
+        <<0:256, ?TPM_CC_POLICY_OR:32/unsigned-big,
+          PcrPolicy/binary, ActivatePolicy/binary>>).
+
+policy_pcr_digest(Pcrs, PcrMap) ->
+    PcrDigest = compute_pcr_digest(Pcrs, PcrMap),
+    Selection = policy_pcr_selection(Pcrs),
+    crypto:hash(sha256, <<0:256, ?TPM_CC_POLICY_PCR:32/unsigned-big,
+                          Selection/binary, PcrDigest/binary>>).
+
+policy_pcr_selection(Pcrs) ->
+    Selected = normalize_pcr_indices(Pcrs),
+    SelectBytes =
+        << <<(pcr_select_byte(Selected, Byte)):8/unsigned>>
+           || Byte <- lists:seq(0, 2) >>,
+    <<1:32/unsigned-big, 16#000B:16/unsigned-big, 3:8/unsigned-big,
+      SelectBytes/binary>>.
+
+pcr_select_byte(Pcrs, Byte) ->
+    lists:foldl(
+        fun(I, Acc) when I div 8 =:= Byte -> Acc bor (1 bsl (I rem 8));
+           (_, Acc) -> Acc
+        end,
+        0,
+        Pcrs).
+
+ak_policy_digest_result(Pcrs, PcrMap) ->
+    try {ok, ak_policy_digest(Pcrs, PcrMap)}
+    catch
+        throw:{missing_pcr, I} -> {missing_pcr, I};
+        _:_ -> invalid
+    end.
+
 %%---- check 3: event-log replay matches quoted PCR 15 ------------------
 %%
 %% Require at least one PCR-15 event. With zero events, `Replayed'
@@ -1615,6 +1706,8 @@ credential_subject_body(Opts) ->
         <<"ak-public">> => ak_public(Opts),
         <<"ak-name">> => ak_name(Opts),
         <<"ak-qualified-name">> => ak_qualified_name(Opts),
+        <<"ak-policy-digest">> => ak_policy_digest(Opts),
+        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
         <<"tpm-properties">> => tpm_properties()
     }.
 
@@ -1977,13 +2070,16 @@ ensure_subject_matches_boot(Subject, BootEnv) ->
         {<<"ak-name">>, <<"AK name">>},
         {<<"ak-public">>, <<"AK public area">>},
         {<<"ak-pub-pem">>, <<"AK public PEM">>},
-        {<<"ak-qualified-name">>, <<"AK qualified name">>}
+        {<<"ak-qualified-name">>, <<"AK qualified name">>},
+        {<<"ak-policy-digest">>, <<"AK policy digest">>},
+        {<<"ak-policy-pcrs">>, <<"AK policy PCR set">>}
     ],
     lists:foreach(
         fun({Key, Label}) ->
             case {hb_maps:get(Key, Subject, <<>>, #{}),
                   hb_maps:get(Key, BootEnv, <<>>, #{})} of
                 {V, V} when is_binary(V), byte_size(V) > 0 -> ok;
+                {V, V} when is_list(V), V =/= [] -> ok;
                 _ ->
                     throw({boot_attestation_error,
                            #{<<"credential-subject">> =>
@@ -2128,6 +2224,17 @@ tpm2b_public_name(Tpm2BPublic) ->
         {error, _} = E -> E
     end.
 
+tpm2b_public_auth_policy(Tpm2BPublic) ->
+    try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
+        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
+          _Attrs:32/unsigned-big, Rest/binary>> = Public,
+        {AuthPolicy, _} = tpm2b(Rest),
+        {ok, AuthPolicy}
+    catch
+        _:_ -> {error, bad_tpm2b_public}
+    end.
+
 tpm_name_hash_alg(16#0004) -> {ok, sha};
 tpm_name_hash_alg(16#000B) -> {ok, sha256};
 tpm_name_hash_alg(16#000C) -> {ok, sha384};
@@ -2264,6 +2371,8 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ak-public">> => ak_public(Opts),
                         <<"ak-name">> => ak_name(Opts),
                         <<"ak-qualified-name">> => ak_qualified_name(Opts),
+                        <<"ak-policy-digest">> => ak_policy_digest(Opts),
+                        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
                         <<"ak-hierarchy">> => <<"endorsement">>,
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
@@ -2377,6 +2486,8 @@ attestation(_Base, Req, Opts) ->
                         <<"ak-public">> => ak_public(Opts),
                         <<"ak-name">> => ak_name(Opts),
                         <<"ak-qualified-name">> => ak_qualified_name(Opts),
+                        <<"ak-policy-digest">> => ak_policy_digest(Opts),
+                        <<"ak-policy-pcrs">> => ak_policy_pcrs(Opts),
                         %% v1.2.2 paper P3: AK is a primary under
                         %% the Endorsement hierarchy (see
                         %% native/lapee_tpm_nif/lapee_tpm_nif.c
@@ -2775,7 +2886,9 @@ cache_tpm_public_terms(Prefix, Info) ->
         end,
         [{tpm2b_public, public},
          {name, name},
-         {qualified_name, qualified_name}]).
+         {qualified_name, qualified_name},
+         {policy_digest, policy_digest},
+         {policy_pcrs, policy_pcrs}]).
 
 ek_cert_pem(Opts) ->
     case persistent_term:get({dev_tpm2, ek_cert_pem}, undefined) of
@@ -2807,6 +2920,12 @@ ek_qualified_name(Opts) -> encoded_cached(ek, qualified_name, Opts).
 ak_public(Opts) -> encoded_cached(ak, public, Opts).
 ak_name(Opts) -> encoded_cached(ak, name, Opts).
 ak_qualified_name(Opts) -> encoded_cached(ak, qualified_name, Opts).
+ak_policy_digest(Opts) -> encoded_cached(ak, policy_digest, Opts).
+ak_policy_pcrs(Opts) ->
+    case raw_cached(ak, policy_pcrs, Opts) of
+        L when is_list(L) -> L;
+        _ -> []
+    end.
 
 encoded_cached(Prefix, Slot, Opts) ->
     case raw_cached(Prefix, Slot, Opts) of
@@ -3872,6 +3991,36 @@ ensure_ak_public_matches_subject_test() ->
         ensure_ak_public_matches_subject(
             Subject#{<<"ak-name">> => hb_util:encode(<<"wrong-name">>)})).
 
+ak_policy_bound_test() ->
+    ModulusBin = <<1:2048>>,
+    PcrMap =
+        maps:from_list(
+            [{integer_to_binary(I),
+              hb_util:encode(crypto:strong_rand_bytes(32))}
+             || I <- ?AK_POLICY_PCRS]),
+    Policy = ak_policy_digest(?AK_POLICY_PCRS, PcrMap),
+    Public = test_rsa_tpm2b_public(ModulusBin, 0, Policy),
+    ?assertEqual({ok, Policy}, tpm2b_public_auth_policy(Public)),
+    Envelope = #{
+        <<"ak-public">> => hb_util:encode(Public),
+        <<"ak-policy-digest">> => hb_util:encode(Policy),
+        <<"ak-policy-pcrs">> => ?AK_POLICY_PCRS,
+        <<"tpm-quote">> => #{<<"pcr-values">> => PcrMap}
+    },
+    ?assertMatch({ok, _}, chk_ak_policy_bound(Envelope)),
+    ?assertMatch(
+        {error, <<"AK authPolicy is empty">>},
+        chk_ak_policy_bound(
+            Envelope#{
+                <<"ak-public">> =>
+                    hb_util:encode(test_rsa_tpm2b_public(ModulusBin, 0))
+            })),
+    ?assertMatch(
+        {error, <<"reported AK policy digest does not match", _/binary>>},
+        chk_ak_policy_bound(
+            Envelope#{<<"ak-policy-digest">> =>
+                hb_util:encode(crypto:strong_rand_bytes(32))})).
+
 tpms_attest_qualified_signer_must_match_ak_test() ->
     Nonce = crypto:strong_rand_bytes(32),
     QualifiedSigner = <<"ak-qualified-name">>,
@@ -3913,11 +4062,14 @@ test_tpm2b(Bin) ->
     <<(byte_size(Bin)):16/unsigned-big, Bin/binary>>.
 
 test_rsa_tpm2b_public(ModulusBin, Exponent) ->
+    test_rsa_tpm2b_public(ModulusBin, Exponent, <<>>).
+
+test_rsa_tpm2b_public(ModulusBin, Exponent, AuthPolicy) ->
     Body = <<
         16#0001:16/unsigned-big,
         16#000B:16/unsigned-big,
         0:32/unsigned-big,
-        0:16/unsigned-big,
+        (test_tpm2b(AuthPolicy))/binary,
         16#0010:16/unsigned-big,
         16#0010:16/unsigned-big,
         2048:16/unsigned-big,
