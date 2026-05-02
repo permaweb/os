@@ -7,4 +7,5 @@
 
 menu "LapEE packages"
 	source "$BR2_EXTERNAL_LAPEE_PATH/package/hyperbeam/Config.in"
+	source "$BR2_EXTERNAL_LAPEE_PATH/package/lapee-sb-provisioner/Config.in"
 endmenu

@@ -161,7 +161,7 @@ SB_ENROL_DIR="${LAPEE_ROOT}/secureboot/enrol"
 STAGED_SB=""
 STAGED_EXTRA_BYTES=0
 if [[ -d "$SB_ENROL_DIR" ]]; then
-    for f in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer; do
+    for f in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer PK.esl KEK.esl db.esl; do
         if [[ -f "$SB_ENROL_DIR/$f" ]]; then
             cp "$SB_ENROL_DIR/$f" "$BUILD_DIR/$f"
             STAGED_SB="${STAGED_SB}${STAGED_SB:+ }$f"
@@ -254,7 +254,7 @@ docker run --rm $DOCKER_PLATFORM \
         mcopy -i /work/usb-build/esp.img \\
             /work/usb-build/LAPEE.MARKER ::/LAPEE.MARKER
 
-        for _a in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer; do
+        for _a in PK.auth KEK.auth db.auth PK.cer KEK.cer db.cer PK.esl KEK.esl db.esl; do
             if [[ -f /work/usb-build/\$_a ]]; then
                 mcopy -i /work/usb-build/esp.img \\
                     /work/usb-build/\$_a ::/\$_a
