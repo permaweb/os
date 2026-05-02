@@ -168,12 +168,70 @@ decode_chunks(Body, Acc) ->
 
 decode_json_body(Body) when is_binary(Body) ->
     try hb_json:decode(Body) of
-        Msg when is_map(Msg) -> Msg;
+        Msg when is_map(Msg) -> restore_json_atom_types(Msg);
         _ -> Body
     catch _:_ -> Body
     end;
 decode_json_body(Body) ->
     Body.
+
+restore_json_atom_types(Msg) when is_map(Msg) ->
+    RestoredNested =
+        maps:map(
+            fun(_Key, Value) ->
+                restore_json_atom_types(Value)
+            end,
+            Msg
+        ),
+    lists:foldl(
+        fun(Key, Acc) ->
+            case maps:get(Key, Acc, undefined) of
+                B when is_binary(B) ->
+                    Acc#{Key => known_json_atom(B)};
+                _ ->
+                    Acc
+            end
+        end,
+        RestoredNested,
+        atom_type_keys(maps:get(<<"ao-types">>, RestoredNested, <<>>))
+    );
+restore_json_atom_types(List) when is_list(List) ->
+    [restore_json_atom_types(Value) || Value <- List];
+restore_json_atom_types(Value) ->
+    Value.
+
+atom_type_keys(Types) when is_binary(Types) ->
+    lists:filtermap(
+        fun(Part0) ->
+            Part = string:trim(Part0),
+            case binary:split(unicode:characters_to_binary(Part), <<"=">>) of
+                [Key0, <<"\"atom\"">>] ->
+                    {true, strip_json_type_quotes(Key0)};
+                _ ->
+                    false
+            end
+        end,
+        string:split(Types, <<",">>, all)
+    );
+atom_type_keys(_) ->
+    [].
+
+strip_json_type_quotes(<<"\"", Rest/binary>>) ->
+    case binary:last(Rest) of
+        $" -> binary:part(Rest, 0, byte_size(Rest) - 1);
+        _ -> Rest
+    end;
+strip_json_type_quotes(Bin) ->
+    Bin.
+
+known_json_atom(<<"true">>) -> true;
+known_json_atom(<<"false">>) -> false;
+known_json_atom(<<"null">>) -> null;
+known_json_atom(<<"undefined">>) -> undefined;
+known_json_atom(Bin) ->
+    try binary_to_existing_atom(Bin, utf8)
+    catch _:_ -> Bin
+    end.
 
 http_error_response(_Status, #{<<"status">> := _} = Msg) ->
     Msg;
@@ -218,5 +276,40 @@ structured_http_error_response_test() ->
             <<"body">> => #{<<"error">> => <<"template-mismatch">>}
         },
         Msg).
+
+typed_json_response_round_trips_atom_test() ->
+    Msg = parse_response(
+        <<
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: application/json\r\n\r\n",
+            "{\"ok\":\"true\",\"ao-types\":\"ok=\\\"atom\\\"\"}"
+        >>
+    ),
+    ?assertMatch(#{<<"ok">> := true}, Msg).
+
+signed_json_response_remains_verifiable_test() ->
+    Wallet = ar_wallet:new(),
+    Signed = hb_message:commit(
+        #{
+            <<"type">> => <<"lapee-http-json-test">>,
+            <<"ok">> => true,
+            <<"store-module">> => hb_store_fs,
+            <<"nested">> => #{
+                <<"maybe">> => null,
+                <<"value">> => <<"kept">>
+            }
+        },
+        #{<<"priv-wallet">> => Wallet}
+    ),
+    JSON = hb_message:convert(
+        Signed,
+        #{<<"device">> => <<"json@1.0">>, <<"bundle">> => true},
+        #{}
+    ),
+    Decoded = decode_json_body(JSON),
+    ?assert(hb_message:verify(
+        Decoded,
+        [hb_util:human_id(ar_wallet:to_address(Wallet))],
+        #{})).
 
 -endif.

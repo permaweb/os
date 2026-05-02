@@ -14,11 +14,18 @@ def main() -> int:
 
     att = json.loads((out / "responses/node1-boot-attestation.json").read_text())
     cmdline = att["body"]["system"]["kernel"]["cmdline"]
-    publisher = att["body"]["node"]["address"]
+    dmi_product = (
+        att["body"]["system"]["firmware"]["dmi"]["fields"]["product-name"]
+    )
     (out / "requests/init.json").write_text(json.dumps({
-        "trusted-publishers": [publisher],
+        "name": "book-shelf",
         "template": {
-            "system": {"kernel": {"cmdline": cmdline}},
+            "system": {
+                "kernel": {"cmdline": cmdline},
+                "firmware": {
+                    "dmi": {"fields": {"product-name": dmi_product}},
+                },
+            },
             "tpm": {"ek-cert-source": {"kind": "tpm-nv"}},
         }
     }))
@@ -31,11 +38,13 @@ def main() -> int:
 
     for n in (2, 3, 4):
         (out / f"requests/join{n}.json").write_text(json.dumps({
+            "name": "book-shelf",
             "peer-url": f"http://{guest_host}:{base_port + 1}",
             "self-url": f"http://{guest_host}:{base_port + n}",
             "trusted-ca": trusted_ca,
         }))
         (out / f"requests/admit{n}.json").write_text(json.dumps({
+            "name": "book-shelf",
             "joiner-url": f"http://{guest_host}:{base_port + n}",
             "trusted-ca": trusted_ca,
         }))
@@ -47,6 +56,7 @@ def main() -> int:
 
     for n in (1, 2, 3, 4):
         (out / f"requests/sign{n}.json").write_text(json.dumps({
+            "name": "book-shelf",
             "body": {
                 "type": "green-zone-acceptance-signature",
                 "node": n,

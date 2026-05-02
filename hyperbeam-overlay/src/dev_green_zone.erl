@@ -3,23 +3,23 @@
 %%% A green-zone is a shared signing identity admitted by evidence rather than
 %%% by operator fiat. The device is intentionally small:
 %%%
-%%% * `init' creates or loads a ring wallet, a 256-bit AES ring secret, and a
-%%%   deeply-nested template.
+%%% * `init' creates a named ring wallet, a 256-bit AES ring secret, and a
+%%%   deeply-nested template after proving that the initializing node matches
+%%%   the template.
 %%% * `admit' verifies a candidate peer through `~tpm@2.0a/verify-peer',
 %%%   matches the candidate's nonce-bound fresh attestation against the
 %%%   template, then wraps the ring AES secret to the peer's TPM using
 %%%   MakeCredential. The ring wallet is encrypted under that AES key.
-%%% * `join' asks an existing member for admission, checks the admission
+%%% * `join' asks an existing member for a named ring admission, checks it,
 %%%   envelope, unwraps the AES key through `~tpm@2.0a/activate-credential',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
-%%%   it as the local `green-zone' identity.
-%%% * `sign' signs an arbitrary message with that shared ring wallet.
+%%%   it as a local green-zone identity.
+%%% * `sign' signs an arbitrary message with a named shared ring wallet.
 %%%
-%%% The policy language is deliberately just deep-subset matching. A template
-%%% map matches when every key in the template exists in the candidate and its
-%%% value recursively matches. Non-map values match exactly, with `<<"$any">>'
-%%% as the only wildcard. This makes the enforced parameters explicit AO-Core
-%%% data, while leaving trust policy interpretation to callers.
+%%% Ring templates are normal HyperBEAM message match templates: the template
+%%% keys must be present in the candidate, non-map values match exactly, and
+%%% the atom `_' is a wildcard. JSON callers can send the string `"_"', which
+%%% is normalized to that atom before matching.
 -module(dev_green_zone).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3, sign/3,
          match/3]).
@@ -27,7 +27,7 @@
 -include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--define(DEFAULT_IDENTITY, <<"green-zone">>).
+-define(IDENTITY_PREFIX, <<"green-zone/">>).
 -define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
 
 info(_) ->
@@ -51,27 +51,42 @@ info(_Base, _Req, _Opts) ->
                 <<"TPM-backed green-zone ring admission and shared identity">>,
             <<"version">> => <<"1.0">>,
             <<"template-semantics">> =>
-                <<"Deep map subset match; non-map values exact; '$any' wildcard">>,
+                <<"HyperBEAM message primary match; non-map values exact; "
+                  "'_' wildcard">>,
             <<"peer-attestation-trust">> =>
-                <<"Admission can verify a live joiner-url, or reuse a signed "
-                  "lapee-peer-attestation when one of its signers is listed in "
-                  "the ring's configured trusted publishers.">>
+                <<"Green-zone admission verifies live peers through "
+                  "~tpm@2.0a/verify-peer. Reusable/transitive peer-attestation "
+                  "publisher trust is a TPM-device concern, not ring state.">>
         }
     }}.
 
 init(_Base, Req, Opts) ->
     with_result(fun() ->
+        Name = required_name(Req, Opts),
         Template = template_from(Req, Opts),
-        AES = existing_or_new_aes(Req, Opts),
-        Wallet = existing_or_new_wallet(Req, Opts),
-        TrustedPublishers = trusted_publishers_from_req(Req, Opts),
-        NewOpts = install_ring(Template, AES, Wallet, TrustedPublishers, Opts),
+        reject_supplied_secret_material(Req, Opts),
+        Self = self_attestation_body(Opts),
+        ok = assert_template_match(Template, Self, <<"self">>, Opts),
+        AES = crypto:strong_rand_bytes(32),
+        Wallet = ar_wallet:new(),
+        Members = member_map(
+            hb_maps:get(<<"self-url">>, Req, undefined, Opts),
+            Self,
+            <<"initializer">>,
+            Opts
+        ),
+        NewOpts = install_ring(Name, Template, AES, Wallet, Members, Opts),
         hb_http_server:set_opts(NewOpts),
-        status_body(NewOpts)
+        status_body(Name, NewOpts)
     end, Opts).
 
-status(_Base, _Req, Opts) ->
-    with_result(fun() -> status_body(Opts) end, Opts).
+status(_Base, Req, Opts) ->
+    with_result(fun() ->
+        case optional_name(Req, Opts) of
+            undefined -> all_status_body(Opts);
+            Name -> status_body(Name, Opts)
+        end
+    end, Opts).
 
 match(_Base, Req, Opts) ->
     with_result(fun() ->
@@ -87,46 +102,54 @@ match(_Base, Req, Opts) ->
 
 admit(_Base, Req, Opts) ->
     with_result(fun() ->
-        {AES, Wallet, Template} = require_ring(Opts),
-        RingScope = ring_scope(Template, Wallet, Opts),
-        {JoinerURL, PeerAttestation, Publisher} =
+        Name = required_name(Req, Opts),
+        {AES, Wallet, Zone} = require_ring(Name, Opts),
+        Template = hb_maps:get(<<"template">>, Zone, #{}, Opts),
+        RingScope = ring_scope(Name, Template, Wallet, Opts),
+        {JoinerURL, PeerAttestation} =
             peer_attestation_from_req(Req, RingScope, Opts),
         PolicyAttestation = peer_policy_attestation_body(PeerAttestation, Opts),
-        case match_template(Template, PolicyAttestation, Opts) of
-            true -> ok;
-            false ->
-                throw({green_zone_error, #{
-                    <<"error">> => <<"template-mismatch">>,
-                    <<"mismatch-path">> =>
-                        mismatch_path(Template, PolicyAttestation, Opts),
-                    <<"joiner-url">> => JoinerURL
-                }})
-        end,
+        ok = assert_template_match(Template, PolicyAttestation, JoinerURL, Opts),
         Subject = hb_maps:get(
             <<"peer-credential-subject">>, PeerAttestation, undefined, Opts),
-        Credential = dev_tpm2:make_credential_for_subject(Subject, AES),
-        hb_message:commit(#{
+        Credential = commit_unsigned_tree(
+            dev_tpm2:make_credential_for_subject(Subject, AES),
+            Opts),
+        EncryptedWallet = commit_unsigned_tree(encrypt_wallet(Wallet, AES), Opts),
+        Members = add_member_to_zone(Zone, JoinerURL, PolicyAttestation, Opts),
+        NewOpts = install_ring(Name, Template, AES, Wallet, Members, Opts),
+        hb_http_server:set_opts(NewOpts),
+        Definition = commit_unsigned_tree(
+            zone_definition(Name, Template, Wallet, Members, Opts),
+            Opts),
+        Validity = commit_unsigned_tree(admission_validity(Req, Opts), Opts),
+        Admission0 = #{
             <<"type">> => <<"green-zone-admission">>,
             <<"version">> => <<"1.0">>,
+            <<"name">> => Name,
             <<"issued-at-unix">> => erlang:system_time(second),
-            <<"validity">> => admission_validity(Req, Opts),
+            <<"validity">> => Validity,
             <<"admission-nonce">> =>
                 hb_maps:get(<<"admission-nonce">>, Req, null, Opts),
-            <<"ring-scope">> => RingScope,
+            <<"ring-scope">> => commit_unsigned_tree(RingScope, Opts),
+            <<"green-zone">> => Definition,
             <<"joiner-url">> => JoinerURL,
-            <<"template">> => Template,
+            <<"template">> => commit_unsigned_tree(Template, Opts),
             <<"template-matched">> => true,
-            <<"peer-attestation-publisher">> => Publisher,
             <<"peer-attestation">> => PeerAttestation,
             <<"credential">> => Credential,
-            <<"encrypted-wallet">> => encrypt_wallet(Wallet, AES),
-            <<"ring-address">> => wallet_address(Wallet),
-            <<"trusted-publishers">> => trusted_publishers(Opts)
-        }, #{<<"priv-wallet">> => Wallet})
+            <<"encrypted-wallet">> => EncryptedWallet,
+            <<"ring-address">> => wallet_address(Wallet)
+        },
+        Admission0#{
+            <<"authorization">> =>
+                admission_authorization(Admission0, Wallet, Opts)
+        }
     end, Opts).
 
 join(_Base, Req, Opts) ->
     with_result(fun() ->
+        Name = required_name(Req, Opts),
         PeerURL = required_peer(Req, Opts),
         SelfURL = required_self(Req, Opts),
         AdmissionNonce = hb_util:encode(crypto:strong_rand_bytes(32)),
@@ -142,21 +165,33 @@ join(_Base, Req, Opts) ->
             Opts
         ),
         assert_wallet_matches_admission(Wallet, Admission, Opts),
+        case hb_maps:get(<<"name">>, Admission, undefined, Opts) of
+            Name -> ok;
+            _ -> bad_admission(<<"name">>)
+        end,
         Template = hb_maps:get(<<"template">>, Admission, #{}, Opts),
-        TrustedPublishers =
-            normalize_publishers(
-                hb_maps:get(<<"trusted-publishers">>, Admission, [], Opts)),
-        NewOpts = install_ring(
-            Template, AES, Wallet, TrustedPublishers, Opts),
+        Definition = hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
+        Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
+        NewMembers = add_member_to_members(
+            Members, SelfURL, peer_policy_attestation_body(
+                response_body(
+                    hb_maps:get(<<"peer-attestation">>, Admission, #{}, Opts),
+                    Opts),
+                Opts),
+            <<"member">>,
+            Opts
+        ),
+        NewOpts = install_ring(Name, Template, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts#{
             <<"green-zone-last-admission">> => Admission
         }),
-        status_body(NewOpts)
+        status_body(Name, NewOpts)
     end, Opts).
 
 sign(_Base, Req, Opts) ->
     with_result(fun() ->
-        RingOpts = green_zone_signing_opts(Opts),
+        Name = required_name(Req, Opts),
+        RingOpts = green_zone_signing_opts(Name, Opts),
         Payload = sign_payload(Req, Opts),
         hb_message:commit(Payload, RingOpts)
     end, Opts).
@@ -190,105 +225,212 @@ ensure_committed(Msg, Opts) when is_map(Msg) ->
 ensure_committed(Msg, _Opts) ->
     Msg.
 
+commit_unsigned_tree(Msg, Opts) when is_map(Msg) ->
+    case hb_message:signers(Msg, Opts) of
+        [] ->
+            hb_message:commit(
+                maps:map(
+                    fun(_Key, Value) -> commit_unsigned_tree(Value, Opts) end,
+                    Msg
+                ),
+                Opts
+            );
+        _ -> Msg
+    end;
+commit_unsigned_tree(List, Opts) when is_list(List) ->
+    [commit_unsigned_tree(Value, Opts) || Value <- List];
+commit_unsigned_tree(Value, _Opts) ->
+    Value.
+
+admission_authorization(Admission, Wallet, Opts) ->
+    hb_message:commit(
+        #{
+            <<"type">> => <<"green-zone-admission-authorization">>,
+            <<"version">> => <<"1.0">>,
+            <<"name">> => hb_maps:get(<<"name">>, Admission, undefined, Opts),
+            <<"issued-at-unix">> =>
+                hb_maps:get(<<"issued-at-unix">>, Admission, undefined, Opts),
+            <<"admission-nonce">> =>
+                hb_maps:get(
+                    <<"admission-nonce">>, Admission, undefined, Opts),
+            <<"joiner-url">> =>
+                hb_maps:get(<<"joiner-url">>, Admission, undefined, Opts),
+            <<"ring-address">> =>
+                hb_maps:get(<<"ring-address">>, Admission, undefined, Opts),
+            <<"template-matched">> => <<"true">>,
+            <<"validity-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"validity">>, Admission, #{}, Opts),
+                    Opts),
+            <<"ring-scope-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"ring-scope">>, Admission, #{}, Opts),
+                    Opts),
+            <<"green-zone-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
+                    Opts),
+            <<"template-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"template">>, Admission, #{}, Opts),
+                    Opts),
+            <<"peer-attestation-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"peer-attestation">>, Admission, #{}, Opts),
+                    Opts),
+            <<"credential-id">> =>
+                stable_message_id(
+                    hb_maps:get(<<"credential">>, Admission, #{}, Opts),
+                    Opts),
+            <<"encrypted-wallet-id">> =>
+                stable_message_id(
+                    hb_maps:get(
+                        <<"encrypted-wallet">>, Admission, #{}, Opts),
+                    Opts)
+        },
+        #{<<"priv-wallet">> => Wallet}
+    ).
+
+stable_message_id(Msg, Opts) when is_map(Msg) ->
+    Body = response_body(Msg, Opts),
+    case unsigned_commitment_ids(Body, Opts) of
+        [ID | _] -> ID;
+        [] -> stable_uncommitted_id(Body)
+    end;
+stable_message_id(Value, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
+
+stable_uncommitted_id(Msg) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(Msg, #{}),
+        uncommitted,
+        #{}
+    ).
+
+unsigned_commitment_ids(Msg, Opts) when is_map(Msg) ->
+    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
+    [
+        ID
+     || {ID, Commitment} <- hb_maps:to_list(Commitments, Opts),
+        hb_maps:get(<<"type">>, Commitment, undefined, Opts) =:=
+            <<"hmac-sha256">>,
+        hb_maps:get(<<"committer">>, Commitment, undefined, Opts) =:=
+            undefined
+    ];
+unsigned_commitment_ids(_Msg, _Opts) ->
+    [].
+
 template_from(Req, Opts) ->
     clean_template(
         hb_maps:get(
             <<"template">>,
             Req,
-            hb_opts:get(<<"green-zone-template">>, #{}, Opts),
+            #{},
             Opts),
         Opts).
 
-existing_or_new_aes(Req, Opts) ->
-    case hb_maps:get(<<"aes-key">>, Req, undefined, Opts) of
-        B when is_binary(B), byte_size(B) > 0 -> hb_util:decode(B);
-        _ ->
-            hb_opts:get(
-                <<"priv-green-zone-aes">>,
-                crypto:strong_rand_bytes(32),
-                Opts
-            )
-    end.
-
-existing_or_new_wallet(Req, Opts) ->
-    case hb_maps:get(<<"wallet">>, Req, undefined, Opts) of
-        B when is_binary(B), byte_size(B) > 0 -> ar_wallet:from_json(B);
-        _ ->
-            hb_opts:get(
-                <<"priv-green-zone-wallet">>,
-                ar_wallet:new(),
-                Opts
-            )
-    end.
-
-install_ring(Template0, AES, Wallet, TrustedPublishers, Opts) ->
-    Template = clean_template(Template0, Opts),
-    ok = ensure_nonempty_template(Template),
-    Identities = hb_opts:get(identities, #{}, Opts),
-    Opts#{
-        <<"green-zone-template">> => Template,
-        <<"green-zone-initialized">> => true,
-        <<"green-zone-trusted-publishers">> =>
-            normalize_publishers(TrustedPublishers),
-        <<"priv-green-zone-aes">> => AES,
-        <<"priv-green-zone-wallet">> => Wallet,
-        <<"identities">> => Identities#{
-            ?DEFAULT_IDENTITY => #{<<"priv-wallet">> => Wallet}
-        }
-    }.
-
-require_ring(Opts) ->
-    case {
-        hb_opts:get(<<"priv-green-zone-aes">>, undefined, Opts),
-        hb_opts:get(<<"priv-green-zone-wallet">>, undefined, Opts),
-        hb_opts:get(<<"green-zone-template">>, undefined, Opts)
-    } of
-        {AES, Wallet, Template}
-                when is_binary(AES), tuple_size(Wallet) > 0,
-                     is_map(Template) ->
-            {AES, Wallet, Template};
+reject_supplied_secret_material(Req, Opts) ->
+    case first_defined([
+        hb_maps:get(<<"aes-key">>, Req, undefined, Opts),
+        hb_maps:get(<<"wallet">>, Req, undefined, Opts),
+        hb_maps:get(<<"priv-green-zone-aes">>, Req, undefined, Opts),
+        hb_maps:get(<<"priv-green-zone-wallet">>, Req, undefined, Opts)
+    ]) of
+        undefined -> ok;
         _ ->
             throw({green_zone_error, #{
-                <<"error">> => <<"green-zone-not-initialized">>
+                <<"error">> => <<"secret-material-forbidden">>
             }})
     end.
 
-status_body(Opts) ->
-    Wallet = hb_opts:get(<<"priv-green-zone-wallet">>, undefined, Opts),
-    Template = hb_opts:get(<<"green-zone-template">>, #{}, Opts),
-    Address =
-        case Wallet of
-            undefined -> undefined;
-            _ -> wallet_address(Wallet)
-        end,
-    RingScope =
-        case Wallet of
-            undefined -> null;
-            _ -> ring_scope(Template, Wallet, Opts)
-        end,
+install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
+    Template = clean_template(Template0, Opts),
+    ok = ensure_nonempty_template(Template),
+    Identities = hb_opts:get(identities, #{}, Opts),
+    GreenZones = hb_opts:get(<<"green-zones">>, #{}, Opts),
+    PrivGreenZones = hb_opts:get(<<"priv-green-zones">>, #{}, Opts),
+    Definition = zone_definition(Name, Template, Wallet, Members, Opts),
+    Identity = zone_identity(Name),
+    Opts#{
+        <<"green-zones">> => GreenZones#{Name => Definition},
+        <<"priv-green-zones">> => PrivGreenZones#{
+            Name => #{
+                <<"aes">> => AES,
+                <<"wallet">> => Wallet
+            }
+        },
+        <<"identities">> => Identities#{
+            Identity => #{<<"priv-wallet">> => Wallet}
+        }
+    }.
+
+require_ring(Name, Opts) ->
+    Priv = hb_opts:get(<<"priv-green-zones">>, #{}, Opts),
+    Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
+    case {hb_maps:get(Name, Priv, undefined, Opts),
+          hb_maps:get(Name, Zones, undefined, Opts)} of
+        {#{<<"aes">> := AES, <<"wallet">> := Wallet}, Zone}
+                when is_binary(AES), tuple_size(Wallet) > 0, is_map(Zone) ->
+            {AES, Wallet, Zone};
+        _ -> green_zone_not_initialized(Name)
+    end.
+
+green_zone_not_initialized(Name) ->
+    throw({green_zone_error, #{
+        <<"error">> => <<"green-zone-not-initialized">>,
+        <<"name">> => Name
+    }}).
+
+all_status_body(Opts) ->
+    Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
     #{
         <<"type">> => <<"green-zone-status">>,
         <<"version">> => <<"1.0">>,
-        <<"initialized">> =>
-            hb_opts:get(<<"green-zone-initialized">>, false, Opts),
-        <<"identity">> => ?DEFAULT_IDENTITY,
-        <<"ring-address">> => Address,
-        <<"ring-scope">> => RingScope,
-        <<"trusted-publishers">> => trusted_publishers(Opts),
-        <<"template">> => Template
+        <<"initialized">> => map_size(Zones) > 0,
+        <<"green-zones">> => Zones
     }.
 
-ring_scope(Template, Wallet, Opts) ->
+status_body(Name, Opts) ->
+    case hb_maps:get(Name, hb_opts:get(<<"green-zones">>, #{}, Opts),
+                     undefined, Opts) of
+        undefined -> green_zone_not_initialized(Name);
+        Zone ->
+            #{
+                <<"type">> => <<"green-zone-status">>,
+                <<"version">> => <<"1.0">>,
+                <<"initialized">> => true,
+                <<"name">> => Name,
+                <<"identity">> => zone_identity(Name),
+                <<"green-zone">> => Zone
+            }
+    end.
+
+zone_definition(Name, Template, Wallet, Members, Opts) ->
+    #{
+        <<"type">> => <<"green-zone-definition">>,
+        <<"version">> => <<"1.0">>,
+        <<"name">> => Name,
+        <<"identity">> => zone_identity(Name),
+        <<"ring-address">> => wallet_address(Wallet),
+        <<"ring-scope">> => ring_scope(Name, Template, Wallet, Opts),
+        <<"template-id">> => template_id(Name, Template, Opts),
+        <<"template">> => Template,
+        <<"members">> => Members
+    }.
+
+ring_scope(Name, Template, Wallet, Opts) ->
     #{
         <<"type">> => <<"green-zone-ring-scope">>,
         <<"version">> => <<"1.0">>,
+        <<"name">> => Name,
         <<"ring-address">> => wallet_address(Wallet),
-        <<"template-id">> => template_id(Template, Opts)
+        <<"template-id">> => template_id(Name, Template, Opts)
     }.
 
-template_id(Template, Opts) ->
+template_id(Name, Template, Opts) ->
     hb_message:id(
         #{<<"type">> => <<"green-zone-template">>,
+          <<"name">> => Name,
           <<"template">> => clean_template(Template, Opts)},
         all,
         Opts).
@@ -342,6 +484,97 @@ required_self(Req, Opts) ->
         URL -> strip_trailing_slash(URL)
     end.
 
+required_name(Req, Opts) ->
+    case optional_name(Req, Opts) of
+        undefined ->
+            throw({green_zone_error, #{<<"error">> => <<"missing-name">>}});
+        Name -> Name
+    end.
+
+optional_name(Req, Opts) ->
+    case first_defined([
+        hb_maps:get(<<"name">>, Req, undefined, Opts),
+        hb_maps:get(<<"green-zone-name">>, Req, undefined, Opts),
+        hb_opts:get(<<"green-zone-name">>, undefined, Opts)
+    ]) of
+        B when is_binary(B), byte_size(B) > 0 -> B;
+        _ -> undefined
+    end.
+
+zone_identity(Name) ->
+    <<?IDENTITY_PREFIX/binary, Name/binary>>.
+
+self_attestation_body(Opts) ->
+    case dev_tpm2:boot_attestation(#{}, #{}, Opts) of
+        {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
+            response_body(Body, Opts);
+        {ok, #{<<"body">> := Body}} ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"self-attestation-failed">>,
+                <<"details">> => Body
+            }});
+        Other ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"self-attestation-failed">>,
+                <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
+            }})
+    end.
+
+assert_template_match(Template, Candidate, Subject, Opts) ->
+    case hb_message:match(Template, Candidate, primary, Opts) of
+        true -> ok;
+        {mismatch, _Type, Path, _Expected, _Actual} ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"template-mismatch">>,
+                <<"mismatch-path">> => canonical_mismatch_path(Path),
+                <<"subject">> => Subject
+            }});
+        Other ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"template-mismatch">>,
+                <<"details">> => hb_util:bin(io_lib:format("~p", [Other])),
+                <<"subject">> => Subject
+            }})
+    end.
+
+member_map(URL, Attestation, Role, Opts) ->
+    add_member_to_members(#{}, URL, Attestation, Role, Opts).
+
+add_member_to_zone(Zone, URL, Attestation, Opts) ->
+    add_member_to_members(
+        hb_maps:get(<<"members">>, Zone, #{}, Opts),
+        URL,
+        Attestation,
+        <<"member">>,
+        Opts
+    ).
+
+add_member_to_members(Members, URL, Attestation, Role, Opts) ->
+    Address = attestation_node_address(Attestation, Opts),
+    case Address of
+        undefined -> Members;
+        _ ->
+            Members#{
+                Address => #{
+                    <<"address">> => Address,
+                    <<"url">> => null_or_url(URL),
+                    <<"role">> => Role,
+                    <<"last-seen-unix">> => erlang:system_time(second)
+                }
+            }
+    end.
+
+attestation_node_address(Attestation, Opts) ->
+    Body = response_body(Attestation, Opts),
+    Node = hb_maps:get(<<"node">>, Body, #{}, Opts),
+    case hb_maps:get(<<"address">>, Node, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> B;
+        _ -> undefined
+    end.
+
+null_or_url(undefined) -> null;
+null_or_url(URL) -> strip_trailing_slash(URL).
+
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);
 first_defined([V | _]) -> V.
@@ -374,75 +607,10 @@ verify_joiner(JoinerURL, Req, RingScope, Opts) ->
     end.
 
 peer_attestation_from_req(Req, RingScope, Opts) ->
-    case hb_maps:get(<<"peer-attestation">>, Req, undefined, Opts) of
-        PeerAttestation0 when is_map(PeerAttestation0) ->
-            PeerAttestation = response_body(PeerAttestation0, Opts),
-            Publisher = require_trusted_publisher(PeerAttestation, Req, Opts),
-            assert_peer_attestation_body(PeerAttestation, RingScope, Opts),
-            JoinerURL = stored_attestation_joiner_url(
-                PeerAttestation, Req, Opts),
-            {JoinerURL, PeerAttestation, Publisher};
-        _ ->
-            JoinerURL = required_url(Req, Opts),
-            PeerAttestation = verify_joiner(JoinerURL, Req, RingScope, Opts),
-            assert_peer_attestation_body(PeerAttestation, RingScope, Opts),
-            {JoinerURL, PeerAttestation, null}
-    end.
-
-require_trusted_publisher(PeerAttestation, _Req, Opts) ->
-    Signers = peer_attestation_signers(PeerAttestation, Opts),
-    case hb_message:verify(PeerAttestation, Signers, Opts) of
-        true -> ok;
-        false ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"peer-attestation-signature-invalid">>
-            }})
-    end,
-    Trusted = trusted_publishers(Opts),
-    case [S || S <- Signers, lists:member(S, Trusted)] of
-        [Publisher | _] -> Publisher;
-        [] ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"peer-attestation-publisher-untrusted">>,
-                <<"signers">> => Signers,
-                <<"trusted-publishers">> => Trusted
-            }})
-    end.
-
-peer_attestation_signers(PeerAttestation, Opts) ->
-    try hb_message:signers(PeerAttestation, Opts) of
-        [] ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"peer-attestation-unsigned">>
-            }});
-        Signers -> Signers
-    catch
-        throw:{green_zone_error, _} = Error -> throw(Error);
-        _:_ ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"peer-attestation-signers-unreadable">>
-            }})
-    end.
-
-trusted_publishers(Opts) ->
-    normalize_publishers(first_defined([
-        hb_opts:get(<<"green-zone-trusted-publishers">>, undefined, Opts),
-        hb_opts:get(<<"green-zone-trusted-publisher">>, undefined, Opts)
-    ])).
-
-trusted_publishers_from_req(Req, Opts) ->
-    normalize_publishers(first_defined([
-        hb_maps:get(<<"trusted-publishers">>, Req, undefined, Opts),
-        hb_maps:get(<<"trusted-publisher">>, Req, undefined, Opts),
-        hb_opts:get(<<"green-zone-trusted-publishers">>, undefined, Opts),
-        hb_opts:get(<<"green-zone-trusted-publisher">>, undefined, Opts)
-    ])).
-
-normalize_publishers(undefined) -> [];
-normalize_publishers(B) when is_binary(B), byte_size(B) > 0 -> [B];
-normalize_publishers(L) when is_list(L) ->
-    [B || B <- L, is_binary(B), byte_size(B) > 0];
-normalize_publishers(_) -> [].
+    JoinerURL = required_url(Req, Opts),
+    PeerAttestation = verify_joiner(JoinerURL, Req, RingScope, Opts),
+    assert_peer_attestation_body(PeerAttestation, RingScope, Opts),
+    {JoinerURL, PeerAttestation}.
 
 clock_skew_seconds(Opts) ->
     parse_positive_integer(
@@ -556,6 +724,8 @@ assert_peer_attestation_scope(PeerAttestation, RingScope, Opts) ->
     ConsumerScope =
         hb_maps:get(<<"consumer-scope">>, Scope, undefined, Opts),
     assert_scope_field(
+        <<"name">>, ConsumerScope, RingScope, Opts),
+    assert_scope_field(
         <<"ring-address">>, ConsumerScope, RingScope, Opts),
     assert_scope_field(
         <<"template-id">>, ConsumerScope, RingScope, Opts),
@@ -607,31 +777,6 @@ assert_scope_field(Key, Scope, RingScope, Opts) ->
         _ -> bad_peer_attestation(<<"peer-scope.consumer-scope">>)
     end.
 
-stored_attestation_joiner_url(PeerAttestation, Req, Opts) ->
-    AttestedURL0 = hb_maps:get(
-        <<"peer-url">>, PeerAttestation, undefined, Opts),
-    ReqURL0 = hb_maps:get(<<"joiner-url">>, Req, undefined, Opts),
-    case {AttestedURL0, ReqURL0} of
-        {undefined, _} ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"missing-peer-attestation-url">>
-            }});
-        {AttestedURL, undefined} ->
-            strip_trailing_slash(AttestedURL);
-        {AttestedURL, ReqURL} ->
-            Attested = strip_trailing_slash(AttestedURL),
-            Requested = strip_trailing_slash(ReqURL),
-            case Attested =:= Requested of
-                true -> Attested;
-                false ->
-                    throw({green_zone_error, #{
-                        <<"error">> => <<"peer-attestation-url-mismatch">>,
-                        <<"peer-url">> => Attested,
-                        <<"joiner-url">> => Requested
-                    }})
-            end
-    end.
-
 peer_boot_attestation_body(PeerAttestation, Opts) ->
     response_body(
         hb_maps:get(
@@ -639,24 +784,21 @@ peer_boot_attestation_body(PeerAttestation, Opts) ->
         Opts).
 
 peer_policy_attestation_body(PeerAttestation, Opts) ->
-    response_body(
-        hb_maps:get(
-            <<"peer-fresh-attestation">>, PeerAttestation, undefined, Opts),
-        Opts).
+    peer_boot_attestation_body(PeerAttestation, Opts).
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
-    Body = maps:without(
-        [<<"path">>, <<"device">>, <<"method">>, <<"peer-url">>,
-         <<"self-url">>, <<"url">>, <<"peer-attestation">>],
+    Body = maps:with(
+        [<<"trusted-ca">>, <<"trusted-ca-pem">>],
         Req
     ),
     AdmitReq = Body#{
+        <<"name">> => required_name(Req, Opts),
         <<"joiner-url">> => SelfURL,
         <<"admission-nonce">> => AdmissionNonce
     },
     try
         admission_response_body(
-            lapee_http_json:post(
+            post_admission_request(
                 PeerURL,
                 <<"/~green-zone@1.0/admit">>,
                 AdmitReq,
@@ -674,6 +816,9 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
             }})
     end.
 
+post_admission_request(PeerURL, Path, AdmitReq, Opts) ->
+    lapee_http_json:post(PeerURL, Path, AdmitReq, Opts).
+
 admission_response_body(#{<<"status">> := 200, <<"body">> := Body}, Opts) ->
     response_body(Body, Opts);
 admission_response_body(#{<<"status">> := Status, <<"body">> := Body}, _Opts)
@@ -686,11 +831,13 @@ assert_admission_body(Admission, _PeerURL, SelfURL, AdmissionNonce, Req, Opts) -
     Self = strip_trailing_slash(SelfURL),
     Checks = [
         {field_eq, <<"type">>, <<"green-zone-admission">>},
-        {field_eq, <<"template-matched">>, true},
+        {field_eq, <<"name">>, required_name(Req, Opts)},
+        {field_true, <<"template-matched">>},
         {field_eq, <<"joiner-url">>, Self},
         {field_eq, <<"admission-nonce">>, AdmissionNonce},
         {field_map, <<"validity">>},
         {field_map, <<"ring-scope">>},
+        {field_map, <<"authorization">>},
         {field_map, <<"credential">>},
         {field_map, <<"encrypted-wallet">>},
         {field_map, <<"peer-attestation">>},
@@ -708,6 +855,12 @@ assert_admission_body(Admission, _PeerURL, SelfURL, AdmissionNonce, Req, Opts) -
                 case Actual =:= Expected of
                     true -> ok;
                     false -> bad_admission(Key)
+                end;
+            ({field_true, Key}) ->
+                case hb_maps:get(Key, Admission, undefined, Opts) of
+                    true -> ok;
+                    <<"true">> -> ok;
+                    _ -> bad_admission(Key)
                 end;
             ({field_map, Key}) ->
                 case hb_maps:get(Key, Admission, undefined, Opts) of
@@ -737,6 +890,11 @@ assert_admission_body(Admission, _PeerURL, SelfURL, AdmissionNonce, Req, Opts) -
     case hb_maps:get(<<"ring-address">>, RingScope, undefined, Opts) of
         RingAddress -> ok;
         _ -> bad_admission(<<"ring-scope.ring-address">>)
+    end,
+    Name = hb_maps:get(<<"name">>, Admission, undefined, Opts),
+    case hb_maps:get(<<"name">>, RingScope, undefined, Opts) of
+        Name -> ok;
+        _ -> bad_admission(<<"ring-scope.name">>)
     end.
 
 bad_admission(Key) ->
@@ -746,16 +904,78 @@ bad_admission(Key) ->
     }}).
 
 assert_admission_signature(Admission, Opts) ->
+    Authorization = response_body(
+        hb_maps:get(<<"authorization">>, Admission, undefined, Opts),
+        Opts),
     RingAddress = hb_maps:get(<<"ring-address">>, Admission, undefined, Opts),
-    Signers = hb_message:signers(Admission, Opts),
-    case hb_message:verify(Admission, Signers, Opts) of
+    Signers = hb_message:signers(Authorization, Opts),
+    case hb_message:verify(Authorization, Signers, Opts) of
         true -> ok;
-        false -> bad_admission(<<"commitments">>)
+        false -> bad_admission(<<"authorization.commitments">>)
     end,
     case lists:member(RingAddress, Signers) of
         true -> ok;
         false -> bad_admission(<<"ring-address">>)
+    end,
+    assert_authorization_fields(Authorization, Admission, Opts),
+    assert_authorization_ids(Authorization, Admission, Opts).
+
+assert_authorization_fields(Authorization, Admission, Opts) ->
+    Fields = [
+        <<"name">>,
+        <<"issued-at-unix">>,
+        <<"admission-nonce">>,
+        <<"joiner-url">>,
+        <<"ring-address">>
+    ],
+    lists:foreach(
+        fun(Field) ->
+            case {
+                hb_maps:get(Field, Authorization, undefined, Opts),
+                hb_maps:get(Field, Admission, undefined, Opts)
+            } of
+                {Same, Same} when Same =/= undefined -> ok;
+                _ -> bad_admission(<<"authorization.", Field/binary>>)
+            end
+        end,
+        Fields),
+    case hb_maps:get(<<"template-matched">>, Authorization, undefined, Opts) of
+        <<"true">> -> ok;
+        true -> ok;
+        _ -> bad_admission(<<"authorization.template-matched">>)
     end.
+
+assert_authorization_ids(Authorization, Admission, Opts) ->
+    Pairs = [
+        {<<"validity-id">>, <<"validity">>},
+        {<<"ring-scope-id">>, <<"ring-scope">>},
+        {<<"green-zone-id">>, <<"green-zone">>},
+        {<<"template-id">>, <<"template">>},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>},
+        {<<"credential-id">>, <<"credential">>},
+        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
+    ],
+    lists:foreach(
+        fun({AuthKey, AdmissionKey}) ->
+            Payload = hb_maps:get(AdmissionKey, Admission, undefined, Opts),
+            case hb_maps:get(AuthKey, Authorization, undefined, Opts) of
+                ID when is_binary(ID) ->
+                    case lists:member(ID, acceptable_payload_ids(Payload, Opts)) of
+                        true -> ok;
+                        false ->
+                            bad_admission(<<"authorization.", AuthKey/binary>>)
+                    end;
+                _ ->
+                    bad_admission(<<"authorization.", AuthKey/binary>>)
+            end
+        end,
+        Pairs).
+
+acceptable_payload_ids(Payload, Opts) when is_map(Payload) ->
+    Body = response_body(Payload, Opts),
+    [stable_uncommitted_id(Body) | unsigned_commitment_ids(Body, Opts)];
+acceptable_payload_ids(Payload, _Opts) ->
+    [hb_util:encode(crypto:hash(sha256, term_to_binary(Payload)))].
 
 assert_admission_validity(Admission, Opts) ->
     Now = erlang:system_time(second),
@@ -865,13 +1085,9 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
             }})
     end.
 
-green_zone_signing_opts(Opts) ->
-    case hb_opts:as(?DEFAULT_IDENTITY, Opts) of
-        {ok, RingOpts} -> RingOpts;
-        _ ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"green-zone-not-initialized">>
-            }})
+green_zone_signing_opts(Name, Opts) ->
+    case require_ring(Name, Opts) of
+        {_AES, Wallet, _Zone} -> #{<<"priv-wallet">> => Wallet}
     end.
 
 sign_payload(Req, Opts) ->
@@ -884,21 +1100,8 @@ sign_payload(Req, Opts) ->
 wallet_address(Wallet) ->
     hb_util:human_id(ar_wallet:to_address(Wallet)).
 
-match_template(Template, Candidate, Opts) when is_map(Template),
-                                              is_map(Candidate) ->
-    lists:all(
-        fun({Key, Expected}) ->
-            case hb_maps:get(Key, Candidate, undefined, Opts) of
-                undefined -> false;
-                Actual -> match_template(Expected, Actual, Opts)
-            end
-        end,
-        hb_maps:to_list(Template, Opts)
-    );
-match_template(<<"$any">>, undefined, _Opts) -> false;
-match_template(<<"$any">>, _Candidate, _Opts) -> true;
-match_template(Expected, Expected, _Opts) -> true;
-match_template(_Expected, _Candidate, _Opts) -> false.
+match_template(Template, Candidate, Opts) ->
+    hb_message:match(Template, Candidate, primary, Opts) =:= true.
 
 clean_template(Template, Opts) when is_map(Template) ->
     clean_template_map(Template, true, Opts);
@@ -914,7 +1117,9 @@ clean_template_map(Template, StripMeta, Opts) ->
         ]).
 
 clean_template_value(Value, Opts) when is_map(Value) ->
-    clean_template_map(Value, false, Opts);
+    clean_template_map(Value, true, Opts);
+clean_template_value(<<"_">>, _Opts) ->
+    '_';
 clean_template_value(Value, _Opts) ->
     Value.
 
@@ -925,36 +1130,16 @@ ensure_nonempty_template(_Template) ->
     throw({green_zone_error, #{<<"error">> => <<"empty-template">>}}).
 
 mismatch_path(Template, Candidate, Opts) ->
-    case mismatch_path(Template, Candidate, [], Opts) of
-        [] -> <<"/">>;
-        Path -> iolist_to_binary(["/", lists:join("/", lists:reverse(Path))])
+    case hb_message:match(Template, Candidate, primary, Opts) of
+        {mismatch, _Type, Path, _Expected, _Actual} ->
+            canonical_mismatch_path(Path);
+        _ -> <<"/">>
     end.
 
-mismatch_path(Template, Candidate, Path, Opts) when is_map(Template),
-                                                   is_map(Candidate) ->
-    case lists:dropwhile(
-        fun({Key, Expected}) ->
-            case hb_maps:get(Key, Candidate, undefined, Opts) of
-                undefined -> false;
-                Actual -> match_template(Expected, Actual, Opts)
-            end
-        end,
-        hb_maps:to_list(Template, Opts))
-    of
-        [] -> [];
-        [{Key, _Expected} | _] ->
-            case hb_maps:get(Key, Candidate, undefined, Opts) of
-                undefined -> [Key | Path];
-                Actual ->
-                    mismatch_path(
-                        hb_maps:get(Key, Template, undefined, Opts),
-                        Actual,
-                        [Key | Path],
-                        Opts)
-            end
-    end;
-mismatch_path(_Template, _Candidate, Path, _Opts) ->
-    Path.
+canonical_mismatch_path(<<"/", _/binary>> = Path) ->
+    Path;
+canonical_mismatch_path(Path) when is_binary(Path) ->
+    <<"/", Path/binary>>.
 
 -ifdef(TEST).
 
@@ -985,13 +1170,16 @@ deep_subset_match_test() ->
     )).
 
 wildcard_match_test() ->
+    Template = clean_template(
+        #{<<"node">> => #{<<"address">> => <<"_">>}},
+        #{}),
     ?assert(match_template(
-        #{<<"node">> => #{<<"address">> => <<"$any">>}},
+        Template,
         #{<<"node">> => #{<<"address">> => <<"abc">>}},
         #{}
     )),
     ?assertNot(match_template(
-        #{<<"node">> => #{<<"address">> => <<"$any">>}},
+        Template,
         #{<<"node">> => #{}},
         #{}
     )).
@@ -1045,152 +1233,28 @@ admission_response_body_preserves_policy_rejection_test() ->
         {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
         admission_response_body(Rejection, #{})).
 
-trusted_peer_attestation_can_be_reused_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
-            <<"tpm">> => #{<<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>}}
-        }
-    }, RingScope),
-    Req = #{
-        <<"peer-attestation">> => Attestation
-    },
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
-    {<<"http://peer.example">>, TrustedAttestation, Publisher} =
-        peer_attestation_from_req(Req, RingScope, Opts),
-    ?assert(match_template(
-        #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
-        peer_boot_attestation_body(TrustedAttestation, Opts),
-        Opts)).
-
-untrusted_peer_attestation_publisher_rejected_test() ->
+stored_peer_attestation_is_not_green_zone_trust_input_test() ->
     PublisherWallet = ar_wallet:new(),
     RingScope = test_ring_scope(),
     Attestation = signed_peer_attestation(PublisherWallet, #{
         <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
     }, RingScope),
-    Req = #{
-        <<"peer-attestation">> => Attestation
-    },
-    Opts = #{<<"green-zone-trusted-publishers">> => [<<"not-the-signer">>]},
+    Req = #{<<"peer-attestation">> => Attestation},
     ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-publisher-untrusted">>
-        }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
-
-request_supplied_publisher_trust_is_ignored_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingScope),
-    Req = #{
-        <<"peer-attestation">> => Attestation,
-        <<"trusted-publisher">> => Publisher
-    },
-    ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-publisher-untrusted">>
-        }},
+        {green_zone_error, #{<<"error">> := <<"missing-joiner-url">>}},
         peer_attestation_from_req(Req, RingScope, #{})).
 
-stored_peer_attestation_url_mismatch_rejected_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingScope),
-    Req = #{
-        <<"peer-attestation">> => Attestation,
-        <<"joiner-url">> => <<"http://other.example">>
-    },
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
-    ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-url-mismatch">>
-        }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
-
-stored_peer_attestation_scope_mismatch_rejected_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    OtherScope = RingScope#{<<"template-id">> => <<"other-template">>},
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, OtherScope),
-    Req = #{<<"peer-attestation">> => Attestation},
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
-    ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-invalid">>,
-            <<"field">> := <<"peer-scope.consumer-scope">>
-        }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
-
-stored_peer_attestation_peer_scope_url_mismatch_rejected_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    Attestation0 = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingScope),
-    Scope0 = hb_maps:get(<<"peer-scope">>, Attestation0, #{}, #{}),
-    Attestation = hb_message:commit(
-        (unsigned_message(Attestation0))#{
-            <<"peer-scope">> =>
-                Scope0#{<<"peer-url">> => <<"http://other.example">>}
-        },
-        #{<<"priv-wallet">> => PublisherWallet}),
-    Req = #{<<"peer-attestation">> => Attestation},
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
-    ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-invalid">>,
-            <<"field">> := <<"peer-scope.peer-url">>
-        }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
-
-stored_peer_attestation_embedded_id_mismatch_rejected_test() ->
-    PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
-    RingScope = test_ring_scope(),
-    Attestation0 = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingScope),
-    Scope0 = hb_maps:get(<<"peer-scope">>, Attestation0, #{}, #{}),
-    Attestation = hb_message:commit(
-        (unsigned_message(Attestation0))#{
-            <<"peer-scope">> =>
-                Scope0#{<<"boot-attestation-id">> => <<"wrong-id">>}
-        },
-        #{<<"priv-wallet">> => PublisherWallet}),
-    Req = #{<<"peer-attestation">> => Attestation},
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
-    ?assertThrow(
-        {green_zone_error, #{
-            <<"error">> := <<"peer-attestation-invalid">>,
-            <<"field">> := <<"peer-scope.attestation-id">>
-        }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
-
-green_zone_policy_uses_fresh_attestation_test() ->
+green_zone_policy_uses_boot_attestation_test() ->
     PublisherWallet = ar_wallet:new(),
     RingScope = test_ring_scope(),
     Boot = #{
         <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
         }
     },
     Fresh = #{
         <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
+            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
         }
     },
     Attestation = signed_peer_attestation(
@@ -1200,24 +1264,26 @@ green_zone_policy_uses_fresh_attestation_test() ->
     ?assert(match_template(
         Template, peer_policy_attestation_body(Attestation, #{}), #{})),
     ?assertNot(match_template(
-        Template, peer_boot_attestation_body(Attestation, #{}), #{})).
+        Template,
+        response_body(
+            hb_maps:get(
+                <<"peer-fresh-attestation">>, Attestation, undefined, #{}),
+            #{}),
+        #{})).
 
 expired_peer_attestation_rejected_test() ->
     PublisherWallet = ar_wallet:new(),
-    Publisher = wallet_address(PublisherWallet),
     RingScope = test_ring_scope(),
     Old = erlang:system_time(second) - 7200,
     Attestation = signed_peer_attestation(PublisherWallet, #{
         <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
     }, RingScope, Old),
-    Req = #{<<"peer-attestation">> => Attestation},
-    Opts = #{<<"green-zone-trusted-publishers">> => [Publisher]},
     ?assertThrow(
         {green_zone_error, #{
             <<"error">> := <<"peer-attestation-invalid">>,
             <<"field">> := <<"issued-at-unix">>
         }},
-        peer_attestation_from_req(Req, RingScope, Opts)).
+        assert_peer_attestation_body(Attestation, RingScope, #{})).
 
 admission_body_requires_joiner_binding_test() ->
     Wallet = ar_wallet:new(),
@@ -1231,7 +1297,7 @@ admission_body_requires_joiner_binding_test() ->
             <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
-            #{},
+            #{<<"name">> => test_name()},
             #{})).
 
 admission_body_requires_expected_ring_test() ->
@@ -1246,7 +1312,7 @@ admission_body_requires_expected_ring_test() ->
             <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
-            #{},
+            #{<<"name">> => test_name()},
             #{})).
 
 admission_body_accepts_expected_ring_test() ->
@@ -1258,7 +1324,10 @@ admission_body_accepts_expected_ring_test() ->
             <<"http://peer.example">>,
             <<"http://self.example">>,
             <<"nonce">>,
-            #{<<"expected-ring-address">> => RingAddress},
+            #{
+                <<"name">> => test_name(),
+                <<"expected-ring-address">> => RingAddress
+            },
             #{})).
 
 ring_wallet_address_mismatch_rejected_test() ->
@@ -1273,21 +1342,19 @@ ring_wallet_address_mismatch_rejected_test() ->
 sign_without_ring_is_policy_error_test() ->
     ?assertThrow(
         {green_zone_error, #{<<"error">> := <<"green-zone-not-initialized">>}},
-        green_zone_signing_opts(#{})).
+        green_zone_signing_opts(test_name(), #{})).
 
 nested_commitments_template_is_policy_test() ->
     Template = clean_template(#{
         <<"system">> => #{<<"commitments">> => <<"required">>},
         <<"commitments">> => #{<<"ignored-envelope-metadata">> => true}
     }, #{}),
-    ?assertEqual(
-        #{<<"system">> => #{<<"commitments">> => <<"required">>}},
-        Template),
+    ?assertEqual(#{<<"system">> => #{}}, Template),
     ?assert(match_template(
         Template,
-        #{<<"system">> => #{<<"commitments">> => <<"required">>}},
+        #{<<"system">> => #{}},
         #{})),
-    ?assertNot(match_template(
+    ?assert(match_template(
         Template,
         #{<<"system">> => #{}},
         #{})).
@@ -1296,28 +1363,38 @@ metadata_only_template_rejected_test() ->
     ?assertThrow(
         {green_zone_error, #{<<"error">> := <<"empty-template">>}},
         install_ring(
+            test_name(),
             #{<<"commitments">> => #{<<"only-metadata">> => true}},
             crypto:strong_rand_bytes(32),
             ar_wallet:new(),
-            [],
+            #{},
             #{})).
 
 test_admission(Wallet) ->
     RingScope = test_ring_scope(Wallet),
-    hb_message:commit(#{
+    Admission = #{
         <<"type">> => <<"green-zone-admission">>,
         <<"version">> => <<"1.0">>,
+        <<"name">> => test_name(),
         <<"issued-at-unix">> => erlang:system_time(second),
         <<"validity">> => admission_validity(#{}, #{}),
         <<"admission-nonce">> => <<"nonce">>,
         <<"ring-scope">> => RingScope,
+        <<"green-zone">> => #{
+            <<"name">> => test_name(),
+            <<"members">> => #{}
+        },
+        <<"template">> => #{},
         <<"template-matched">> => true,
         <<"joiner-url">> => <<"http://self.example">>,
         <<"credential">> => #{},
         <<"encrypted-wallet">> => #{},
         <<"peer-attestation">> => #{<<"peer-url">> => <<"http://self.example">>},
         <<"ring-address">> => wallet_address(Wallet)
-    }, #{<<"priv-wallet">> => Wallet}).
+    },
+    Admission#{
+        <<"authorization">> => admission_authorization(Admission, Wallet, #{})
+    }.
 
 signed_peer_attestation(Wallet, BootAttestation, RingScope) ->
     signed_peer_attestation(
@@ -1366,12 +1443,16 @@ test_ring_scope() ->
     #{
         <<"type">> => <<"green-zone-ring-scope">>,
         <<"version">> => <<"1.0">>,
+        <<"name">> => test_name(),
         <<"ring-address">> => <<"ring-address">>,
         <<"template-id">> => <<"template-id">>
     }.
 
 test_ring_scope(Wallet) ->
     (test_ring_scope())#{<<"ring-address">> => wallet_address(Wallet)}.
+
+test_name() ->
+    <<"book-shelf">>.
 
 test_credential_subject() ->
     #{
@@ -1385,8 +1466,5 @@ test_fresh_attestation() ->
             <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
         }
     }.
-
-unsigned_message(Msg) ->
-    maps:without([<<"commitments">>, <<"ao-types">>], Msg).
 
 -endif.

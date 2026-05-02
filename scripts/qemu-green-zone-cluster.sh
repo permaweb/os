@@ -3,17 +3,17 @@
 #
 # The harness boots three admissible LapEE nodes and one inadmissible node
 # under QEMU+OVMF+swtpm. The nodes intentionally vary observable system
-# properties, currently guest RAM size plus node 4's rejected kernel cmdline,
-# so the green-zone template is tested as a deep subset policy rather than an
-# accidental whole-machine equality check. Each swtpm is manufactured with a
-# local EK certificate so `~tpm@2.0a/verify-peer' can exercise the real
-# MakeCredential/ActivateCredential path instead of a no-cert shortcut.
+# properties. The three admitted nodes share the template-matched DMI product;
+# node 4 carries a different boot-attested DMI product. Each swtpm is
+# manufactured with a local EK certificate so `~tpm@2.0a/verify-peer' can
+# exercise the real MakeCredential/ActivateCredential path instead of a
+# no-cert shortcut.
 #
 # Acceptance checked here:
 #   * all four nodes answer `~tpm@2.0a/boot-attestation'
-#   * node 1 initializes a green-zone template from its boot cmdline
+#   * node 1 initializes a named green-zone template from its system report
 #   * nodes 2 and 3 join through node 1 and receive the shared ring wallet
-#   * node 4 has a different cmdline and is rejected by the same template
+#   * node 4 has a different DMI product and is rejected by the same template
 #   * nodes 1-3 can sign with the same green-zone wallet address
 #   * node 4 cannot sign with that green-zone wallet address
 
@@ -22,7 +22,6 @@ cd "$(dirname "$0")/.."
 
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 IMG=${IMG:-$BUILD_DIR/images/lapee-usb-no-tme.img}
-BAD_IMG=${BAD_IMG:-$BUILD_DIR/images/lapee-usb-no-tme-bad-ring.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone}
 BASE_PORT=${BASE_PORT:-19080}
 TIMEOUT=${TIMEOUT:-480}
@@ -30,22 +29,20 @@ KEEP_RUNNING=${KEEP_RUNNING:-0}
 SWTPM_LOCALCA_OPTIONS=${SWTPM_LOCALCA_OPTIONS:-/opt/homebrew/etc/swtpm-localca.options}
 GUEST_HOST=${GUEST_HOST:-$(ipconfig getifaddr en0 2>/dev/null || echo 10.0.2.2)}
 GOOD_CMDLINE=${GOOD_CMDLINE:-"console=tty0 quiet loglevel=0 vt.global_cursor_default=0 rdinit=/init lapee.mode=prod lapee.wifi=enabled lapee.splash=blue LAPEE_NO_TME=1"}
-BAD_CMDLINE=${BAD_CMDLINE:-"$GOOD_CMDLINE lapee.green-zone=reject"}
 NODE1_MEMORY_MIB=${NODE1_MEMORY_MIB:-2048}
 NODE2_MEMORY_MIB=${NODE2_MEMORY_MIB:-2304}
 NODE3_MEMORY_MIB=${NODE3_MEMORY_MIB:-2560}
-NODE4_MEMORY_MIB=${NODE4_MEMORY_MIB:-1792}
-NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-GZ-admit-1}
-NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-GZ-admit-2}
-NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-GZ-admit-3}
+NODE4_MEMORY_MIB=${NODE4_MEMORY_MIB:-2816}
+NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-GZ-admit}
+NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-GZ-admit}
+NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-GZ-admit}
 NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-GZ-reject-4}
-SWTPM_CTRL=${SWTPM_CTRL:-tcp}
+SWTPM_CTRL=${SWTPM_CTRL:-unix}
 SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
 
 while (($# > 0)); do
     case "$1" in
         --img) IMG=$2; shift 2;;
-        --bad-img) BAD_IMG=$2; shift 2;;
         --outdir) OUTDIR=$2; shift 2;;
         --base-port) BASE_PORT=$2; shift 2;;
         --timeout) TIMEOUT=$2; shift 2;;
@@ -96,16 +93,6 @@ if [[ ! -f "$IMG" ]]; then
         --size auto \
         --image "$IMG"
 fi
-if [[ ! -f "$BAD_IMG" ]]; then
-    echo ">> building inadmissible no-TME image: $BAD_IMG"
-    WIFI=0 ./scripts/build-usb-image.sh \
-        --kernel "$BUILD_DIR/kernel/vmlinuz-lapee" \
-        --initramfs "$BUILD_DIR/initramfs/initramfs-lapee.cpio.zst" \
-        --cmdline "$BAD_CMDLINE" \
-        --size auto \
-        --image "$BAD_IMG"
-fi
-
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
@@ -118,7 +105,7 @@ echo "swtpm: $(swtpm --version | head -n 1)"
 echo "guest-host: $GUEST_HOST"
 echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
-ls -lhT "$IMG" "$BAD_IMG" 2>/dev/null || ls -lh "$IMG" "$BAD_IMG"
+ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
 cat > "$OUTDIR/localca.conf" <<EOF
 statedir = $OUTDIR/ca
@@ -321,7 +308,7 @@ require_request() {
 start_node 1 "$IMG"
 start_node 2 "$IMG"
 start_node 3 "$IMG"
-start_node 4 "$BAD_IMG"
+start_node 4 "$IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
 for n in 1 2 3 4; do
@@ -358,12 +345,14 @@ jq -n \
         distinct_ak_name: ([.[].ak_name] | unique | length),
         ek_cert_source_kinds: ([.[].ek_cert_source_kind] | unique)
       }' > "$OUTDIR/responses/security-properties.json"
-jq -e '.distinct_cmdlines >= 2 and .distinct_memtotal_kb == 4 and
-       .distinct_dmi_products == 4 and .distinct_ek_public == 4 and
+jq -e '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
+       .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
        .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
        .nodes[0].cmdline == .nodes[1].cmdline and
        .nodes[1].cmdline == .nodes[2].cmdline and
-       .nodes[3].cmdline != .nodes[0].cmdline' \
+       .nodes[0].dmi_product == .nodes[1].dmi_product and
+       .nodes[1].dmi_product == .nodes[2].dmi_product and
+       .nodes[3].dmi_product != .nodes[0].dmi_product' \
     "$OUTDIR/responses/security-properties.json" >/dev/null
 echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
@@ -377,10 +366,10 @@ post_json 1 "/~green-zone@1.0/init" \
     "$OUTDIR/requests/init.json" \
     "$OUTDIR/responses/node1-init.json"
 jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true") and
-       (.body."ring-address" | type == "string" and length > 0)' \
+       (.body."green-zone"."ring-address" | type == "string" and length > 0)' \
     "$OUTDIR/responses/node1-init.json" >/dev/null
-ring_addr=$(jq -r '.body."ring-address"' "$OUTDIR/responses/node1-init.json")
-ring_scope=$(jq -c '.body."ring-scope"' "$OUTDIR/responses/node1-init.json")
+ring_addr=$(jq -r '.body."green-zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
+ring_scope=$(jq -c '.body."green-zone"."ring-scope"' "$OUTDIR/responses/node1-init.json")
 jq --argjson scope "$ring_scope" \
     '. + {"peer-attestation-scope": $scope}' \
     "$OUTDIR/requests/verify2.json" \
@@ -407,19 +396,6 @@ jq -e '.status == 200 and .body.type == "lapee-peer-attestation" and
        (.body."credential-activation".verified == true or
         .body."credential-activation".verified == "true")' \
     "$OUTDIR/responses/node1-verify2.json" >/dev/null
-jq -n \
-    --slurpfile att "$OUTDIR/responses/node1-verify2.json" \
-    '{"peer-attestation": $att[0]}' \
-    > "$OUTDIR/requests/admit2-published.json"
-require_request admit2-published
-post_json 1 "/~green-zone@1.0/admit" \
-    "$OUTDIR/requests/admit2-published.json" \
-    "$OUTDIR/responses/node1-admit2-published.json"
-jq -e '.status == 200 and .body.credential."credential-blob" and
-       .body."encrypted-wallet"' \
-    "$OUTDIR/responses/node1-admit2-published.json" >/dev/null
-echo ">> node 1 can reuse its signed peer attestation for node 2"
-
 post_json 1 "/~green-zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
     "$OUTDIR/responses/node1-admit2.json"
@@ -447,7 +423,7 @@ if [[ "$join4_rc" != 0 ]]; then
     exit 1
 fi
 if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-            .body."mismatch-path" == "/system/kernel/cmdline"' \
+            .body."mismatch-path" == "/system/firmware/dmi/fields/product-name"' \
         "$OUTDIR/responses/node4-join.json" >/dev/null; then
     echo "!! node 4 rejection was not the expected template-mismatch" >&2
     cat "$OUTDIR/responses/node4-join.json" >&2
@@ -457,9 +433,9 @@ echo ">> node 4 rejected as expected"
 
 get_json 4 "/~green-zone@1.0/status" \
     "$OUTDIR/responses/node4-status.json"
-jq -e --arg addr "$ring_addr" \
+jq -e \
     '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
-     (.body."ring-address" != $addr)' \
+     (.body."green-zones" | has("book-shelf") | not)' \
     "$OUTDIR/responses/node4-status.json" >/dev/null
 echo ">> node 4 status has no green-zone wallet"
 

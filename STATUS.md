@@ -1,5 +1,52 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 19
+
+Reworked `~green-zone@1.0` around named ring definitions rather than one
+implicit singleton ring:
+
+- `init`, `join`, `admit`, and `sign` now require a green-zone `name`.
+- A node can hold multiple zones at once. Public definitions live under the
+  node-message-visible `green-zones` key, keyed by name. Private AES/wallet
+  material lives separately under `priv-green-zones`.
+- The initializer no longer supplies a wallet or AES key. `init` rejects
+  caller-provided secret material and mints both inside the matching node.
+- `init` now checks the initializer's own boot attestation against the
+  template before creating the ring wallet.
+- Green-zone-local `trusted-publishers` state was removed. Reusable or
+  transitive peer-attestation publisher trust is a TPM-device concern, not a
+  ring-definition concern.
+- Green-zone templates now use `hb_message:match(..., primary, Opts)` and the
+  standard `_` wildcard. JSON callers can send `"_"`, which is normalized to
+  the Erlang wildcard atom.
+- Public green-zone definitions include a lightweight `members` map keyed by
+  node address with known URLs for nodes admitted into the ring.
+
+Validation:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test compile
+Post-compile hooks executed
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_green_zone, [verbose])
+All 16 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(dev_tpm2, [verbose])
+All 37 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 erl ... eunit:test(lapee_http_json, [verbose])
+2 tests passed.
+
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+$ git diff --check
+```
+
 ## Current Objective
 
 Build a maintainable TPM-backed peer verification and green-zone ring flow.
@@ -919,3 +966,74 @@ native-build requires a Linux host (Buildroot doesn't run on Darwin).
 The last full appliance/QEMU green-zone pass remains Update 13. This increment
 is host-validated and staged into `build/hyperbeam/src-edge`; the strengthened
 gate still needs a host with Docker access and swtpm socket permission.
+
+## Update 15 - Named Green-Zones Accepted End-to-End
+
+Sam clarified that transitive trust in stored peer attestations is a TPM-layer
+concern, while green-zone state should be named active rings. The green-zone
+implementation now follows that shape:
+
+- `~green-zone@1.0` has named zones. `init`, `join`, `admit`, and `sign` take
+  `name`/`green-zone-name`; node opts expose public `green-zones` keyed by
+  name and private `priv-green-zones` keyed by name.
+- `init` rejects caller-supplied AES keys or wallets, proves the initializer's
+  own boot attestation matches the template, then mints the ring AES secret
+  and wallet inside the node.
+- `admit` still performs live TPM peer verification and MakeCredential, but no
+  longer treats trusted publishers as ring state.
+- Admission responses carry a nested ring-wallet-signed `authorization` over
+  stable payload IDs so the joiner can verify the transported material before
+  installing the named ring identity.
+- The QEMU acceptance harness now uses a single no-TME image for all four
+  nodes, differentiates node 4 via boot-attested DMI product, and asserts that
+  only nodes 1-3 can join/sign as `book-shelf`.
+
+Validation evidence at `2026-05-02 13:42 EDT`:
+
+```text
+$ ./scripts/stage-hyperbeam-overlay.sh build/hyperbeam/src-edge
+>> LapEE HyperBEAM overlay staged
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m dev_green_zone
+All 16 tests passed.
+
+$ make buildroot JOBS=18
+build/initramfs/initramfs-lapee.cpio.zst 192M May 2 13:34
+build/kernel/vmlinuz-lapee 20M May 2 13:34
+
+$ make hb-usb-no-tme-image WIFI=0
+USB image ready: .../build/images/lapee-usb-no-tme.img (247463936 bytes)
+
+$ ./scripts/qemu-green-zone-cluster.sh --timeout 600
+>> node 1 initialized green-zone MmLlnKmWdIdvJxB_QV-yIfdMhNFBVKo9LS5v30g3KJ0
+>> node 1 can admit node 2
+>> node 2 joined green-zone
+>> node 3 joined green-zone
+>> node 4 rejected as expected
+>> node 4 status has no green-zone wallet
+>> node 4 cannot sign as green-zone
+>> node 1 signed as green-zone MmLlnKmWdIdvJxB_QV-yIfdMhNFBVKo9LS5v30g3KJ0
+>> node 2 signed as green-zone MmLlnKmWdIdvJxB_QV-yIfdMhNFBVKo9LS5v30g3KJ0
+>> node 3 signed as green-zone MmLlnKmWdIdvJxB_QV-yIfdMhNFBVKo9LS5v30g3KJ0
+
+=== green-zone QEMU cluster PASSED ===
+out: /Users/sam/.codex/worktrees/4b17/lapee/build/qemu-green-zone
+ring-address: MmLlnKmWdIdvJxB_QV-yIfdMhNFBVKo9LS5v30g3KJ0
+
+$ git diff --check
+$ bash -n scripts/qemu-green-zone-cluster.sh
+$ PYTHONPYCACHEPREFIX=/private/tmp/lapee-pycache \
+    python3 -m py_compile scripts/qemu-green-zone-requests.py
+
+$ cd build/hyperbeam/src-edge
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m dev_green_zone
+All 16 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m dev_tpm2
+All 37 tests passed.
+
+$ LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 as test eunit -m lapee_http_json
+All 4 tests passed. The Codex exec wrapper reported code -1 twice after
+printing the successful EUnit result and normal os_mon shutdown lines.
+```

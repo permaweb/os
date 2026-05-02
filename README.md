@@ -315,10 +315,11 @@ Run the TPM-backed green-zone acceptance gate:
 make qemu-green-zone-cluster
 ```
 
-That boots four QEMU+swtpm nodes. Three nodes share the measured
-configuration and must join the green-zone and sign with the same ring
-wallet; the fourth carries a different measured command line and must
-fail admission with `template-mismatch` and fail to sign as the ring.
+That boots four QEMU+swtpm nodes from the same image. Node 1 initializes
+a named green-zone from its measured system report. Nodes 2 and 3 join
+that named zone and sign with the same ring wallet; node 4 carries a
+different boot-attested DMI product and must fail admission with
+`template-mismatch` and fail to sign as the ring.
 
 Write a freshly built image directly to USB:
 

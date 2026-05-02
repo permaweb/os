@@ -2302,15 +2302,7 @@ attestation(_Base, Req, Opts) ->
                     {TcgLogBin, TcgLogSource} =
                         read_tcg_event_log_with_source(),
                     TcgLogFormat = infer_log_format(TcgLogBin),
-                    NodeMsg = get_node_msg(Opts),
-                    NodeMsgId =
-                        case NodeMsg of
-                            undefined -> null;
-                            _ ->
-                                hb_util:human_id(
-                                    hb_util:native_id(
-                                        hb_message:id(NodeMsg, all, Opts)))
-                        end,
+                    {NodeMsg, NodeMsgId} = attested_subject(Opts),
                     Envelope = #{
                         <<"lapee-attestation-version">> => <<"0.4">>,
                         <<"issued-at-unix">> =>
@@ -2595,6 +2587,45 @@ get_node_msg(Opts) ->
     case persistent_term:get({dev_tpm2, attested_node_msg}, undefined) of
         undefined -> hb_opts:get(lapee_attested_node_msg, undefined, Opts);
         Msg -> Msg
+    end.
+
+attested_subject(Opts) ->
+    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
+        {ok, Boot} ->
+            case subject_from_boot_attestation(Boot, Opts) of
+                {Subject, SubjectID} -> {Subject, SubjectID};
+                undefined -> legacy_attested_subject(Opts)
+            end;
+        _ ->
+            legacy_attested_subject(Opts)
+    end.
+
+subject_from_boot_attestation(Boot, Opts) when is_map(Boot) ->
+    System = hb_maps:get(<<"system">>, Boot, undefined, Opts),
+    Node = hb_maps:get(<<"node">>, Boot, undefined, Opts),
+    Tpm = hb_maps:get(<<"tpm">>, Boot, #{}, Opts),
+    SubjectID = hb_maps:get(<<"extended-subject">>, Tpm, undefined, Opts),
+    case {System, Node, SubjectID} of
+        {S, N, ID}
+                when is_map(S), is_map(N), is_binary(ID),
+                     byte_size(ID) =:= 43 ->
+            {#{<<"system">> => S, <<"node">> => N}, ID};
+        _ ->
+            undefined
+    end;
+subject_from_boot_attestation(_Boot, _Opts) ->
+    undefined.
+
+legacy_attested_subject(Opts) ->
+    case get_node_msg(Opts) of
+        undefined ->
+            {null, null};
+        Msg ->
+            {
+                Msg,
+                hb_util:human_id(
+                    hb_util:native_id(hb_message:id(Msg, all, Opts)))
+            }
     end.
 
 %%%============================================================================
