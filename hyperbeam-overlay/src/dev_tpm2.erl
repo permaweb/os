@@ -475,7 +475,7 @@ pcr_read(_Base, Req, Opts) ->
 verify(Base, Req, Opts) ->
     Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
     TrustedCaPem = resolve_trusted_ca(Req, Opts),
-    CaSource = trust_anchor_source(Req, Opts, TrustedCaPem),
+    CaSource = trust_anchor_source(Req, TrustedCaPem),
     Checks = [
         safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
@@ -588,14 +588,11 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
 %% by `resolve_trusted_ca/2'. Returns a binary: "request", "node_config",
 %% or "none" (when no anchor was found anywhere -- the chain check
 %% will then fail with a targeted "missing or unparseable" message).
-trust_anchor_source(Req, _Opts, <<>>) ->
-    case hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}) of
-        undefined -> <<"none">>;
-        _ -> <<"request_but_empty">>
-    end;
-trust_anchor_source(Req, _Opts, _Pem) ->
-    case hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}) of
-        B when is_binary(B), byte_size(B) > 0 -> <<"request">>;
+trust_anchor_source(Req, Pem) ->
+    case {hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}), Pem} of
+        {undefined, <<>>} -> <<"none">>;
+        {_Value, <<>>} -> <<"request_but_empty">>;
+        {B, _} when is_binary(B), byte_size(B) > 0 -> <<"request">>;
         _ -> <<"node_config">>
     end.
 
