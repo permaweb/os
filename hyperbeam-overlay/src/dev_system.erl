@@ -1259,17 +1259,19 @@ report_fixture_root_test() ->
             <<"0x8086\n">>),
         write_fixture(Root, "/sys/class/drm/card0/device/device",
             <<"0x7d45\n">>),
-        write_u32_fixture(
+        write_uint_fixture(
             Root,
             "/sys/class/drm/card0/device/resource0",
             ?MTL_MEM_SS_INFO_GLOBAL,
-            2 bor (8 bsl 4) bor (3 bsl 8)),
-        write_u64_fixture(
+            2 bor (8 bsl 4) bor (3 bsl 8),
+            32),
+        write_uint_fixture(
             Root,
             "/dev/cpu/0/msr",
             ?MSR_BOOT_GUARD_SACM_INFO,
             (1 bsl 32) bor (1 bsl 6) bor (1 bsl 5) bor
-                (1 bsl 3) bor (2 bsl 1)),
+                (1 bsl 3) bor (2 bsl 1),
+            64),
         make_dir_p(Root, "/sys/class/drm/card0-eDP-1"),
         write_fixture(Root, "/sys/class/drm/card0-eDP-1/status",
             <<"connected\n">>),
@@ -1361,22 +1363,12 @@ write_fixture(Root, Abs, Data) ->
     ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Data).
 
-write_u32_fixture(Root, Abs, Offset, Value) ->
+write_uint_fixture(Root, Abs, Offset, Value, Bits) ->
     Path = root_path(Root, Abs),
     ok = filelib:ensure_dir(Path),
     {ok, Io} = file:open(Path, [write, raw, binary]),
     try
-        ok = file:pwrite(Io, Offset, <<Value:32/little-unsigned-integer>>)
-    after
-        file:close(Io)
-    end.
-
-write_u64_fixture(Root, Abs, Offset, Value) ->
-    Path = root_path(Root, Abs),
-    ok = filelib:ensure_dir(Path),
-    {ok, Io} = file:open(Path, [write, raw, binary]),
-    try
-        ok = file:pwrite(Io, Offset, <<Value:64/little-unsigned-integer>>)
+        ok = file:pwrite(Io, Offset, <<Value:Bits/little-unsigned-integer>>)
     after
         file:close(Io)
     end.
