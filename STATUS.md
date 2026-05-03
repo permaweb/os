@@ -1,5 +1,24 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 37
+
+Collapsed green-zone admission authorization field definitions so the signer
+and verifier share the same scalar/payload field lists, and removed a dead
+admission-validity argument plus dead template sanitizer branch. Validation
+evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19189 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 15 tests; `HB_PORT=19190 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_tpm2` passed all 40 tests; after the final dead-argument cleanup
+`HB_PORT=19191 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 15 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`06313373d1e8d7031d55eaf4b75dc464931fbcec3c07da9e6358014fb00dd7cb`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`pl7S3EOuZAh9Rp37TOuDBggG204Ejv3ArhFvhj1PrOk`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`1d00d605346482dbae3daf352cbde2ec29cf2bd951d77108d4f9deb4fcbbf519`.
+
 ## Update 36
 
 Removed the unused `green-zone-last-admission` server option written after

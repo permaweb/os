@@ -159,7 +159,7 @@ admit(_Base, Req, Opts) ->
         Definition = commit_unsigned_tree(
             zone_definition(Name, Template, Wallet, Members, Opts),
             Opts),
-        Validity = commit_unsigned_tree(admission_validity(Req, Opts), Opts),
+        Validity = commit_unsigned_tree(admission_validity(Opts), Opts),
         Admission0 = #{
             <<"type">> => <<"green-zone-admission">>,
             <<"version">> => <<"1.0">>,
@@ -272,52 +272,42 @@ commit_unsigned_tree(Value, _Opts) ->
 
 admission_authorization(Admission, Wallet, Opts) ->
     hb_message:commit(
-        #{
+        maps:merge(#{
             <<"type">> => <<"green-zone-admission-authorization">>,
             <<"version">> => <<"1.0">>,
-            <<"name">> => hb_maps:get(<<"name">>, Admission, undefined, Opts),
-            <<"issued-at-unix">> =>
-                hb_maps:get(<<"issued-at-unix">>, Admission, undefined, Opts),
-            <<"admission-nonce">> =>
-                hb_maps:get(
-                    <<"admission-nonce">>, Admission, undefined, Opts),
-            <<"joiner-url">> =>
-                hb_maps:get(<<"joiner-url">>, Admission, undefined, Opts),
-            <<"ring-address">> =>
-                hb_maps:get(<<"ring-address">>, Admission, undefined, Opts),
-            <<"template-matched">> => <<"true">>,
-            <<"validity-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"validity">>, Admission, #{}, Opts),
-                    Opts),
-            <<"ring-reference-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"ring-reference">>, Admission, #{}, Opts),
-                    Opts),
-            <<"green-zone-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
-                    Opts),
-            <<"template-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"template">>, Admission, #{}, Opts),
-                    Opts),
-            <<"peer-attestation-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"peer-attestation">>, Admission, #{}, Opts),
-                    Opts),
-            <<"credential-id">> =>
-                stable_message_id(
-                    hb_maps:get(<<"credential">>, Admission, #{}, Opts),
-                    Opts),
-            <<"encrypted-wallet-id">> =>
-                stable_message_id(
-                    hb_maps:get(
-                        <<"encrypted-wallet">>, Admission, #{}, Opts),
-                    Opts)
-        },
+            <<"template-matched">> => <<"true">>
+        }, maps:from_list(
+            [
+                {Field, hb_maps:get(Field, Admission, undefined, Opts)}
+             || Field <- authorization_scalar_fields()
+            ] ++
+            [
+                {AuthKey, stable_message_id(
+                    hb_maps:get(AdmissionKey, Admission, #{}, Opts), Opts)}
+             || {AuthKey, AdmissionKey} <- authorization_id_fields()
+            ])),
         #{<<"priv-wallet">> => Wallet}
     ).
+
+authorization_scalar_fields() ->
+    [
+        <<"name">>,
+        <<"issued-at-unix">>,
+        <<"admission-nonce">>,
+        <<"joiner-url">>,
+        <<"ring-address">>
+    ].
+
+authorization_id_fields() ->
+    [
+        {<<"validity-id">>, <<"validity">>},
+        {<<"ring-reference-id">>, <<"ring-reference">>},
+        {<<"green-zone-id">>, <<"green-zone">>},
+        {<<"template-id">>, <<"template">>},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>},
+        {<<"credential-id">>, <<"credential">>},
+        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
+    ].
 
 stable_message_id(Msg, Opts) when is_map(Msg) ->
     Body = response_body(Msg, Opts),
@@ -463,7 +453,7 @@ template_id(Name, Template, Opts) ->
         all,
         Opts).
 
-admission_validity(_Req, Opts) ->
+admission_validity(Opts) ->
     Now = erlang:system_time(second),
     TTL = admission_ttl_seconds(Opts),
     #{
@@ -916,13 +906,6 @@ assert_admission_signature(Admission, Opts) ->
     assert_authorization_ids(Authorization, Admission, Opts).
 
 assert_authorization_fields(Authorization, Admission, Opts) ->
-    Fields = [
-        <<"name">>,
-        <<"issued-at-unix">>,
-        <<"admission-nonce">>,
-        <<"joiner-url">>,
-        <<"ring-address">>
-    ],
     lists:foreach(
         fun(Field) ->
             case {
@@ -933,22 +916,13 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
                 _ -> bad_admission(<<"authorization.", Field/binary>>)
             end
         end,
-        Fields),
+        authorization_scalar_fields()),
     case hb_maps:get(<<"template-matched">>, Authorization, undefined, Opts) of
         <<"true">> -> ok;
         _ -> bad_admission(<<"authorization.template-matched">>)
     end.
 
 assert_authorization_ids(Authorization, Admission, Opts) ->
-    Pairs = [
-        {<<"validity-id">>, <<"validity">>},
-        {<<"ring-reference-id">>, <<"ring-reference">>},
-        {<<"green-zone-id">>, <<"green-zone">>},
-        {<<"template-id">>, <<"template">>},
-        {<<"peer-attestation-id">>, <<"peer-attestation">>},
-        {<<"credential-id">>, <<"credential">>},
-        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
-    ],
     lists:foreach(
         fun({AuthKey, AdmissionKey}) ->
             Payload = hb_maps:get(AdmissionKey, Admission, undefined, Opts),
@@ -963,7 +937,7 @@ assert_authorization_ids(Authorization, Admission, Opts) ->
                     bad_admission(<<"authorization.", AuthKey/binary>>)
             end
         end,
-        Pairs).
+        authorization_id_fields()).
 
 acceptable_payload_ids(Payload, Opts) when is_map(Payload) ->
     Body = response_body(Payload, Opts),
@@ -1097,20 +1071,20 @@ match_template(Template, Candidate, Opts) ->
     hb_message:match(Template, Candidate, primary, Opts) =:= true.
 
 clean_template(Template, Opts) when is_map(Template) ->
-    clean_template_map(Template, true, Opts);
+    clean_template_map(Template, Opts);
 clean_template(Template, _Opts) ->
     Template.
 
-clean_template_map(Template, StripMeta, Opts) ->
+clean_template_map(Template, Opts) ->
     maps:from_list(
         [
             {Key, clean_template_value(Value, Opts)}
          || {Key, Value} <- hb_maps:to_list(Template, Opts),
-            not (StripMeta andalso lists:member(Key, ?TEMPLATE_META_KEYS))
+            not lists:member(Key, ?TEMPLATE_META_KEYS)
         ]).
 
 clean_template_value(Value, Opts) when is_map(Value) ->
-    clean_template_map(Value, true, Opts);
+    clean_template_map(Value, Opts);
 clean_template_value(<<"_">>, _Opts) ->
     '_';
 clean_template_value(Value, _Opts) ->
@@ -1345,7 +1319,7 @@ test_admission(Wallet) ->
         <<"version">> => <<"1.0">>,
         <<"name">> => test_name(),
         <<"issued-at-unix">> => erlang:system_time(second),
-        <<"validity">> => admission_validity(#{}, #{}),
+        <<"validity">> => admission_validity(#{}),
         <<"admission-nonce">> => <<"nonce">>,
         <<"ring-reference">> => RingReference,
         <<"green-zone">> => #{
