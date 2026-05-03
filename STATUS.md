@@ -20,8 +20,8 @@ state.
 
 Overlay staged into `build/hyperbeam/src-edge`.
 
-`HB_PORT=19208 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_system`
-passed both focused system-device tests.
+Focused eunit passed for `dev_tpm2`, `dev_green_zone`, `dev_system`,
+`lapee_http_json`, and `dev_tpm_interpret`.
 
 `make buildroot JOBS=18` completed.
 
@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: 249caba1d6cde8512a0d224b784a39139807109c73967703be502042b489f50e
+sha256: 8f2b76aa20a256e51f7ac5fd36fcc77c88ef970c715341c9baa1663aceb1cc76
 ```
 
 QEMU ring test:
@@ -41,7 +41,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: L9rByp5zly-nftavk92ailpscXifophYIf146B9dpCk
+ring-address: Aw17hpASXpG5bC6HPAG_PAdXFU99ccft33E1GF2JpZc
 ```
 
 Standard TME image:
@@ -49,7 +49,7 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 846fac1cff3a35cdd2b6538dbede1a25b8220d4472c9f17cbbca7214ecdacc80
+sha256: 59df77ff539b8bca677976648e0690c4b9b01a840f3608452a731d14736d6ad2
 ```
 
 No QEMU or swtpm processes owned by this validation run remain. The only
@@ -71,18 +71,9 @@ stable payload IDs rather than the mutable transport envelope.
 ## Recent Cleanup
 
 The unattended cleanup pass has been committing only net-negative source
-changes. Recent examples:
-
-- Trimmed TPM platform-probe parsing.
-- Inlined green-zone template loading.
-- Removed TPM peer helper indirection.
-- Shared TPM nonce decoding.
-- Removed stale TPM signing and AK signing stubs.
-- Shared green-zone authorization and field checks.
-
-Latest local cleanup before the next commit: removed unused Boot Guard probe
-source generality; `~system@1.0` now reports the single implemented
-`/dev/cpu/0/msr` path directly.
+changes: TPM probe parsing, stale helper stubs, green-zone authorization
+checks, peer-cache docs, and Boot Guard probe source generality were all
+trimmed while preserving the four-node QEMU acceptance gate.
 
 ## Open Threads
 
