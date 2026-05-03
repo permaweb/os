@@ -95,15 +95,7 @@ load_fresh() ->
     }.
 
 read_json_map(Path, InnerKey) ->
-    case file:read_file(Path) of
-        {ok, Bin} ->
-            try
-                Decoded = json:decode(Bin),
-                maps:get(InnerKey, Decoded, #{})
-            catch _:_ -> #{}
-            end;
-        _ -> #{}
-    end.
+    maps:get(InnerKey, read_json(Path), #{}).
 
 read_dir_of_json(Dir) ->
     case file:list_dir(Dir) of
