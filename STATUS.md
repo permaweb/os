@@ -1,5 +1,23 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 48
+
+Removed the private `~green-zone@1.0` `template_from/2` wrapper. The two
+callers now read the `template` field and pass it through `clean_template/2`
+directly, preserving recursive metadata stripping and wildcard normalization
+while deleting seven net Erlang source lines.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19203 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_green_zone` passed all 15 tests; `make buildroot JOBS=18`;
+no-TME image `build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`685104bd0693de546b69d10a8985176afd7c93f5f0e13cd829686e0ac000ab01`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`caWDWu-0WQioA5nXCtYnSSWHWyPDtidMbTufLT0NaZk`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`ede7377ce13cabafab427d5d53cf1b132913fa67c847baa5d696c51514a0e7a2`.
+
 ## Update 47
 
 Trimmed `~tpm@2.0a` peer-verification helper indirection. The peer verifier now

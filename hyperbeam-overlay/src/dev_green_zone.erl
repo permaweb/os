@@ -93,7 +93,9 @@ info(_Base, _Req, _Opts) ->
 init(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
-        Template = template_from(Req, Opts),
+        Template = clean_template(
+            hb_maps:get(<<"template">>, Req, #{}, Opts),
+            Opts),
         reject_supplied_secret_material(Req, Opts),
         Self = self_attestation_body(Opts),
         ok = assert_template_match(Template, Self, <<"self">>, Opts),
@@ -122,7 +124,7 @@ status(_Base, Req, Opts) ->
 match(_Base, Req, Opts) ->
     with_result(fun() ->
         Template = clean_template(
-            hb_maps:get(<<"template">>, Req, template_from(Req, Opts), Opts),
+            hb_maps:get(<<"template">>, Req, #{}, Opts),
             Opts),
         Candidate = hb_maps:get(<<"candidate">>, Req, undefined, Opts),
         #{
@@ -333,15 +335,6 @@ unsigned_commitment_ids(Msg, Opts) when is_map(Msg) ->
     ];
 unsigned_commitment_ids(_Msg, _Opts) ->
     [].
-
-template_from(Req, Opts) ->
-    clean_template(
-        hb_maps:get(
-            <<"template">>,
-            Req,
-            #{},
-            Opts),
-        Opts).
 
 reject_supplied_secret_material(Req, Opts) ->
     case first_defined([
