@@ -96,6 +96,11 @@ fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
+# AF_UNIX sun_path is 104 bytes on macOS / 108 on Linux. Worktree-rooted
+# OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
+# opaquely with "Path for UnioIO socket is too long". Stage the sockets
+# in a short /tmp dir and keep state/logs/certs in OUTDIR.
+SOCK_DIR=$(mktemp -d /tmp/lapee-gz.XXXXXX)
 
 echo "=== green-zone QEMU cluster ==="
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -136,6 +141,7 @@ cleanup() {
     for pid in "${tpm_pids[@]+"${tpm_pids[@]}"}"; do
         kill "$pid" 2>/dev/null || true
     done
+    rm -rf "$SOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -196,7 +202,7 @@ start_node() {
     cp "$img" "$node_dir/disk.img"
     cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
     manufacture_tpm "$n"
-    local sock="$node_dir/tpm/swtpm-sock"
+    local sock="$SOCK_DIR/tpm$n.sock"
     local memory_mib
     memory_mib=$(node_memory_mib "$n")
     local dmi_product
