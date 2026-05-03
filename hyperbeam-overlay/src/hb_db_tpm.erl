@@ -109,8 +109,7 @@ read_dir_of_json(Dir) ->
 
 read_json(Path) ->
     case file:read_file(Path) of
-        {ok, Bin} ->
-            try json:decode(Bin) catch _:_ -> #{} end;
+        {ok, Bin} -> try json:decode(Bin) catch _:_ -> #{} end;
         _ -> #{}
     end.
 
