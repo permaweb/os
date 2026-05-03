@@ -2522,18 +2522,14 @@ event_log(_Opts) ->
     end.
 
 append_event(Pcr, Payload) ->
-    Seq = case persistent_term:get({dev_tpm2, event_seq}, 0) of
-        N -> N
-    end,
+    Seq = persistent_term:get({dev_tpm2, event_seq}, 0),
     NewSeq = Seq + 1,
     Entry = Payload#{
         <<"seq">> => Seq,
         <<"pcr">> => Pcr,
         <<"emitted-at-unix">> => erlang:system_time(second)
     },
-    Old = case persistent_term:get({dev_tpm2, event_log}, []) of
-        L when is_list(L) -> L
-    end,
+    Old = persistent_term:get({dev_tpm2, event_log}, []),
     persistent_term:put({dev_tpm2, event_log}, Old ++ [Entry]),
     persistent_term:put({dev_tpm2, event_seq}, NewSeq),
     ok.
