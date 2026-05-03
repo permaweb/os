@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: f3e0ee1a1ab6000c55f4cfd1edb39e40b9e5562b89cf7c80839564084d7fa530
+sha256: 9ca2becb031849e25ef8ff4642f7b3eb76ef07ae885568b1026c46824ad9130a
 ```
 
 QEMU ring test:
@@ -41,7 +41,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: GIGjjIgZUPr9QV_i8JGHiIjVKBWWAZMI8ygvwTDtt8w
+ring-address: D-3ORKB6GxzkMrjtxQGicfgsIyvaM5XM9USFEjCuHTw
 ```
 
 Standard TME image:
@@ -49,8 +49,13 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: d1ca927cb43a30c5ea7c3bf7cfc0d42a21a5b0b547341e9d6d6d7469b6764c3c
+sha256: e7bfc6c575619ab372b9b9d079c342fbc0dcf5d8f9876a11a0892e49d5ecfe68
 ```
+
+Single-node `~tpm@2.0a/attestation` envelope re-validated end-to-end with
+`secondary-external-verifier/verifier_hb.py` after the seq-pinning fix
+(check 6 matches by digest, check 7 matches `EV_HYPERBEAM_KEY_PUBKEY_EXTEND`
++ digest): all eight checks PASS.
 
 No QEMU or swtpm processes owned by this validation run remain. The only
 matching process was the pre-existing `work/qemu-hyperbuddy-test` swtpm, which
@@ -74,6 +79,25 @@ The unattended cleanup pass has been committing only net-negative source
 changes: TPM probe parsing, stale helper stubs, green-zone authorization
 checks, peer-cache docs, and Boot Guard probe source generality were all
 trimmed while preserving the four-node QEMU acceptance gate.
+
+Two operability defects surfaced during this validation pass and were
+fixed in-place:
+
+* `scripts/qemu-green-zone-cluster.sh` was creating swtpm unix sockets
+  under `OUTDIR/nodes/nodeN/tpm/swtpm-sock`. Worktree-rooted OUTDIRs
+  blew the AF_UNIX `sun_path` limit (104 bytes on macOS) and swtpm
+  failed opaquely with `Path for UnioIO socket is too long`. The
+  script now stages sockets under a short `mktemp -d /tmp/lapee-gz.*`
+  directory and cleans it up on exit; state, logs, and certs continue
+  to live under OUTDIR.
+* `secondary-external-verifier/verifier_hb.py` pinned PCR-15 binding
+  checks to seq=0 (`EV_HYPERBEAM_NODE_IDENTITY_EXTEND`) and seq=1
+  (`EV_HYPERBEAM_KEY_PUBKEY_EXTEND`). Production now drives PCR 15
+  from the `on.start` -> `boot-attestation` path, so seq 0 carries
+  `EV_HYPERBEAM_KEY_PUBKEY_EXTEND` and the node-identity binding is
+  `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT` at seq 2. The fix matches
+  the Erlang-side `chk_binding` / `chk_ak_pubkey_binding` semantics:
+  search by event-type + digest, not by seq position.
 
 ## Open Threads
 
