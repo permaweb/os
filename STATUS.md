@@ -20,8 +20,8 @@ state.
 
 Overlay staged into `build/hyperbeam/src-edge`.
 
-`HB_PORT=19206 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
-passed all 40 tests.
+`HB_PORT=19207 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_system`
+passed both focused system-device tests.
 
 `make buildroot JOBS=18` completed.
 
@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: d76583d38b542d75690b6bb4bf152581f0db8e2b2c02538e94b7e832f504a51c
+sha256: 89875273b48f5ff0daccb8f1a9e3939a2c1d6a3f207b1218f9c3f7a1ece0bdec
 ```
 
 QEMU ring test:
@@ -41,7 +41,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: NVnjXChhW0qZWiMOyKtOct0gs5RvjzCz7eVw_gPkyOc
+ring-address: khbcYXRrDskKBWMs3uWlL3i2ezCtIkyeyUi5kwQQIj4
 ```
 
 Standard TME image:
@@ -49,7 +49,7 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 76c73fb2a5b2d1d245389b47c1403e7a5b07563d21893ed5731210ccde83ac27
+sha256: 4c5b4f418d60becfc65c20d795578c0824a1d349487070c2144b347f0cbfbb57
 ```
 
 No QEMU or swtpm processes owned by this validation run remain. The only
@@ -80,9 +80,8 @@ changes. Recent examples:
 - Removed stale TPM signing and AK signing stubs.
 - Shared green-zone authorization and field checks.
 
-Latest local cleanup before the next commit: simplified TPM trust-anchor source
-reporting by removing an unused opts argument and collapsing the two clauses
-into one expression.
+Latest local cleanup before the next commit: shared `~system@1.0` fixed-width
+pread handling across MMIO, MSR, and CPUID probes.
 
 ## Open Threads
 

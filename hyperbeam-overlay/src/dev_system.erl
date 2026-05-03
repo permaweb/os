@@ -1047,33 +1047,25 @@ read_lines(Root, Abs) ->
     end.
 
 read_u32_le_at(Root, Abs, Offset) ->
-    case file:open(root_path(Root, Abs), [read, raw, binary]) of
-        {ok, Io} ->
-            try
-                case file:pread(Io, Offset, 4) of
-                    {ok, <<Value:32/little-unsigned-integer>>} ->
-                        {ok, Value};
-                    {ok, _} ->
-                        {error, 'short-read'};
-                    eof ->
-                        {error, eof};
-                    {error, Reason} ->
-                        {error, Reason}
-                end
-            after
-                file:close(Io)
-            end;
-        {error, Reason} ->
-            {error, Reason}
-    end.
+    read_uint_le_at(Root, Abs, Offset, 4).
 
 read_u64_le_at(Root, Abs, Offset) ->
+    read_uint_le_at(Root, Abs, Offset, 8).
+
+read_uint_le_at(Root, Abs, Offset, Bytes) ->
+    Bits = Bytes * 8,
+    case read_exact_at(Root, Abs, Offset, Bytes) of
+        {ok, <<Value:Bits/little-unsigned-integer>>} -> {ok, Value};
+        Error -> Error
+    end.
+
+read_exact_at(Root, Abs, Offset, Bytes) ->
     case file:open(root_path(Root, Abs), [read, raw, binary]) of
         {ok, Io} ->
             try
-                case file:pread(Io, Offset, 8) of
-                    {ok, <<Value:64/little-unsigned-integer>>} ->
-                        {ok, Value};
+                case file:pread(Io, Offset, Bytes) of
+                    {ok, Bin} when byte_size(Bin) =:= Bytes ->
+                        {ok, Bin};
                     {ok, _} ->
                         {error, 'short-read'};
                     eof ->
@@ -1090,28 +1082,14 @@ read_u64_le_at(Root, Abs, Offset) ->
 
 read_cpuid_leaf(Root, Abs, Leaf, Subleaf) ->
     Offset = (Subleaf bsl 32) bor Leaf,
-    case file:open(root_path(Root, Abs), [read, raw, binary]) of
-        {ok, Io} ->
-            try
-                case file:pread(Io, Offset, 16) of
-                    {ok, <<Eax:32/little-unsigned-integer,
-                           Ebx:32/little-unsigned-integer,
-                           Ecx:32/little-unsigned-integer,
-                           Edx:32/little-unsigned-integer>>} ->
-                        {ok, #{eax => Eax, ebx => Ebx,
-                               ecx => Ecx, edx => Edx}};
-                    {ok, _} ->
-                        {error, 'short-read'};
-                    eof ->
-                        {error, eof};
-                    {error, Reason} ->
-                        {error, Reason}
-                end
-            after
-                file:close(Io)
-            end;
-        {error, Reason} ->
-            {error, Reason}
+    case read_exact_at(Root, Abs, Offset, 16) of
+        {ok, <<Eax:32/little-unsigned-integer,
+               Ebx:32/little-unsigned-integer,
+               Ecx:32/little-unsigned-integer,
+               Edx:32/little-unsigned-integer>>} ->
+            {ok, #{eax => Eax, ebx => Ebx, ecx => Ecx, edx => Edx}};
+        Error ->
+            Error
     end.
 
 read_attr_map(Root, Abs, Names) ->
