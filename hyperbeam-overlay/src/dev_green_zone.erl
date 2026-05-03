@@ -233,14 +233,11 @@ with_result(Fun, Opts) ->
     catch
         throw:{green_zone_error, ErrorBody} ->
             {ok, #{<<"status">> => 400, <<"body">> => ErrorBody}};
-        Class:Reason ->
+        _:_ ->
             {ok, #{
                 <<"status">> => 500,
                 <<"body">> => #{
-                    <<"error">> => <<"green-zone-failed">>,
-                    <<"class">> => hb_util:bin(Class),
-                    <<"reason">> =>
-                        iolist_to_binary(io_lib:format("~p", [Reason]))
+                    <<"error">> => <<"green-zone-failed">>
                 }
             }}
     end.
@@ -518,15 +515,13 @@ self_attestation_body(Opts) ->
     case dev_tpm2:boot_attestation(#{}, #{}, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
             response_body(Body, Opts);
-        {ok, #{<<"body">> := Body}} ->
+        {ok, #{<<"body">> := _}} ->
             throw({green_zone_error, #{
-                <<"error">> => <<"self-attestation-failed">>,
-                <<"details">> => Body
+                <<"error">> => <<"self-attestation-failed">>
             }});
-        Other ->
+        _ ->
             throw({green_zone_error, #{
-                <<"error">> => <<"self-attestation-failed">>,
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
+                <<"error">> => <<"self-attestation-failed">>
             }})
     end.
 
@@ -539,10 +534,9 @@ assert_template_match(Template, Candidate, Subject, Opts) ->
                 <<"mismatch-path">> => canonical_mismatch_path(Path),
                 <<"subject">> => Subject
             }});
-        Other ->
+        _ ->
             throw({green_zone_error, #{
                 <<"error">> => <<"template-mismatch">>,
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Other])),
                 <<"subject">> => Subject
             }})
     end.
@@ -592,15 +586,13 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
     },
     case dev_tpm2:verify_peer(#{}, VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
-        {ok, #{<<"body">> := Body}} ->
+        {ok, #{<<"body">> := _}} ->
             throw({green_zone_error, #{
-                <<"error">> => <<"peer-verification-failed">>,
-                <<"details">> => Body
+                <<"error">> => <<"peer-verification-failed">>
             }});
-        Other ->
+        _ ->
             throw({green_zone_error, #{
-                <<"error">> => <<"peer-verification-failed">>,
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
+                <<"error">> => <<"peer-verification-failed">>
             }})
     end.
 
@@ -803,11 +795,9 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     catch
         throw:{green_zone_error, ErrorBody} ->
             throw({green_zone_error, ErrorBody});
-        Class:Reason ->
+        _:_ ->
             throw({green_zone_error, #{
-                <<"error">> => <<"admission-request-failed">>,
-                <<"class">> => hb_util:bin(Class),
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Reason]))
+                <<"error">> => <<"admission-request-failed">>
             }})
     end.
 
@@ -975,10 +965,9 @@ activate_local_credential(Credential, Opts) ->
     case dev_tpm2:activate_credential_secret(Credential, Opts) of
         {ok, Secret} when is_binary(Secret) ->
             Secret;
-        Other ->
+        _ ->
             throw({green_zone_error, #{
-                <<"error">> => <<"credential-activation-failed">>,
-                <<"details">> => hb_util:bin(io_lib:format("~p", [Other]))
+                <<"error">> => <<"credential-activation-failed">>
             }})
     end.
 

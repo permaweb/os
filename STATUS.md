@@ -1,5 +1,23 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 39
+
+Same-TPM stale-boot check passed against the pushed AK/PCR policy fix: one
+swtpm state reported prod no-TME AK name
+`AAv4-Et0X3CzCwr3YTyMKPhgcfix56pDYW5H_Zip_Q6Ntw`, then no-TME debug AK name
+`AAsFJiS6pFHGnJTLGtEebP1K8JtjIvgsOFqdZDAaYooleQ`. Also trimmed unexpected
+green-zone internal error payloads so class/reason dumps are not part of the
+public device surface. Validation evidence: staged overlay into
+`build/hyperbeam/src-edge`; `HB_PORT=19194 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3
+eunit --module=dev_green_zone` passed all 15 tests; `make buildroot JOBS=18`;
+no-TME image `build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`c9e9b4c1a544c56eda59d6cd80fd680c7b475d8729c56e91ca310d91a52a61a1`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`1V_brTOjGy7MKhf1vAHqP8AZ8fiC6pEbKUfjfd95QM8`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`42f7b0906e3beb99aed0ff49201c8afe7a5caa613897b857f57059b27faeff68`.
+
 ## Update 38
 
 Removed the unused native `sign/2` TPM NIF export, leaving quote and
