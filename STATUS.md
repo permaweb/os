@@ -1,5 +1,22 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 44
+
+Made AK PCR-policy binding clearer in the native TPM template: the AK public
+template now initializes `authPolicy` with the computed PolicyPCR digest
+directly instead of initializing it empty and assigning the digest one statement
+later. This is behavior-preserving but removes the last misleading
+empty-AK-policy line.
+
+Validation evidence: `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`edc91453f558005f8bbba2be215b92b4a85570317cb637441781f9570d9f2b9a`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`6MvIDO8FbtJzdOf_3LdRGN0YPYdH79oVooJfiYMYX-g`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`20a012eee84bde73ba4a8d3995d11d10f9f9a9360eb03b17d4abd6dee36d32ca`.
+
 ## Update 43
 
 Removed the stale `lapee_tpm_nif:sign/2` Erlang export and stub. The native AK

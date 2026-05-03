@@ -714,7 +714,7 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                 TPMA_OBJECT_ADMINWITHPOLICY |
                 TPMA_OBJECT_NODA | TPMA_OBJECT_RESTRICTED |
                 TPMA_OBJECT_SIGN_ENCRYPT,
-            .authPolicy = { .size = 0 },
+            .authPolicy = ak_policy,
             .parameters.rsaDetail = {
                 .symmetric = { .algorithm = TPM2_ALG_NULL },
                 .scheme = {
@@ -727,8 +727,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             .unique.rsa = { .size = 0, .buffer = {0} }
         }
     };
-    in_public.publicArea.authPolicy = ak_policy;
-
     TPM2B_SENSITIVE_CREATE in_sensitive = { .size = 0 };
     TPM2B_DATA outside_info = { .size = 0 };
     TPML_PCR_SELECTION creation_pcr = { .count = 0 };
