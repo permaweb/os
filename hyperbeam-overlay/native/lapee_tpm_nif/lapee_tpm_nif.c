@@ -1141,73 +1141,6 @@ nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
 }
 
-/*-------------------------------- sign/2 ------------------------------------*/
-
-static ERL_NIF_TERM
-nif_sign(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
-{
-    (void)argc;
-    unsigned esys_tr;
-    ErlNifBinary msg;
-    if (!enif_get_uint(env, argv[0], &esys_tr)) return enif_make_badarg(env);
-    if (!enif_inspect_binary(env, argv[1], &msg)) return enif_make_badarg(env);
-
-    /* Restricted signing keys cannot sign arbitrary data unless it comes with
-     * a hash ticket proving the TPM computed it. For our milestone we use
-     * Esys_Hash with TPM_RH_OWNER to get the ticket, then pass that to Sign. */
-    TPM2B_MAX_BUFFER data = { .size = 0 };
-    if (msg.size > sizeof(data.buffer)) return lapee_make_error(env, "message_too_large");
-    data.size = (UINT16)msg.size;
-    memcpy(data.buffer, msg.data, msg.size);
-
-    TPM2B_DIGEST *digest = NULL;
-    TPMT_TK_HASHCHECK *validation = NULL;
-    TSS2_RC rc = Esys_Hash(g_esys_ctx,
-                           ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
-                           &data, TPM2_ALG_SHA256, TPM2_RH_OWNER,
-                           &digest, &validation);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_Hash", rc);
-    }
-
-    TPMT_SIG_SCHEME scheme = {
-        .scheme = TPM2_ALG_RSAPSS,
-        .details.rsapss.hashAlg = TPM2_ALG_SHA256,
-    };
-
-    TPMT_SIGNATURE *sig = NULL;
-    ESYS_TR ak_policy_session = ESYS_TR_NONE;
-    rc = lapee_ak_policy_session(
-        TPM2_SE_POLICY, false, &ak_policy_session, NULL);
-    if (rc != TSS2_RC_SUCCESS) {
-        Esys_Free(digest);
-        Esys_Free(validation);
-        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
-    }
-    rc = Esys_Sign(g_esys_ctx,
-                   (ESYS_TR)esys_tr,
-                   ak_policy_session, ESYS_TR_NONE, ESYS_TR_NONE,
-                   digest, &scheme, validation, &sig);
-    Esys_FlushContext(g_esys_ctx, ak_policy_session);
-    Esys_Free(digest);
-    Esys_Free(validation);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_Sign", rc);
-    }
-    ERL_NIF_TERM out;
-    if (sig->sigAlg == TPM2_ALG_RSAPSS) {
-        unsigned char *b = enif_make_new_binary(
-            env, sig->signature.rsapss.sig.size, &out);
-        memcpy(b, sig->signature.rsapss.sig.buffer,
-               sig->signature.rsapss.sig.size);
-    } else {
-        Esys_Free(sig);
-        return lapee_make_error(env, "unexpected_sig_alg");
-    }
-    Esys_Free(sig);
-    return enif_make_tuple2(env, enif_make_atom(env, "ok"), out);
-}
-
 /*-------------------------------- tpm_properties/0 --------------------------*/
 
 /* Decode a 32-bit TPMU property value as a 4-char ASCII string and
@@ -1667,7 +1600,6 @@ static ErlNifFunc nif_funcs[] = {
     {"activate_credential", 4, nif_activate_credential,
                                 ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"quote", 3, nif_quote, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"sign", 2, nif_sign, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"tpm_properties", 0, nif_tpm_properties,
                            ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"nv_read_public", 1, nif_nv_read_public,

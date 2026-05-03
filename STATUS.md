@@ -1,5 +1,23 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 38
+
+Removed the unused native `sign/2` TPM NIF export, leaving quote and
+credential-activation as the only AK operations exposed by the LapEE TPM
+device. I tested and rejected a smaller pure-`PolicyPCR` AK policy because the
+full QEMU cluster showed `ActivateCredential` returning an invalid activation
+response; the dual PCR-or-ActivateCredential policy is intentionally retained.
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19193 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`e53184c17efe565ad47730a2f3a262af85884ee74d2c3ca3174c18acfadc14c4`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`IUvtBb4aHJhUWhydrqgZiHwLjoWpBRA90o_MxB7vDGE`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`376ba3cb9abcb70046c86a370cc5dc7c8c51fc73bc0bf308c91a3a40c47b3226`.
+
 ## Update 37
 
 Collapsed green-zone admission authorization field definitions so the signer
