@@ -1709,15 +1709,15 @@ verify_peer(_Base, Req, Opts) ->
 verify_peer_url(Url, Req, Opts) ->
     with_ok(
         fun() ->
-            Boot0 = fetch_peer_message(Url, <<"/~tpm@2.0a/boot-attestation">>,
-                                       Opts),
+            Boot0 = lapee_http_json:get(
+                Url, <<"/~tpm@2.0a/boot-attestation">>, Opts),
             Boot = resolve_subject_body(Boot0, Opts),
             Subject0 =
-                fetch_peer_message(Url, <<"/~tpm@2.0a/credential-subject">>,
-                                   Opts),
+                lapee_http_json:get(
+                    Url, <<"/~tpm@2.0a/credential-subject">>, Opts),
             Subject = resolve_subject_body(Subject0, Opts),
             FreshNonce = crypto:strong_rand_bytes(32),
-            Fresh0 = fetch_peer_message(
+            Fresh0 = lapee_http_json:get(
                 Url, fresh_attestation_path(FreshNonce), Opts),
             Fresh = resolve_subject_body(Fresh0, Opts),
             BootEnv = normalise_attestation(Boot, Opts),
@@ -1798,10 +1798,10 @@ verify_peer_url(Url, Req, Opts) ->
         end).
 
 peer_url(Req, Opts) ->
-    case hb_maps:get(<<"url">>, Req, undefined, Opts) of
-        undefined -> hb_maps:get(<<"peer">>, Req, undefined, Opts);
-        V -> V
-    end.
+    first_defined([
+        hb_maps:get(<<"url">>, Req, undefined, Opts),
+        hb_maps:get(<<"peer">>, Req, undefined, Opts)
+    ]).
 
 strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     case binary:last(B) of
@@ -1810,9 +1810,6 @@ strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     end;
 strip_trailing_slash(B) ->
     B.
-
-fetch_peer_message(Url, Path, Opts) ->
-    lapee_http_json:get(Url, Path, Opts).
 
 resolve_subject_body(Msg, Opts) when is_map(Msg) ->
     case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
@@ -1897,7 +1894,7 @@ encoded_field_sha256(Key, Msg, Opts) ->
             sha256,
             safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
 
-encoded_message_sha256(Msg, _Opts) ->
+encoded_message_sha256(Msg) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Msg))).
 
 first_defined([]) -> undefined;
@@ -1916,9 +1913,6 @@ parse_positive_integer(B) when is_binary(B) ->
     end;
 parse_positive_integer(_) ->
     undefined.
-
-ensure_activation_secret(Activation, Credential, Expected, Opts) ->
-    ensure_activation_secret(Activation, Credential, Expected, undefined, Opts).
 
 ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
     ok = ensure_activation_envelope(Activation, Subject, Opts),
@@ -2121,7 +2115,7 @@ peer_attestation_cache_paths(Signed, SignedID, Opts) ->
         hb_maps:get(<<"boot-attestation-id">>, Scope, <<"unknown">>, Opts),
     ConsumerScopeHash =
         encoded_message_sha256(
-            hb_maps:get(<<"consumer-scope">>, Scope, null, Opts), Opts),
+            hb_maps:get(<<"consumer-scope">>, Scope, null, Opts)),
     [
         <<Prefix/binary, "/by-id/", SignedID/binary>>,
         <<Prefix/binary,
@@ -3807,7 +3801,7 @@ peer_attestation_cache_paths_test() ->
     SignedID = <<"signed-id">>,
     PeerURLHash = hb_util:encode(
         crypto:hash(sha256, <<"http://peer.example:8734">>)),
-    ConsumerScopeHash = encoded_message_sha256(null, #{}),
+    ConsumerScopeHash = encoded_message_sha256(null),
     Prefix = ?PEER_ATTESTATION_PREFIX,
     ?assertEqual(
         [
@@ -3834,7 +3828,7 @@ credential_activation_public_body_hides_secret_test() ->
         ?assert(maps:is_key(<<"credential-secret-sha256">>, Body)),
         ?assert(maps:is_key(<<"credential-secret-proof">>, Body)),
         ?assertEqual(ok,
-            ensure_activation_secret(Body, Credential, Secret, #{}))
+            ensure_activation_secret(Body, Credential, Secret, undefined, #{}))
     after
         persistent_term:erase({dev_tpm2, ak, name})
     end.
@@ -3864,7 +3858,8 @@ credential_activation_public_proof_rejects_wrong_secret_test() ->
             <<"credential-activation">> :=
                 <<"activation proof did not match challenge">>
         }},
-        ensure_activation_secret(Activation, Credential, <<"secret-b">>, #{})).
+        ensure_activation_secret(Activation, Credential, <<"secret-b">>,
+                                 undefined, #{})).
 
 verify_peer_requires_boot_fresh_subject_match_test() ->
     ?assertEqual(ok,

@@ -1,5 +1,25 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 47
+
+Trimmed `~tpm@2.0a` peer-verification helper indirection. The peer verifier now
+calls `lapee_http_json:get/3` directly at the three remote fetch points, reuses
+the existing `first_defined/1` helper for `url`/`peer`, drops an unused
+argument from the message-digest helper, and removes the one-arity
+`ensure_activation_secret/4` wrapper. Net result is five fewer Erlang source
+lines with no protocol change.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19202 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`ffb4aa4a09483abcde00b2d14850908d8f1a345d4dd106afa5ee66d7685073c0`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`LAVgJjlY4nkop5i0IAMrDrGgPOZ5SiXjjd_cloxfF_0`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`4cf83b50ec9b2593f072783c7fad9d5a03f5543e193145a90437ae2dc7c3ba10`.
+
 ## Update 46
 
 Collapsed duplicate `~tpm@2.0a` nonce decoding into a shared helper. Quote
