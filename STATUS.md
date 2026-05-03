@@ -1,5 +1,21 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 40
+
+Sorted unsigned commitment IDs before selecting the stable nested payload ID
+for green-zone admission authorization, removing a latent dependency on map
+iteration order. Also collapsed two duplicate error branches. Validation
+evidence: staged overlay into `build/hyperbeam/src-edge`; `HB_PORT=19195
+LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone` passed all 15
+tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`98928693368b26c9150cbcfa63fa238886d3c98fd014919748a8eadb806c7793`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`abcXi_SuM6rZK4XDtfxJ8eBKhEhiDXZoXEHR0uUsoDo`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`5a90f9a7207e706fac0407748cd33d7b04c0dbcb43817257c280b23e52cba7d7`.
+
 ## Update 39
 
 Same-TPM stale-boot check passed against the pushed AK/PCR policy fix: one

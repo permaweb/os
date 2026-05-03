@@ -308,7 +308,7 @@ authorization_id_fields() ->
 
 stable_message_id(Msg, Opts) when is_map(Msg) ->
     Body = response_body(Msg, Opts),
-    case unsigned_commitment_ids(Body, Opts) of
+    case lists:sort(unsigned_commitment_ids(Body, Opts)) of
         [ID | _] -> ID;
         [] -> stable_uncommitted_id(Body)
     end;
@@ -515,10 +515,6 @@ self_attestation_body(Opts) ->
     case dev_tpm2:boot_attestation(#{}, #{}, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
             response_body(Body, Opts);
-        {ok, #{<<"body">> := _}} ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"self-attestation-failed">>
-            }});
         _ ->
             throw({green_zone_error, #{
                 <<"error">> => <<"self-attestation-failed">>
@@ -586,10 +582,6 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
     },
     case dev_tpm2:verify_peer(#{}, VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
-        {ok, #{<<"body">> := _}} ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"peer-verification-failed">>
-            }});
         _ ->
             throw({green_zone_error, #{
                 <<"error">> => <<"peer-verification-failed">>
