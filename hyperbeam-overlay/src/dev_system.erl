@@ -499,7 +499,7 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
             <<"offset">> => u32_hex(?MTL_MEM_SS_INFO_GLOBAL)
         }
     },
-    case read_u32_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL) of
+    case read_uint_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL, 4) of
         {ok, Raw} ->
             Status = intel_mtl_dram_status(Raw),
             Common#{
@@ -681,7 +681,7 @@ efi_byte_state(_, _) -> <<"unknown">>.
 
 boot_guard_report(Root) ->
     Path = "/dev/cpu/0/msr",
-    case read_u64_le_at(Root, Path, ?MSR_BOOT_GUARD_SACM_INFO) of
+    case read_uint_le_at(Root, Path, ?MSR_BOOT_GUARD_SACM_INFO, 8) of
         {ok, Raw} ->
             #{
                 <<"available">> => true,
@@ -1039,12 +1039,6 @@ read_lines(Root, Abs) ->
         error ->
             []
     end.
-
-read_u32_le_at(Root, Abs, Offset) ->
-    read_uint_le_at(Root, Abs, Offset, 4).
-
-read_u64_le_at(Root, Abs, Offset) ->
-    read_uint_le_at(Root, Abs, Offset, 8).
 
 read_uint_le_at(Root, Abs, Offset, Bytes) ->
     Bits = Bytes * 8,
