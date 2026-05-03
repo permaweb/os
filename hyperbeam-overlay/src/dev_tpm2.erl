@@ -599,9 +599,9 @@ trust_anchor_source(Req, _Opts, _Pem) ->
         _ -> <<"node_config">>
     end.
 
-%% Wrap any check in a try/catch so one misformed field doesn't take
+%% Wrap any check in a try/catch so one malformed field doesn't take
 %% down the whole verifier -- the relevant check just becomes `ok=false,
-%% detail=<exception info>'.
+%% detail=exception.
 safely_run(F, Name, Severity) ->
     try F() of
         {ok, Detail}    -> #{ <<"name">> => Name,
@@ -613,12 +613,10 @@ safely_run(F, Name, Severity) ->
                               <<"detail">> => Detail,
                               <<"severity">> => Severity }
     catch
-        Class:Reason:Stack ->
+        _:_ ->
             #{ <<"name">> => Name,
                <<"ok">> => false,
-               <<"detail">> =>
-                    iolist_to_binary(io_lib:format(
-                        "exception ~p:~p at ~p", [Class, Reason, Stack])),
+               <<"detail">> => <<"exception">>,
                <<"severity">> => Severity }
     end.
 

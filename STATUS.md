@@ -1,5 +1,24 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 41
+
+Trimmed `~tpm@2.0a` verifier exception details so malformed remote
+attestation fields still fail the relevant check without returning Erlang
+class/reason/stack traces as public API data. The device keeps the per-check
+failure shape and now reports `detail=exception` for unexpected verifier
+exceptions.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19196 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`82f3fefcbc58856b911e2974889622b8b5edd11410f34379a5e80562692766ef`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`bjeV090tG9UPJNmxqEan_mbM1CZz8a2LkcNQn9asyaQ`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`86c3db8b924884ab6021809ecbe709559ff0c7157910da9b03cec5568d96afaa`.
+
 ## Update 40
 
 Sorted unsigned commitment IDs before selecting the stable nested payload ID
