@@ -221,9 +221,8 @@ join(_Base, Req, Opts) ->
 sign(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
-        RingOpts = green_zone_signing_opts(Name, Opts),
         Payload = sign_payload(Req, Opts),
-        hb_message:commit(Payload, RingOpts)
+        hb_message:commit(Payload, green_zone_signing_opts(Name, Opts))
     end, Opts).
 
 with_result(Fun, Opts) ->
@@ -1023,9 +1022,8 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
     end.
 
 green_zone_signing_opts(Name, Opts) ->
-    case require_ring(Name, Opts) of
-        {_AES, Wallet, _Zone} -> #{<<"priv-wallet">> => Wallet}
-    end.
+    {_AES, Wallet, _Zone} = require_ring(Name, Opts),
+    #{<<"priv-wallet">> => Wallet}.
 
 sign_payload(Req, Opts) ->
     case hb_maps:get(<<"body">>, Req, undefined, Opts) of

@@ -1,5 +1,23 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 45
+
+Trimmed `~green-zone@1.0` signing setup: `sign/3` now passes the ring signing
+opts directly, and `green_zone_signing_opts/2` destructures `require_ring/2`
+without a single-clause `case`. Net result is two fewer Erlang source lines
+with no protocol change.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19200 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 15 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`2ba191efdad236e896afb4d962346d71438a70120e411a3e56abe4ae88c3dc0c`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`pXRi6I0rzxWr6hjq4ExRAmCf9NsqtuI_j4l3i0b7VFo`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`2548fae7126a4f1f854a5a55dbfdc82b18fce50f3bd1f90d8e06d3916c3d75e6`.
+
 ## Update 44
 
 Made AK PCR-policy binding clearer in the native TPM template: the AK public
