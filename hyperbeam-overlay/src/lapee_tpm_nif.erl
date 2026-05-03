@@ -15,7 +15,6 @@
     make_credential/3,
     activate_credential/4,
     quote/3,
-    sign/2,
     tpm_properties/0,
     nv_read_public/1,
     nv_read/1,
@@ -103,8 +102,6 @@ activate_credential(_AkHandle, _EkHandle, _CredentialBlob, _Secret) ->
     erlang:nif_error(nif_not_loaded).
 
 quote(_SignHandle, _PcrList, _Nonce) -> erlang:nif_error(nif_not_loaded).
-
-sign(_SignHandle, _Message) -> erlang:nif_error(nif_not_loaded).
 
 %% Query TPM2_GetCapability for standard manufacturer / vendor-string
 %% / spec-version / firmware-version fields. Returns

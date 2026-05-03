@@ -1,5 +1,22 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 43
+
+Removed the stale `lapee_tpm_nif:sign/2` Erlang export and stub. The native AK
+signing NIF was already removed, so leaving the wrapper export only advertised
+a dead raw signing surface that would fail if called.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19199 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`53f7c2080d4f3a31ef5901d20d3b6b0f12c15b827525dfdeaab13161253ce1fc`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`4AOkSECTVq-zXqll0NShWIsWyvYJZV7HVSLSqzQK3m8`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`d7bb5a09d5fd37e3cb9b3636e29caa086d8ad3789931d89bb574d99d45c90c8d`.
+
 ## Update 42
 
 Collapsed duplicate `~green-zone@1.0` admission and peer-attestation field
