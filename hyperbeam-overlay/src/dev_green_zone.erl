@@ -444,7 +444,9 @@ template_id(Name, Template, Opts) ->
 
 admission_validity(Opts) ->
     Now = erlang:system_time(second),
-    TTL = admission_ttl_seconds(Opts),
+    TTL = parse_positive_integer(
+        hb_opts:get(<<"green-zone-admission-ttl-seconds">>, 300, Opts),
+        300),
     #{
         <<"not-before-unix">> => Now,
         <<"expires-at-unix">> => Now + TTL
@@ -591,17 +593,6 @@ clock_skew_seconds(Opts) ->
         hb_opts:get(<<"green-zone-clock-skew-seconds">>, 300, Opts),
         300).
 
-peer_attestation_max_age_seconds(Opts) ->
-    parse_positive_integer(
-        hb_opts:get(<<"green-zone-peer-attestation-max-age-seconds">>,
-                    3600, Opts),
-        3600).
-
-admission_ttl_seconds(Opts) ->
-    parse_positive_integer(
-        hb_opts:get(<<"green-zone-admission-ttl-seconds">>, 300, Opts),
-        300).
-
 parse_positive_integer(N, _Default) when is_integer(N), N > 0 ->
     N;
 parse_positive_integer(B, Default) when is_binary(B) ->
@@ -686,7 +677,10 @@ assert_field(Msg, {field_binary, Key}, Bad, Opts) ->
 assert_peer_attestation_validity(PeerAttestation, Opts) ->
     Now = erlang:system_time(second),
     Skew = clock_skew_seconds(Opts),
-    MaxAge = peer_attestation_max_age_seconds(Opts),
+    MaxAge = parse_positive_integer(
+        hb_opts:get(<<"green-zone-peer-attestation-max-age-seconds">>,
+                    3600, Opts),
+        3600),
     IssuedAt = hb_maps:get(<<"issued-at-unix">>, PeerAttestation, 0, Opts),
     Validity = hb_maps:get(<<"validity">>, PeerAttestation, #{}, Opts),
     NotBefore = hb_maps:get(<<"not-before-unix">>, Validity, IssuedAt, Opts),
