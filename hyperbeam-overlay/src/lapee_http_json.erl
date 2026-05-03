@@ -176,13 +176,8 @@ decode_json_body(Body) ->
     Body.
 
 restore_json_atom_types(Msg) when is_map(Msg) ->
-    RestoredNested =
-        maps:map(
-            fun(_Key, Value) ->
-                restore_json_atom_types(Value)
-            end,
-            Msg
-        ),
+    RestoredNested = maps:map(
+        fun(_Key, Value) -> restore_json_atom_types(Value) end, Msg),
     lists:foldl(
         fun(Key, Acc) ->
             case maps:get(Key, Acc, undefined) of

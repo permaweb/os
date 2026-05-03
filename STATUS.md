@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: e8c4064d0862e5fa7ec914e7c839f972903631698bf549fc0eff5a940aef6ab6
+sha256: f3e0ee1a1ab6000c55f4cfd1edb39e40b9e5562b89cf7c80839564084d7fa530
 ```
 
 QEMU ring test:
@@ -41,7 +41,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: cGgEXNkF8Y2pBXVk-ZA3LMzOaQS8Cae6TlLpCySWGds
+ring-address: GIGjjIgZUPr9QV_i8JGHiIjVKBWWAZMI8ygvwTDtt8w
 ```
 
 Standard TME image:
@@ -49,7 +49,7 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 1c25db35f3425d57123df94a0e50f514e373268c9db0469d9e54686018c0a5cb
+sha256: d1ca927cb43a30c5ea7c3bf7cfc0d42a21a5b0b547341e9d6d6d7469b6764c3c
 ```
 
 No QEMU or swtpm processes owned by this validation run remain. The only
