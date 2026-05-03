@@ -2972,22 +2972,16 @@ read_cpuinfo_stanza() ->
 line_to_kv(Line, Acc) ->
     case binary:split(Line, <<":">>, []) of
         [Key, Val] ->
-            K = normalise_kv_key(string:trim(Key)),
-            V = string:trim(Val),
+            K = binary:replace(
+                string:lowercase(string:trim(Key)),
+                <<" ">>,
+                <<"-">>,
+                [global]),
             %% Only the first occurrence counts (first processor
             %% stanza); skip subsequent duplicates.
-            case maps:is_key(K, Acc) of
-                true -> Acc;
-                false -> Acc#{K => V}
-            end;
+            maps:merge(#{K => string:trim(Val)}, Acc);
         _ -> Acc
     end.
-
-normalise_kv_key(K) ->
-    %% /proc/cpuinfo uses space-separated lowercase words; our
-    %% kebab-case wire convention matches.
-    Lowered = string:lowercase(K),
-    binary:replace(Lowered, <<" ">>, <<"-">>, [global]).
 
 %% Count the entries in /sys/kernel/iommu_groups/. Each group
 %% corresponds to one IOMMU-enforced isolation domain. Zero
@@ -3006,8 +3000,7 @@ count_iommu_groups() ->
 %% kernels expose under /sys/kernel/iommu_groups/.
 is_group_dir(E) ->
     case string:to_integer(E) of
-        {N, <<>>} when is_integer(N) -> true;
-        {N, ""}   when is_integer(N) -> true;
+        {N, Rest} when is_integer(N) -> Rest =:= <<>> orelse Rest =:= "";
         _                            -> false
     end.
 

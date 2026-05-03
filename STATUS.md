@@ -1,5 +1,24 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 49
+
+Trimmed the generic platform-probe parser in `~tpm@2.0a`. The `/proc/cpuinfo`
+reader now normalizes keys at the call site, uses `maps:merge/2` to preserve
+the first value for duplicate keys, and collapses the IOMMU group-name check
+into one return expression. Net result is seven fewer Erlang source lines with
+the same wire output shape.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19205 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`86e81121a262c8436689733da24ce646137fdcb221eb248edc2f50cb4e555180`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`0vQ_w-VCGT3f6ABVcgWPV-iaIIXX5lojDo36UrHYQ5E`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`d0784f3701847804d816ce5c07f66cdbf0c73af38623ceba7370e96023f2ae39`.
+
 ## Update 48
 
 Removed the private `~green-zone@1.0` `template_from/2` wrapper. The two
