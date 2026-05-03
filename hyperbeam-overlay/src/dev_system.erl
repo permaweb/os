@@ -690,34 +690,28 @@ boot_guard_report(Root) ->
                 <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
                 <<"raw-hex">> => u64_hex(Raw),
                 <<"decoded">> => boot_guard_decode(Raw),
-                <<"notes">> => boot_guard_notes(<<"dev-cpu-msr">>)
+                <<"notes">> => boot_guard_notes()
             };
         {error, Reason} ->
-            boot_guard_unavailable(
-                <<"dev-cpu-msr">>,
-                to_bin(Path),
-                Reason)
+            boot_guard_unavailable(Reason)
     end.
 
-boot_guard_unavailable(Source, Interface, Reason) ->
+boot_guard_unavailable(Reason) ->
     #{
         <<"available">> => false,
-        <<"source">> => Source,
-        <<"interface">> => Interface,
+        <<"source">> => <<"dev-cpu-msr">>,
+        <<"interface">> => <<"/dev/cpu/0/msr">>,
         <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
         <<"error">> => to_bin(Reason),
-        <<"notes">> => boot_guard_notes(Source)
+        <<"notes">> => boot_guard_notes()
     }.
 
-boot_guard_notes(<<"dev-cpu-msr">>) ->
-    <<"MSR_BOOT_GUARD_SACM_INFO read through /dev/cpu/0/msr. This is a "
-      "neutral runtime observation of the S-ACM-exported status register; "
+boot_guard_notes() ->
+    <<"This probe reads MSR_BOOT_GUARD_SACM_INFO through /dev/cpu/0/msr "
+      "when the kernel exposes it. It is a neutral runtime observation of "
+      "the S-ACM-exported status register; "
       "TPM/TCG event-log Boot Guard measurements remain separate firmware "
-      "evidence.">>;
-boot_guard_notes(_) ->
-    <<"MSR_BOOT_GUARD_SACM_INFO was not readable through the configured "
-      "kernel interfaces. Boot Guard evidence may still be available "
-      "indirectly in the TPM/TCG event log and should be interpreted there.">>.
+      "evidence.">>.
 
 boot_guard_decode(Raw) ->
     #{

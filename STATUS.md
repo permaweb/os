@@ -20,7 +20,7 @@ state.
 
 Overlay staged into `build/hyperbeam/src-edge`.
 
-`HB_PORT=19207 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_system`
+`HB_PORT=19208 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_system`
 passed both focused system-device tests.
 
 `make buildroot JOBS=18` completed.
@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: 89875273b48f5ff0daccb8f1a9e3939a2c1d6a3f207b1218f9c3f7a1ece0bdec
+sha256: 249caba1d6cde8512a0d224b784a39139807109c73967703be502042b489f50e
 ```
 
 QEMU ring test:
@@ -41,7 +41,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: khbcYXRrDskKBWMs3uWlL3i2ezCtIkyeyUi5kwQQIj4
+ring-address: L9rByp5zly-nftavk92ailpscXifophYIf146B9dpCk
 ```
 
 Standard TME image:
@@ -49,7 +49,7 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 4c5b4f418d60becfc65c20d795578c0824a1d349487070c2144b347f0cbfbb57
+sha256: 846fac1cff3a35cdd2b6538dbede1a25b8220d4472c9f17cbbca7214ecdacc80
 ```
 
 No QEMU or swtpm processes owned by this validation run remain. The only
@@ -80,8 +80,9 @@ changes. Recent examples:
 - Removed stale TPM signing and AK signing stubs.
 - Shared green-zone authorization and field checks.
 
-Latest local cleanup before the next commit: shared `~system@1.0` fixed-width
-pread handling across MMIO, MSR, and CPUID probes.
+Latest local cleanup before the next commit: removed unused Boot Guard probe
+source generality; `~system@1.0` now reports the single implemented
+`/dev/cpu/0/msr` path directly.
 
 ## Open Threads
 
