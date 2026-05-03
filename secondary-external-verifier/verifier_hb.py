@@ -34,12 +34,18 @@ Checks:
   5. PCR 15 replay: starting at all-zero, extend every PCR-15 event
      in `runtime-event-log' in `seq' order; result must equal the
      quoted PCR-15 value.
-  6. The seq=0 PCR-15 event (must be `EV_HYPERBEAM_NODE_IDENTITY_EXTEND')
-     digest equals `node-message-id'. That closes the loop: TPM state
-     commits to the running node's identity hash.
-  7. The seq=1 PCR-15 event (must be `EV_HYPERBEAM_KEY_PUBKEY_EXTEND')
-     digest equals sha256(ak-pub-pem). Paper P5: AK is bound to the
-     measured-boot session.
+  6. Some PCR-15 event has digest equal to `node-message-id'. That
+     closes the loop: TPM state commits to the running node's
+     identity hash. Match by digest, not by seq position -- the
+     binding event-type is `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT'
+     when on.start drives `~tpm@2.0a/boot-attestation' (the
+     production path) and `EV_HYPERBEAM_NODE_IDENTITY_EXTEND'
+     when a caller drives `~tpm@2.0a/extend' directly.
+  7. Some `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event on PCR 15 has
+     digest equal to sha256(ak-pub-pem). Paper P5: AK is bound
+     to the measured-boot session. Match by event-type + digest;
+     the extend lands at seq 0 of the runtime log under the
+     production boot-attestation flow.
   8. node-message + node-message-id present, IDs are base64url 32 bytes.
 """
 from __future__ import annotations
@@ -259,64 +265,58 @@ def _verify_pcr15_replay(envelope):
 
 
 # ----------------------------------------------------------------------
-# 6. seq=0 event commits to node-message-id
+# 6. PCR-15 event commits to node-message-id
 # ----------------------------------------------------------------------
 def _verify_node_msg_binding(envelope):
     events = _pcr15_events_in_order(envelope)
     claimed = envelope.get("node-message-id")
     if not claimed:
-        return Check("PCR 15 seq=0 commits to node-message-id",
+        return Check("PCR 15 event commits to node-message-id",
                      False, "no node-message-id in envelope")
     if not events:
-        return Check("PCR 15 seq=0 commits to node-message-id",
+        return Check("PCR 15 event commits to node-message-id",
                      False, "no PCR-15 events in runtime-event-log")
-    e0 = events[0]
-    if e0.get("event-type") != "EV_HYPERBEAM_NODE_IDENTITY_EXTEND":
+    matches = [e for e in events if e.get("digest") == claimed]
+    if not matches:
         return Check(
-            "PCR 15 seq=0 commits to node-message-id",
+            "PCR 15 event commits to node-message-id",
             False,
-            f"seq=0 event-type is {e0.get('event-type')!r}, expected "
-            "EV_HYPERBEAM_NODE_IDENTITY_EXTEND")
-    if e0.get("digest") != claimed:
-        return Check(
-            "PCR 15 seq=0 commits to node-message-id",
-            False,
-            f"seq=0 digest={e0.get('digest')[:16]}... vs "
-            f"node-message-id={claimed[:16]}...")
+            f"no PCR-15 event digest matches node-message-id "
+            f"{claimed[:16]}...")
+    e = matches[0]
     return Check(
-        "PCR 15 seq=0 commits to node-message-id",
+        "PCR 15 event commits to node-message-id",
         True,
-        f"seq=0 EV_HYPERBEAM_NODE_IDENTITY_EXTEND digest "
+        f"seq={e.get('seq')} {e.get('event-type')} digest "
         f"{claimed[:16]}... matches node-message-id")
 
 
 # ----------------------------------------------------------------------
-# 7. seq=1 event commits to AK pub PEM (paper P5 binding)
+# 7. EV_HYPERBEAM_KEY_PUBKEY_EXTEND commits to AK pub PEM (paper P5)
 # ----------------------------------------------------------------------
 def _verify_ak_pubkey_binding(envelope):
     events = _pcr15_events_in_order(envelope)
-    if len(events) < 2:
-        return Check("PCR 15 seq=1 commits to AK pub PEM (paper P5)",
-                     False, f"only {len(events)} PCR-15 event(s); need ≥2")
-    e1 = events[1]
-    if e1.get("event-type") != "EV_HYPERBEAM_KEY_PUBKEY_EXTEND":
+    binders = [e for e in events
+               if e.get("event-type") == "EV_HYPERBEAM_KEY_PUBKEY_EXTEND"]
+    if not binders:
         return Check(
-            "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+            "PCR 15 commits to AK pub PEM (paper P5)",
             False,
-            f"seq=1 event-type is {e1.get('event-type')!r}, expected "
-            "EV_HYPERBEAM_KEY_PUBKEY_EXTEND")
+            "no EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in PCR-15 log")
     ak_pem = envelope["ak-pub-pem"].encode()
     expected_digest = b64url_encode(hashlib.sha256(ak_pem).digest())
-    if e1.get("digest") != expected_digest:
+    matches = [e for e in binders if e.get("digest") == expected_digest]
+    if not matches:
         return Check(
-            "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+            "PCR 15 commits to AK pub PEM (paper P5)",
             False,
-            f"seq=1 digest={e1.get('digest')[:16]}... vs "
+            f"EV_HYPERBEAM_KEY_PUBKEY_EXTEND digests do not match "
             f"sha256(ak-pub-pem)={expected_digest[:16]}...")
+    e = matches[0]
     return Check(
-        "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+        "PCR 15 commits to AK pub PEM (paper P5)",
         True,
-        f"seq=1 EV_HYPERBEAM_KEY_PUBKEY_EXTEND digest "
+        f"seq={e.get('seq')} EV_HYPERBEAM_KEY_PUBKEY_EXTEND digest "
         f"{expected_digest[:16]}... matches sha256(ak-pub-pem)")
 
 

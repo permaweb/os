@@ -1182,18 +1182,13 @@ int_pcr(V) when is_binary(V)  -> binary_to_integer(V).
 %% AK-signed quote cryptographically proves the AK pub was bound
 %% into this measured-boot session's PCR 15 trajectory.
 %%
-%% Reviewer 7 note: in the real boot sequence the on/start hook
-%% (which fires `EV_HYPERBEAM_NODE_IDENTITY_EXTEND' at seq 0) runs
-%% BEFORE the first `/attestation' request reaches `init_chain',
-%% so the AK-pub-extend lands at seq 1, not seq 0. The verifier
-%% does not pin seq position -- it only checks PRESENCE of an
-%% `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event with the right digest --
-%% so ordering is a documentation detail, not an enforcement one.
-%%
 %% Verifier: find an event in the runtime event log with
 %% event-type = `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' whose decoded digest
-%% equals `sha256(envelope.ak-pub-pem)'. The producer emits this at
-%% seq 0 via `extend_with_ak_pubkey/1' from `init_chain/1'.
+%% equals `sha256(envelope.ak-pub-pem)'. Position-agnostic: the
+%% producer emits this from `extend_with_ak_pubkey/1' inside
+%% `init_chain/1', and any later log entries (boot-subject extend,
+%% TCG log tip commitment, manual `extend/3' calls) do not displace
+%% the binding.
 %%
 %% Absent = paper property violated. An envelope without this event
 %% has no cryptographic proof that the AK pub is tied to the

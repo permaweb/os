@@ -13,7 +13,7 @@ standalone tool with a minimal dependency surface.
 
 ## What it does
 
-Five checks, in order:
+Eight checks, in order:
 
 1. **EK certificate chains to a self-signed manufacturer root.** Loads
    every PEM in `--roots-dir`, splits them into self-signed (candidate
@@ -30,8 +30,13 @@ Five checks, in order:
 4. **Quote pcrDigest == SHA-256(PCR values concatenated in selection
    order)**.
 5. **Runtime event-log PCR 15 replay** matches the quoted PCR 15 value.
-6. **PCR 15 extension digest == `node_message_id_hex`**.
-7. **Embedded `node_message` + id shape** (id decodes to 32 bytes).
+6. **Some PCR 15 event digest equals `node-message-id`** — TPM state
+   commits to the running node identity. Match by digest, not by seq
+   position.
+7. **Some `EV_HYPERBEAM_KEY_PUBKEY_EXTEND` event on PCR 15 has digest
+   `sha256(ak-pub-pem)`** — paper P5: AK pub is bound into the
+   measured-boot session before any quote.
+8. **Embedded `node-message` + id shape** (id decodes to 32 bytes).
 
 ## Intentional limitations
 
@@ -52,5 +57,5 @@ Five checks, in order:
 python3 verifier_hb.py <envelope.json> --roots-dir <dir>
 ```
 
-Exit code: 0 if all seven checks pass, 1 otherwise. Each check prints
+Exit code: 0 if all eight checks pass, 1 otherwise. Each check prints
 its own PASS/FAIL line with detail.
