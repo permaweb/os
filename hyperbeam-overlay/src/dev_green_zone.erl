@@ -694,10 +694,9 @@ assert_peer_attestation_validity(PeerAttestation, Opts) ->
         I when is_integer(I), I + Skew >= Now -> ok;
         _ -> bad_peer_attestation(<<"validity.expires-at-unix">>)
     end,
-    case MaxAge of
-        undefined -> ok;
-        Age when is_integer(Age), Age > 0, IssuedAt + Age + Skew >= Now -> ok;
-        _ -> bad_peer_attestation(<<"issued-at-unix">>)
+    case IssuedAt + MaxAge + Skew >= Now of
+        true -> ok;
+        false -> bad_peer_attestation(<<"issued-at-unix">>)
     end.
 
 assert_peer_attestation_scope(PeerAttestation, RingReference, Opts) ->
