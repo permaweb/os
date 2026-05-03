@@ -1,5 +1,25 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 42
+
+Collapsed duplicate `~green-zone@1.0` admission and peer-attestation field
+validators into one shared helper, reducing the device by 11 Erlang lines
+without changing the public protocol. The helper still routes each failure to
+the existing admission/peer error constructors, so API error shapes remain
+unchanged.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19197 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 15 tests; `HB_PORT=19198 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit
+--module=dev_tpm2` passed all 40 tests; `make buildroot JOBS=18`; no-TME
+image `build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`f60944aff076e76a3155a3b759842687d9b3666d3b7cb51e57683367a58b47ad`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`l3eugmrxUYn4ntFObfE5hjTy0Ylrf0gRquDFoZeTtEk`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`6e6b577460ad1c914ac5d33d18f84ac1f5334df607da2f96178719bec52f01b8`.
+
 ## Update 41
 
 Trimmed `~tpm@2.0a` verifier exception details so malformed remote

@@ -629,7 +629,7 @@ encoded_field_sha256(Key, Msg, Opts) ->
 
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     Required = [
-        {field_eq, <<"type">>, <<"green-zone-peer-attestation">>},
+        {eq, <<"type">>, <<"green-zone-peer-attestation">>},
         {field_integer, <<"issued-at-unix">>},
         {nested_true, <<"boot-verification">>, <<"verified">>},
         {nested_true, <<"verification">>, <<"verified">>},
@@ -641,34 +641,7 @@ assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
         {field_map, <<"peer-boot-attestation">>},
         {field_map, <<"peer-fresh-attestation">>}
     ],
-    lists:foreach(
-        fun
-            ({field_eq, Key, Expected}) ->
-                case hb_maps:get(Key, PeerAttestation, undefined, Opts) of
-                    Expected -> ok;
-                    _ -> bad_peer_attestation(Key)
-                end;
-            ({nested_true, Outer, Inner}) ->
-                case hb_maps:get(Outer, PeerAttestation, undefined, Opts) of
-                    M when is_map(M) ->
-                        case hb_maps:get(Inner, M, false, Opts) of
-                            true -> ok;
-                            _ -> bad_peer_attestation(Outer)
-                        end;
-                    _ -> bad_peer_attestation(Outer)
-                end;
-            ({field_integer, Key}) ->
-                case hb_maps:get(Key, PeerAttestation, undefined, Opts) of
-                    I when is_integer(I), I > 0 -> ok;
-                    _ -> bad_peer_attestation(Key)
-                end;
-            ({field_map, Key}) ->
-                case hb_maps:get(Key, PeerAttestation, undefined, Opts) of
-                    M when is_map(M) -> ok;
-                    _ -> bad_peer_attestation(Key)
-                end
-        end,
-        Required),
+    assert_fields(PeerAttestation, Required, fun bad_peer_attestation/1, Opts),
     assert_peer_attestation_validity(PeerAttestation, Opts),
     assert_peer_attestation_scope(PeerAttestation, RingReference, Opts).
 
@@ -677,6 +650,46 @@ bad_peer_attestation(Key) ->
         <<"error">> => <<"peer-attestation-invalid">>,
         <<"field">> => Key
     }}).
+
+assert_fields(Msg, Checks, Bad, Opts) ->
+    lists:foreach(
+        fun(Check) -> assert_field(Msg, Check, Bad, Opts) end,
+        Checks).
+
+assert_field(Msg, {eq, Key, Expected}, Bad, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        Expected -> ok;
+        _ -> Bad(Key)
+    end;
+assert_field(Msg, {eq_normalized, Key, Expected, Normalize}, Bad, Opts) ->
+    case Normalize(hb_maps:get(Key, Msg, undefined, Opts)) of
+        Expected -> ok;
+        _ -> Bad(Key)
+    end;
+assert_field(Msg, {nested_true, Outer, Inner}, Bad, Opts) ->
+    case hb_maps:get(Outer, Msg, undefined, Opts) of
+        M when is_map(M) ->
+            case hb_maps:get(Inner, M, false, Opts) of
+                true -> ok;
+                _ -> Bad(Outer)
+            end;
+        _ -> Bad(Outer)
+    end;
+assert_field(Msg, {field_integer, Key}, Bad, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        I when is_integer(I), I > 0 -> ok;
+        _ -> Bad(Key)
+    end;
+assert_field(Msg, {field_map, Key}, Bad, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        M when is_map(M) -> ok;
+        _ -> Bad(Key)
+    end;
+assert_field(Msg, {field_binary, Key}, Bad, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> ok;
+        _ -> Bad(Key)
+    end.
 
 assert_peer_attestation_validity(PeerAttestation, Opts) ->
     Now = erlang:system_time(second),
@@ -804,10 +817,10 @@ admission_response_body(Other, Opts) ->
 assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
     Self = strip_trailing_slash(SelfURL),
     Checks = [
-        {field_eq, <<"type">>, <<"green-zone-admission">>},
-        {field_eq, <<"name">>, required_name(Req, Opts)},
-        {field_eq, <<"joiner-url">>, Self},
-        {field_eq, <<"admission-nonce">>, AdmissionNonce},
+        {eq, <<"type">>, <<"green-zone-admission">>},
+        {eq, <<"name">>, required_name(Req, Opts)},
+        {eq_normalized, <<"joiner-url">>, Self, fun strip_trailing_slash/1},
+        {eq, <<"admission-nonce">>, AdmissionNonce},
         {field_map, <<"validity">>},
         {field_map, <<"ring-reference">>},
         {field_map, <<"authorization">>},
@@ -816,31 +829,7 @@ assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
         {field_map, <<"peer-attestation">>},
         {field_binary, <<"ring-address">>}
     ],
-    lists:foreach(
-        fun
-            ({field_eq, Key, Expected}) ->
-                Actual0 = hb_maps:get(Key, Admission, undefined, Opts),
-                Actual =
-                    case Key of
-                        <<"joiner-url">> -> strip_trailing_slash(Actual0);
-                        _ -> Actual0
-                    end,
-                case Actual =:= Expected of
-                    true -> ok;
-                    false -> bad_admission(Key)
-                end;
-            ({field_map, Key}) ->
-                case hb_maps:get(Key, Admission, undefined, Opts) of
-                    M when is_map(M) -> ok;
-                    _ -> bad_admission(Key)
-                end;
-            ({field_binary, Key}) ->
-                case hb_maps:get(Key, Admission, undefined, Opts) of
-                    B when is_binary(B), byte_size(B) > 0 -> ok;
-                    _ -> bad_admission(Key)
-                end
-        end,
-        Checks),
+    assert_fields(Admission, Checks, fun bad_admission/1, Opts),
     assert_admission_signature(Admission, Opts),
     assert_admission_validity(Admission, Opts),
     assert_expected_ring_address(Admission, Req, Opts),
