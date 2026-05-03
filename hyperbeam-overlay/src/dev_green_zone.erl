@@ -214,9 +214,7 @@ join(_Base, Req, Opts) ->
             Opts
         ),
         NewOpts = install_ring(Name, Template, AES, Wallet, NewMembers, Opts),
-        hb_http_server:set_opts(NewOpts#{
-            <<"green-zone-last-admission">> => Admission
-        }),
+        hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
 

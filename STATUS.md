@@ -1,5 +1,31 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 36
+
+Removed the unused `green-zone-last-admission` server option written after
+join. Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19188 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_green_zone`
+passed all 15 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`4592f73125406bba4dbb77d77e541f47997a9bd8a7035c4e94c62b1d51f98a39`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`IqoWeY2RMtT3i17gsW4FnO3mCKenrvMuvXIjH0AzBFM`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`1ea70b672dd416ab27374390c0303317b538202bb5b4c7bf4897b077e9b16287`.
+
+## Update 35
+
+Full appliance validation passed for the corrected transport-stable
+green-zone authorization. Evidence: `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`0a436bb3a61d5f63268dc88ba4aeaaf7629d14037210fe9754c725d628ff6610`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`s31LvSS5pYGOmNpz8nsxsdrvXLA01TeGU-eF0Gx8DzA`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`329a8907a2e6e0cb1b285865a9d3e65d88300c1b7fcc73a2cfe1f122424fe9a4`.
+
 ## Update 34
 
 QEMU found boolean `template-matched` transport-unstable for signed
