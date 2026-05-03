@@ -2592,29 +2592,17 @@ pcr_int(B) when is_binary(B) ->
 %% is not supported (HyperBEAM wire convention is base64url
 %% everywhere).
 resolve_nonce(Req) when is_map(Req) ->
-    case maps:get(<<"nonce">>, Req, undefined) of
-        undefined ->
-            crypto:strong_rand_bytes(32);
-        B when is_binary(B) ->
-            Decoded =
-                try hb_util:decode(B)
-                catch _:_ -> B
-                end,
-            %% Reviewer pass 13 (crypto primitives): TPM2B_DATA
-            %% caps extraData at 64 bytes (TCG TPM 2.0 Part 2 §
-            %% 10.4.1). The NIF would otherwise reject with
-            %% enif_make_badarg and the HTTP response would be a
-            %% less-helpful 400. Canonical nonces are 32 bytes
-            %% (`crypto:strong_rand_bytes(32)'); anything larger
-            %% is either caller confusion or a padding attempt.
-            case byte_size(Decoded) > 64 of
-                true -> crypto:strong_rand_bytes(32);
-                false -> Decoded
-            end
+    case decoded_nonce(Req) of
+        undefined -> crypto:strong_rand_bytes(32);
+        Decoded when byte_size(Decoded) > 64 -> crypto:strong_rand_bytes(32);
+        Decoded -> Decoded
     end;
 resolve_nonce(_) -> crypto:strong_rand_bytes(32).
 
-expected_nonce(Req) when is_map(Req) ->
+expected_nonce(Req) ->
+    decoded_nonce(Req).
+
+decoded_nonce(Req) when is_map(Req) ->
     case maps:get(<<"nonce">>, Req, undefined) of
         undefined -> undefined;
         B when is_binary(B) ->
@@ -2623,7 +2611,7 @@ expected_nonce(Req) when is_map(Req) ->
             end;
         _ -> undefined
     end;
-expected_nonce(_) ->
+decoded_nonce(_) ->
     undefined.
 
 %% @doc Produce a 32-byte SHA-256 digest for a subject.

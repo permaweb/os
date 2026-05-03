@@ -1,5 +1,23 @@
 # LapEE Green-Zone Peer Verification Overnight Pass
 
+## Update 46
+
+Collapsed duplicate `~tpm@2.0a` nonce decoding into a shared helper. Quote
+generation still replaces oversized TPM `extraData` with a fresh nonce, while
+verification still checks the caller-supplied nonce exactly. The patch removes
+12 Erlang source lines.
+
+Validation evidence: staged overlay into `build/hyperbeam/src-edge`;
+`HB_PORT=19201 LAPEE_TPM_ALLOW_NO_NIF=1 rebar3 eunit --module=dev_tpm2`
+passed all 40 tests; `make buildroot JOBS=18`; no-TME image
+`build/images/lapee-usb-no-tme.img` 247463936 bytes, SHA-256
+`31269bdfae82285b138d8226aacf338d6b5f43d7d66288db1f7b421d14baa0ce`;
+`TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh --img
+build/images/lapee-usb-no-tme.img --timeout 600` passed with ring
+`VukMHN72FhozYCgSk3D580hO2jBEc8u0WyV8jeAHtIM`; standard TME image
+`build/images/lapee-usb.img` 247463936 bytes, SHA-256
+`1c850ec28f44cefbf4117889635a71609938b70a39a753e8db7bbc030cd88286`.
+
 ## Update 45
 
 Trimmed `~green-zone@1.0` signing setup: `sign/3` now passes the ring signing
