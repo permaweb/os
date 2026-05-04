@@ -720,41 +720,48 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
     case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
         {ok, _} = Ok -> Ok;
         {error, Reasons} ->
-            %% Local roots + envelope-supplied intermediates didn't
-            %% close the chain. Try AIA caIssuers walking from the
-            %% leaf upward (e.g. Intel ODCA's per-SoC issuing CAs are
-            %% only published at tsci.intel.com and are not part of
-            %% the keylime corpus). Disabled-by-config short-circuits
-            %% to the original error.
-            case lapee_aia:enabled(Opts) of
-                false ->
-                    {error, render_chain_failure(Reasons, TrustedDers,
-                                                 <<"AIA disabled">>)};
-                true ->
-                    case extend_chain_via_aia(EkDer, PeerChainDers,
-                                              TrustedDers, Opts) of
-                        {extended, ExtendedChainDers, FetchSummary} ->
-                            case attempt_chain(EkDer, ExtendedChainDers,
-                                               TrustedDers) of
-                                {ok, Detail} ->
-                                    {ok, iolist_to_binary([
-                                        Detail, <<" [via AIA: ">>,
-                                        FetchSummary, <<"]">>])};
-                                {error, Reasons2} ->
-                                    {error,
-                                        render_chain_failure(
-                                            Reasons2, TrustedDers,
-                                            iolist_to_binary([
-                                                <<"AIA fetched ">>,
-                                                FetchSummary,
-                                                <<", chain still invalid">>
-                                            ]))}
-                            end;
-                        {no_extension, Why} ->
-                            {error, render_chain_failure(
-                                Reasons, TrustedDers, Why)}
-                    end
-            end
+            try_aia_fallback(EkDer, PeerChainDers, TrustedDers,
+                             Reasons, Opts)
+    end.
+
+%% Local trust + envelope-supplied intermediates didn't close the
+%% chain. Try AIA caIssuers walking from the leaf upward (Intel
+%% ODCA's per-SoC issuing CAs are published only at tsci.intel.com
+%% and are not in the keylime corpus). Disabled-by-config
+%% short-circuits to the original error.
+try_aia_fallback(EkDer, PeerChainDers, TrustedDers, Reasons, Opts) ->
+    case lapee_aia:enabled(Opts) of
+        false ->
+            {error, render_chain_failure(Reasons, TrustedDers,
+                                         <<"AIA disabled">>)};
+        true ->
+            extend_and_retry(EkDer, PeerChainDers, TrustedDers,
+                             Reasons, Opts)
+    end.
+
+extend_and_retry(EkDer, PeerChainDers, TrustedDers, OriginalReasons,
+                 Opts) ->
+    case extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) of
+        {extended, ExtendedChainDers, FetchSummary} ->
+            attempt_with_aia_summary(EkDer, ExtendedChainDers,
+                                     TrustedDers, FetchSummary);
+        {no_extension, Why} ->
+            {error, render_chain_failure(OriginalReasons, TrustedDers,
+                                         Why)}
+    end.
+
+attempt_with_aia_summary(EkDer, ExtendedChainDers, TrustedDers,
+                         FetchSummary) ->
+    case attempt_chain(EkDer, ExtendedChainDers, TrustedDers) of
+        {ok, Detail} ->
+            {ok, iolist_to_binary([
+                Detail, <<" [via AIA: ">>, FetchSummary, <<"]">>])};
+        {error, Reasons} ->
+            {error, render_chain_failure(
+                Reasons, TrustedDers,
+                iolist_to_binary([
+                    <<"AIA fetched ">>, FetchSummary,
+                    <<", chain still invalid">>]))}
     end.
 
 attempt_chain(EkDer, PeerChainDers, TrustedDers) ->
