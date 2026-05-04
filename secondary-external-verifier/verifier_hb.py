@@ -377,18 +377,24 @@ def main():
                     help="path to a LapEE attestation envelope JSON "
                          "(either /attestation-json or the bundled "
                          "/attestation form -- both are accepted)")
-    # Default to the directory that ships with this repo (the
-    # `fetch-ek-root-cas.sh' script populates it from keylime's
-    # tpm_cert_store). Override on the cmdline if you maintain a
-    # separate trust bundle.
-    _default_roots = pathlib.Path(__file__).resolve().parent / "root-cas"
+    # Default to the runtime trust corpus baked into the LapEE node
+    # image. `scripts/fetch-ek-root-cas.sh' populates it from keylime's
+    # tpm_cert_store. Pointing both verifiers at the same directory
+    # means one refresh updates the LapEE runtime and this auditor in
+    # lockstep -- no parallel corpora to drift apart. Override on the
+    # cmdline if you maintain a separate trust bundle.
+    _default_roots = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "hyperbeam-overlay" / "priv" / "tpm-interpret" / "root-cas"
+    )
     ap.add_argument("--roots-dir",
                     default=str(_default_roots),
                     help="directory of candidate root-CA PEMs. Only "
                          "self-signed certificates are treated as trust "
                          "anchors; all others become untrusted "
-                         "intermediates. (default: ./root-cas next to "
-                         "verifier_hb.py)")
+                         "intermediates. (default: the LapEE runtime "
+                         "corpus at hyperbeam-overlay/priv/"
+                         "tpm-interpret/root-cas/)")
     args = ap.parse_args()
 
     raw = json.loads(pathlib.Path(args.envelope).read_text())
