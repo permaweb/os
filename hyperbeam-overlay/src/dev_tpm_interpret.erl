@@ -257,7 +257,7 @@ claim(Base, Req, Opts) ->
     Events = interpret_events_raw(Envelope),
     {ok, #{
         <<"status">> => 200,
-        <<"body">> => interpret_claim(Events, Envelope, Db)
+        <<"body">> => interpret_claim(Events, Envelope, Db, Opts)
     }}.
 
 %%%============================================================================
@@ -1049,7 +1049,7 @@ interpret_envelope(E, Opts) ->
     Node = interpret_node(E),
     System = interpret_system(E),
     Env = interpret_envelope_meta(E),
-    Claim = interpret_claim(Events, E, Db),
+    Claim = interpret_claim(Events, E, Db, Opts),
     #{
         <<"envelope">> => Env,
         <<"tpm">>      => Tpm,
@@ -1233,10 +1233,10 @@ is_printable_ascii(_) -> false.
 %%   claim.tme.enabled
 %%   claim.lockdown.level
 
-interpret_claim(Events, E, Db) ->
+interpret_claim(Events, E, Db, Opts) ->
     EvList = event_list(Events),
     Context = detect_context(Events, EvList),
-    BaseClaim0 = interpret_claim_body(Events, EvList, E, Db, Context),
+    BaseClaim0 = interpret_claim_body(Events, EvList, E, Db, Context, Opts),
     %% v1.1 cross-links: fold post-construction signals that need
     %% two already-built sections. Today's only example is
     %%   cpu.tee-support += [ tme-for-vendor ] when tme.enabled=true
@@ -1297,7 +1297,7 @@ add_tee_for_vendor(Claim, CPU) ->
                 CPU#{<<"tee-support">> => [Feature | Existing]}}
     end.
 
-interpret_claim_body(Events, EvList, E, Db, Context) ->
+interpret_claim_body(Events, EvList, E, Db, Context, Opts) ->
     #{
         <<"secure-boot">>        => claim_secure_boot(EvList),
         %% Hour-12: folded Secure-Boot policy posture --
@@ -1371,7 +1371,7 @@ interpret_claim_body(Events, EvList, E, Db, Context) ->
         %% onto the flat claim surface so a policy engine can
         %% answer "is this EK signed by a known TPM CA?" in one
         %% lookup.
-        <<"ek">>                 => claim_ek(E, Db),
+        <<"ek">>                 => claim_ek(E, Db, Opts),
         %% Structured decode of the Attestation Key (AK) public
         %% blob -- algorithm, size, public exponent / curve,
         %% DER SHA-256 fingerprint so a verifier can pin the
@@ -1721,7 +1721,7 @@ lookup_vendor_by_ascii(_, _) -> #{}.
 %%     chain-valid          true | false | "unknown"
 %%     reason               free-form explanation
 %%   evidence            provenance list
-claim_ek(E, Db) ->
+claim_ek(E, Db, Opts) ->
     Pem = hb_maps:get(<<"ek-cert-pem">>, E, <<>>, #{}),
     case decode_cert_with_der(Pem) of
         {error, _} -> unknown_ek_claim();
@@ -1737,7 +1737,8 @@ claim_ek(E, Db) ->
             %% one into an OTPCertificate for pkix_path_validation.
             ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, E, <<>>, #{}),
             ChainCerts = decode_cert_bundle_with_der(ChainPem),
-            Chain = validate_ek_chain({Cert, DerCert}, ChainCerts, Roots),
+            Chain = validate_ek_chain({Cert, DerCert}, ChainCerts, Roots,
+                                      Opts),
             From = maps:get(valid_from, Attrs, undefined),
             To   = maps:get(valid_to, Attrs, undefined),
             #{
@@ -1950,11 +1951,11 @@ decode_cert_bundle_with_der(_) -> [].
 %%
 %% When no roots are loaded we return `unknown' (not a failure)
 %% since the caller may be operating in a dev environment.
-validate_ek_chain(Cert, Chain, Roots) ->
+validate_ek_chain(Cert, Chain, Roots, Opts) ->
     DerCert = cert_der(Cert),
     DerIntermediates = [cert_der(C) || C <- Chain],
     validate_ek_chain_1(DerCert, DerIntermediates, Roots,
-                        length(Chain)).
+                        length(Chain), Opts).
 
 safe_der_encode(Cert) ->
     try public_key:pkix_encode('OTPCertificate', Cert, otp)
@@ -1964,7 +1965,7 @@ safe_der_encode(Cert) ->
 cert_der({_Cert, Der}) when is_binary(Der) -> Der;
 cert_der(Cert) -> safe_der_encode(Cert).
 
-validate_ek_chain_1(_DerCert, _Intermediates, [], _ChainLen) ->
+validate_ek_chain_1(_DerCert, _Intermediates, [], _ChainLen, _Opts) ->
     #{
         <<"validated-by-root-ca">> => null,
         <<"root-ca-count">>        => 0,
@@ -1973,7 +1974,7 @@ validate_ek_chain_1(_DerCert, _Intermediates, [], _ChainLen) ->
             <<"no root-cas loaded in priv/tpm-interpret/root-cas/">>,
         <<"intermediates-used">>   => 0
     };
-validate_ek_chain_1(<<>>, _Intermediates, Roots, _ChainLen) ->
+validate_ek_chain_1(<<>>, _Intermediates, Roots, _ChainLen, _Opts) ->
     #{
         <<"validated-by-root-ca">> => null,
         <<"root-ca-count">>        => length(Roots),
@@ -1981,7 +1982,7 @@ validate_ek_chain_1(<<>>, _Intermediates, Roots, _ChainLen) ->
         <<"reason">>               => <<"cert re-encode failed">>,
         <<"intermediates-used">>   => 0
     };
-validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
+validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen, Opts) ->
     %% Only self-signed certs may stand as trust anchors. Non-self-
     %% signed entries in the shipped bundle are candidate
     %% intermediates — promoting them to anchors is the reward-hack
@@ -2009,7 +2010,7 @@ validate_ek_chain_1(DerCert, DerIntermediates, Roots, ChainLen) ->
             %% only trust anchors.
             try_validate_with_candidate_intermediates(
               DerCert, Cleaned, TrueRoots, BundleIntermediates,
-              Direct)
+              Direct, Opts)
     end,
     Result#{<<"intermediates-used">> => ChainLen}.
 
@@ -2038,7 +2039,7 @@ partition_self_signed_roots(Roots) ->
 try_validate_with_candidate_intermediates(DerCert, TpmIntermediates,
                                           TrueRoots,
                                           BundleIntermediates,
-                                          FallbackResult) ->
+                                          FallbackResult, Opts) ->
     case decode_der_cert(DerCert) of
         {ok, LeafCert} ->
             Candidates =
@@ -2047,7 +2048,7 @@ try_validate_with_candidate_intermediates(DerCert, TpmIntermediates,
                 named_bundle_intermediates(BundleIntermediates),
             try_validate_built_paths(
               DerCert, LeafCert, TrueRoots, Candidates,
-              FallbackResult);
+              FallbackResult, Opts);
         error ->
             FallbackResult
     end.
@@ -2071,7 +2072,7 @@ named_bundle_intermediates(BundleIntermediates) ->
         IDer =/= <<>>].
 
 try_validate_built_paths(DerCert, LeafCert, TrueRoots,
-                         Candidates, FallbackResult) ->
+                         Candidates, FallbackResult, Opts) ->
     DecodedRoots = [
         {Name, Cert, Der} ||
         R <- TrueRoots,
@@ -2081,14 +2082,14 @@ try_validate_built_paths(DerCert, LeafCert, TrueRoots,
     ],
     walk_built_paths(
       DerCert, LeafCert, DecodedRoots, length(DecodedRoots),
-      Candidates, FallbackResult).
+      Candidates, FallbackResult, Opts).
 
 walk_built_paths(_DerCert, _LeafCert, [], _RootCount, _Candidates,
-                 FallbackResult) ->
+                 FallbackResult, _Opts) ->
     FallbackResult;
 walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert, AnchorDer} | Rest],
-                 RootCount, Candidates, FallbackResult) ->
-    case build_intermediate_path(LeafCert, AnchorCert, Candidates) of
+                 RootCount, Candidates, FallbackResult, Opts) ->
+    case build_intermediate_path(LeafCert, AnchorCert, Candidates, Opts) of
         {ok, PathDers, PathNames} ->
             case validate_against_one_root_der(
                    DerCert, PathDers, AnchorDer) of
@@ -2109,19 +2110,19 @@ walk_built_paths(DerCert, LeafCert, [{AnchorName, AnchorCert, AnchorDer} | Rest]
                 false ->
                     walk_built_paths(
                       DerCert, LeafCert, Rest, RootCount, Candidates,
-                      FallbackResult)
+                      FallbackResult, Opts)
             end;
         not_found ->
             walk_built_paths(
               DerCert, LeafCert, Rest, RootCount, Candidates,
-              FallbackResult)
+              FallbackResult, Opts)
     end.
 
-build_intermediate_path(LeafCert, RootCert, Candidates) ->
-    build_intermediate_path(LeafCert, RootCert, Candidates, [], []).
+build_intermediate_path(LeafCert, RootCert, Candidates, Opts) ->
+    build_intermediate_path(LeafCert, RootCert, Candidates, [], [], Opts).
 
 build_intermediate_path(CurrentCert, RootCert, Candidates,
-                        AccDers, AccNames) ->
+                        AccDers, AccNames, Opts) ->
     Issuer = cert_issuer(CurrentCert),
     case same_name(Issuer, cert_subject(RootCert)) of
         true ->
@@ -2132,7 +2133,8 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
                       same_name(cert_subject(Cert), Issuer)],
             CandidatesWithAia =
                 case Matches of
-                    [] -> aia_extend_candidates(CurrentCert, Candidates);
+                    [] -> aia_extend_candidates(CurrentCert, Candidates,
+                                                Opts);
                     _ -> Candidates
                 end,
             UpdatedMatches =
@@ -2144,7 +2146,7 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
                 end,
             try_candidate_paths(
               UpdatedMatches, RootCert, CandidatesWithAia,
-              AccDers, AccNames)
+              AccDers, AccNames, Opts)
     end.
 
 %% When the local Candidates list lacks an issuer for the current
@@ -2154,14 +2156,15 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
 %% the same SoC family don't re-hit the network. Walks ALL AIA URLs
 %% and appends every one that fetches+decodes -- a cert with multiple
 %% AIA endpoints contributes every reachable issuer to the candidate
-%% pool, not just the first.
-aia_extend_candidates(CurrentCert, Candidates) ->
+%% pool, not just the first. `Opts' carries the operator's
+%% `lapee-aia-fetch-enabled' kill switch through to lapee_aia.
+aia_extend_candidates(CurrentCert, Candidates, Opts) ->
     Fetched =
         [
             {aia_candidate_name(Url), IssuerDer, IssuerCert}
         ||
             Url <- lapee_aia:caissuers_urls(CurrentCert),
-            {ok, IssuerDer} <- [lapee_aia:fetch_issuer(Url, #{})],
+            {ok, IssuerDer} <- [lapee_aia:fetch_issuer(Url, Opts)],
             {ok, IssuerCert} <- [decode_der_cert(IssuerDer)]
         ],
     Candidates ++ Fetched.
@@ -2170,19 +2173,20 @@ aia_candidate_name(Url) ->
     iolist_to_binary([<<"aia-fetched/">>,
                       binary:part(Url, 0, min(80, byte_size(Url)))]).
 
-try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->
+try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames,
+                    _Opts) ->
     not_found;
 try_candidate_paths([{Name, Der, Cert} = Candidate | Rest],
-                    RootCert, Candidates, AccDers, AccNames) ->
+                    RootCert, Candidates, AccDers, AccNames, Opts) ->
     Remaining = [C || C <- Candidates, C =/= Candidate],
     case build_intermediate_path(
            Cert, RootCert, Remaining, [Der | AccDers],
-           [Name | AccNames]) of
+           [Name | AccNames], Opts) of
         {ok, _PathDers, _PathNames} = Hit ->
             Hit;
         not_found ->
             try_candidate_paths(
-              Rest, RootCert, Candidates, AccDers, AccNames)
+              Rest, RootCert, Candidates, AccDers, AccNames, Opts)
     end.
 
 cert_subject(#'OTPCertificate'{tbsCertificate = Tbs}) ->
@@ -11357,7 +11361,8 @@ v1_2_intel_odca_chain_preserves_original_der_test() ->
             Chain = validate_ek_chain(
                 {Ptt, PttDer},
                 [{Kernel, KernelDer}, {Rom, RomDer}],
-                Roots
+                Roots,
+                #{}
             ),
             ?assertEqual(true, maps:get(<<"chain-valid">>, Chain)),
             ?assertEqual(<<"INTEL_ODCA_ROOT_CA">>,
@@ -11367,6 +11372,85 @@ v1_2_intel_odca_chain_preserves_original_der_test() ->
                 maps:get(<<"validated-via-intermediates">>, Chain)
             ))
     end.
+
+%% Operator kill switch: `lapee-aia-fetch-enabled' = false in `Opts'
+%% must short-circuit AIA fetching on the interpret path the same way
+%% it does on the admission path (`dev_tpm2:chk_ek_chain'). Real Intel
+%% ADL EK leaf + ROM/Kernel/PTT chain pins against an ODCA root + CSME
+%% intermediate, but the per-SoC ADL Issuing CA only lives at
+%% `tsci.intel.com' and isn't in the keylime corpus -- the chain only
+%% closes when AIA is enabled. Pre-cache the fetch result so AIA-
+%% enabled mode validates without touching the network; with AIA
+%% disabled in `Opts', `lapee_aia:fetch_issuer/2' returns
+%% `{error, aia_disabled}' BEFORE the cache lookup, so even a
+%% pre-warmed cache cannot rescue the chain.
+v1_2_aia_kill_switch_skips_chain_extension_test() ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "aia-fixtures",
+                       "intel-adl-ek-leaf.pem"]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "aia-fixtures", "intel-adl-ek-leaf.pem"])
+    ],
+    case [Bin || P <- Paths, {ok, Bin} <- [file:read_file(P)]] of
+        [] -> ok;  %% fixtures not staged; skip
+        [LeafPem | _] ->
+            ChainPem = aia_kill_switch_fixture("intel-adl-ek-chain.pem"),
+            IssuingPem = aia_kill_switch_fixture(
+                "intel-adl-issuing-ca-2820.pem"),
+            RootPem = aia_kill_switch_root("INTEL_ODCA_ROOT_CA.pem"),
+            CsmePem = aia_kill_switch_root(
+                "INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem"),
+            {ok, Leaf, LeafDer} = decode_cert_with_der(LeafPem),
+            ChainCerts = decode_cert_bundle_with_der(ChainPem),
+            {ok, _IssuingCert, IssuingDer} =
+                decode_cert_with_der(IssuingPem),
+            Roots = [
+                #{<<"name">> => <<"INTEL_ODCA_ROOT_CA">>,
+                  <<"pem">>  => RootPem},
+                #{<<"name">> => <<"INTEL_ODCA_CA2_CSME_INTERMEDIATE">>,
+                  <<"pem">>  => CsmePem}
+            ],
+            ChainDers = [Der || {_, Der} <- ChainCerts],
+            [AdlUrl | _] =
+                lists:flatten(
+                    [lapee_aia:caissuers_urls(D) || D <- ChainDers]),
+            persistent_term:put({lapee_aia, fetched, AdlUrl}, IssuingDer),
+            try
+                %% AIA enabled (default Opts): cached fetch closes
+                %% the chain.
+                ChainOk = validate_ek_chain(
+                    {Leaf, LeafDer}, ChainCerts, Roots, #{}),
+                ?assertEqual(true,
+                             maps:get(<<"chain-valid">>, ChainOk)),
+                %% AIA disabled: kill switch wins over the cache,
+                %% chain does NOT validate.
+                Disabled = #{<<"lapee-aia-fetch-enabled">> => false},
+                ChainBad = validate_ek_chain(
+                    {Leaf, LeafDer}, ChainCerts, Roots, Disabled),
+                ?assertNotEqual(
+                    true, maps:get(<<"chain-valid">>, ChainBad))
+            after
+                persistent_term:erase({lapee_aia, fetched, AdlUrl})
+            end
+    end.
+
+aia_kill_switch_fixture(Name) ->
+    aia_kill_switch_read([
+        filename:join(["priv", "tpm-interpret", "aia-fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "aia-fixtures", Name])
+    ]).
+
+aia_kill_switch_root(Name) ->
+    aia_kill_switch_read([
+        filename:join(["priv", "tpm-interpret", "root-cas", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "root-cas", Name])
+    ]).
+
+aia_kill_switch_read(Paths) ->
+    [Bin | _] = [B || P <- Paths, {ok, B} <- [file:read_file(P)]],
+    Bin.
 
 %% v1.2 batch 9 / paper-to-code MEDIUM-4: ek_finding must emit a
 %% critical for `ek-chain-valid = "unknown"' so an empty roots
