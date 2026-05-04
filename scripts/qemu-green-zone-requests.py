@@ -36,10 +36,16 @@ def main() -> int:
     ).encode()
     trusted_ca = base64.urlsafe_b64encode(ca_bundle).decode().rstrip("=")
 
+    # Node 3 joins via node 2 -- not via node 1 -- so the harness
+    # exercises the multi-hop members propagation path that the
+    # `add_member_to_members` bug used to silently break (the
+    # admission's `green-zone.members` would have lost the new
+    # joiner's wallet through stale-commitment cache linkification).
+    join_via = {2: 1, 3: 2, 4: 1}
     for n in (2, 3, 4):
         (out / f"requests/join{n}.json").write_text(json.dumps({
             "name": "book-shelf",
-            "peer-url": f"http://{guest_host}:{base_port + 1}",
+            "peer-url": f"http://{guest_host}:{base_port + join_via[n]}",
             "self-url": f"http://{guest_host}:{base_port + n}",
             "trusted-ca": trusted_ca,
         }))
