@@ -171,3 +171,78 @@ parse_positive_integer(B, Default) when is_binary(B) ->
     catch _:_ -> Default
     end;
 parse_positive_integer(_, Default) -> Default.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+caissuers_urls_extracts_intel_adl_aia_test() ->
+    Pem = read_aia_fixture("intel-adl-ek-chain.pem"),
+    %% The chain is leaf -> PTT CA -> Kernel CA -> ROM CA. Only the
+    %% ROM CA carries the AIA caIssuers pointer to its public Intel
+    %% issuing CA -- which is the whole reason AIA fetching exists.
+    Ders = [Der || {'Certificate', Der, not_encrypted}
+                       <- public_key:pem_decode(Pem)],
+    AllUrls = lists:flatten([caissuers_urls(D) || D <- Ders]),
+    ?assertEqual(
+        [<<"https://tsci.intel.com/content/OnDieCA/certs/"
+           "ADL_00002820_ODCA_CA2.cer">>],
+        AllUrls).
+
+caissuers_urls_returns_empty_for_root_test() ->
+    %% Self-signed roots in the keylime corpus typically omit AIA.
+    Pem = read_root_fixture("INTEL_ODCA_ROOT_CA.pem"),
+    [{_, Der, _} | _] = public_key:pem_decode(Pem),
+    ?assertEqual([], caissuers_urls(Der)).
+
+enabled_default_is_true_test() ->
+    ?assert(enabled(#{})).
+
+enabled_respects_false_atom_test() ->
+    ?assertNot(enabled(#{<<"lapee-aia-fetch-enabled">> => false})).
+
+enabled_respects_false_binary_test() ->
+    ?assertNot(enabled(#{<<"lapee-aia-fetch-enabled">> => <<"false">>})).
+
+fetch_issuer_when_disabled_returns_aia_disabled_test() ->
+    ?assertEqual(
+        {error, aia_disabled},
+        fetch_issuer(<<"https://tsci.intel.com/anything">>,
+                     #{<<"lapee-aia-fetch-enabled">> => false})).
+
+fetch_issuer_rejects_non_https_test() ->
+    %% No cache hit and no offline gate -- should refuse plain HTTP.
+    Url = <<"http://insecure.example/intermediate.cer">>,
+    ?assertEqual(undefined,
+                 persistent_term:get(?CACHE_KEY(Url), undefined)),
+    ?assertMatch({error, {non_https_aia, _}},
+                 fetch_issuer(Url, #{})).
+
+fetch_issuer_uses_cache_test() ->
+    Url = <<"https://example/no-network/cached.cer">>,
+    Synth = <<"synth-der">>,
+    persistent_term:put(?CACHE_KEY(Url), Synth),
+    try
+        ?assertEqual({ok, Synth}, fetch_issuer(Url, #{}))
+    after
+        persistent_term:erase(?CACHE_KEY(Url))
+    end.
+
+read_aia_fixture(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "aia-fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "aia-fixtures", Name])
+    ],
+    [Bin | _] = [B || P <- Paths, {ok, B} <- [file:read_file(P)]],
+    Bin.
+
+read_root_fixture(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "root-cas", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "root-cas", Name])
+    ],
+    [Bin | _] = [B || P <- Paths, {ok, B} <- [file:read_file(P)]],
+    Bin.
+
+-endif.
