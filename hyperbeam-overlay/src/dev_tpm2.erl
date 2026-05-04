@@ -720,48 +720,41 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
     case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
         {ok, _} = Ok -> Ok;
         {error, Reasons} ->
-            try_aia_fallback(EkDer, PeerChainDers, TrustedDers,
-                             Reasons, Opts)
-    end.
-
-%% Local trust + envelope-supplied intermediates didn't close the
-%% chain. Try AIA caIssuers walking from the leaf upward (Intel
-%% ODCA's per-SoC issuing CAs are published only at tsci.intel.com
-%% and are not in the keylime corpus). Disabled-by-config
-%% short-circuits to the original error.
-try_aia_fallback(EkDer, PeerChainDers, TrustedDers, Reasons, Opts) ->
-    case lapee_aia:enabled(Opts) of
-        false ->
-            {error, render_chain_failure(Reasons, TrustedDers,
-                                         <<"AIA disabled">>)};
-        true ->
-            extend_and_retry(EkDer, PeerChainDers, TrustedDers,
-                             Reasons, Opts)
-    end.
-
-extend_and_retry(EkDer, PeerChainDers, TrustedDers, OriginalReasons,
-                 Opts) ->
-    case extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) of
-        {extended, ExtendedChainDers, FetchSummary} ->
-            attempt_with_aia_summary(EkDer, ExtendedChainDers,
-                                     TrustedDers, FetchSummary);
-        {no_extension, Why} ->
-            {error, render_chain_failure(OriginalReasons, TrustedDers,
-                                         Why)}
-    end.
-
-attempt_with_aia_summary(EkDer, ExtendedChainDers, TrustedDers,
-                         FetchSummary) ->
-    case attempt_chain(EkDer, ExtendedChainDers, TrustedDers) of
-        {ok, Detail} ->
-            {ok, iolist_to_binary([
-                Detail, <<" [via AIA: ">>, FetchSummary, <<"]">>])};
-        {error, Reasons} ->
-            {error, render_chain_failure(
-                Reasons, TrustedDers,
-                iolist_to_binary([
-                    <<"AIA fetched ">>, FetchSummary,
-                    <<", chain still invalid">>]))}
+            %% Local roots + envelope-supplied intermediates didn't
+            %% close the chain. Try AIA caIssuers walking from the
+            %% leaf upward (e.g. Intel ODCA's per-SoC issuing CAs are
+            %% only published at tsci.intel.com and are not part of
+            %% the keylime corpus). Disabled-by-config short-circuits
+            %% to the original error.
+            case lapee_aia:enabled(Opts) of
+                false ->
+                    {error, render_chain_failure(Reasons, TrustedDers,
+                                                 <<"AIA disabled">>)};
+                true ->
+                    case extend_chain_via_aia(EkDer, PeerChainDers,
+                                              TrustedDers, Opts) of
+                        {extended, ExtendedChainDers, FetchSummary} ->
+                            case attempt_chain(EkDer, ExtendedChainDers,
+                                               TrustedDers) of
+                                {ok, Detail} ->
+                                    {ok, iolist_to_binary([
+                                        Detail, <<" [via AIA: ">>,
+                                        FetchSummary, <<"]">>])};
+                                {error, Reasons2} ->
+                                    {error,
+                                        render_chain_failure(
+                                            Reasons2, TrustedDers,
+                                            iolist_to_binary([
+                                                <<"AIA fetched ">>,
+                                                FetchSummary,
+                                                <<", chain still invalid">>
+                                            ]))}
+                            end;
+                        {no_extension, Why} ->
+                            {error, render_chain_failure(
+                                Reasons, TrustedDers, Why)}
+                    end
+            end
     end.
 
 attempt_chain(EkDer, PeerChainDers, TrustedDers) ->
@@ -790,30 +783,32 @@ render_chain_failure(Reasons, TrustedDers, AiaNote) ->
 -define(AIA_MAX_DEPTH, 5).
 
 extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
-    %% Start at the top of the existing chain (the cert closest to
-    %% the root we already have) and follow each cert's AIA caIssuers
-    %% pointer until we hit a trusted root, run out of pointers, or
-    %% exhaust the depth budget. `Tip' is the cert whose issuer we
-    %% want next; `AccChain' accumulates the intermediates we built.
-    aia_walk(lists:last([EkDer | PeerChainDers]),
-             PeerChainDers, TrustedDers, Opts, ?AIA_MAX_DEPTH, []).
+    aia_walk([EkDer | PeerChainDers], PeerChainDers, TrustedDers,
+             Opts, ?AIA_MAX_DEPTH, []).
 
-aia_walk(_Tip, AccChain, _Trusted, _Opts, 0, Fetches) ->
+aia_walk(_Trail, AccChain, _Trusted, _Opts, 0, Fetches) ->
     summarise_aia_walk(AccChain, Fetches, <<"max-depth reached">>);
-aia_walk(Tip, AccChain, Trusted, Opts, Budget, Fetches) ->
+aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
+    %% Use the most-recently-added cert in the trail as the "current"
+    %% subject whose issuer we'd like to find next.
+    Tip = hd(lists:reverse(Trail)),
     case aia_fetch_for(Tip, AccChain, Trusted, Opts) of
         skip ->
-            summarise_aia_walk(AccChain, Fetches,
-                               <<"chain already reaches a root">>);
-        {fetched, IssuerDer, Url} ->
-            aia_walk(IssuerDer, AccChain ++ [IssuerDer],
-                     Trusted, Opts, Budget - 1, [Url | Fetches]);
+            summarise_aia_walk(AccChain, Fetches, <<"chain already reaches a root">>);
+        {fetched, NewIssuerDer, Url} ->
+            aia_walk(
+                Trail ++ [NewIssuerDer],
+                AccChain ++ [NewIssuerDer],
+                Trusted, Opts,
+                Budget - 1,
+                [Url | Fetches]
+            );
         {error, Why} ->
             summarise_aia_walk(AccChain, Fetches,
                 iolist_to_binary(io_lib:format("AIA hop failed: ~p", [Why])))
     end.
 
-summarise_aia_walk(_AccChain, [], Why) ->
+summarise_aia_walk(AccChain, [], Why) ->
     {no_extension, Why};
 summarise_aia_walk(AccChain, Fetches, _Why) ->
     Summary = iolist_to_binary(io_lib:format(
@@ -826,59 +821,54 @@ summarise_aia_walk(AccChain, Fetches, _Why) ->
 %%   {fetched, IssuerDer, Url}    - fetched a new intermediate
 %%   {error, Why}                 - AIA had no URL or fetch failed.
 aia_fetch_for(Der, AccChain, Trusted, Opts) ->
-    case otp_cert(Der) of
-        {error, Reason} -> {error, {decode_failed, Reason}};
-        {ok, Otp} ->
-            IssuerDn = otp_issuer_dn(Otp),
+    try public_key:pkix_decode_cert(Der, otp) of
+        Otp ->
+            Tbs = Otp#'OTPCertificate'.tbsCertificate,
+            IssuerDn = public_key:pkix_normalize_name(
+                Tbs#'OTPTBSCertificate'.issuer),
             case issuer_known(IssuerDn, AccChain ++ Trusted) of
                 true -> skip;
                 false ->
                     case lapee_aia:caissuers_urls(Otp) of
                         [] -> {error, no_aia_url};
-                        Urls -> try_aia_urls(Urls, IssuerDn, Opts)
+                        Urls ->
+                            try_aia_urls(Urls, IssuerDn, Opts)
                     end
             end
+    catch _:Reason -> {error, {decode_failed, Reason}}
     end.
 
 try_aia_urls([], _IssuerDn, _Opts) -> {error, all_aia_urls_failed};
 try_aia_urls([Url | Rest], IssuerDn, Opts) ->
-    Next = fun() -> try_aia_urls(Rest, IssuerDn, Opts) end,
     case lapee_aia:fetch_issuer(Url, Opts) of
         {ok, IssuerDer} ->
-            case otp_cert(IssuerDer) of
-                {ok, Otp} ->
-                    case otp_subject_dn(Otp) =:= IssuerDn of
-                        true -> {fetched, IssuerDer, Url};
-                        false -> Next()
-                    end;
-                _ -> Next()
+            try
+                Otp = public_key:pkix_decode_cert(IssuerDer, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                case Subject =:= IssuerDn of
+                    true -> {fetched, IssuerDer, Url};
+                    false -> try_aia_urls(Rest, IssuerDn, Opts)
+                end
+            catch _:_ -> try_aia_urls(Rest, IssuerDn, Opts)
             end;
-        _ -> Next()
+        _ -> try_aia_urls(Rest, IssuerDn, Opts)
     end.
 
 issuer_known(IssuerDn, Ders) ->
     lists:any(
         fun(Der) ->
-            case otp_cert(Der) of
-                {ok, Otp} -> otp_subject_dn(Otp) =:= IssuerDn;
-                _ -> false
+            try
+                Otp = public_key:pkix_decode_cert(Der, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                Subject =:= IssuerDn
+            catch _:_ -> false
             end
         end,
         Ders).
-
-%% Tiny wrappers around `public_key:pkix_decode_cert' /
-%% `public_key:pkix_normalize_name' so the AIA helpers above read like
-%% a chain-of-trust description rather than a public_key tutorial.
-otp_cert(Der) ->
-    try {ok, public_key:pkix_decode_cert(Der, otp)}
-    catch _:Reason -> {error, Reason}
-    end.
-
-otp_subject_dn(#'OTPCertificate'{tbsCertificate = Tbs}) ->
-    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.subject).
-
-otp_issuer_dn(#'OTPCertificate'{tbsCertificate = Tbs}) ->
-    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.issuer).
 
 validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
     try public_key:pkix_decode_cert(AnchorDer, otp) of
