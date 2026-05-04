@@ -34,6 +34,9 @@
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
 -export([event_log/1]).
+%% Exposed for tests + auditors that want to drive chain validation
+%% (including the AIA fallback) directly without going through verify/3.
+-export([validate_ek_chain/3, validate_ek_chain/4]).
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -686,8 +689,10 @@ resolve_trusted_ca_from_config(Opts) ->
 %% `{bad_cert, selfsigned_peer}` for a rogue EK and the callback
 %% would tell it "that's fine", defeating the whole chain check.
 chk_ek_chain(Envelope, TrustedCaPem) ->
-    EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, #{}),
-    ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, #{}),
+    chk_ek_chain(Envelope, TrustedCaPem, #{}).
+chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
+    EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, Opts),
+    ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, Opts),
     case {decode_pem_cert(EkPem), decode_pem_certs(TrustedCaPem)} of
         {{ok, EkDer}, {ok, TrustedDers}} ->
             PeerChainDers =
@@ -696,7 +701,7 @@ chk_ek_chain(Envelope, TrustedCaPem) ->
                     {error, empty} -> [];
                     {error, _} -> []
                 end,
-            validate_ek_chain(EkDer, PeerChainDers, TrustedDers);
+            validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts);
         {_, {error, _}} ->
             {error, <<"trusted CA missing or unparseable; set "
                       "`lapee_tpm_ca_cert' in node config or pass "
@@ -707,9 +712,52 @@ chk_ek_chain(Envelope, TrustedCaPem) ->
                                                     [Why]))}
     end.
 
-validate_ek_chain(_EkDer, _PeerChainDers, []) ->
-    {error, <<"trusted CA missing or unparseable">>};
 validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
+    validate_ek_chain(EkDer, PeerChainDers, TrustedDers, #{}).
+validate_ek_chain(_EkDer, _PeerChainDers, [], _Opts) ->
+    {error, <<"trusted CA missing or unparseable">>};
+validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
+    case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
+        {ok, _} = Ok -> Ok;
+        {error, Reasons} ->
+            %% Local roots + envelope-supplied intermediates didn't
+            %% close the chain. Try AIA caIssuers walking from the
+            %% leaf upward (e.g. Intel ODCA's per-SoC issuing CAs are
+            %% only published at tsci.intel.com and are not part of
+            %% the keylime corpus). Disabled-by-config short-circuits
+            %% to the original error.
+            case lapee_aia:enabled(Opts) of
+                false ->
+                    {error, render_chain_failure(Reasons, TrustedDers,
+                                                 <<"AIA disabled">>)};
+                true ->
+                    case extend_chain_via_aia(EkDer, PeerChainDers,
+                                              TrustedDers, Opts) of
+                        {extended, ExtendedChainDers, FetchSummary} ->
+                            case attempt_chain(EkDer, ExtendedChainDers,
+                                               TrustedDers) of
+                                {ok, Detail} ->
+                                    {ok, iolist_to_binary([
+                                        Detail, <<" [via AIA: ">>,
+                                        FetchSummary, <<"]">>])};
+                                {error, Reasons2} ->
+                                    {error,
+                                        render_chain_failure(
+                                            Reasons2, TrustedDers,
+                                            iolist_to_binary([
+                                                <<"AIA fetched ">>,
+                                                FetchSummary,
+                                                <<", chain still invalid">>
+                                            ]))}
+                            end;
+                        {no_extension, Why} ->
+                            {error, render_chain_failure(
+                                Reasons, TrustedDers, Why)}
+                    end
+            end
+    end.
+
+attempt_chain(EkDer, PeerChainDers, TrustedDers) ->
     Attempts =
         [
             validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, Anchor)
@@ -718,12 +766,109 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
         ],
     case [Detail || {ok, Detail} <- Attempts] of
         [Detail | _] -> {ok, Detail};
-        [] ->
-            Reasons = [Reason || {error, Reason} <- Attempts],
-            {error, iolist_to_binary(io_lib:format(
-                "chain invalid for all ~B trusted anchor candidate(s): ~p",
-                [length(TrustedDers), Reasons]))}
+        [] -> {error, [Reason || {error, Reason} <- Attempts]}
     end.
+
+render_chain_failure(Reasons, TrustedDers, AiaNote) ->
+    iolist_to_binary(io_lib:format(
+        "chain invalid for all ~B trusted anchor candidate(s) (~s): ~p",
+        [length(TrustedDers), AiaNote, Reasons])).
+
+%% Walk the leaf -> known-intermediates list from the bottom up,
+%% asking each cert's AIA extension for its issuer URL and fetching
+%% any cert that isn't already in the candidate set. Stops when the
+%% next cert's issuer matches a TrustedDer subject, when AIA returns
+%% nothing fetchable, or after `?AIA_MAX_DEPTH' hops -- whichever
+%% comes first.
+-define(AIA_MAX_DEPTH, 5).
+
+extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
+    aia_walk([EkDer | PeerChainDers], PeerChainDers, TrustedDers,
+             Opts, ?AIA_MAX_DEPTH, []).
+
+aia_walk(_Trail, AccChain, _Trusted, _Opts, 0, Fetches) ->
+    summarise_aia_walk(AccChain, Fetches, <<"max-depth reached">>);
+aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
+    %% Use the most-recently-added cert in the trail as the "current"
+    %% subject whose issuer we'd like to find next.
+    Tip = hd(lists:reverse(Trail)),
+    case aia_fetch_for(Tip, AccChain, Trusted, Opts) of
+        skip ->
+            summarise_aia_walk(AccChain, Fetches, <<"chain already reaches a root">>);
+        {fetched, NewIssuerDer, Url} ->
+            aia_walk(
+                Trail ++ [NewIssuerDer],
+                AccChain ++ [NewIssuerDer],
+                Trusted, Opts,
+                Budget - 1,
+                [Url | Fetches]
+            );
+        {error, Why} ->
+            summarise_aia_walk(AccChain, Fetches,
+                iolist_to_binary(io_lib:format("AIA hop failed: ~p", [Why])))
+    end.
+
+summarise_aia_walk(AccChain, [], Why) ->
+    {no_extension, Why};
+summarise_aia_walk(AccChain, Fetches, _Why) ->
+    Summary = iolist_to_binary(io_lib:format(
+        "fetched ~B intermediate(s)", [length(Fetches)])),
+    {extended, AccChain, Summary}.
+
+%% For a given subject DER, decide whether AIA fetch is needed and, if
+%% so, fetch and return the issuer. Returns:
+%%   skip                         - issuer matches a known trusted root
+%%   {fetched, IssuerDer, Url}    - fetched a new intermediate
+%%   {error, Why}                 - AIA had no URL or fetch failed.
+aia_fetch_for(Der, AccChain, Trusted, Opts) ->
+    try public_key:pkix_decode_cert(Der, otp) of
+        Otp ->
+            Tbs = Otp#'OTPCertificate'.tbsCertificate,
+            IssuerDn = public_key:pkix_normalize_name(
+                Tbs#'OTPTBSCertificate'.issuer),
+            case issuer_known(IssuerDn, AccChain ++ Trusted) of
+                true -> skip;
+                false ->
+                    case lapee_aia:caissuers_urls(Otp) of
+                        [] -> {error, no_aia_url};
+                        Urls ->
+                            try_aia_urls(Urls, IssuerDn, Opts)
+                    end
+            end
+    catch _:Reason -> {error, {decode_failed, Reason}}
+    end.
+
+try_aia_urls([], _IssuerDn, _Opts) -> {error, all_aia_urls_failed};
+try_aia_urls([Url | Rest], IssuerDn, Opts) ->
+    case lapee_aia:fetch_issuer(Url, Opts) of
+        {ok, IssuerDer} ->
+            try
+                Otp = public_key:pkix_decode_cert(IssuerDer, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                case Subject =:= IssuerDn of
+                    true -> {fetched, IssuerDer, Url};
+                    false -> try_aia_urls(Rest, IssuerDn, Opts)
+                end
+            catch _:_ -> try_aia_urls(Rest, IssuerDn, Opts)
+            end;
+        _ -> try_aia_urls(Rest, IssuerDn, Opts)
+    end.
+
+issuer_known(IssuerDn, Ders) ->
+    lists:any(
+        fun(Der) ->
+            try
+                Otp = public_key:pkix_decode_cert(Der, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                Subject =:= IssuerDn
+            catch _:_ -> false
+            end
+        end,
+        Ders).
 
 validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
     try public_key:pkix_decode_cert(AnchorDer, otp) of
@@ -4345,6 +4490,57 @@ candidate_intermediate_chains_keeps_direct_anchor_path_test() ->
         candidate_intermediate_chains([],
                                       [Anchor, OtherTrusted],
                                       Anchor)).
+
+%% AIA fallback: a real Intel ADL EK leaf + ROM/Kernel/PTT
+%% intermediates pin against an Intel ODCA root + the CSME
+%% Intermediate CA, but the per-SoC `ODCA 2 CSME P_ADL 00002820
+%% Issuing CA' is missing from the local corpus. Without AIA the
+%% chain fails. With AIA -- pre-cached via persistent_term so the
+%% test never hits the network -- the chain extension picks up the
+%% missing intermediate and validation succeeds.
+aia_extends_chain_for_missing_intel_adl_intermediate_test() ->
+    Leaf = aia_fixture_pem("intel-adl-ek-leaf.pem"),
+    PeerChain = aia_fixture_pems("intel-adl-ek-chain.pem"),
+    Roots = [
+        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem"),
+        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem")
+    ],
+    %% Disabled: chain incomplete, verifier rejects.
+    {error, _} = validate_ek_chain(Leaf, PeerChain, Roots,
+        #{<<"lapee-aia-fetch-enabled">> => false}),
+    %% Pre-cache the Intel ADL Issuing CA fetch result so the test
+    %% exercises the AIA wiring without hitting the network.
+    AdlIssuingDer = aia_fixture_pem("intel-adl-issuing-ca-2820.pem"),
+    AdlUrl = aia_url_from_chain(PeerChain),
+    persistent_term:put({lapee_aia, fetched, AdlUrl}, AdlIssuingDer),
+    try
+        {ok, Detail} = validate_ek_chain(Leaf, PeerChain, Roots, #{}),
+        ?assert(byte_size(Detail) > 0)
+    after
+        persistent_term:erase({lapee_aia, fetched, AdlUrl})
+    end.
+
+aia_fixture_pem(Name) ->
+    Pems = aia_fixture_pems(Name),
+    hd(Pems).
+
+aia_fixture_pems(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "aia-fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "aia-fixtures", Name])
+    ],
+    [Pem] = [Bin || P <- Paths, {ok, Bin} <- [file:read_file(P)]],
+    [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)].
+
+aia_url_from_chain(ChainDers) ->
+    %% Walk the chain and return the AIA caIssuers URL of the cert
+    %% whose issuer DN is the missing ADL Issuing CA. Any cert in
+    %% the fixture chain whose AIA points at the ADL Issuing CA URL
+    %% is acceptable.
+    Urls = lists:flatten([lapee_aia:caissuers_urls(D) || D <- ChainDers]),
+    [hd(Urls)],
+    hd(Urls).
 
 parse_chain_group_reads_cert_across_nv_boundary_test() ->
     Der = root_ca_fixture_der(),

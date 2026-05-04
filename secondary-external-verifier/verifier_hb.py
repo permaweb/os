@@ -112,7 +112,79 @@ def _load_roots(roots_dir):
     return roots, intermediates, unreadable
 
 
-def _verify_cert_chain(ek_pem, roots_dir):
+# Cache fetched AIA intermediates per process so repeated verifies of
+# peers in the same SoC family hit the URL exactly once. Keyed by URL.
+_AIA_CACHE: dict[str, bytes] = {}
+
+
+def _aia_caissuers_urls(pem_path):
+    """Extract every `id-ad-caIssuers' URL from a cert's AIA extension
+    via openssl text. We avoid the Python cryptography lib here because
+    real Intel ODCA EK leaves carry DER quirks (`EncodedDefault') that
+    the strict parser refuses, and openssl is what the verify path
+    already shells out to. Returns a list of HTTPS URLs."""
+    r = subprocess.run(
+        ["openssl", "x509", "-in", str(pem_path), "-noout", "-text"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return []
+    urls = []
+    in_aia = False
+    for line in r.stdout.splitlines():
+        stripped = line.strip()
+        if "Authority Information Access" in stripped:
+            in_aia = True
+            continue
+        if in_aia:
+            if stripped.startswith("CA Issuers - URI:"):
+                urls.append(stripped.split("URI:", 1)[1].strip())
+            elif stripped and not stripped.startswith("OCSP")\
+                    and not stripped.startswith("CA Issuers"):
+                # Hit the next extension; stop scanning.
+                in_aia = False
+    return [u for u in urls if u.startswith("https://")]
+
+
+def _aia_fetch(url, timeout=5):
+    """HTTPS GET an AIA URL, cache successful fetches, return PEM
+    bytes. Detects whether the server returned PEM or DER and
+    normalises to PEM. Returns None on any failure -- caller decides
+    whether to fall through."""
+    if url in _AIA_CACHE:
+        return _AIA_CACHE[url]
+    if not url.startswith("https://"):
+        return None
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "lapee-aia/1"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(64 * 1024)
+    except Exception:
+        return None
+    # Convert DER to PEM via openssl when the body is binary.
+    if body[:11] == b"-----BEGIN ":
+        pem = body
+    else:
+        r = subprocess.run(
+            ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+            input=body, capture_output=True)
+        if r.returncode != 0:
+            return None
+        pem = r.stdout
+    # Sanity-parse via openssl before caching to reject arbitrary
+    # bytes from a misconfigured AIA endpoint.
+    r2 = subprocess.run(
+        ["openssl", "x509", "-noout"],
+        input=pem, capture_output=True)
+    if r2.returncode != 0:
+        return None
+    _AIA_CACHE[url] = pem
+    return pem
+
+
+def _verify_cert_chain(ek_pem, roots_dir,
+                       envelope_chain_pem=b"", aia_enabled=True):
     roots, intermediates, unreadable = _load_roots(roots_dir)
     if not roots:
         return Check(
@@ -127,37 +199,115 @@ def _verify_cert_chain(ek_pem, roots_dir):
         f.write(ek_pem)
         ek_path = f.name
 
-    def _try(root_path, mid):
+    # The envelope itself can supply on-TPM intermediates via
+    # `ek-cert-chain-pem' (Intel ODCA stuffs the PTT/Kernel/ROM CAs
+    # into the TPM NV slot adjacent to the EK; the LapEE TPM device
+    # carries them through to the verifier). Treat them as untrusted
+    # intermediates so the chain walker can use them. They never
+    # promote to trust anchors -- only self-signed certs from
+    # `roots_dir' do that.
+    envelope_pems = []
+    if isinstance(envelope_chain_pem, str):
+        envelope_chain_pem = envelope_chain_pem.encode()
+    if envelope_chain_pem:
+        envelope_pems = [envelope_chain_pem]
+
+    # Materialise candidate intermediates as a single concatenated PEM
+    # so openssl can chase the issuer chain across multiple bundled
+    # intermediates in one shot. The previous "one intermediate at a
+    # time" loop couldn't build the four-step Intel ODCA ladder.
+    def _bundle(extra_pems):
+        with tempfile.NamedTemporaryFile(suffix=".pem", mode="wb",
+                                         delete=False) as g:
+            for _, cert in intermediates:
+                from cryptography.hazmat.primitives import serialization
+                g.write(cert.public_bytes(
+                    serialization.Encoding.PEM))
+            for ep in envelope_pems + list(extra_pems):
+                g.write(ep)
+        return g.name
+
+    def _try(root_path, bundle_path):
         cmd = ["openssl", "verify", "-CAfile", str(root_path)]
-        if mid is not None:
-            cmd += ["-untrusted", str(mid)]
+        if bundle_path is not None:
+            cmd += ["-untrusted", str(bundle_path)]
         cmd.append(ek_path)
         r = subprocess.run(cmd, capture_output=True, text=True)
         return r.returncode == 0
 
+    bundle_path = _bundle([])
     for root_path, _ in roots:
         if _try(root_path, None):
             return Check(
                 "EK certificate chains to a self-signed manufacturer root",
                 True,
                 f"validated against {root_path.name} (direct)")
-        for mid_path, _ in intermediates:
-            if _try(root_path, mid_path):
-                return Check(
-                    "EK certificate chains to a self-signed manufacturer root",
-                    True,
-                    f"validated against {root_path.name} via {mid_path.name}")
+        if _try(root_path, bundle_path):
+            return Check(
+                "EK certificate chains to a self-signed manufacturer root",
+                True,
+                f"validated against {root_path.name} via "
+                f"{len(intermediates)} bundled intermediate(s)")
 
-    from cryptography import x509
-    ek_cert = x509.load_pem_x509_certificate(ek_pem.encode())
+    # Local trust + envelope-supplied intermediates didn't close the
+    # chain. Walk AIA caIssuers URLs starting from the leaf, then from
+    # each cert in the envelope's chain, and try again with the
+    # fetched intermediates appended. Real EK leaves don't carry an
+    # AIA pointer (their issuer is the on-TPM PTT/leaf CA, which is
+    # already in the envelope chain); the AIA pointer lives mid-chain
+    # on the cert whose issuer is the missing public Issuing CA. We
+    # must split a concatenated envelope chain PEM into individual
+    # cert files since `openssl x509 -text' only reads the first cert
+    # of any input.
+    if aia_enabled:
+        import re as _re
+        cert_paths = [ek_path]
+        for ep in envelope_pems:
+            ep_str = ep.decode() if isinstance(ep, bytes) else ep
+            for single in _re.findall(
+                    r"-----BEGIN CERTIFICATE-----.*?"
+                    r"-----END CERTIFICATE-----",
+                    ep_str, _re.DOTALL):
+                with tempfile.NamedTemporaryFile(
+                        suffix=".pem", mode="w", delete=False) as nt:
+                    nt.write(single)
+                    cert_paths.append(nt.name)
+        fetched_pems = []
+        fetched_summary = []
+        seen_urls = set()
+        for cert_path in cert_paths:
+            urls = _aia_caissuers_urls(cert_path)
+            for url in urls:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                p = _aia_fetch(url)
+                if p:
+                    fetched_pems.append(p)
+                    fetched_summary.append(url)
+            if len(fetched_pems) >= 5:
+                break  # depth cap
+        if fetched_pems:
+            extended_bundle = _bundle(fetched_pems)
+            for root_path, _ in roots:
+                if _try(root_path, extended_bundle):
+                    return Check(
+                        "EK certificate chains to a self-signed manufacturer root",
+                        True,
+                        f"validated against {root_path.name} via "
+                        f"{len(intermediates)} bundled + "
+                        f"{len(envelope_pems)} envelope + "
+                        f"{len(fetched_pems)} AIA-fetched intermediate(s) "
+                        f"[{', '.join(fetched_summary)}]")
+
     return Check(
         "EK certificate chains to a self-signed manufacturer root",
         False,
         "no self-signed root anchors this EK cert.\n"
-        f"       EK issuer     : {ek_cert.issuer.rfc4514_string()}\n"
         f"       roots tried   : {len(roots)} "
         f"({', '.join(p.name for p,_ in roots)})\n"
-        f"       intermediates : {len(intermediates)}, none completed.")
+        f"       bundled mids  : {len(intermediates)}, AIA: "
+        f"{'enabled' if aia_enabled else 'disabled'}")
 
 
 # ----------------------------------------------------------------------
@@ -350,7 +500,7 @@ def _verify_node_msg_shape(envelope):
 # ----------------------------------------------------------------------
 # Driver
 # ----------------------------------------------------------------------
-def verify(envelope, roots_dir):
+def verify(envelope, roots_dir, aia_enabled=True):
     if envelope.get("lapee-attestation-version") != EXPECTED_VERSION:
         return [Check(
             f"envelope version is exactly {EXPECTED_VERSION!r}",
@@ -358,7 +508,10 @@ def verify(envelope, roots_dir):
             f"got {envelope.get('lapee-attestation-version')!r}")]
 
     return [
-        _verify_cert_chain(envelope["ek-cert-pem"], roots_dir),
+        _verify_cert_chain(envelope["ek-cert-pem"], roots_dir,
+                           envelope_chain_pem=envelope.get(
+                               "ek-cert-chain-pem", ""),
+                           aia_enabled=aia_enabled),
         *_verify_quote(envelope),
         _verify_pcr15_replay(envelope),
         _verify_node_msg_binding(envelope),
@@ -395,6 +548,11 @@ def main():
                          "intermediates. (default: the LapEE runtime "
                          "corpus at hyperbeam-overlay/priv/"
                          "tpm-interpret/root-cas/)")
+    ap.add_argument("--no-aia-fetch", action="store_true",
+                    help="disable AIA caIssuers fetching when the local "
+                         "corpus + envelope-supplied intermediates do not "
+                         "complete the chain. Use for offline / "
+                         "hermetic audits.")
     args = ap.parse_args()
 
     raw = json.loads(pathlib.Path(args.envelope).read_text())
@@ -417,7 +575,8 @@ def main():
     print(f"  tpm-session-mode    : {envelope.get('tpm-session-mode')}")
     print()
 
-    results = verify(envelope, args.roots_dir)
+    results = verify(envelope, args.roots_dir,
+                     aia_enabled=not args.no_aia_fetch)
     for r in results:
         print(r)
     ok = all(r.ok for r in results)
