@@ -783,32 +783,30 @@ render_chain_failure(Reasons, TrustedDers, AiaNote) ->
 -define(AIA_MAX_DEPTH, 5).
 
 extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
-    aia_walk([EkDer | PeerChainDers], PeerChainDers, TrustedDers,
-             Opts, ?AIA_MAX_DEPTH, []).
+    %% Start at the top of the existing chain (the cert closest to
+    %% the root we already have) and follow each cert's AIA caIssuers
+    %% pointer until we hit a trusted root, run out of pointers, or
+    %% exhaust the depth budget. `Tip' is the cert whose issuer we
+    %% want next; `AccChain' accumulates the intermediates we built.
+    aia_walk(lists:last([EkDer | PeerChainDers]),
+             PeerChainDers, TrustedDers, Opts, ?AIA_MAX_DEPTH, []).
 
-aia_walk(_Trail, AccChain, _Trusted, _Opts, 0, Fetches) ->
+aia_walk(_Tip, AccChain, _Trusted, _Opts, 0, Fetches) ->
     summarise_aia_walk(AccChain, Fetches, <<"max-depth reached">>);
-aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
-    %% Use the most-recently-added cert in the trail as the "current"
-    %% subject whose issuer we'd like to find next.
-    Tip = hd(lists:reverse(Trail)),
+aia_walk(Tip, AccChain, Trusted, Opts, Budget, Fetches) ->
     case aia_fetch_for(Tip, AccChain, Trusted, Opts) of
         skip ->
-            summarise_aia_walk(AccChain, Fetches, <<"chain already reaches a root">>);
-        {fetched, NewIssuerDer, Url} ->
-            aia_walk(
-                Trail ++ [NewIssuerDer],
-                AccChain ++ [NewIssuerDer],
-                Trusted, Opts,
-                Budget - 1,
-                [Url | Fetches]
-            );
+            summarise_aia_walk(AccChain, Fetches,
+                               <<"chain already reaches a root">>);
+        {fetched, IssuerDer, Url} ->
+            aia_walk(IssuerDer, AccChain ++ [IssuerDer],
+                     Trusted, Opts, Budget - 1, [Url | Fetches]);
         {error, Why} ->
             summarise_aia_walk(AccChain, Fetches,
                 iolist_to_binary(io_lib:format("AIA hop failed: ~p", [Why])))
     end.
 
-summarise_aia_walk(AccChain, [], Why) ->
+summarise_aia_walk(_AccChain, [], Why) ->
     {no_extension, Why};
 summarise_aia_walk(AccChain, Fetches, _Why) ->
     Summary = iolist_to_binary(io_lib:format(
