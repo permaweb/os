@@ -2315,7 +2315,15 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"tcg-event-log-length-bytes">> =>
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
-                            infer_log_format(TcgLogBin)
+                            infer_log_format(TcgLogBin),
+                        %% Derived signals from the firmware-side TCG
+                        %% event log replay -- exposed in the signed
+                        %% boot-attestation so green-zone templates and
+                        %% external auditors can pin policy-actionable
+                        %% facts (currently `secure-boot.enabled') without
+                        %% re-walking the log themselves. Mirrors the
+                        %% interpret-side `policy-verdict.signals' shape.
+                        <<"signals">> => dev_tpm_tcg:boot_signals(TcgLogBin)
                     };
                 {error, Reason} ->
                     throw({boot_attestation_error,

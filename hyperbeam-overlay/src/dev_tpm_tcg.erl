@@ -62,7 +62,7 @@
 %%% went wrong."
 -module(dev_tpm_tcg).
 -export([parse/1, parse/2, event_type_name/1, event_type_name/2,
-         decode_event/1, decode_events/1,
+         decode_event/1, decode_events/1, boot_signals/1,
          %% UEFI structure helpers (also useful to callers):
          parse_device_path/1, parse_smbios/1, parse_smbios_structure/1,
          parse_acpi_table/1, parse_acpi_rsdp/1,
@@ -146,6 +146,69 @@ decode_event(Event) when is_map(Event) ->
         Code -> Event#{<<"parsed">> => do_decode(Code, Event)}
     end;
 decode_event(E) -> E.
+
+%% @doc Derive a small map of policy-actionable signals from a raw TCG
+%% event-log binary. Embedded directly in the boot-attestation envelope
+%% so green-zone templates and external auditors can match against
+%% interpreter-derived facts without re-walking the whole log.
+%%
+%% Currently emits one signal:
+%%
+%%   secure-boot:
+%%     enabled    true | false | <<"unknown">>
+%%     provenance #{seq, pcr, event-type} of the EV_EFI_VARIABLE_DRIVER_CONFIG
+%%                event whose UEFI variable name is `SecureBoot' and whose
+%%                semantic decode produced the boolean.  Empty when the log
+%%                contains no such event (firmware did not measure SB state,
+%%                or SB is unsupported on this platform).
+%%
+%% Returns the empty map when the log binary is empty or unparseable --
+%% callers pass through whatever the system probe surfaces in those cases.
+-spec boot_signals(binary()) -> map().
+boot_signals(<<>>) -> #{};
+boot_signals(LogBin) when is_binary(LogBin) ->
+    Decoded = decode_events(parse(LogBin)),
+    Sorted = lists:sort(
+        fun({KA, _}, {KB, _}) ->
+            try binary_to_integer(KA) =< binary_to_integer(KB)
+            catch _:_ -> KA =< KB
+            end
+        end,
+        maps:to_list(Decoded)),
+    EvList = [V || {_, V} <- Sorted, is_map(V), not maps:is_key(<<"error">>, V)],
+    SbEvents = [Ev || Ev <- EvList,
+                      maps:get(<<"event-type-code">>, Ev, 0) =:= 16#80000001,
+                      sb_var_name(Ev) =:= <<"SecureBoot">>],
+    Sb = case SbEvents of
+        [] ->
+            #{<<"enabled">> => <<"unknown">>};
+        [Ev0 | _] ->
+            Sem = nested_get(Ev0, [<<"parsed">>, <<"semantic">>], #{}),
+            #{
+                <<"enabled">> =>
+                    maps:get(<<"secure-boot-enabled">>, Sem, <<"unknown">>),
+                <<"provenance">> => sb_provenance(Ev0)
+            }
+    end,
+    #{<<"secure-boot">> => Sb}.
+
+sb_var_name(Ev) ->
+    nested_get(Ev, [<<"parsed">>, <<"variable-name">>], <<>>).
+
+sb_provenance(Ev) ->
+    #{
+        <<"seq">>        => maps:get(<<"seq">>, Ev, null),
+        <<"pcr">>        => maps:get(<<"pcr">>, Ev, null),
+        <<"event-type">> => maps:get(<<"event-type">>, Ev, null)
+    }.
+
+nested_get(M, [], _Default) -> M;
+nested_get(M, [K|Rest], Default) when is_map(M) ->
+    case maps:get(K, M, undefined) of
+        undefined -> Default;
+        Next -> nested_get(Next, Rest, Default)
+    end;
+nested_get(_, _, Default) -> Default.
 
 %%%---- M4: Secure Boot variables + firmware CRTM + POST code -----------
 
@@ -3402,6 +3465,39 @@ secure_boot_variable_record_parses_test() ->
     %% the UTF-16LE "SecureBoot" string, then a single 0x01 byte.
     Data = maps:get(<<"event-data">>, E3),
     ?assert(byte_size(Data) > 40).
+
+%% Regression: `boot_signals/1' must surface secure-boot.enabled=true
+%% from the firmware-side TCG event log so that green-zone templates
+%% (and external auditors) can pin a real Secure-Boot enforcement
+%% gate against the signed boot-attestation envelope -- not just the
+%% efivarfs-state probe, which reads `not-readable' on every recent
+%% laptop firmware whether SB is on or off.
+boot_signals_secure_boot_enabled_test() ->
+    Signals = boot_signals(build_fixture()),
+    Sb = maps:get(<<"secure-boot">>, Signals),
+    ?assertEqual(true, maps:get(<<"enabled">>, Sb)),
+    Prov = maps:get(<<"provenance">>, Sb),
+    ?assertEqual(7, maps:get(<<"pcr">>, Prov)),
+    ?assertEqual(<<"EV_EFI_VARIABLE_DRIVER_CONFIG">>,
+                 maps:get(<<"event-type">>, Prov)).
+
+boot_signals_empty_log_test() ->
+    ?assertEqual(#{}, boot_signals(<<>>)).
+
+boot_signals_unknown_when_log_lacks_sb_event_test() ->
+    %% Build a one-record SpecID-only log: no SecureBoot event ->
+    %% enabled is recorded as `unknown', never silently true.
+    AlgPairs = <<16#04:16/little, 20:16/little,
+                 16#0B:16/little, 32:16/little>>,
+    SpecId = <<"Spec ID Event03", 0,
+               0:32/little, 0:8, 2:8, 0:8, 8:8,
+               2:32/little, AlgPairs/binary, 0:8>>,
+    SpecIdSize = byte_size(SpecId),
+    FirstRec = <<0:32/little, 3:32/little, 0:(20*8),
+                 SpecIdSize:32/little, SpecId/binary>>,
+    Signals = boot_signals(FirstRec),
+    Sb = maps:get(<<"secure-boot">>, Signals),
+    ?assertEqual(<<"unknown">>, maps:get(<<"enabled">>, Sb)).
 
 event_type_name_standalone_test() ->
     %% With no Opts, falls back to the static table.
