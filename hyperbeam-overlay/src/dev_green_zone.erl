@@ -531,19 +531,30 @@ assert_template_match(Template, Candidate, Subject, Opts) ->
             }})
     end.
 
+%% Add a member entry keyed by the attestation's node wallet address.
+%% Members may already carry a `commitments' key from a previous admission
+%% snapshot. A plain Erlang `Map#{K => V}' update would leave that stale
+%% commitment in place, and the next `hb_message:commit' on a parent that
+%% holds Members linkifies it through the cache: the cache write honours
+%% the existing signature's `committed' list and silently drops the new
+%% key. Strip the stale commitments first, then set via the AO-Core
+%% primitive so callers (`commit_unsigned_tree') can re-sign over the
+%% updated content.
 add_member_to_members(Members, URL, Attestation, Role, Opts) ->
-    Address = attestation_node_address(Attestation, Opts),
-    case Address of
+    case attestation_node_address(Attestation, Opts) of
         undefined -> Members;
-        _ ->
-            Members#{
-                Address => #{
+        Address ->
+            hb_ao:set(
+                hb_message:uncommitted(Members, Opts),
+                Address,
+                #{
                     <<"address">> => Address,
                     <<"url">> => null_or_url(URL),
                     <<"role">> => Role,
                     <<"last-seen-unix">> => erlang:system_time(second)
-                }
-            }
+                },
+                Opts
+            )
     end.
 
 attestation_node_address(Attestation, Opts) ->
@@ -1265,6 +1276,57 @@ metadata_only_template_rejected_test() ->
             ar_wallet:new(),
             #{},
             #{})).
+
+%% Regression: a third-hop admission must carry the new joiner in
+%% green-zone.members. The previous implementation did `Members#{...}'
+%% on a Members map that arrived from a prior admission with a stale
+%% `commitments' key; the next `commit_unsigned_tree' linkified the
+%% inner map, the cache write honoured the existing signature's
+%% `committed' list, and the new key was silently dropped. The fix
+%% uncommits before setting via the AO-Core primitive, and the
+%% regression check passes the result through `commit_unsigned_tree'
+%% to drive the same cache-write path that exposed the bug on real
+%% nodes.
+member_survives_admission_commit_tree_test() ->
+    RingWallet = ar_wallet:new(),
+    Opts = #{
+        <<"priv-wallet">> => RingWallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    %% Existing committed Members snapshot the way it leaves a prior
+    %% admission's green-zone.members.
+    M0 = #{<<"existing">> =>
+            hb_message:commit(
+                #{<<"address">> => <<"existing">>,
+                  <<"role">> => <<"initializer">>},
+                Opts)},
+    CommittedMembers = hb_message:commit(M0, Opts),
+    [_ | _] = hb_message:signers(CommittedMembers, Opts),
+    %% Build a peer-attestation whose boot-attestation reports a node
+    %% address `joiner-addr'.
+    Attestation =
+        #{<<"node">> => #{<<"address">> => <<"joiner-addr">>}},
+    NewMembers = add_member_to_members(
+        CommittedMembers,
+        <<"http://joiner.example">>,
+        Attestation,
+        <<"member">>,
+        Opts),
+    %% Drive through commit_unsigned_tree -- the same path that loses
+    %% keys on a stale-commitment Erlang `#{=>}' update.
+    Definition = commit_unsigned_tree(
+        #{<<"type">> => <<"green-zone-definition">>,
+          <<"name">> => <<"book-shelf">>,
+          <<"members">> => NewMembers},
+        Opts),
+    Resolved = case maps:get(<<"members">>, Definition) of
+        L when is_tuple(L), element(1, L) =:= link ->
+            hb_cache:ensure_loaded(L, Opts);
+        Other -> Other
+    end,
+    Keys = lists:sort(maps:keys(Resolved)),
+    ?assert(lists:member(<<"existing">>, Keys)),
+    ?assert(lists:member(<<"joiner-addr">>, Keys)).
 
 test_admission(Wallet) ->
     RingReference = test_ring_reference(Wallet),
