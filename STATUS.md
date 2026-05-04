@@ -30,7 +30,7 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: e85b49f34ca8e5e37a33b4693afa26533d92390652d1870502b2c42fd3ffa2b4
+sha256: ab211ba7f766bda109a11ad7cf176103d50c6444f84ca36d557e69a86a490cdc
 ```
 
 QEMU ring test (now exercises the multi-hop join path: node 3 joins
@@ -44,7 +44,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: 6rVd4xW24iuihKQKRHfB8YISFXf_r-HXiL-NOZo-tKg
+ring-address: HrIyJPigZc-qmIAcpp32BvxuOyB_T0GBmQTaD1uLPjs
 ```
 
 Standard TME image:
@@ -52,7 +52,7 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 53292d9785b504ed99b810210a95e7845a24e4f754b885a2ab562d276d46ae6b
+sha256: 8eeaf7fb9f65bc16a4ff0881ad0dde0a2abee1ed8e1d3124458eafbca0300634
 ```
 
 Single-node `~tpm@2.0a/attestation` envelope re-validated end-to-end with
@@ -142,6 +142,38 @@ A second pass driven by three real-hardware findings:
    Intel-PTT (which requires AIA fetch of the ADL Issuing CA) all
    return ATTESTATION ACCEPTED from the Python verifier with default
    settings.
+
+## Sharpening pass
+
+Four follow-up commits on top of the QEMU acceptance gate, all
+verified against `dev_tpm2 / dev_green_zone / dev_system /
+dev_tpm_interpret / lapee_http_json / lapee_aia` eunit (189 tests
+pass) plus a fresh QEMU run against the rebuilt no-TME image:
+
+* AIA chain helpers tightened in `dev_tpm2': three near-identical
+  decode+normalize blocks consolidated into `otp_cert/1' /
+  `otp_subject_dn/1' / `otp_issuer_dn/1'.  In `dev_tpm_interpret',
+  the recursive AIA URL extender replaced with a list comprehension
+  that walks every successful URL, fixing a robustness wart where
+  multi-URL EK certs were silently capped at one.
+* Redundant `Trail' parameter dropped from `aia_walk/6'.  Single
+  explicit `Tip' parameter; no `lists:reverse' on every hop.
+* Honour `lapee-aia-fetch-enabled' on the `dev_tpm_interpret' claim
+  path: `Opts' threaded from `claim/3' / `interpret_envelope/2'
+  through `interpret_claim' / `interpret_claim_body' / `claim_ek' /
+  `validate_ek_chain' / `validate_ek_chain_1' /
+  `try_validate_with_candidate_intermediates' / etc. down to
+  `lapee_aia:fetch_issuer/2'.  `dev_tpm2' already honoured the kill
+  switch; the interpret path silently bypassed it.
+  `v1_2_aia_kill_switch_skips_chain_extension_test' is load-bearing:
+  pre-cached AIA fetch result rescues the chain when AIA is enabled,
+  the kill switch wins over the cache when disabled.  Reverting the
+  `Opts'-pass-through one line at a time was verified to make the
+  test fail.
+* `validate_ek_chain/4' nesting flattened.  Body shrinks from 36
+  lines to 6; reads top-down as `attempt_chain → ok? done / err?
+  try_aia_fallback', with each subsequent helper carrying one
+  further step.
 
 ## Open Threads
 
