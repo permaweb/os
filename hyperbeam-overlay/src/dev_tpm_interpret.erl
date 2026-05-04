@@ -2151,28 +2151,24 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
 %% cert, try to fetch it via the cert's AIA caIssuers extension.
 %% Successful fetches are appended to Candidates and cached in
 %% lapee_aia's persistent_term so subsequent admissions of peers in
-%% the same SoC family don't re-hit the network.
+%% the same SoC family don't re-hit the network. Walks ALL AIA URLs
+%% and appends every one that fetches+decodes -- a cert with multiple
+%% AIA endpoints contributes every reachable issuer to the candidate
+%% pool, not just the first.
 aia_extend_candidates(CurrentCert, Candidates) ->
-    Urls = lapee_aia:caissuers_urls(CurrentCert),
-    aia_extend_candidates_1(Urls, Candidates).
+    Fetched =
+        [
+            {aia_candidate_name(Url), IssuerDer, IssuerCert}
+        ||
+            Url <- lapee_aia:caissuers_urls(CurrentCert),
+            {ok, IssuerDer} <- [lapee_aia:fetch_issuer(Url, #{})],
+            {ok, IssuerCert} <- [decode_der_cert(IssuerDer)]
+        ],
+    Candidates ++ Fetched.
 
-aia_extend_candidates_1([], Candidates) -> Candidates;
-aia_extend_candidates_1([Url | Rest], Candidates) ->
-    case lapee_aia:fetch_issuer(Url, #{}) of
-        {ok, IssuerDer} ->
-            case decode_der_cert(IssuerDer) of
-                {ok, IssuerCert} ->
-                    Name = iolist_to_binary([
-                        <<"aia-fetched/">>,
-                        binary:part(Url, 0, min(80, byte_size(Url)))
-                    ]),
-                    Candidates ++ [{Name, IssuerDer, IssuerCert}];
-                _ ->
-                    aia_extend_candidates_1(Rest, Candidates)
-            end;
-        _ ->
-            aia_extend_candidates_1(Rest, Candidates)
-    end.
+aia_candidate_name(Url) ->
+    iolist_to_binary([<<"aia-fetched/">>,
+                      binary:part(Url, 0, min(80, byte_size(Url)))]).
 
 try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->
     not_found;

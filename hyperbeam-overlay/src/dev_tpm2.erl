@@ -821,54 +821,59 @@ summarise_aia_walk(AccChain, Fetches, _Why) ->
 %%   {fetched, IssuerDer, Url}    - fetched a new intermediate
 %%   {error, Why}                 - AIA had no URL or fetch failed.
 aia_fetch_for(Der, AccChain, Trusted, Opts) ->
-    try public_key:pkix_decode_cert(Der, otp) of
-        Otp ->
-            Tbs = Otp#'OTPCertificate'.tbsCertificate,
-            IssuerDn = public_key:pkix_normalize_name(
-                Tbs#'OTPTBSCertificate'.issuer),
+    case otp_cert(Der) of
+        {error, Reason} -> {error, {decode_failed, Reason}};
+        {ok, Otp} ->
+            IssuerDn = otp_issuer_dn(Otp),
             case issuer_known(IssuerDn, AccChain ++ Trusted) of
                 true -> skip;
                 false ->
                     case lapee_aia:caissuers_urls(Otp) of
                         [] -> {error, no_aia_url};
-                        Urls ->
-                            try_aia_urls(Urls, IssuerDn, Opts)
+                        Urls -> try_aia_urls(Urls, IssuerDn, Opts)
                     end
             end
-    catch _:Reason -> {error, {decode_failed, Reason}}
     end.
 
 try_aia_urls([], _IssuerDn, _Opts) -> {error, all_aia_urls_failed};
 try_aia_urls([Url | Rest], IssuerDn, Opts) ->
+    Next = fun() -> try_aia_urls(Rest, IssuerDn, Opts) end,
     case lapee_aia:fetch_issuer(Url, Opts) of
         {ok, IssuerDer} ->
-            try
-                Otp = public_key:pkix_decode_cert(IssuerDer, otp),
-                Tbs = Otp#'OTPCertificate'.tbsCertificate,
-                Subject = public_key:pkix_normalize_name(
-                    Tbs#'OTPTBSCertificate'.subject),
-                case Subject =:= IssuerDn of
-                    true -> {fetched, IssuerDer, Url};
-                    false -> try_aia_urls(Rest, IssuerDn, Opts)
-                end
-            catch _:_ -> try_aia_urls(Rest, IssuerDn, Opts)
+            case otp_cert(IssuerDer) of
+                {ok, Otp} ->
+                    case otp_subject_dn(Otp) =:= IssuerDn of
+                        true -> {fetched, IssuerDer, Url};
+                        false -> Next()
+                    end;
+                _ -> Next()
             end;
-        _ -> try_aia_urls(Rest, IssuerDn, Opts)
+        _ -> Next()
     end.
 
 issuer_known(IssuerDn, Ders) ->
     lists:any(
         fun(Der) ->
-            try
-                Otp = public_key:pkix_decode_cert(Der, otp),
-                Tbs = Otp#'OTPCertificate'.tbsCertificate,
-                Subject = public_key:pkix_normalize_name(
-                    Tbs#'OTPTBSCertificate'.subject),
-                Subject =:= IssuerDn
-            catch _:_ -> false
+            case otp_cert(Der) of
+                {ok, Otp} -> otp_subject_dn(Otp) =:= IssuerDn;
+                _ -> false
             end
         end,
         Ders).
+
+%% Tiny wrappers around `public_key:pkix_decode_cert' /
+%% `public_key:pkix_normalize_name' so the AIA helpers above read like
+%% a chain-of-trust description rather than a public_key tutorial.
+otp_cert(Der) ->
+    try {ok, public_key:pkix_decode_cert(Der, otp)}
+    catch _:Reason -> {error, Reason}
+    end.
+
+otp_subject_dn(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.subject).
+
+otp_issuer_dn(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    public_key:pkix_normalize_name(Tbs#'OTPTBSCertificate'.issuer).
 
 validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
     try public_key:pkix_decode_cert(AnchorDer, otp) of
