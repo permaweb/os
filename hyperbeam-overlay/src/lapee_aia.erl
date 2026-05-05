@@ -29,7 +29,7 @@
 %%% before that). Connect/read timeouts are bounded by the caller via
 %%% `Opts#{<<"aia-timeout-ms">>}'; the default is 5s.
 %%%
-%%% Disable end-to-end via `Opts#{<<"aia-fetch-enabled">> => false}'
+%%% Disable end-to-end via `Opts#{<<"lapee-aia-fetch-enabled">> => false}'
 %%% for offline / locked-down deployments. The chain validator then
 %%% falls back to local-corpus-only behaviour.
 -module(lapee_aia).

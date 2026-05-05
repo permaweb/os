@@ -4222,10 +4222,9 @@ decode_uefi_image_load_walks_device_path_test() ->
 %% X.509 signature list -- a valid self-signed cert ends up fully
 %% decoded (issuer DN + subject + fingerprint + key algorithm).
 decode_x509_signature_list_test() ->
-    %% Generate a self-signed RSA cert in-test so we have a
-    %% deterministic ASN.1-valid sample without shipping a .pem.
-    {Cert, _Key} = generate_test_self_signed_cert(),
-    Der = public_key:pkix_encode('OTPCertificate', Cert, otp),
+    %% Use an existing RSA root fixture rather than synthesizing a
+    %% certificate through OTP's version-sensitive ASN.1 signer.
+    Der = test_rsa_cert_der(),
     %% Build one EFI_SIGNATURE_LIST containing one EFI_CERT_X509
     %% entry with owner GUID = zeros + cert DER.
     X509TypeGuid =
@@ -4280,50 +4279,16 @@ decode_malformed_x509_returns_error_test() ->
     ?assert(maps:is_key(<<"x509-decode-error">>, Cert1)),
     ?assert(maps:is_key(<<"x509-sha256-fingerprint">>, Cert1)).
 
-%% Helper: generate a self-signed RSA cert using OTP public_key.
-generate_test_self_signed_cert() ->
-    Key = public_key:generate_key({rsa, 2048, 65537}),
-    PubKey = #'RSAPublicKey'{
-        modulus = Key#'RSAPrivateKey'.modulus,
-        publicExponent = Key#'RSAPrivateKey'.publicExponent
-    },
-    Subject = {rdnSequence, [
-        [#'AttributeTypeAndValue'{
-            type = ?'id-at-commonName',
-            value = {utf8String, <<"LapEE Test Cert">>}
-        }],
-        [#'AttributeTypeAndValue'{
-            type = ?'id-at-organizationName',
-            value = {utf8String, <<"Test">>}
-        }]
-    ]},
-    Validity = #'Validity'{
-        notBefore = {utcTime, "250101000000Z"},
-        notAfter  = {utcTime, "350101000000Z"}
-    },
-    TbsCert = #'OTPTBSCertificate'{
-        version = v3,
-        serialNumber = 1,
-        signature = #'SignatureAlgorithm'{
-            algorithm = ?sha256WithRSAEncryption,
-            parameters = 'NULL'
-        },
-        issuer = Subject,
-        validity = Validity,
-        subject = Subject,
-        subjectPublicKeyInfo = #'OTPSubjectPublicKeyInfo'{
-            algorithm = #'PublicKeyAlgorithm'{
-                algorithm = ?rsaEncryption,
-                parameters = 'NULL'
-            },
-            subjectPublicKey = PubKey
-        }
-    },
-    Signed = public_key:pkix_sign(TbsCert, Key),
-    %% pkix_sign returns a DER binary; re-decode to OTPCertificate
-    %% for our caller.
-    Cert = public_key:pkix_decode_cert(Signed, otp),
-    {Cert, Key}.
+test_rsa_cert_der() ->
+    RootDir = filename:join(filename:dirname(fixtures_dir()), "root-cas"),
+    Paths = [
+        filename:join(RootDir, "IFX_RSA_RT.pem"),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "root-cas", "IFX_RSA_RT.pem"])
+    ],
+    [Pem | _] = [B || P <- Paths, {ok, B} <- [file:read_file(P)]],
+    [{'Certificate', Der, not_encrypted} | _] = public_key:pem_decode(Pem),
+    Der.
 
 %% SMBIOS v2.x entry point -- 31 bytes anchored at "_SM_".
 parse_smbios_v2_entry_point_test() ->

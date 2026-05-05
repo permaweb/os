@@ -480,7 +480,7 @@ verify(Base, Req, Opts) ->
     TrustedCaPem = resolve_trusted_ca(Req, Opts),
     CaSource = trust_anchor_source(Req, TrustedCaPem),
     Checks = [
-        safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem) end,
+        safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem, Opts) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
                    <<"core">>),
         safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
@@ -688,8 +688,6 @@ resolve_trusted_ca_from_config(Opts) ->
 %% implementation -- was a rubber stamp: pkix would surface
 %% `{bad_cert, selfsigned_peer}` for a rogue EK and the callback
 %% would tell it "that's fine", defeating the whole chain check.
-chk_ek_chain(Envelope, TrustedCaPem) ->
-    chk_ek_chain(Envelope, TrustedCaPem, #{}).
 chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
     EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, Opts),
     ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, Opts),
@@ -808,7 +806,7 @@ aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
                 iolist_to_binary(io_lib:format("AIA hop failed: ~p", [Why])))
     end.
 
-summarise_aia_walk(AccChain, [], Why) ->
+summarise_aia_walk(_AccChain, [], Why) ->
     {no_extension, Why};
 summarise_aia_walk(AccChain, Fetches, _Why) ->
     Summary = iolist_to_binary(io_lib:format(
@@ -4539,8 +4537,8 @@ aia_url_from_chain(ChainDers) ->
     %% the fixture chain whose AIA points at the ADL Issuing CA URL
     %% is acceptable.
     Urls = lists:flatten([lapee_aia:caissuers_urls(D) || D <- ChainDers]),
-    [hd(Urls)],
-    hd(Urls).
+    [Url | _] = Urls,
+    Url.
 
 parse_chain_group_reads_cert_across_nv_boundary_test() ->
     Der = root_ca_fixture_der(),
