@@ -2130,8 +2130,48 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
             Matches =
                 [C || C = {_Name, _Der, Cert} <- Candidates,
                       same_name(cert_subject(Cert), Issuer)],
+            CandidatesWithAia =
+                case Matches of
+                    [] -> aia_extend_candidates(CurrentCert, Candidates);
+                    _ -> Candidates
+                end,
+            UpdatedMatches =
+                case Matches of
+                    [] ->
+                        [C || C = {_Name, _Der, Cert} <- CandidatesWithAia,
+                              same_name(cert_subject(Cert), Issuer)];
+                    _ -> Matches
+                end,
             try_candidate_paths(
-              Matches, RootCert, Candidates, AccDers, AccNames)
+              UpdatedMatches, RootCert, CandidatesWithAia,
+              AccDers, AccNames)
+    end.
+
+%% When the local Candidates list lacks an issuer for the current
+%% cert, try to fetch it via the cert's AIA caIssuers extension.
+%% Successful fetches are appended to Candidates and cached in
+%% lapee_aia's persistent_term so subsequent admissions of peers in
+%% the same SoC family don't re-hit the network.
+aia_extend_candidates(CurrentCert, Candidates) ->
+    Urls = lapee_aia:caissuers_urls(CurrentCert),
+    aia_extend_candidates_1(Urls, Candidates).
+
+aia_extend_candidates_1([], Candidates) -> Candidates;
+aia_extend_candidates_1([Url | Rest], Candidates) ->
+    case lapee_aia:fetch_issuer(Url, #{}) of
+        {ok, IssuerDer} ->
+            case decode_der_cert(IssuerDer) of
+                {ok, IssuerCert} ->
+                    Name = iolist_to_binary([
+                        <<"aia-fetched/">>,
+                        binary:part(Url, 0, min(80, byte_size(Url)))
+                    ]),
+                    Candidates ++ [{Name, IssuerDer, IssuerCert}];
+                _ ->
+                    aia_extend_candidates_1(Rest, Candidates)
+            end;
+        _ ->
+            aia_extend_candidates_1(Rest, Candidates)
     end.
 
 try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->

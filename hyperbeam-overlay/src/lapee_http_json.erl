@@ -19,10 +19,19 @@ post(BaseURL, Path, Body, Opts) ->
 request(Method, BaseURL, Path, Body, Opts) ->
     URL = url_parts(BaseURL, Path),
     Socket = connect(URL, Opts),
-    ok = gen_tcp:send(Socket, request_bytes(Method, URL, Body)),
-    Response = recv_all(Socket, [], recv_timeout(Opts)),
-    gen_tcp:close(Socket),
-    parse_response(Response).
+    %% Guarantee the socket is closed even when `gen_tcp:send' fails
+    %% (the `ok = ...' badmatch escapes) or `recv_all' throws on
+    %% recv error / timeout.  Without this the green-zone retry loop
+    %% leaks one port per failed peer call -- harmless on a single
+    %% failure, eventually exhausts the BEAM's port table on a flaky
+    %% network or a partitioned peer.
+    try
+        ok = gen_tcp:send(Socket, request_bytes(Method, URL, Body)),
+        Response = recv_all(Socket, [], recv_timeout(Opts)),
+        parse_response(Response)
+    after
+        gen_tcp:close(Socket)
+    end.
 
 url_parts(BaseURL, Path) ->
     URL = <<(to_bin(BaseURL))/binary, Path/binary>>,
@@ -306,5 +315,46 @@ signed_json_response_remains_verifiable_test() ->
         Decoded,
         [hb_util:human_id(ar_wallet:to_address(Wallet))],
         #{})).
+
+%% Regression: a recv timeout (or any other throw inside `request/5'
+%% after `connect') must NOT leak the connect()'d socket.  Without
+%% the `try .. after gen_tcp:close' wrapper the socket stays open
+%% until BEAM GC, which is fine for one failure but slowly exhausts
+%% the port table on a flaky network or partitioned peer.
+%%
+%% Test setup: bind a listening socket, ignore inbound connections
+%% (so the kernel queues the connect but the request never receives
+%% a response). Drive `get/3' with a tiny `peer-http-timeout-ms' so
+%% `recv_all' throws on `{error, timeout}'.  Then check that the
+%% number of `tcp_inet' ports owned by the BEAM is unchanged.
+request_closes_socket_on_recv_timeout_test() ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {reuseaddr, true},
+                                      {active, false}]),
+    {ok, ListenPort} = inet:port(Listen),
+    BaseURL = iolist_to_binary(io_lib:format("http://127.0.0.1:~B",
+                                              [ListenPort])),
+    Before = tcp_port_count(),
+    Threw =
+        try
+            get(BaseURL, <<"/">>,
+                #{<<"peer-http-timeout-ms">> => 50,
+                  <<"peer-http-connect-timeout-ms">> => 1000}),
+            false
+        catch
+            throw:_ -> true
+        end,
+    %% Allow the BEAM a tick to update its port table after close.
+    timer:sleep(20),
+    After = tcp_port_count(),
+    ok = gen_tcp:close(Listen),
+    ?assert(Threw),
+    %% Listen socket is still open at the time of the count, so
+    %% Before and After both include it. Net delta must be zero --
+    %% any positive delta means the connect()'d socket leaked.
+    ?assertEqual(Before, After).
+
+tcp_port_count() ->
+    length([P || P <- erlang:ports(),
+                 erlang:port_info(P, name) =:= {name, "tcp_inet"}]).
 
 -endif.

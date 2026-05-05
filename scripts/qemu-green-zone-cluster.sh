@@ -96,6 +96,11 @@ fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
+# AF_UNIX sun_path is 104 bytes on macOS / 108 on Linux. Worktree-rooted
+# OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
+# opaquely with "Path for UnioIO socket is too long". Stage the sockets
+# in a short /tmp dir and keep state/logs/certs in OUTDIR.
+SOCK_DIR=$(mktemp -d /tmp/lapee-gz.XXXXXX)
 
 echo "=== green-zone QEMU cluster ==="
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -136,6 +141,7 @@ cleanup() {
     for pid in "${tpm_pids[@]+"${tpm_pids[@]}"}"; do
         kill "$pid" 2>/dev/null || true
     done
+    rm -rf "$SOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -196,7 +202,7 @@ start_node() {
     cp "$img" "$node_dir/disk.img"
     cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
     manufacture_tpm "$n"
-    local sock="$node_dir/tpm/swtpm-sock"
+    local sock="$SOCK_DIR/tpm$n.sock"
     local memory_mib
     memory_mib=$(node_memory_mib "$n")
     local dmi_product
@@ -464,6 +470,38 @@ for n in 1 2 3; do
              to_entries[]?; .value.committer == $addr)' \
         "$OUTDIR/responses/node$n-sign.json" >/dev/null
     echo ">> node $n signed as green-zone $ring_addr"
+done
+
+# Multi-hop members propagation. Node 3 joined via node 2, so node 2
+# (the admitter) and node 3 (the joiner) must both see all three
+# wallets in their `/status'. Node 1 was not involved in node 3's
+# admit and the green-zone protocol does not propagate membership
+# upstream, so node 1's view legitimately stops at two -- itself and
+# node 2. This is a regression for the `add_member_to_members' bug
+# that silently dropped joiners through a stale-commitment cache
+# write: pre-fix, node 2's view would have stayed at two as well.
+expected_member_count() {
+    case "$1" in
+        1) echo 2 ;;
+        2) echo 3 ;;
+        3) echo 3 ;;
+    esac
+}
+for n in 1 2 3; do
+    get_json "$n" "/~green-zone@1.0/status?name=book-shelf" \
+        "$OUTDIR/responses/node$n-status.json"
+    member_count=$(jq -r '.body."green-zone".members
+                          | with_entries(select(.key != "commitments"))
+                          | keys | length' \
+        "$OUTDIR/responses/node$n-status.json")
+    expected=$(expected_member_count "$n")
+    if [[ "$member_count" != "$expected" ]]; then
+        echo "!! node $n status shows $member_count member wallet(s); expected $expected" >&2
+        jq '.body."green-zone".members | keys' \
+            "$OUTDIR/responses/node$n-status.json" >&2
+        exit 1
+    fi
+    echo ">> node $n status shows $expected ring member(s) (as expected)"
 done
 
 echo ""

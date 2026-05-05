@@ -117,8 +117,9 @@ read_cert_roots(Dir) ->
     case file:list_dir(Dir) of
         {ok, Files} ->
             [#{<<"name">> => list_to_binary(filename:rootname(F)),
-               <<"pem">>  => element(2, file:read_file(
-                                filename:join(Dir, F)))}
-             || F <- Files, filename:extension(F) =:= ".pem"];
+               <<"pem">>  => Pem}
+             || F <- Files, filename:extension(F) =:= ".pem",
+                {ok, Pem} <-
+                    [file:read_file(filename:join(Dir, F))]];
         _ -> []
     end.

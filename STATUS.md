@@ -30,10 +30,13 @@ No-TME image:
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: f3e0ee1a1ab6000c55f4cfd1edb39e40b9e5562b89cf7c80839564084d7fa530
+sha256: e85b49f34ca8e5e37a33b4693afa26533d92390652d1870502b2c42fd3ffa2b4
 ```
 
-QEMU ring test:
+QEMU ring test (now exercises the multi-hop join path: node 3 joins
+via node 2, then asserts every member's `/status` shows the wallet
+count the protocol actually delivers -- 2 on the initializer, 3 on
+the admitter and joiner):
 
 ```text
 TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
@@ -41,7 +44,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: GIGjjIgZUPr9QV_i8JGHiIjVKBWWAZMI8ygvwTDtt8w
+ring-address: 6rVd4xW24iuihKQKRHfB8YISFXf_r-HXiL-NOZo-tKg
 ```
 
 Standard TME image:
@@ -49,8 +52,13 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: d1ca927cb43a30c5ea7c3bf7cfc0d42a21a5b0b547341e9d6d6d7469b6764c3c
+sha256: 53292d9785b504ed99b810210a95e7845a24e4f754b885a2ab562d276d46ae6b
 ```
+
+Single-node `~tpm@2.0a/attestation` envelope re-validated end-to-end with
+`secondary-external-verifier/verifier_hb.py` after the seq-pinning fix
+(check 6 matches by digest, check 7 matches `EV_HYPERBEAM_KEY_PUBKEY_EXTEND`
++ digest): all eight checks PASS.
 
 No QEMU or swtpm processes owned by this validation run remain. The only
 matching process was the pre-existing `work/qemu-hyperbuddy-test` swtpm, which
@@ -74,6 +82,66 @@ The unattended cleanup pass has been committing only net-negative source
 changes: TPM probe parsing, stale helper stubs, green-zone authorization
 checks, peer-cache docs, and Boot Guard probe source generality were all
 trimmed while preserving the four-node QEMU acceptance gate.
+
+Two operability defects surfaced during this validation pass and were
+fixed in-place:
+
+* `scripts/qemu-green-zone-cluster.sh` was creating swtpm unix sockets
+  under `OUTDIR/nodes/nodeN/tpm/swtpm-sock`. Worktree-rooted OUTDIRs
+  blew the AF_UNIX `sun_path` limit (104 bytes on macOS) and swtpm
+  failed opaquely with `Path for UnioIO socket is too long`. The
+  script now stages sockets under a short `mktemp -d /tmp/lapee-gz.*`
+  directory and cleans it up on exit; state, logs, and certs continue
+  to live under OUTDIR.
+* `secondary-external-verifier/verifier_hb.py` pinned PCR-15 binding
+  checks to seq=0 (`EV_HYPERBEAM_NODE_IDENTITY_EXTEND`) and seq=1
+  (`EV_HYPERBEAM_KEY_PUBKEY_EXTEND`). Production now drives PCR 15
+  from the `on.start` -> `boot-attestation` path, so seq 0 carries
+  `EV_HYPERBEAM_KEY_PUBKEY_EXTEND` and the node-identity binding is
+  `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT` at seq 2. The fix matches
+  the Erlang-side `chk_binding` / `chk_ak_pubkey_binding` semantics:
+  search by event-type + digest, not by seq position.
+
+## Cross-vendor green-zone hardening
+
+A second pass driven by three real-hardware findings:
+
+1. `add_member_to_members` was dropping new members through a stale
+   `commitments` key. Mutating a committed map via Erlang's `#{=>}'
+   leaves the commitments untouched; the next `commit_unsigned_tree'
+   linkifies the inner map, the cache write honours the existing
+   signature's `committed' list, and the new key is silently
+   filtered. Switched to `hb_message:uncommitted' + `hb_ao:set'.
+   Regression eunit drives the same `commit_unsigned_tree' path that
+   exposed the bug on real nodes.
+2. The original cross-vendor green-zone template I built pinned the
+   `system.firmware.efi.global-variables.secure-boot.state' value,
+   which reads `not-readable' on every recent laptop firmware that
+   doesn't expose efivarfs to the kernel -- whether SB is on or
+   off. The template trivially admitted a Lenovo ADL with SB
+   *disabled*. Added `dev_tpm_tcg:boot_signals/1' which derives
+   policy-actionable signals from the firmware-side TCG event log
+   (currently `secure-boot.enabled' from
+   `EV_EFI_VARIABLE_DRIVER_CONFIG' on PCR 7) and embedded the result
+   at `body.tpm.signals.secure-boot.enabled' in the signed
+   boot-attestation envelope. Green-zone templates can now pin the
+   actual TCG-derived state, not the efivarfs-readable proxy.
+3. The keylime corpus shipped at `priv/tpm-interpret/root-cas/' is
+   never updated automatically (the fetch script had drifted to
+   write to a different directory, since reverted), and Intel ODCA's
+   per-SoC issuing CAs (one per Alder Lake / Meteor Lake / Raptor
+   Lake / ... family) are not in keylime's bundle at all. They are
+   only published at each chip's AIA caIssuers URL (e.g.
+   `https://tsci.intel.com/content/OnDieCA/certs/ADL_00002820_ODCA_CA2.cer').
+   Added a new `lapee_aia' module (HTTPS-only fetch, persistent_term
+   cache, node-config kill switch) and wired it into both Erlang
+   chain validators (`dev_tpm2:validate_ek_chain' and
+   `dev_tpm_interpret:build_intermediate_path') plus the Python
+   secondary verifier. Confirmed end-to-end on three live nodes:
+   Lenovo MTL Intel-PTT, Framework 13 Nuvoton, and Lenovo ADL
+   Intel-PTT (which requires AIA fetch of the ADL Issuing CA) all
+   return ATTESTATION ACCEPTED from the Python verifier with default
+   settings.
 
 ## Open Threads
 
