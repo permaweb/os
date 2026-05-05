@@ -72,13 +72,54 @@ def b64url_encode(b: bytes) -> str:
 
 
 def unwrap_envelope(raw):
-    """Bundle endpoint nests the envelope in `body'; plain endpoint
-    returns it at top level. Accept either."""
-    if isinstance(raw, dict) and "body" in raw and isinstance(raw["body"], dict):
+    """Accept the flat attestation envelope and the signed
+    boot-attestation wrapper.
+
+    The boot-attestation shape is:
+
+      body.{system,node,tpm}
+
+    `dev_tpm2' normalises that to the flat verifier shape before
+    checking peer attestations. Do the same here so this external
+    verifier checks the live production endpoint, not only the older
+    `/attestation-json' form.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    if "lapee-attestation-version" in raw:
+        return raw
+    if "body" in raw and isinstance(raw["body"], dict):
         body = raw["body"]
         if "lapee-attestation-version" in body:
             return body
+        boot = normalise_boot_attestation(body)
+        if boot is not None:
+            return boot
+    boot = normalise_boot_attestation(raw)
+    if boot is not None:
+        return boot
     return raw
+
+
+def normalise_boot_attestation(body):
+    if not isinstance(body, dict):
+        return None
+    system = body.get("system")
+    node = body.get("node")
+    tpm = body.get("tpm")
+    if not all(isinstance(v, dict) for v in (system, node, tpm)):
+        return None
+    out = dict(tpm)
+    if "tpm-quote" not in out and "quote" in out:
+        out["tpm-quote"] = out["quote"]
+    out.setdefault("lapee-attestation-version", EXPECTED_VERSION)
+    if "version" in body:
+        out["boot-attestation-version"] = body["version"]
+    out["node-message"] = node
+    out["node-message-id"] = out.get("extended-subject")
+    out["wallet-address"] = node.get("address")
+    out["system-report"] = system
+    return out
 
 
 class Check:
