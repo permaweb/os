@@ -271,7 +271,8 @@ run_secure_boot_provisioner() {
         _rc=$?
         sbp_log ""
         sbp_log "ERROR: Secure Boot provisioning failed with status $_rc."
-        sbp_log "No private keys were present on this USB."
+        sbp_log "This USB contains only public enrolment artifacts and signed update blobs."
+        sbp_log "Secure Boot signing private keys were not present."
     fi
     umount /mnt/esp 2>/dev/null || true
     exec sh -c 'while :; do sleep 3600; done'
