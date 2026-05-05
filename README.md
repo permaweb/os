@@ -240,9 +240,9 @@ Some firmware exposes Secure Boot Setup Mode but does not expose a useful
 UI for enrolling keys or image hashes. For those machines, LapEE can build
 a one-shot provisioning image. This image contains only public enrollment
 artifacts on the ESP and enrolls the operator `db`, `KEK`, then `PK` while
-the firmware is already in Setup Mode. The USB cannot put the firmware into
-Setup Mode on its own unless the current platform-owner keys already permit
-that transition; the usual route is still the firmware setup UI:
+the firmware is already in Setup Mode. The image selects LapEE's provisioning
+flow by itself, but entering firmware Setup Mode is still a firmware-owner
+operation and usually has to be done from the firmware setup UI:
 
 ```sh
 make hb-sb-keys

@@ -187,6 +187,16 @@ sbp_log() {
     printf '%s\n' "$*" > /dev/console 2>/dev/null || true
 }
 
+sbp_mount_efivars_rw() {
+    mkdir -p /sys/firmware/efi/efivars 2>/dev/null || true
+    if grep -q ' /sys/firmware/efi/efivars ' /proc/mounts 2>/dev/null; then
+        mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null && return 0
+        umount /sys/firmware/efi/efivars 2>/dev/null || true
+    fi
+    mount -t efivarfs -o rw,nosuid,noexec,nodev \
+        efivarfs /sys/firmware/efi/efivars 2>/dev/null
+}
+
 sbp_warning_screen() {
     printf '\033[0m\033[41;37;1m\033[48;5;52m\033[38;5;231m\033[2J\033[H' \
         > /dev/console 2>/dev/null || true
@@ -222,12 +232,10 @@ run_secure_boot_provisioner() {
     sbp_log "Firmware must be in Setup Mode before running this image."
 
     mkdir -p /mnt/esp /sys/firmware/efi/efivars 2>/dev/null || true
-    if ! grep -q ' /sys/firmware/efi/efivars ' /proc/mounts 2>/dev/null; then
-        if ! mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; then
-            sbp_log "ERROR: efivarfs could not be mounted."
-            sbp_log "This kernel/firmware path cannot provision Secure Boot variables."
-            exec sh -c 'while :; do sleep 3600; done'
-        fi
+    if ! sbp_mount_efivars_rw; then
+        sbp_log "ERROR: efivarfs could not be mounted read-write."
+        sbp_log "This kernel/firmware path cannot provision Secure Boot variables."
+        exec sh -c 'while :; do sleep 3600; done'
     fi
 
     sbp_log "Looking for the LapEE provisioning USB."
@@ -271,8 +279,7 @@ run_secure_boot_provisioner() {
         _rc=$?
         sbp_log ""
         sbp_log "ERROR: Secure Boot provisioning failed with status $_rc."
-        sbp_log "This USB contains only public enrolment artifacts and signed update blobs."
-        sbp_log "Secure Boot signing private keys were not present."
+        sbp_log "The provisioning USB contains only public enrolment artifacts."
     fi
     umount /mnt/esp 2>/dev/null || true
     exec sh -c 'while :; do sleep 3600; done'
