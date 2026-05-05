@@ -28,6 +28,9 @@ mount -t tmpfs -o nosuid,nodev         tmpfs /run
 mkdir -p /dev/pts
 mount -t devpts -o nosuid,noexec devpts /dev/pts
 mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+mkdir -p /sys/firmware/efi/efivars
+mount -t efivarfs -o ro,nosuid,noexec,nodev \
+    efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
 # cmdline_value KEY
 #   Print the first value for the exact cmdline token KEY=VALUE.
