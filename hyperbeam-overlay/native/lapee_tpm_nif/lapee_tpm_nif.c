@@ -10,40 +10,21 @@
 #include <tss2/tss2_mu.h>
 #include <tss2/tss2_rc.h>
 #include <tss2/tss2_tctildr.h>
+#include <openssl/evp.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "tpm_helpers.h"
 
-/*
- * v1.2.2 paper P4 -- HMAC + parameter-encryption sessions for all
- * sensitive TPM operations.
- *
- * The paper's section Arch commits to:
- *   "All TPM sessions touching sensitive state use encrypted sessions
- *    (HMAC + parameter encryption)."
- *
- * On LapEE's threat model (Nuvoton NPCT75x dTPM on LPC bus), a
- * physical attacker with bus-level access can sniff plaintext
- * requests / responses. HMAC sessions bind each command in the
- * request stream with a key-derived MAC (an attacker cannot modify
- * a request without knowing the session key derived from caller +
- * TPM nonces), and parameter encryption wraps the first TPM2B
- * parameter in each direction under AES-128-CFB.
- *
- * Implementation: one shared unsalted HMAC session at file scope.
- * Created lazily on first use via lapee_ensure_auth_session().
- * Attached as shandle2 to sensitive ops so shandle1 can remain
- * hierarchy/object-auth (ESYS_TR_PASSWORD for empty-auth hierarchies)
- * while shandle2 provides the encrypt/decrypt/integrity coverage.
- *
- * Uses TPMA_SESSION_CONTINUESESSION so one session covers every
- * command; the TPM auto-updates the session's rolling nonce between
- * calls. No app-level bookkeeping.
- */
+/* Shared HMAC session with AES-CFB parameter encryption for TPM2B-valued
+ * sensitive operations. Commands fail closed if this session cannot start. */
 static ESYS_TR g_auth_session = ESYS_TR_NONE;
+static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14};
+#define LAPEE_AK_POLICY_PCR_COUNT \
+    (sizeof(g_ak_policy_pcrs) / sizeof(g_ak_policy_pcrs[0]))
 
 static TSS2_RC
 lapee_ensure_auth_session(void)
@@ -54,11 +35,8 @@ lapee_ensure_auth_session(void)
         .keyBits = { .aes = 128 },
         .mode = { .aes = TPM2_ALG_CFB },
     };
-    /* Unsalted (tpmKey = NONE), unbound (bind = NONE). The session
-     * still authenticates command integrity via rolling HMAC; its
-     * key-derivation is seeded by the TPM-generated nonceTPM plus
-     * our nonceCaller. Parameter encryption applies to the first
-     * TPM2B in the marked direction. */
+    /* Unsalted and unbound: the TPM and caller nonces still derive the
+     * rolling HMAC key, and parameter encryption covers the first TPM2B. */
     TSS2_RC rc = Esys_StartAuthSession(
         g_esys_ctx,
         ESYS_TR_NONE,  /* tpmKey */
@@ -70,23 +48,8 @@ lapee_ensure_auth_session(void)
         TPM2_ALG_SHA256,
         &g_auth_session);
     if (rc != TSS2_RC_SUCCESS) return rc;
-    /* Session is HMAC + parameter-encrypt/decrypt + continues.
-     *
-     * Applied only to ops whose first cmd-param AND first rsp-
-     * param are TPM2B_* structures: Esys_CreatePrimary (EK + AK)
-     * and Esys_Quote. On those ops the TPM accepts ENCRYPT +
-     * DECRYPT attributes and actually wraps the TPM2B payload
-     * under AES-128-CFB for transit over the LPC bus.
-     *
-     * Ops with list-struct first parameters (PCR_Extend takes
-     * TPML_DIGEST_VALUES, PCR_Read returns TPML_DIGEST,
-     * GetCapability uses TPMS_CAPABILITY_DATA) do NOT support
-     * parameter encryption per TPM 2.0 spec, and any session
-     * with a non-auth "purpose" attribute fails RC_ATTRIBUTES
-     * in a non-auth slot. Those ops run without this session;
-     * their responses carry public values (PCR digests, TPM
-     * vendor / fw-version readback) that the paper's threat
-     * model explicitly marks as attester-intended-public. */
+    /* Only TPM2B first-parameter operations receive this session; list-struct
+     * PCR/capability calls reject ENCRYPT/DECRYPT by spec. */
     TPMA_SESSION attrs = TPMA_SESSION_ENCRYPT |
                          TPMA_SESSION_DECRYPT |
                          TPMA_SESSION_CONTINUESESSION;
@@ -94,19 +57,323 @@ lapee_ensure_auth_session(void)
                                       attrs, 0xFF);
 }
 
-/* Returns g_auth_session when the HMAC session is available, or
- * ESYS_TR_NONE as a safe fallback if session creation fails. The
- * fallback preserves pre-P4 behaviour (no encryption) on TPMs that
- * somehow refuse HMAC sessions -- paper P4 grades by the session's
- * actual attributes, not by whether the helper returned the live
- * handle. */
-static ESYS_TR
-lapee_enc_session(void)
+static TSS2_RC
+lapee_enc_session(ESYS_TR *out_session)
 {
-    if (lapee_ensure_auth_session() == TSS2_RC_SUCCESS) {
-        return g_auth_session;
+    TSS2_RC rc = lapee_ensure_auth_session();
+    if (rc == TSS2_RC_SUCCESS) *out_session = g_auth_session;
+    return rc;
+}
+
+static TSS2_RC
+lapee_policy_secret_endorsement_session(ESYS_TR *out_session)
+{
+    TPMT_SYM_DEF symmetric = {
+        .algorithm = TPM2_ALG_NULL,
+    };
+    ESYS_TR session = ESYS_TR_NONE;
+    TSS2_RC rc = Esys_StartAuthSession(
+        g_esys_ctx,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        TPM2_SE_POLICY,
+        &symmetric,
+        TPM2_ALG_SHA256,
+        &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    TPM2B_TIMEOUT *timeout = NULL;
+    TPMT_TK_AUTH *ticket = NULL;
+    rc = Esys_PolicySecret(
+        g_esys_ctx,
+        ESYS_TR_RH_ENDORSEMENT,
+        session,
+        ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL, NULL, NULL, 0,
+        &timeout, &ticket);
+    if (timeout) Esys_Free(timeout);
+    if (ticket) Esys_Free(ticket);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, session);
+        return rc;
     }
-    return ESYS_TR_NONE;
+    *out_session = session;
+    return TSS2_RC_SUCCESS;
+}
+
+static TPML_PCR_SELECTION
+lapee_ak_policy_selection(void)
+{
+    TPML_PCR_SELECTION sel = {
+        .count = 1,
+        .pcrSelections = {
+            {
+                .hash = TPM2_ALG_SHA256,
+                .sizeofSelect = 3,
+                .pcrSelect = {0, 0, 0},
+            }
+        }
+    };
+    for (size_t i = 0; i < LAPEE_AK_POLICY_PCR_COUNT; i++) {
+        int pcr = g_ak_policy_pcrs[i];
+        sel.pcrSelections[0].pcrSelect[pcr / 8] |= (1 << (pcr % 8));
+    }
+    return sel;
+}
+
+static TSS2_RC
+lapee_ak_policy_pcr_digest(TPM2B_DIGEST *out)
+{
+    TPML_PCR_SELECTION sel = lapee_ak_policy_selection();
+    UINT32 update_counter = 0;
+    TPML_PCR_SELECTION *out_sel = NULL;
+    TPML_DIGEST *digests = NULL;
+    TSS2_RC rc = Esys_PCR_Read(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &sel, &update_counter, &out_sel, &digests);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+    if (!digests || digests->count != LAPEE_AK_POLICY_PCR_COUNT) {
+        if (out_sel) Esys_Free(out_sel);
+        if (digests) Esys_Free(digests);
+        return TSS2_ESYS_RC_BAD_VALUE;
+    }
+
+    EVP_MD_CTX *md = EVP_MD_CTX_new();
+    if (!md) {
+        if (out_sel) Esys_Free(out_sel);
+        Esys_Free(digests);
+        return TSS2_ESYS_RC_MEMORY;
+    }
+    unsigned int len = 0;
+    int ok = EVP_DigestInit_ex(md, EVP_sha256(), NULL) == 1;
+    for (size_t i = 0; ok && i < LAPEE_AK_POLICY_PCR_COUNT; i++) {
+        ok = EVP_DigestUpdate(md, digests->digests[i].buffer,
+                              digests->digests[i].size) == 1;
+    }
+    ok = ok && EVP_DigestFinal_ex(md, out->buffer, &len) == 1;
+    EVP_MD_CTX_free(md);
+    if (out_sel) Esys_Free(out_sel);
+    Esys_Free(digests);
+    if (!ok || len > sizeof(out->buffer)) return TSS2_ESYS_RC_GENERAL_FAILURE;
+    out->size = (UINT16)len;
+    return TSS2_RC_SUCCESS;
+}
+
+static TSS2_RC
+lapee_policy_session_start(TPM2_SE type, ESYS_TR *out_session)
+{
+    TPMT_SYM_DEF symmetric = { .algorithm = TPM2_ALG_NULL };
+    return Esys_StartAuthSession(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        type,
+        &symmetric,
+        TPM2_ALG_SHA256,
+        out_session);
+}
+
+static TSS2_RC
+lapee_policy_pcr_step(ESYS_TR session)
+{
+    TPM2B_DIGEST pcr_digest = { .size = 0 };
+    TPML_PCR_SELECTION sel = lapee_ak_policy_selection();
+    TSS2_RC rc = lapee_ak_policy_pcr_digest(&pcr_digest);
+    if (rc == TSS2_RC_SUCCESS) {
+        rc = Esys_PolicyPCR(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            &pcr_digest,
+            &sel);
+    }
+    return rc;
+}
+
+static TSS2_RC
+lapee_policy_digest(ESYS_TR session, TPM2B_DIGEST *out)
+{
+    TPM2B_DIGEST *policy_digest = NULL;
+    TSS2_RC rc = Esys_PolicyGetDigest(
+        g_esys_ctx,
+        session,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &policy_digest);
+    if (rc == TSS2_RC_SUCCESS) {
+        *out = *policy_digest;
+        Esys_Free(policy_digest);
+    }
+    return rc;
+}
+
+static TSS2_RC
+lapee_ak_policy_branch_digest(bool activate_credential, TPM2B_DIGEST *out)
+{
+    ESYS_TR session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_policy_session_start(TPM2_SE_TRIAL, &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    rc = lapee_policy_pcr_step(session);
+    if (rc == TSS2_RC_SUCCESS && activate_credential) {
+        rc = Esys_PolicyCommandCode(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            TPM2_CC_ActivateCredential);
+    }
+    if (rc == TSS2_RC_SUCCESS) rc = lapee_policy_digest(session, out);
+    Esys_FlushContext(g_esys_ctx, session);
+    return rc;
+}
+
+static TSS2_RC
+lapee_ak_policy_branches(TPML_DIGEST *out)
+{
+    out->count = 2;
+    TSS2_RC rc = lapee_ak_policy_branch_digest(false, &out->digests[0]);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+    return lapee_ak_policy_branch_digest(true, &out->digests[1]);
+}
+
+static TSS2_RC
+lapee_ak_policy_session(TPM2_SE type, bool activate_credential,
+                        ESYS_TR *out_session,
+                        TPM2B_DIGEST *out_policy_digest)
+{
+    TPML_DIGEST branches;
+    TSS2_RC rc = lapee_ak_policy_branches(&branches);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    ESYS_TR session = ESYS_TR_NONE;
+    rc = lapee_policy_session_start(type, &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    rc = lapee_policy_pcr_step(session);
+    if (rc == TSS2_RC_SUCCESS && activate_credential) {
+        rc = Esys_PolicyCommandCode(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            TPM2_CC_ActivateCredential);
+    }
+    if (rc == TSS2_RC_SUCCESS) {
+        rc = Esys_PolicyOR(
+            g_esys_ctx,
+            session,
+            ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+            &branches);
+    }
+    if (rc == TSS2_RC_SUCCESS && out_policy_digest) {
+        rc = lapee_policy_digest(session, out_policy_digest);
+    }
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, session);
+        return rc;
+    }
+    *out_session = session;
+    return TSS2_RC_SUCCESS;
+}
+
+static int
+lapee_name_to_term(ErlNifEnv *env, const TPM2B_NAME *name, ERL_NIF_TERM *out)
+{
+    if (!name) return -1;
+    unsigned char *buf = enif_make_new_binary(env, name->size, out);
+    memcpy(buf, name->name, name->size);
+    return 0;
+}
+
+static int
+lapee_public_to_terms(ErlNifEnv *env, const TPM2B_PUBLIC *public,
+                      ERL_NIF_TERM *pem_term, ERL_NIF_TERM *tpm2b_term)
+{
+    unsigned char *pem = NULL; size_t pem_len = 0;
+    if (lapee_tpm2b_public_to_pem(public, &pem, &pem_len) != 0) return -1;
+
+    unsigned char *marshalled = NULL; size_t marshalled_len = 0;
+    if (lapee_marshal_public(public, &marshalled, &marshalled_len) != 0) {
+        enif_free(pem);
+        return -1;
+    }
+
+    unsigned char *pem_out = enif_make_new_binary(env, pem_len, pem_term);
+    memcpy(pem_out, pem, pem_len);
+    unsigned char *mb_out =
+        enif_make_new_binary(env, marshalled_len, tpm2b_term);
+    memcpy(mb_out, marshalled, marshalled_len);
+
+    enif_free(pem);
+    enif_free(marshalled);
+    return 0;
+}
+
+static int
+lapee_read_names(ErlNifEnv *env, ESYS_TR tr,
+                 ERL_NIF_TERM *name_term, ERL_NIF_TERM *qname_term,
+                 ERL_NIF_TERM *error_term)
+{
+    TPM2B_PUBLIC *ignored_public = NULL;
+    TPM2B_NAME *name = NULL;
+    TPM2B_NAME *qname = NULL;
+    TSS2_RC rc = Esys_ReadPublic(
+        g_esys_ctx,
+        tr,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &ignored_public, &name, &qname);
+    if (rc != TSS2_RC_SUCCESS) {
+        if (error_term) {
+            *error_term = lapee_make_tss_error(env, "Esys_ReadPublic", rc);
+        }
+        return -1;
+    }
+    int ok = lapee_name_to_term(env, name, name_term) == 0 &&
+             lapee_name_to_term(env, qname, qname_term) == 0;
+    if (ignored_public) Esys_Free(ignored_public);
+    if (name) Esys_Free(name);
+    if (qname) Esys_Free(qname);
+    if (!ok && error_term) {
+        *error_term = lapee_make_error(env, "name_encode_failed");
+    }
+    return ok ? 0 : -1;
+}
+
+static int
+lapee_marshal_id_object(const TPM2B_ID_OBJECT *obj,
+                        unsigned char **out, size_t *outlen)
+{
+    size_t off = 0;
+    unsigned char *buf = enif_alloc(4096);
+    if (!buf) return -1;
+    TSS2_RC rc = Tss2_MU_TPM2B_ID_OBJECT_Marshal(obj, buf, 4096, &off);
+    if (rc != TSS2_RC_SUCCESS || off == 0) {
+        enif_free(buf);
+        return -1;
+    }
+    *out = buf;
+    *outlen = off;
+    return 0;
+}
+
+static int
+lapee_marshal_encrypted_secret(const TPM2B_ENCRYPTED_SECRET *secret,
+                               unsigned char **out, size_t *outlen)
+{
+    size_t off = 0;
+    unsigned char *buf = enif_alloc(4096);
+    if (!buf) return -1;
+    TSS2_RC rc =
+        Tss2_MU_TPM2B_ENCRYPTED_SECRET_Marshal(secret, buf, 4096, &off);
+    if (rc != TSS2_RC_SUCCESS || off == 0) {
+        enif_free(buf);
+        return -1;
+    }
+    *out = buf;
+    *outlen = off;
+    return 0;
 }
 
 /*-------------------------------- Load / Unload -----------------------------*/
@@ -336,20 +603,22 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    /* Paper P4: hierarchy auth (empty password) via shandle1, HMAC-
-     * encrypted session via shandle2 covers the TPM2B_SENSITIVE_CREATE
-     * (empty here, but in principle could hold auth values) and
-     * encrypts the TPM2B_PUBLIC response in transit on the LPC bus. */
-    TSS2_RC rc = Esys_CreatePrimary(g_esys_ctx,
-                                    ESYS_TR_RH_ENDORSEMENT,
-                                    ESYS_TR_PASSWORD,
-                                    lapee_enc_session(),
-                                    ESYS_TR_NONE,
-                                    &in_sensitive, &ek_template,
-                                    &outside_info, &creation_pcr,
-                                    &ek_tr, &out_public,
-                                    &creation_data, &creation_hash,
-                                    &creation_ticket);
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
+    rc = Esys_CreatePrimary(g_esys_ctx,
+                            ESYS_TR_RH_ENDORSEMENT,
+                            ESYS_TR_PASSWORD,
+                            enc_session,
+                            ESYS_TR_NONE,
+                            &in_sensitive, &ek_template,
+                            &outside_info, &creation_pcr,
+                            &ek_tr, &out_public,
+                            &creation_data, &creation_hash,
+                            &creation_ticket);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_CreatePrimary(EK)", rc);
     }
@@ -365,8 +634,8 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle", rc);
     }
 
-    unsigned char *pem = NULL; size_t pem_len = 0;
-    if (lapee_tpm2b_public_to_pem(out_public, &pem, &pem_len) != 0) {
+    ERL_NIF_TERM pem_term, tpm2b_term, name_term, qname_term, err_term;
+    if (lapee_public_to_terms(env, out_public, &pem_term, &tpm2b_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ek_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
@@ -374,11 +643,14 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         if (creation_ticket) Esys_Free(creation_ticket);
         return lapee_make_error(env, "pem_encode_failed");
     }
-
-    ERL_NIF_TERM pem_term;
-    unsigned char *pem_out = enif_make_new_binary(env, pem_len, &pem_term);
-    memcpy(pem_out, pem, pem_len);
-    enif_free(pem);
+    if (lapee_read_names(env, ek_tr, &name_term, &qname_term, &err_term) != 0) {
+        Esys_FlushContext(g_esys_ctx, ek_tr);
+        if (out_public) Esys_Free(out_public);
+        if (creation_data) Esys_Free(creation_data);
+        if (creation_hash) Esys_Free(creation_hash);
+        if (creation_ticket) Esys_Free(creation_ticket);
+        return err_term;
+    }
 
     /* We deliberately store ESYS_TR in the map too under 'esys_tr' so the
      * caller can re-use it for Esys_* calls without a re-load. */
@@ -392,6 +664,15 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "public_pem"),
                       pem_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "tpm2b_public"),
+                      tpm2b_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "name"),
+                      name_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "qualified_name"),
+                      qname_term, &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
@@ -403,13 +684,6 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 
 /*-------------------------------- create_signing_key/1 ----------------------*/
 
-/* RSA-2048 SHA-256 RSASSA-PSS signing key, created under a primary (EK).
- * Note: real EK-AK binding requires a policy session (TPM2_PolicySecret with
- * endorsement auth). For first-cut correctness against swtpm, we instead
- * create the AK under the Owner hierarchy primary or Null hierarchy. Here
- * we actually make a fresh primary under the Owner hierarchy — simpler and
- * still proves end-to-end quote+verify. The parent handle argument is
- * accepted but ignored for this milestone; see RESULT.md. */
 static ERL_NIF_TERM
 nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -419,14 +693,16 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return enif_make_badarg(env);
     }
 
-    /* Template for restricted RSA-2048 signing key (PSS, SHA-256).
-     *
-     * NODA is important for appliance attestations: this AK uses the
-     * build's empty object auth and must keep serving quotes even if the
-     * TPM's dictionary-attack counter is locked by unrelated firmware/user
-     * activity. Without TPMA_OBJECT_NODA, real Framework TPMs reject Quote
-     * with TPM_RC_LOCKOUT once global DA lockout is active.
-     */
+    TPM2B_DIGEST ak_policy = { .size = 0 };
+    ESYS_TR trial_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_ak_policy_session(
+        TPM2_SE_TRIAL, false, &trial_session, &ak_policy);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK trial)", rc);
+    }
+    Esys_FlushContext(g_esys_ctx, trial_session);
+
+    /* Template for restricted RSA-2048 signing key (PSS, SHA-256). */
     TPM2B_PUBLIC in_public = {
         .size = 0,
         .publicArea = {
@@ -434,10 +710,11 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             .nameAlg = TPM2_ALG_SHA256,
             .objectAttributes =
                 TPMA_OBJECT_FIXEDTPM | TPMA_OBJECT_FIXEDPARENT |
-                TPMA_OBJECT_SENSITIVEDATAORIGIN | TPMA_OBJECT_USERWITHAUTH |
+                TPMA_OBJECT_SENSITIVEDATAORIGIN |
+                TPMA_OBJECT_ADMINWITHPOLICY |
                 TPMA_OBJECT_NODA | TPMA_OBJECT_RESTRICTED |
                 TPMA_OBJECT_SIGN_ENCRYPT,
-            .authPolicy = { .size = 0 },
+            .authPolicy = ak_policy,
             .parameters.rsaDetail = {
                 .symmetric = { .algorithm = TPM2_ALG_NULL },
                 .scheme = {
@@ -450,7 +727,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
             .unique.rsa = { .size = 0, .buffer = {0} }
         }
     };
-
     TPM2B_SENSITIVE_CREATE in_sensitive = { .size = 0 };
     TPM2B_DATA outside_info = { .size = 0 };
     TPML_PCR_SELECTION creation_pcr = { .count = 0 };
@@ -461,29 +737,22 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    /* v1.2.2 paper P3 -- AK lives under the Endorsement hierarchy.
-     * Previously this used ESYS_TR_RH_OWNER as a swtpm-compat
-     * shortcut; the paper requires Endorsement so that the AK's
-     * qualifiedSigner chain in every TPMS_ATTEST roots at the
-     * same primary-seed tree as the EK (same TPM -- a verifier
-     * walking the qualifiedSigner name path can validate the AK
-     * originated in the same physical TPM as the EK in the cert
-     * chain). Factory Nuvoton NPCT75x ships with empty
-     * endorsement auth so the null-password session still works;
-     * provisioned owner-password-only TPMs are out of scope. */
-    /* Paper P4 as with the EK primary creation -- shandle1=PASSWORD
-     * authenticates the Endorsement hierarchy, shandle2=HMAC session
-     * integrity-protects + encrypts sensitive parameters. */
-    TSS2_RC rc = Esys_CreatePrimary(g_esys_ctx,
-                                    ESYS_TR_RH_ENDORSEMENT,
-                                    ESYS_TR_PASSWORD,
-                                    lapee_enc_session(),
-                                    ESYS_TR_NONE,
-                                    &in_sensitive, &in_public,
-                                    &outside_info, &creation_pcr,
-                                    &ak_tr, &out_public,
-                                    &creation_data, &creation_hash,
-                                    &creation_ticket);
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
+    rc = Esys_CreatePrimary(g_esys_ctx,
+                            ESYS_TR_RH_ENDORSEMENT,
+                            ESYS_TR_PASSWORD,
+                            enc_session,
+                            ESYS_TR_NONE,
+                            &in_sensitive, &in_public,
+                            &outside_info, &creation_pcr,
+                            &ak_tr, &out_public,
+                            &creation_data, &creation_hash,
+                            &creation_ticket);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_CreatePrimary(AK)", rc);
     }
@@ -499,8 +768,8 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle(AK)", rc);
     }
 
-    unsigned char *pem = NULL; size_t pem_len = 0;
-    if (lapee_tpm2b_public_to_pem(out_public, &pem, &pem_len) != 0) {
+    ERL_NIF_TERM pem_term, mb_term, name_term, qname_term, err_term;
+    if (lapee_public_to_terms(env, out_public, &pem_term, &mb_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ak_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
@@ -508,25 +777,14 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         if (creation_ticket) Esys_Free(creation_ticket);
         return lapee_make_error(env, "pem_encode_failed");
     }
-
-    unsigned char *marshalled = NULL; size_t marshalled_len = 0;
-    if (lapee_marshal_public(out_public, &marshalled, &marshalled_len) != 0) {
-        enif_free(pem);
+    if (lapee_read_names(env, ak_tr, &name_term, &qname_term, &err_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ak_tr);
         if (out_public) Esys_Free(out_public);
         if (creation_data) Esys_Free(creation_data);
         if (creation_hash) Esys_Free(creation_hash);
         if (creation_ticket) Esys_Free(creation_ticket);
-        return lapee_make_error(env, "marshal_failed");
+        return err_term;
     }
-
-    ERL_NIF_TERM pem_term, mb_term;
-    unsigned char *pem_out = enif_make_new_binary(env, pem_len, &pem_term);
-    memcpy(pem_out, pem, pem_len);
-    unsigned char *mb_out = enif_make_new_binary(env, marshalled_len, &mb_term);
-    memcpy(mb_out, marshalled, marshalled_len);
-    enif_free(pem);
-    enif_free(marshalled);
 
     ERL_NIF_TERM map = enif_make_new_map(env);
     enif_make_map_put(env, map,
@@ -541,6 +799,12 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     enif_make_map_put(env, map,
                       enif_make_atom(env, "tpm2b_public"),
                       mb_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "name"),
+                      name_term, &map);
+    enif_make_map_put(env, map,
+                      enif_make_atom(env, "qualified_name"),
+                      qname_term, &map);
 
     if (out_public) Esys_Free(out_public);
     if (creation_data) Esys_Free(creation_data);
@@ -549,6 +813,179 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 
     (void)parent_handle;
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
+}
+
+/*-------------------------------- make_credential/3 -------------------------*/
+
+static ERL_NIF_TERM
+nif_make_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    ErlNifBinary ek_public_bin, ak_name_bin, secret_bin;
+    if (!enif_inspect_binary(env, argv[0], &ek_public_bin) ||
+        !enif_inspect_binary(env, argv[1], &ak_name_bin) ||
+        !enif_inspect_binary(env, argv[2], &secret_bin)) {
+        return enif_make_badarg(env);
+    }
+    if (secret_bin.size == 0 ||
+        secret_bin.size > sizeof(((TPM2B_DIGEST *)0)->buffer) ||
+        ak_name_bin.size == 0 ||
+        ak_name_bin.size > sizeof(((TPM2B_NAME *)0)->name)) {
+        return enif_make_badarg(env);
+    }
+
+    TPM2B_PUBLIC ek_public;
+    size_t off = 0;
+    TSS2_RC rc = Tss2_MU_TPM2B_PUBLIC_Unmarshal(
+        ek_public_bin.data, ek_public_bin.size, &off, &ek_public);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Tss2_MU_TPM2B_PUBLIC_Unmarshal", rc);
+    }
+
+    ESYS_TR ek_tr = ESYS_TR_NONE;
+    rc = Esys_LoadExternal(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        &ek_public,
+        /*
+         * MakeCredential runs on the verifier's TPM using only the
+         * joiner's EK public area. Public-only external objects are
+         * loaded without an inPrivate value; passing an empty sensitive
+         * area still asks ESYS to marshal a private half of the object.
+         * TPM_RH_NULL avoids associating that peer public key with a
+         * local hierarchy.
+         */
+        ESYS_TR_RH_NULL,
+        &ek_tr);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_LoadExternal(peer EK public)", rc);
+    }
+
+    TPM2B_DIGEST credential = { .size = (UINT16)secret_bin.size };
+    memcpy(credential.buffer, secret_bin.data, secret_bin.size);
+    TPM2B_NAME object_name = { .size = (UINT16)ak_name_bin.size };
+    memcpy(object_name.name, ak_name_bin.data, ak_name_bin.size);
+
+    TPM2B_ID_OBJECT *credential_blob = NULL;
+    TPM2B_ENCRYPTED_SECRET *enc_secret = NULL;
+    rc = Esys_MakeCredential(
+        g_esys_ctx,
+        ek_tr,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        &credential, &object_name,
+        &credential_blob, &enc_secret);
+    Esys_FlushContext(g_esys_ctx, ek_tr);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_MakeCredential", rc);
+    }
+
+    unsigned char *blob = NULL, *secret = NULL;
+    size_t blob_len = 0, secret_len = 0;
+    if (lapee_marshal_id_object(credential_blob, &blob, &blob_len) != 0 ||
+        lapee_marshal_encrypted_secret(enc_secret, &secret, &secret_len) != 0) {
+        if (blob) enif_free(blob);
+        if (secret) enif_free(secret);
+        Esys_Free(credential_blob);
+        Esys_Free(enc_secret);
+        return lapee_make_error(env, "marshal_failed");
+    }
+
+    ERL_NIF_TERM blob_term, secret_term;
+    unsigned char *blob_out = enif_make_new_binary(env, blob_len, &blob_term);
+    memcpy(blob_out, blob, blob_len);
+    unsigned char *secret_out =
+        enif_make_new_binary(env, secret_len, &secret_term);
+    memcpy(secret_out, secret, secret_len);
+    enif_free(blob);
+    enif_free(secret);
+    Esys_Free(credential_blob);
+    Esys_Free(enc_secret);
+
+    ERL_NIF_TERM map = enif_make_new_map(env);
+    enif_make_map_put(env, map, enif_make_atom(env, "credential_blob"),
+                      blob_term, &map);
+    enif_make_map_put(env, map, enif_make_atom(env, "secret"),
+                      secret_term, &map);
+    return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
+}
+
+/*-------------------------------- activate_credential/4 ---------------------*/
+
+static ERL_NIF_TERM
+nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    unsigned ak_tr, ek_tr;
+    ErlNifBinary blob_bin, secret_bin;
+    if (!enif_get_uint(env, argv[0], &ak_tr) ||
+        !enif_get_uint(env, argv[1], &ek_tr) ||
+        !enif_inspect_binary(env, argv[2], &blob_bin) ||
+        !enif_inspect_binary(env, argv[3], &secret_bin)) {
+        return enif_make_badarg(env);
+    }
+
+    TPM2B_ID_OBJECT credential_blob;
+    size_t off = 0;
+    TSS2_RC rc = Tss2_MU_TPM2B_ID_OBJECT_Unmarshal(
+        blob_bin.data, blob_bin.size, &off, &credential_blob);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(
+            env, "Tss2_MU_TPM2B_ID_OBJECT_Unmarshal", rc);
+    }
+    TPM2B_ENCRYPTED_SECRET enc_secret;
+    off = 0;
+    rc = Tss2_MU_TPM2B_ENCRYPTED_SECRET_Unmarshal(
+        secret_bin.data, secret_bin.size, &off, &enc_secret);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(
+            env, "Tss2_MU_TPM2B_ENCRYPTED_SECRET_Unmarshal", rc);
+    }
+
+    ESYS_TR ak_policy_session = ESYS_TR_NONE;
+    rc = lapee_ak_policy_session(
+        TPM2_SE_POLICY, true, &ak_policy_session, NULL);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
+    }
+    ESYS_TR ek_policy_session = ESYS_TR_NONE;
+    rc = lapee_policy_secret_endorsement_session(&ek_policy_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
+        return lapee_make_tss_error(
+            env, "Esys_PolicySecret(ENDORSEMENT)", rc);
+    }
+
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
+        Esys_FlushContext(g_esys_ctx, ek_policy_session);
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
+    TPM2B_DIGEST *cert_info = NULL;
+    rc = Esys_ActivateCredential(
+        g_esys_ctx,
+        (ESYS_TR)ak_tr,
+        (ESYS_TR)ek_tr,
+        ak_policy_session,
+        ek_policy_session,
+        enc_session,
+        &credential_blob,
+        &enc_secret,
+        &cert_info);
+    Esys_FlushContext(g_esys_ctx, ak_policy_session);
+    Esys_FlushContext(g_esys_ctx, ek_policy_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_ActivateCredential", rc);
+    }
+
+    ERL_NIF_TERM out;
+    unsigned char *buf = enif_make_new_binary(env, cert_info->size, &out);
+    memcpy(buf, cert_info->buffer, cert_info->size);
+    Esys_Free(cert_info);
+    return enif_make_tuple2(env, enif_make_atom(env, "ok"), out);
 }
 
 /*-------------------------------- quote/3 -----------------------------------*/
@@ -608,19 +1045,27 @@ nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_ATTEST *quoted = NULL;
     TPMT_SIGNATURE *signature = NULL;
 
-    /* Paper P4: shandle1=PASSWORD authorizes use of the AK's user
-     * auth (empty), shandle2=HMAC session integrity-protects the
-     * request and encrypts the TPMS_ATTEST response. Matters for
-     * attestation because an attacker on the LPC bus could
-     * otherwise silently substitute a stale-but-valid quote from
-     * a prior nonce into a current request's response. */
-    TSS2_RC rc = Esys_Quote(g_esys_ctx,
-                            (ESYS_TR)esys_tr,
-                            ESYS_TR_PASSWORD,
-                            lapee_enc_session(),
-                            ESYS_TR_NONE,
-                            &qual, &scheme, &sel,
-                            &quoted, &signature);
+    ESYS_TR ak_policy_session = ESYS_TR_NONE;
+    TSS2_RC rc = lapee_ak_policy_session(
+        TPM2_SE_POLICY, false, &ak_policy_session, NULL);
+    if (rc != TSS2_RC_SUCCESS) {
+        return lapee_make_tss_error(env, "Esys_PolicyPCR(AK)", rc);
+    }
+    ESYS_TR enc_session = ESYS_TR_NONE;
+    rc = lapee_enc_session(&enc_session);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, ak_policy_session);
+        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+    }
+
+    rc = Esys_Quote(g_esys_ctx,
+                    (ESYS_TR)esys_tr,
+                    ak_policy_session,
+                    enc_session,
+                    ESYS_TR_NONE,
+                    &qual, &scheme, &sel,
+                    &quoted, &signature);
+    Esys_FlushContext(g_esys_ctx, ak_policy_session);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_Quote", rc);
     }
@@ -692,64 +1137,6 @@ nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 
     Esys_Free(quoted); Esys_Free(signature);
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
-}
-
-/*-------------------------------- sign/2 ------------------------------------*/
-
-static ERL_NIF_TERM
-nif_sign(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
-{
-    (void)argc;
-    unsigned esys_tr;
-    ErlNifBinary msg;
-    if (!enif_get_uint(env, argv[0], &esys_tr)) return enif_make_badarg(env);
-    if (!enif_inspect_binary(env, argv[1], &msg)) return enif_make_badarg(env);
-
-    /* Restricted signing keys cannot sign arbitrary data unless it comes with
-     * a hash ticket proving the TPM computed it. For our milestone we use
-     * Esys_Hash with TPM_RH_OWNER to get the ticket, then pass that to Sign. */
-    TPM2B_MAX_BUFFER data = { .size = 0 };
-    if (msg.size > sizeof(data.buffer)) return lapee_make_error(env, "message_too_large");
-    data.size = (UINT16)msg.size;
-    memcpy(data.buffer, msg.data, msg.size);
-
-    TPM2B_DIGEST *digest = NULL;
-    TPMT_TK_HASHCHECK *validation = NULL;
-    TSS2_RC rc = Esys_Hash(g_esys_ctx,
-                           ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
-                           &data, TPM2_ALG_SHA256, TPM2_RH_OWNER,
-                           &digest, &validation);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_Hash", rc);
-    }
-
-    TPMT_SIG_SCHEME scheme = {
-        .scheme = TPM2_ALG_RSAPSS,
-        .details.rsapss.hashAlg = TPM2_ALG_SHA256,
-    };
-
-    TPMT_SIGNATURE *sig = NULL;
-    rc = Esys_Sign(g_esys_ctx,
-                   (ESYS_TR)esys_tr,
-                   ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
-                   digest, &scheme, validation, &sig);
-    Esys_Free(digest);
-    Esys_Free(validation);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_Sign", rc);
-    }
-    ERL_NIF_TERM out;
-    if (sig->sigAlg == TPM2_ALG_RSAPSS) {
-        unsigned char *b = enif_make_new_binary(
-            env, sig->signature.rsapss.sig.size, &out);
-        memcpy(b, sig->signature.rsapss.sig.buffer,
-               sig->signature.rsapss.sig.size);
-    } else {
-        Esys_Free(sig);
-        return lapee_make_error(env, "unexpected_sig_alg");
-    }
-    Esys_Free(sig);
-    return enif_make_tuple2(env, enif_make_atom(env, "ok"), out);
 }
 
 /*-------------------------------- tpm_properties/0 --------------------------*/
@@ -1206,8 +1593,11 @@ static ErlNifFunc nif_funcs[] = {
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"create_signing_key", 1, nif_create_signing_key,
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"make_credential", 3, nif_make_credential,
+                            ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"activate_credential", 4, nif_activate_credential,
+                                ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"quote", 3, nif_quote, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"sign", 2, nif_sign, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"tpm_properties", 0, nif_tpm_properties,
                            ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"nv_read_public", 1, nif_nv_read_public,

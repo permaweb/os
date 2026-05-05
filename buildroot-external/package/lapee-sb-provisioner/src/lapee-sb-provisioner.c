@@ -92,6 +92,22 @@ static int read_one_byte_var(const char *efivars, const char *name, const char *
 	return data[4];
 }
 
+static int var_has_payload(const char *efivars, const char *name, const char *guid)
+{
+	char path[PATH_MAX];
+	uint8_t data[5];
+	int fd;
+	ssize_t got;
+
+	snprintf(path, sizeof(path), "%s/%s-%s", efivars, name, guid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	got = read(fd, data, sizeof(data));
+	close(fd);
+	return got >= (ssize_t)sizeof(data);
+}
+
 static void write_var(const char *efivars, const char *name, const char *guid,
 		      const void *payload, size_t payload_len)
 {
@@ -158,6 +174,17 @@ int main(int argc, char **argv)
 	setup_mode = read_one_byte_var(efivars, "SetupMode", EFI_GLOBAL_GUID);
 	secure_boot = read_one_byte_var(efivars, "SecureBoot", EFI_GLOBAL_GUID);
 	printf("finished. SetupMode=%d SecureBoot=%d\n", setup_mode, secure_boot);
+	if (!var_has_payload(efivars, "db", EFI_IMAGE_SECURITY_DB_GUID) ||
+	    !var_has_payload(efivars, "KEK", EFI_GLOBAL_GUID) ||
+	    !var_has_payload(efivars, "PK", EFI_GLOBAL_GUID)) {
+		fprintf(stderr,
+			"enrollment writes returned but enrolled variables were not readable\n");
+		return 3;
+	}
+	if (setup_mode == 1) {
+		printf("firmware still reports SetupMode=1 after enrollment.\n");
+		printf("some machines leave Setup Mode only after a power cycle.\n");
+	}
 	printf("power off, enable Secure Boot if needed, then boot the signed LapEE USB image.\n");
-	return setup_mode == 0 ? 0 : 3;
+	return 0;
 }

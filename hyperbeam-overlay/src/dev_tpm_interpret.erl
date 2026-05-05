@@ -1,7 +1,7 @@
 %%% @doc `~tpm-interpret@1.0' -- turn a verified LapEE TPM attestation
 %%% into rich, human-readable AO-Core fields.
 %%%
-%%% The companion to `~tpm2@2.0a'. `~tpm2@2.0a' is responsible for the
+%%% The companion to `~tpm@2.0a'. `~tpm@2.0a' is responsible for the
 %%% cryptographic chain (EK cert -> AK -> TPM2_Quote -> PCR 15 -> node
 %%% message). This device is responsible for turning that chain into
 %%% *meaning*: the TPM vendor, the firmware identity, the kernel
@@ -18,7 +18,7 @@
 %%%               passes, attach the interpretation. This is the
 %%%               endpoint the user's target URL lands on:
 %%%
-%%%                 ~relay@1.0/call&relay-path="http://PEER/~tpm2@2.0a/attestation"
+%%%                 ~relay@1.0/call&relay-path="http://PEER/~tpm@2.0a/attestation"
 %%%                     /verify~tpm-interpret@1.0
 %%%
 %%% Databases
@@ -63,11 +63,11 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"description">> =>
-                <<"Interpret a `~tpm2@2.0a' attestation envelope into "
+                <<"Interpret a `~tpm@2.0a' attestation envelope into "
                   "named, cross-referenced fields (TPM manufacturer, "
                   "firmware identity, kernel identity, IMA policy, "
                   "LapEE node identity) from a static database shipped "
-                  "in the HyperBEAM release. Composes with `~tpm2@2.0a/"
+                  "in the HyperBEAM release. Composes with `~tpm@2.0a/"
                   "verify': the `verify' export here runs the crypto "
                   "chain first and only interprets on success.">>,
             <<"version">> => <<"1.0">>,
@@ -91,7 +91,7 @@ info(_Base, _Req, _Opts) ->
                 },
                 <<"verify">> => #{
                     <<"description">> =>
-                        <<"Call ~tpm2@2.0a/verify, then if the chain "
+                        <<"Call ~tpm@2.0a/verify, then if the chain "
                           "is accepted, return the verification result "
                           "plus the full interpretation.">>,
                     <<"input">> => <<"Envelope (see interpret).">>,
@@ -100,7 +100,7 @@ info(_Base, _Req, _Opts) ->
                 },
                 <<"verify-peer">> => #{
                     <<"description">> =>
-                        <<"Fetch another HB node's `~tpm2@2.0a/"
+                        <<"Fetch another HB node's `~tpm@2.0a/"
                           "attestation' envelope (GET), verify its "
                           "crypto chain locally, and return the full "
                           "interpretation + a link-free summary. "
@@ -115,14 +115,7 @@ info(_Base, _Req, _Opts) ->
                         <<"trusted-ca">> =>
                             <<"Optional. base64url-encoded PEM of the "
                               "TPM vendor root CA to trust for this "
-                              "request. Overrides node config. Preferred "
-                              "inline form.">>,
-                        <<"trusted-ca-pem">> =>
-                            <<"Optional (back-compat). Raw PEM as a "
-                              "string. Unsafe over URL-encoded GET -- "
-                              "the `+' in base64 base-64 values and in "
-                              "the PEM BEGIN header get mangled. Use "
-                              "`trusted-ca' instead.">>
+                              "request. Overrides node config.">>
                     },
                     <<"response">> =>
                         <<"{peer, verified, verdict, checks, summary, "
@@ -492,7 +485,7 @@ missing_peer_400() ->
 
 fetch_peer_envelope(Base, Opts) ->
     FetchMsg = #{
-        <<"path">>          => <<"/~tpm2@2.0a/attestation">>,
+        <<"path">>          => <<"/~tpm@2.0a/attestation">>,
         <<"accept">>        => <<"application/json@1.0">>,
         <<"accept-bundle">> => <<"true">>
     },
@@ -563,7 +556,7 @@ verify(Base, Req, Opts) ->
 %%%
 %%%   GET /~tpm-interpret@1.0/verify-peer&peer=<base-url>
 %%%
-%%% `peer' is a bare URL; we normalise it + append `/~tpm2@2.0a/
+%%% `peer' is a bare URL; we normalise it + append `/~tpm@2.0a/
 %%% attestation' and fetch with the standard HB content-negotiation
 %%% (`accept: application/json@1.0 + accept-bundle: true') so the
 %%% envelope comes back inline with no body+link references (which
@@ -585,22 +578,8 @@ verify_peer(_Base, Req, Opts) ->
         PeerUrl when is_binary(PeerUrl) ->
             %% Optional inline trust anchor. If absent, we fall back
             %% to this verifier's configured `lapee_tpm_ca_cert' via
-            %% dev_tpm2's `resolve_trusted_ca/2'. Two inline forms
-            %% are accepted:
-            %%
-            %%   `trusted-ca'      -- base64url-encoded PEM bytes
-            %%                       (HyperBEAM wire convention; the
-            %%                       safe form over HTTP/URL).
-            %%   `trusted-ca-pem'  -- raw PEM text. *Only* works when
-            %%                       the request carries an
-            %%                       unambiguous binary (e.g. POST
-            %%                       body, not GET query string),
-            %%                       because the URL form treats `+'
-            %%                       as space and mangles the PEM
-            %%                       header "BEGIN CERTIFICATE".
-            %%
-            %% Both mechanisms resolve to raw PEM bytes before we
-            %% hand them to dev_tpm2.
+            %% dev_tpm2's `resolve_trusted_ca/2'. Inline trust anchors
+            %% use HyperBEAM's base64url wire convention.
             InlineCa = resolve_inline_ca(Req, Opts),
             fetch_and_verify_peer(PeerUrl, InlineCa, Opts);
         Other ->
@@ -616,9 +595,8 @@ verify_peer(_Base, Req, Opts) ->
             }}
     end.
 
-%% Pull an inline trust anchor out of Req, normalising whichever of
-%% the two supported forms the caller used. Returns raw PEM bytes
-%% (a binary) or undefined.
+%% Pull an inline trust anchor out of Req. Returns raw PEM bytes or
+%% undefined.
 resolve_inline_ca(Req, Opts) ->
     case hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 ->
@@ -628,11 +606,7 @@ resolve_inline_ca(Req, Opts) ->
                 _ -> undefined
             catch _:_ -> undefined
             end;
-        _ ->
-            case hb_maps:get(<<"trusted-ca-pem">>, Req, undefined, Opts) of
-                Pem when is_binary(Pem), byte_size(Pem) > 0 -> Pem;
-                _ -> undefined
-            end
+        _ -> undefined
     end.
 
 fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
@@ -644,7 +618,7 @@ fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
     NonceBytes = crypto:strong_rand_bytes(32),
     NonceB64 = hb_util:encode(NonceBytes),
     FetchMsg = #{
-        <<"path">>          => <<"/~tpm2@2.0a/attestation">>,
+        <<"path">>          => <<"/~tpm@2.0a/attestation">>,
         <<"accept">>        => <<"application/json@1.0">>,
         <<"accept-bundle">> => <<"true">>,
         <<"nonce">>         => NonceB64
@@ -669,7 +643,7 @@ fetch_and_verify_peer(PeerUrl, InlineCa, Opts) ->
                             <<"error">> => <<"peer-did-not-return-envelope">>,
                             <<"peer">>  => Base,
                             <<"detail">> =>
-                                <<"GET /~tpm2@2.0a/attestation did not "
+                                <<"GET /~tpm@2.0a/attestation did not "
                                   "return a LapEE attestation envelope; "
                                   "peer may be unreachable, not "
                                   "LapEE-shaped, or returned an error.">>
@@ -784,14 +758,10 @@ envelope_quote_nonce(Envelope, Opts) ->
     end.
 
 do_verify_summary(Envelope, InlineCa, Opts) ->
-    %% Pass both keys through so dev_tpm2:resolve_trusted_ca can
-    %% classify the source itself (and return it to us via body.
-    %% trust_anchor_source). Avoids duplicating the priority rule
-    %% here.
     Req0 = #{<<"envelope">> => Envelope},
     Req  = case InlineCa of
                undefined -> Req0;
-               _         -> Req0#{<<"trusted-ca-pem">> => InlineCa}
+               _         -> Req0#{<<"trusted-ca">> => hb_util:encode(InlineCa)}
            end,
     case dev_tpm2:verify(Envelope, Req, Opts) of
         {ok, #{<<"body">> := Body}} ->
@@ -1986,11 +1956,6 @@ validate_ek_chain(Cert, Chain, Roots) ->
     validate_ek_chain_1(DerCert, DerIntermediates, Roots,
                         length(Chain)).
 
-%% Legacy 2-arg form for call sites that predate v1.2's chain
-%% threading. Equivalent to calling with an empty intermediate list.
-validate_ek_chain(Cert, Roots) ->
-    validate_ek_chain(Cert, [], Roots).
-
 safe_der_encode(Cert) ->
     try public_key:pkix_encode('OTPCertificate', Cert, otp)
     catch _:_ -> <<>>
@@ -2165,8 +2130,48 @@ build_intermediate_path(CurrentCert, RootCert, Candidates,
             Matches =
                 [C || C = {_Name, _Der, Cert} <- Candidates,
                       same_name(cert_subject(Cert), Issuer)],
+            CandidatesWithAia =
+                case Matches of
+                    [] -> aia_extend_candidates(CurrentCert, Candidates);
+                    _ -> Candidates
+                end,
+            UpdatedMatches =
+                case Matches of
+                    [] ->
+                        [C || C = {_Name, _Der, Cert} <- CandidatesWithAia,
+                              same_name(cert_subject(Cert), Issuer)];
+                    _ -> Matches
+                end,
             try_candidate_paths(
-              Matches, RootCert, Candidates, AccDers, AccNames)
+              UpdatedMatches, RootCert, CandidatesWithAia,
+              AccDers, AccNames)
+    end.
+
+%% When the local Candidates list lacks an issuer for the current
+%% cert, try to fetch it via the cert's AIA caIssuers extension.
+%% Successful fetches are appended to Candidates and cached in
+%% lapee_aia's persistent_term so subsequent admissions of peers in
+%% the same SoC family don't re-hit the network.
+aia_extend_candidates(CurrentCert, Candidates) ->
+    Urls = lapee_aia:caissuers_urls(CurrentCert),
+    aia_extend_candidates_1(Urls, Candidates).
+
+aia_extend_candidates_1([], Candidates) -> Candidates;
+aia_extend_candidates_1([Url | Rest], Candidates) ->
+    case lapee_aia:fetch_issuer(Url, #{}) of
+        {ok, IssuerDer} ->
+            case decode_der_cert(IssuerDer) of
+                {ok, IssuerCert} ->
+                    Name = iolist_to_binary([
+                        <<"aia-fetched/">>,
+                        binary:part(Url, 0, min(80, byte_size(Url)))
+                    ]),
+                    Candidates ++ [{Name, IssuerDer, IssuerCert}];
+                _ ->
+                    aia_extend_candidates_1(Rest, Candidates)
+            end;
+        _ ->
+            aia_extend_candidates_1(Rest, Candidates)
     end.
 
 try_candidate_paths([], _RootCert, _Candidates, _AccDers, _AccNames) ->
@@ -2284,23 +2289,62 @@ ek_verify_fun(_, {bad_cert, {not_supported_extension, Ext}}, UserState) ->
     %% TCG namespace here the same way we already treat non-critical
     %% unknown TCG extensions below: metadata is acceptable, the
     %% cryptographic issuer/signature/path checks still run normally.
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _ -> {fail, {not_supported_extension, Ext}}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {fail, {not_supported_extension, Ext}}
+    end;
+ek_verify_fun(Cert, {bad_cert, invalid_key_usage}, UserState) ->
+    case tpm_ek_leaf_cert(Cert) of
+        true -> {valid, UserState};
+        false -> {fail, invalid_key_usage}
     end;
 ek_verify_fun(_, {bad_cert, Reason}, _UserState) ->
     {fail, Reason};
 ek_verify_fun(_, {extension, #'Extension'{extnID = ExtId}}, UserState) ->
     %% Called for each non-critical unknown extension. Accept any
     %% OID under the TCG arc 2.23.133.x (all EK metadata).
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _                     -> {unknown, UserState}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {unknown, UserState}
     end;
 ek_verify_fun(_, valid, UserState)      -> {valid, UserState};
 ek_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
+
+tpm_ek_leaf_cert(Cert) ->
+    try
+        Otp = case Cert of
+            #'OTPCertificate'{} -> Cert;
+            Der when is_binary(Der) -> public_key:pkix_decode_cert(Der, otp)
+        end,
+        Tbs = Otp#'OTPCertificate'.tbsCertificate,
+        Extensions = cert_extensions(Tbs),
+        extension_value(?'id-ce-basicConstraints', Extensions)
+            =:= #'BasicConstraints'{cA = false, pathLenConstraint = asn1_NOVALUE}
+            andalso lists:member(
+                {2, 23, 133, 8, 1},
+                extension_value(?'id-ce-extKeyUsage', Extensions))
+    catch _:_ ->
+        false
+    end.
+
+is_tcg_oid(Oid) when is_tuple(Oid) ->
+    lists:prefix([2, 23, 133], tuple_to_list(Oid));
+is_tcg_oid(_) ->
+    false.
+
+cert_extensions(#'OTPTBSCertificate'{extensions = Extensions})
+        when is_list(Extensions) ->
+    Extensions;
+cert_extensions(_) ->
+    [].
+
+extension_value(Oid, Extensions) ->
+    case [Value || #'Extension'{extnID = ExtOid, extnValue = Value}
+                       <- Extensions,
+                   ExtOid =:= Oid] of
+        [Value | _] -> Value;
+        [] -> null
+    end.
 
 %% @doc Structured decode of the Attestation Key public blob on
 %% the flat claim surface. AK is an RSA-2048 or RSA-3072 key
@@ -2381,11 +2425,10 @@ tpm_trust_tier(_)                     -> <<"unknown">>.
 
 %% CPU microcode identity -- from EV_CPU_MICROCODE on PCR 1.
 %% Discriminates Intel vs AMD vs unknown via `parsed.format'.
-%% The 2-arg form additionally cross-references
+%% Cross-references
 %% `priv/tpm-interpret/cpu-models.json' to attach a human-readable
 %% `codename', `brand-range', `micro-arch', `year' and the
 %% supported TEE/hardening feature set.
-claim_cpu(Events) -> claim_cpu(Events, #{}, #{}).
 claim_cpu(Events, Db) -> claim_cpu(Events, #{}, Db).
 
 claim_cpu(Events, E, Db) ->
@@ -2511,8 +2554,6 @@ hits_to_cpu_hint(Hits) ->
         _         -> <<"unknown">>
     end,
     Brand = pick_brand_range(Needles),
-    Prov = [{_, Ev} | _] = Hits,
-    _ = Prov,
     FirstEv = element(2, hd(Hits)),
     #{<<"vendor">>            => Vendor,
       <<"vendor-provenance">> => [event_provenance(FirstEv),
@@ -3147,11 +3188,8 @@ event_seq_range(EvList) ->
 %%                 (so a policy engine can inspect the
 %%                  evidence without re-walking the tree)
 %%   version       1  (so callers can reason about evolution)
-%% Two-arity form so callers with the raw envelope can feed it
-%% in. The signature-verification signal requires the raw quoted
+%% The signature-verification signal requires the raw quoted
 %% bytes which the claim tree doesn't preserve.
-claim_policy_verdict(Claim) -> claim_policy_verdict(Claim, #{}).
-
 claim_policy_verdict(Claim, Envelope) ->
     Signals = collect_policy_signals(Claim, Envelope),
     {Warnings, Criticals} = classify_policy_findings(Signals),
@@ -3169,8 +3207,6 @@ claim_policy_verdict(Claim, Envelope) ->
 %% Pull the small set of decisive per-section facts into a
 %% flat signal map -- same keys drive the classify_ and
 %% score_ functions below.
-collect_policy_signals(Claim) -> collect_policy_signals(Claim, #{}).
-
 collect_policy_signals(Claim, Envelope) ->
     SB = maps:get(<<"secure-boot">>, Claim, #{}),
     QI = maps:get(<<"quote-integrity">>, Claim, #{}),
@@ -4572,14 +4608,12 @@ sem_var_name(Ev) ->
     nested(Ev, [<<"parsed">>, <<"variable-name">>], <<>>).
 
 %% Firmware identity from EV_S_CRTM_VERSION.
-%% The 2-arg form additionally cross-references the shipped
-%% firmware-versions DB; when the CRTM string starts with a
+%% Cross-references the shipped firmware-versions DB; when the CRTM
+%% string starts with a
 %% known vendor prefix we project the manifest's full attribute
 %% set (vendor, trust-tier, secure-boot-default, ek-root-ca-
 %% source, virtualization-platform, tpm-vendor-id, platforms)
 %% back onto the claim alongside the raw CRTM string.
-claim_firmware(Events) -> claim_firmware(Events, #{}).
-
 claim_firmware(Events, Db) ->
     Matches = [Ev || Ev <- Events,
                      maps:get(<<"event-type-code">>, Ev, 0) =:= 16#8],
@@ -5239,9 +5273,6 @@ claim_pcr_replay(Events, E) ->
                                    Covered =/= [],
         <<"event-count">>       => length(EvList)
     }.
-
-replay_one_pcr(Pcr, EventsByPcr, PcrVals) ->
-    replay_one_pcr(Pcr, EventsByPcr, PcrVals, #{}).
 
 replay_one_pcr(Pcr, EventsByPcr, PcrVals, AlgByPcr) ->
     Events = maps:get(Pcr, EventsByPcr, []),
@@ -6021,8 +6052,6 @@ hash_alg_strength(<<"sha512">>)   -> 4;
 hash_alg_strength(<<"sha3-512">>) -> 4;
 hash_alg_strength(_)              -> 2.   % assume sha256-equivalent default
 
-claim_boot_chain(Events) -> claim_boot_chain(Events, #{}).
-
 claim_boot_chain(Events, Db) ->
     Codes = [16#80000003, 16#80000004, 16#80000005],
     Sorted = lists:sort(
@@ -6320,10 +6349,6 @@ runtime_cmdline_flags_and_provenance(E) ->
 %% `evidence' list lets policy engines require specific tier
 %% combinations (e.g. "tier 2 + tier 3 + tier 4" for confidential-
 %% compute, "tier 2 only" for development).
-claim_tme(Events, E, Db) ->
-    claim_tme(Events, E, Db,
-              #{<<"kind">> => <<"tcg-pc-client">>, <<"evidence">> => []}).
-
 claim_tme(Events, E, Db, Context) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events, E),
     {RuntimeFlags, RuntimeCmdlineProv} =
@@ -6536,14 +6561,6 @@ uki_db_lookup(Profiles, UkiHash, Events, Key) when is_map(Profiles) ->
     end;
 uki_db_lookup(_, _, _, _) -> false.
 
-%% Backward-compat 3-arg form (used by tests that predate the
-%% Events-aware matcher).
-uki_db_lookup(Profiles, UkiHash, Key) ->
-    case uki_db_lookup(Profiles, UkiHash, [], Key) of
-        {true, _} -> true;
-        _         -> false
-    end.
-
 %% Iterate all profiles, return those that match this envelope.
 %% Each returned map is the profile with an extra `-rule' key
 %% naming the matched rule ("uki-hash" | "known-uki-hashes" |
@@ -6660,41 +6677,11 @@ uki_profile_asserts(P, Key) ->
             maps:get(Key, Claims, false) =:= true
     end.
 
-%% Compose a claim from multiple tiers. Rules:
-%%   * Any tier giving `true' -> claim is true (with all supporting
-%%     tiers' evidence).
-%%   * Any tier giving `false' while none say `true' -> claim is false.
-%%   * All tiers return "unknown" -> claim is "unknown".
-compose_claim(Field, TierResults) ->
-    Values = [V || {V, _} <- TierResults],
-    Evidence = lists:flatten([E || {_, E} <- TierResults]),
-    Verdict = compose_verdict(Values),
-    #{
-        Field                                => Verdict,
-        <<(Field)/binary, "-evidence">>      => Evidence,
-        <<(Field)/binary, "-tier-count">>    =>
-            length([E || E <- Evidence, is_tuple(E),
-                          element(1, E) =:= <<"tier">>])
-    }.
-
-compose_verdict(Values) ->
-    case lists:member(true, Values) of
-        true -> true;
-        false ->
-            case lists:member(false, Values) of
-                true -> false;
-                false -> <<"unknown">>
-            end
-    end.
-
 %% Kernel lockdown mode (paper section Arch line 223:
 %% `lockdown=confidentiality').
 %%
 %% Tier 2: cmdline `lockdown=<mode>'.
 %% Tier 3: UKI-hash claim `lockdown-confidentiality: true' in the DB.
-claim_lockdown(Events) ->
-    claim_lockdown(Events, #{}, #{}).
-
 claim_lockdown(Events, E, Db) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events),
     Mode = maps:get(<<"lockdown">>, Flags, <<"unknown">>),
@@ -6785,8 +6772,6 @@ parse_lockdown_line(_) -> unknown.
 %%   iommu=pt                   -> DMA-remap mode
 %%   iommu.strict=1             -> flushes per-op (no lazy invalidation)
 %%   intel_iommu=on | amd_iommu=on -> vendor-specific enable
-claim_iommu(Events) -> claim_iommu(Events, #{}).
-
 claim_iommu(Events, E) ->
     {Flags, CmdlineProv} = cmdline_flags_and_provenance(Events),
     Mode  = maps:get(<<"iommu">>, Flags, <<"unknown">>),
@@ -6852,9 +6837,6 @@ claim_iommu(Events, E) ->
 %%                            cache exploitation)
 %%   page_poison=1         -> free pages poisoned
 %%   lockdown=confidentiality -> kernel lockdown in the strictest mode
-claim_kernel_integrity(Events) ->
-    claim_kernel_integrity(Events, #{}).
-
 claim_kernel_integrity(Events, E) ->
     {Flags, Prov} = cmdline_flags_and_provenance(Events),
     Base = case Prov of
@@ -7736,7 +7718,7 @@ derived_template_for_pcr(10) ->
         <<"note">>                  =>
             <<"LapEE does not yet transport the IMA per-file event "
               "log in the envelope; only PCR 10's final value is "
-              "signed. Future `~tpm2@2.0a' versions will include it.">>
+              "signed. Future `~tpm@2.0a' versions will include it.">>
     };
 derived_template_for_pcr(11) ->
     %% PCR 11 = UKI kernel image (systemd-stub PE hashes).
@@ -8334,7 +8316,7 @@ interpret_ima(_E, _Db, Pcrs) ->
         <<"note">> =>
             <<"LapEE does not yet transport the kernel IMA event log "
               "in the attestation envelope (PCR 10's final value is "
-              "signed; the per-file chain isn't). Future `~tpm2@2.0a' "
+              "signed; the per-file chain isn't). Future `~tpm@2.0a' "
               "versions will include it; until then, a verifier can "
               "only assert PCR 10 matches a known-good profile.">>
     }.
@@ -10543,13 +10525,13 @@ summary_returns_link_free_map_test() ->
         <<"runtime-event-log">> => [],
         <<"node-message">> =>
             #{<<"on">> => #{<<"start">> =>
-                              #{<<"device">> => <<"tpm2@2.0a">>}}},
+                              #{<<"device">> => <<"tpm@2.0a">>}}},
         <<"node-message-id">> => Zero,
         <<"wallet-address">> => <<"sample-wallet">>
     },
     {ok, #{<<"body">> := S}} = summary(Envelope, #{}, #{}),
     ?assertEqual(<<"0.3">>, maps:get(<<"envelope-version">>, S)),
-    ?assertEqual(<<"tpm2@2.0a">>,
+    ?assertEqual(<<"tpm@2.0a">>,
                  maps:get(<<"on-start-hook-device">>, S)),
     ?assertEqual(<<"sample-wallet">>,
                  maps:get(<<"wallet-address">>, S)),
@@ -10647,26 +10629,17 @@ peer_endpoints_reject_missing_peer_test() ->
      || F <- [fun peer_summary/3, fun peer_status/3]],
     ok.
 
-%% `resolve_inline_ca/2' normalises both accepted forms of the
-%% inline trust anchor -- base64url `trusted-ca' wins over raw PEM
-%% `trusted-ca-pem', and undefined/empty inputs stay undefined.
+%% `resolve_inline_ca/2' normalises the base64url inline trust anchor;
+%% undefined, empty, and malformed inputs stay undefined.
 resolve_inline_ca_normalises_forms_test() ->
     Pem = <<"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----">>,
     B64u = hb_util:encode(Pem),
-    %% base64url form decodes back to the raw PEM bytes
     ?assertEqual(Pem, resolve_inline_ca(#{<<"trusted-ca">> => B64u}, #{})),
-    %% raw-PEM form passes through
-    ?assertEqual(Pem, resolve_inline_ca(#{<<"trusted-ca-pem">> => Pem}, #{})),
-    %% both keys -- base64url wins
-    B64u2 = hb_util:encode(<<"OTHER">>),
-    ?assertEqual(<<"OTHER">>,
-                 resolve_inline_ca(#{<<"trusted-ca">> => B64u2,
-                                     <<"trusted-ca-pem">> => Pem}, #{})),
-    %% neither: undefined
     ?assertEqual(undefined, resolve_inline_ca(#{}, #{})),
-    %% empty string: undefined
     ?assertEqual(undefined,
                  resolve_inline_ca(#{<<"trusted-ca">> => <<>>}, #{})),
+    ?assertEqual(undefined,
+                 resolve_inline_ca(#{<<"trusted-ca">> => <<"%%%">>}, #{})),
     ok.
 
 %% Interpret a hand-built envelope with NO valid EK cert -- we still
@@ -10694,7 +10667,7 @@ interpret_handles_partial_envelope_test() ->
             #{<<"port">> => 8734,
               <<"on">> =>
                 #{<<"start">> =>
-                    #{<<"device">> => <<"tpm2@2.0a">>,
+                    #{<<"device">> => <<"tpm@2.0a">>,
                       <<"path">> => <<"extend">>}}},
         <<"node-message-id">> => Zero,
         <<"wallet-address">> => <<"sample-wallet-address-XX">>
@@ -10714,7 +10687,7 @@ interpret_handles_partial_envelope_test() ->
     ?assertEqual(true, maps:get(<<"is-zero">>, Pcr15)),
     %% Node section reads on.start.device
     Node = maps:get(<<"node">>, Body),
-    ?assertEqual(<<"tpm2@2.0a">>,
+    ?assertEqual(<<"tpm@2.0a">>,
                  maps:get(<<"on-start-hook-device">>, Node)).
 
 pcr_role_canonical_mapping_test() ->

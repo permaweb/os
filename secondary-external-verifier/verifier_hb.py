@@ -19,9 +19,9 @@ Envelope shape (kebab-case keys, base64url 32-byte IDs):
   node-message-id           : 32-byte native id (base64url, 43 chars)
   wallet-address            : operator wallet address (AR human-id)
 
-The bundle endpoint `/~tpm2@2.0a/attestation' returns the envelope
+The bundle endpoint `/~tpm@2.0a/attestation' returns the envelope
 inside `{"body": <env>, ...}'. The plain endpoint
-`/~tpm2@2.0a/attestation-json' returns the envelope at the top level
+`/~tpm@2.0a/attestation-json' returns the envelope at the top level
 (when not 500-ing). We accept either by unwrapping `body' if present.
 
 Checks:
@@ -34,12 +34,18 @@ Checks:
   5. PCR 15 replay: starting at all-zero, extend every PCR-15 event
      in `runtime-event-log' in `seq' order; result must equal the
      quoted PCR-15 value.
-  6. The seq=0 PCR-15 event (must be `EV_HYPERBEAM_NODE_IDENTITY_EXTEND')
-     digest equals `node-message-id'. That closes the loop: TPM state
-     commits to the running node's identity hash.
-  7. The seq=1 PCR-15 event (must be `EV_HYPERBEAM_KEY_PUBKEY_EXTEND')
-     digest equals sha256(ak-pub-pem). Paper P5: AK is bound to the
-     measured-boot session.
+  6. Some PCR-15 event has digest equal to `node-message-id'. That
+     closes the loop: TPM state commits to the running node's
+     identity hash. Match by digest, not by seq position -- the
+     binding event-type is `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT'
+     when on.start drives `~tpm@2.0a/boot-attestation' (the
+     production path) and `EV_HYPERBEAM_NODE_IDENTITY_EXTEND'
+     when a caller drives `~tpm@2.0a/extend' directly.
+  7. Some `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event on PCR 15 has
+     digest equal to sha256(ak-pub-pem). Paper P5: AK is bound
+     to the measured-boot session. Match by event-type + digest;
+     the extend lands at seq 0 of the runtime log under the
+     production boot-attestation flow.
   8. node-message + node-message-id present, IDs are base64url 32 bytes.
 """
 from __future__ import annotations
@@ -66,13 +72,54 @@ def b64url_encode(b: bytes) -> str:
 
 
 def unwrap_envelope(raw):
-    """Bundle endpoint nests the envelope in `body'; plain endpoint
-    returns it at top level. Accept either."""
-    if isinstance(raw, dict) and "body" in raw and isinstance(raw["body"], dict):
+    """Accept the flat attestation envelope and the signed
+    boot-attestation wrapper.
+
+    The boot-attestation shape is:
+
+      body.{system,node,tpm}
+
+    `dev_tpm2' normalises that to the flat verifier shape before
+    checking peer attestations. Do the same here so this external
+    verifier checks the live production endpoint, not only the older
+    `/attestation-json' form.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    if "lapee-attestation-version" in raw:
+        return raw
+    if "body" in raw and isinstance(raw["body"], dict):
         body = raw["body"]
         if "lapee-attestation-version" in body:
             return body
+        boot = normalise_boot_attestation(body)
+        if boot is not None:
+            return boot
+    boot = normalise_boot_attestation(raw)
+    if boot is not None:
+        return boot
     return raw
+
+
+def normalise_boot_attestation(body):
+    if not isinstance(body, dict):
+        return None
+    system = body.get("system")
+    node = body.get("node")
+    tpm = body.get("tpm")
+    if not all(isinstance(v, dict) for v in (system, node, tpm)):
+        return None
+    out = dict(tpm)
+    if "tpm-quote" not in out and "quote" in out:
+        out["tpm-quote"] = out["quote"]
+    out.setdefault("lapee-attestation-version", EXPECTED_VERSION)
+    if "version" in body:
+        out["boot-attestation-version"] = body["version"]
+    out["node-message"] = node
+    out["node-message-id"] = out.get("extended-subject")
+    out["wallet-address"] = node.get("address")
+    out["system-report"] = system
+    return out
 
 
 class Check:
@@ -106,7 +153,79 @@ def _load_roots(roots_dir):
     return roots, intermediates, unreadable
 
 
-def _verify_cert_chain(ek_pem, roots_dir):
+# Cache fetched AIA intermediates per process so repeated verifies of
+# peers in the same SoC family hit the URL exactly once. Keyed by URL.
+_AIA_CACHE: dict[str, bytes] = {}
+
+
+def _aia_caissuers_urls(pem_path):
+    """Extract every `id-ad-caIssuers' URL from a cert's AIA extension
+    via openssl text. We avoid the Python cryptography lib here because
+    real Intel ODCA EK leaves carry DER quirks (`EncodedDefault') that
+    the strict parser refuses, and openssl is what the verify path
+    already shells out to. Returns a list of HTTPS URLs."""
+    r = subprocess.run(
+        ["openssl", "x509", "-in", str(pem_path), "-noout", "-text"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return []
+    urls = []
+    in_aia = False
+    for line in r.stdout.splitlines():
+        stripped = line.strip()
+        if "Authority Information Access" in stripped:
+            in_aia = True
+            continue
+        if in_aia:
+            if stripped.startswith("CA Issuers - URI:"):
+                urls.append(stripped.split("URI:", 1)[1].strip())
+            elif stripped and not stripped.startswith("OCSP")\
+                    and not stripped.startswith("CA Issuers"):
+                # Hit the next extension; stop scanning.
+                in_aia = False
+    return [u for u in urls if u.startswith("https://")]
+
+
+def _aia_fetch(url, timeout=5):
+    """HTTPS GET an AIA URL, cache successful fetches, return PEM
+    bytes. Detects whether the server returned PEM or DER and
+    normalises to PEM. Returns None on any failure -- caller decides
+    whether to fall through."""
+    if url in _AIA_CACHE:
+        return _AIA_CACHE[url]
+    if not url.startswith("https://"):
+        return None
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "lapee-aia/1"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(64 * 1024)
+    except Exception:
+        return None
+    # Convert DER to PEM via openssl when the body is binary.
+    if body[:11] == b"-----BEGIN ":
+        pem = body
+    else:
+        r = subprocess.run(
+            ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+            input=body, capture_output=True)
+        if r.returncode != 0:
+            return None
+        pem = r.stdout
+    # Sanity-parse via openssl before caching to reject arbitrary
+    # bytes from a misconfigured AIA endpoint.
+    r2 = subprocess.run(
+        ["openssl", "x509", "-noout"],
+        input=pem, capture_output=True)
+    if r2.returncode != 0:
+        return None
+    _AIA_CACHE[url] = pem
+    return pem
+
+
+def _verify_cert_chain(ek_pem, roots_dir,
+                       envelope_chain_pem=b"", aia_enabled=True):
     roots, intermediates, unreadable = _load_roots(roots_dir)
     if not roots:
         return Check(
@@ -121,37 +240,115 @@ def _verify_cert_chain(ek_pem, roots_dir):
         f.write(ek_pem)
         ek_path = f.name
 
-    def _try(root_path, mid):
+    # The envelope itself can supply on-TPM intermediates via
+    # `ek-cert-chain-pem' (Intel ODCA stuffs the PTT/Kernel/ROM CAs
+    # into the TPM NV slot adjacent to the EK; the LapEE TPM device
+    # carries them through to the verifier). Treat them as untrusted
+    # intermediates so the chain walker can use them. They never
+    # promote to trust anchors -- only self-signed certs from
+    # `roots_dir' do that.
+    envelope_pems = []
+    if isinstance(envelope_chain_pem, str):
+        envelope_chain_pem = envelope_chain_pem.encode()
+    if envelope_chain_pem:
+        envelope_pems = [envelope_chain_pem]
+
+    # Materialise candidate intermediates as a single concatenated PEM
+    # so openssl can chase the issuer chain across multiple bundled
+    # intermediates in one shot. The previous "one intermediate at a
+    # time" loop couldn't build the four-step Intel ODCA ladder.
+    def _bundle(extra_pems):
+        with tempfile.NamedTemporaryFile(suffix=".pem", mode="wb",
+                                         delete=False) as g:
+            for _, cert in intermediates:
+                from cryptography.hazmat.primitives import serialization
+                g.write(cert.public_bytes(
+                    serialization.Encoding.PEM))
+            for ep in envelope_pems + list(extra_pems):
+                g.write(ep)
+        return g.name
+
+    def _try(root_path, bundle_path):
         cmd = ["openssl", "verify", "-CAfile", str(root_path)]
-        if mid is not None:
-            cmd += ["-untrusted", str(mid)]
+        if bundle_path is not None:
+            cmd += ["-untrusted", str(bundle_path)]
         cmd.append(ek_path)
         r = subprocess.run(cmd, capture_output=True, text=True)
         return r.returncode == 0
 
+    bundle_path = _bundle([])
     for root_path, _ in roots:
         if _try(root_path, None):
             return Check(
                 "EK certificate chains to a self-signed manufacturer root",
                 True,
                 f"validated against {root_path.name} (direct)")
-        for mid_path, _ in intermediates:
-            if _try(root_path, mid_path):
-                return Check(
-                    "EK certificate chains to a self-signed manufacturer root",
-                    True,
-                    f"validated against {root_path.name} via {mid_path.name}")
+        if _try(root_path, bundle_path):
+            return Check(
+                "EK certificate chains to a self-signed manufacturer root",
+                True,
+                f"validated against {root_path.name} via "
+                f"{len(intermediates)} bundled intermediate(s)")
 
-    from cryptography import x509
-    ek_cert = x509.load_pem_x509_certificate(ek_pem.encode())
+    # Local trust + envelope-supplied intermediates didn't close the
+    # chain. Walk AIA caIssuers URLs starting from the leaf, then from
+    # each cert in the envelope's chain, and try again with the
+    # fetched intermediates appended. Real EK leaves don't carry an
+    # AIA pointer (their issuer is the on-TPM PTT/leaf CA, which is
+    # already in the envelope chain); the AIA pointer lives mid-chain
+    # on the cert whose issuer is the missing public Issuing CA. We
+    # must split a concatenated envelope chain PEM into individual
+    # cert files since `openssl x509 -text' only reads the first cert
+    # of any input.
+    if aia_enabled:
+        import re as _re
+        cert_paths = [ek_path]
+        for ep in envelope_pems:
+            ep_str = ep.decode() if isinstance(ep, bytes) else ep
+            for single in _re.findall(
+                    r"-----BEGIN CERTIFICATE-----.*?"
+                    r"-----END CERTIFICATE-----",
+                    ep_str, _re.DOTALL):
+                with tempfile.NamedTemporaryFile(
+                        suffix=".pem", mode="w", delete=False) as nt:
+                    nt.write(single)
+                    cert_paths.append(nt.name)
+        fetched_pems = []
+        fetched_summary = []
+        seen_urls = set()
+        for cert_path in cert_paths:
+            urls = _aia_caissuers_urls(cert_path)
+            for url in urls:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                p = _aia_fetch(url)
+                if p:
+                    fetched_pems.append(p)
+                    fetched_summary.append(url)
+            if len(fetched_pems) >= 5:
+                break  # depth cap
+        if fetched_pems:
+            extended_bundle = _bundle(fetched_pems)
+            for root_path, _ in roots:
+                if _try(root_path, extended_bundle):
+                    return Check(
+                        "EK certificate chains to a self-signed manufacturer root",
+                        True,
+                        f"validated against {root_path.name} via "
+                        f"{len(intermediates)} bundled + "
+                        f"{len(envelope_pems)} envelope + "
+                        f"{len(fetched_pems)} AIA-fetched intermediate(s) "
+                        f"[{', '.join(fetched_summary)}]")
+
     return Check(
         "EK certificate chains to a self-signed manufacturer root",
         False,
         "no self-signed root anchors this EK cert.\n"
-        f"       EK issuer     : {ek_cert.issuer.rfc4514_string()}\n"
         f"       roots tried   : {len(roots)} "
         f"({', '.join(p.name for p,_ in roots)})\n"
-        f"       intermediates : {len(intermediates)}, none completed.")
+        f"       bundled mids  : {len(intermediates)}, AIA: "
+        f"{'enabled' if aia_enabled else 'disabled'}")
 
 
 # ----------------------------------------------------------------------
@@ -259,64 +456,58 @@ def _verify_pcr15_replay(envelope):
 
 
 # ----------------------------------------------------------------------
-# 6. seq=0 event commits to node-message-id
+# 6. PCR-15 event commits to node-message-id
 # ----------------------------------------------------------------------
 def _verify_node_msg_binding(envelope):
     events = _pcr15_events_in_order(envelope)
     claimed = envelope.get("node-message-id")
     if not claimed:
-        return Check("PCR 15 seq=0 commits to node-message-id",
+        return Check("PCR 15 event commits to node-message-id",
                      False, "no node-message-id in envelope")
     if not events:
-        return Check("PCR 15 seq=0 commits to node-message-id",
+        return Check("PCR 15 event commits to node-message-id",
                      False, "no PCR-15 events in runtime-event-log")
-    e0 = events[0]
-    if e0.get("event-type") != "EV_HYPERBEAM_NODE_IDENTITY_EXTEND":
+    matches = [e for e in events if e.get("digest") == claimed]
+    if not matches:
         return Check(
-            "PCR 15 seq=0 commits to node-message-id",
+            "PCR 15 event commits to node-message-id",
             False,
-            f"seq=0 event-type is {e0.get('event-type')!r}, expected "
-            "EV_HYPERBEAM_NODE_IDENTITY_EXTEND")
-    if e0.get("digest") != claimed:
-        return Check(
-            "PCR 15 seq=0 commits to node-message-id",
-            False,
-            f"seq=0 digest={e0.get('digest')[:16]}... vs "
-            f"node-message-id={claimed[:16]}...")
+            f"no PCR-15 event digest matches node-message-id "
+            f"{claimed[:16]}...")
+    e = matches[0]
     return Check(
-        "PCR 15 seq=0 commits to node-message-id",
+        "PCR 15 event commits to node-message-id",
         True,
-        f"seq=0 EV_HYPERBEAM_NODE_IDENTITY_EXTEND digest "
+        f"seq={e.get('seq')} {e.get('event-type')} digest "
         f"{claimed[:16]}... matches node-message-id")
 
 
 # ----------------------------------------------------------------------
-# 7. seq=1 event commits to AK pub PEM (paper P5 binding)
+# 7. EV_HYPERBEAM_KEY_PUBKEY_EXTEND commits to AK pub PEM (paper P5)
 # ----------------------------------------------------------------------
 def _verify_ak_pubkey_binding(envelope):
     events = _pcr15_events_in_order(envelope)
-    if len(events) < 2:
-        return Check("PCR 15 seq=1 commits to AK pub PEM (paper P5)",
-                     False, f"only {len(events)} PCR-15 event(s); need ≥2")
-    e1 = events[1]
-    if e1.get("event-type") != "EV_HYPERBEAM_KEY_PUBKEY_EXTEND":
+    binders = [e for e in events
+               if e.get("event-type") == "EV_HYPERBEAM_KEY_PUBKEY_EXTEND"]
+    if not binders:
         return Check(
-            "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+            "PCR 15 commits to AK pub PEM (paper P5)",
             False,
-            f"seq=1 event-type is {e1.get('event-type')!r}, expected "
-            "EV_HYPERBEAM_KEY_PUBKEY_EXTEND")
+            "no EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in PCR-15 log")
     ak_pem = envelope["ak-pub-pem"].encode()
     expected_digest = b64url_encode(hashlib.sha256(ak_pem).digest())
-    if e1.get("digest") != expected_digest:
+    matches = [e for e in binders if e.get("digest") == expected_digest]
+    if not matches:
         return Check(
-            "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+            "PCR 15 commits to AK pub PEM (paper P5)",
             False,
-            f"seq=1 digest={e1.get('digest')[:16]}... vs "
+            f"EV_HYPERBEAM_KEY_PUBKEY_EXTEND digests do not match "
             f"sha256(ak-pub-pem)={expected_digest[:16]}...")
+    e = matches[0]
     return Check(
-        "PCR 15 seq=1 commits to AK pub PEM (paper P5)",
+        "PCR 15 commits to AK pub PEM (paper P5)",
         True,
-        f"seq=1 EV_HYPERBEAM_KEY_PUBKEY_EXTEND digest "
+        f"seq={e.get('seq')} EV_HYPERBEAM_KEY_PUBKEY_EXTEND digest "
         f"{expected_digest[:16]}... matches sha256(ak-pub-pem)")
 
 
@@ -350,7 +541,7 @@ def _verify_node_msg_shape(envelope):
 # ----------------------------------------------------------------------
 # Driver
 # ----------------------------------------------------------------------
-def verify(envelope, roots_dir):
+def verify(envelope, roots_dir, aia_enabled=True):
     if envelope.get("lapee-attestation-version") != EXPECTED_VERSION:
         return [Check(
             f"envelope version is exactly {EXPECTED_VERSION!r}",
@@ -358,7 +549,10 @@ def verify(envelope, roots_dir):
             f"got {envelope.get('lapee-attestation-version')!r}")]
 
     return [
-        _verify_cert_chain(envelope["ek-cert-pem"], roots_dir),
+        _verify_cert_chain(envelope["ek-cert-pem"], roots_dir,
+                           envelope_chain_pem=envelope.get(
+                               "ek-cert-chain-pem", ""),
+                           aia_enabled=aia_enabled),
         *_verify_quote(envelope),
         _verify_pcr15_replay(envelope),
         _verify_node_msg_binding(envelope),
@@ -377,18 +571,29 @@ def main():
                     help="path to a LapEE attestation envelope JSON "
                          "(either /attestation-json or the bundled "
                          "/attestation form -- both are accepted)")
-    # Default to the directory that ships with this repo (the
-    # `fetch-ek-root-cas.sh' script populates it from keylime's
-    # tpm_cert_store). Override on the cmdline if you maintain a
-    # separate trust bundle.
-    _default_roots = pathlib.Path(__file__).resolve().parent / "root-cas"
+    # Default to the runtime trust corpus baked into the LapEE node
+    # image. `scripts/fetch-ek-root-cas.sh' populates it from keylime's
+    # tpm_cert_store. Pointing both verifiers at the same directory
+    # means one refresh updates the LapEE runtime and this auditor in
+    # lockstep -- no parallel corpora to drift apart. Override on the
+    # cmdline if you maintain a separate trust bundle.
+    _default_roots = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "hyperbeam-overlay" / "priv" / "tpm-interpret" / "root-cas"
+    )
     ap.add_argument("--roots-dir",
                     default=str(_default_roots),
                     help="directory of candidate root-CA PEMs. Only "
                          "self-signed certificates are treated as trust "
                          "anchors; all others become untrusted "
-                         "intermediates. (default: ./root-cas next to "
-                         "verifier_hb.py)")
+                         "intermediates. (default: the LapEE runtime "
+                         "corpus at hyperbeam-overlay/priv/"
+                         "tpm-interpret/root-cas/)")
+    ap.add_argument("--no-aia-fetch", action="store_true",
+                    help="disable AIA caIssuers fetching when the local "
+                         "corpus + envelope-supplied intermediates do not "
+                         "complete the chain. Use for offline / "
+                         "hermetic audits.")
     args = ap.parse_args()
 
     raw = json.loads(pathlib.Path(args.envelope).read_text())
@@ -411,7 +616,8 @@ def main():
     print(f"  tpm-session-mode    : {envelope.get('tpm-session-mode')}")
     print()
 
-    results = verify(envelope, args.roots_dir)
+    results = verify(envelope, args.roots_dir,
+                     aia_enabled=not args.no_aia_fetch)
     for r in results:
         print(r)
     ok = all(r.ok for r in results)

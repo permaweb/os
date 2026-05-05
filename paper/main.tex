@@ -485,7 +485,7 @@ as memory corruption, not a usable term). Probabilistic.
 allocator carriers to further suppress address-reuse. Probabilistic.
 
 \textbf{(3) TPM-backed counters for load-bearing invariants.} Where
-anti-replay must be cryptographic, \texttt{\~{}tpm2@2.0a} exposes
+anti-replay must be cryptographic, \texttt{\~{}tpm@2.0a} exposes
 volatile PCR extend (within-session freshness) and NV counter with
 PolicyPCR (monotonic across reboots, tens of ms per increment,
 incrementable
@@ -573,7 +573,7 @@ hardened symbol set described in \S\ref{sec:architecture}, the
 HyperBEAM release with the \texttt{lapee\_tpm} NIF over libtss2, the
 LapEE init script, and Intel/MediaTek WiFi userspace are packed into
 one signed UKI ($\sim$73 MB) on a UEFI-bootable USB image. The
-\texttt{\~{}tpm2@2.0a} device wraps tpm2-tss~\cite{tpm2-tss} for
+\texttt{\~{}tpm@2.0a} device wraps tpm2-tss~\cite{tpm2-tss} for
 quote, sign, PCR-extend, NV ops, and event-log-read, with HMAC +
 AES-128-CFB parameter-encrypted sessions on every TPM operation that
 touches sensitive state. Operator bring-up is three commands: enroll
@@ -586,7 +586,7 @@ running as PID 2.
 \paragraph{Demonstrated boot.} A Framework 13 (13th Gen Intel Core,
 Nuvoton dTPM, INSYDE H2O 03.04) boots from a 1 GB USB stick to
 attestation-serving in roughly 25 seconds on a cold cache. The
-envelope returned at \texttt{/\~{}tpm2@2.0a/attestation} is 105 KB
+envelope returned at \texttt{/\~{}tpm@2.0a/attestation} is 105 KB
 and contains the EK certificate read from TPM NV at handle
 \texttt{0x01C00002} (1.2 KB; chain-validated against the Nuvoton
 ECC521 root via the ECC384 Leaf CA), the AK public PEM
@@ -643,7 +643,7 @@ hardware today.
 
 \vspace{0.4em}
 \noindent\footnotesize\textbf{Availability.} Build recipes and the
-\texttt{\~{}tpm2@2.0a} device ship in the LapEE repository root;
+\texttt{\~{}tpm@2.0a} device ship in the LapEE repository root;
 the second verifier sits next to them under
 \texttt{secondary-external-verifier/}.
 

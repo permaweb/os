@@ -28,18 +28,33 @@
 %%% integration with AO-Core hook dispatch.
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
-         attestation/3, boot_attestation/3]).
+         attestation/3, boot_attestation/3, credential_subject/3,
+         activate_credential/3, activate_credential_secret/2,
+         verify_peer/3]).
 -export([verify/3]).
+-export([make_credential_for_subject/2]).
 -export([event_log/1]).
+%% Exposed for tests + auditors that want to drive chain validation
+%% (including the AIA fallback) directly without going through verify/3.
+-export([validate_ek_chain/3, validate_ek_chain/4]).
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 %% Default PCR that HyperBEAM extends with the node-message identity.
 -define(NODE_IDENTITY_PCR, 15).
+%% PCRs that gate the AK. PCR 15 is deliberately excluded because LapEE
+%% extends it with runtime node/subject evidence after AK creation.
+-define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14]).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
+-define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
+-define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
+-define(TPM_CC_POLICY_OR, 16#00000171).
+-define(TPM_CC_POLICY_PCR, 16#0000017F).
 -define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
+-define(PEER_ATTESTATION_PREFIX, <<"~tpm@2.0a/peer-attestations">>).
+-define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
 %%%============================================================================
 %%% Device API information
@@ -56,6 +71,9 @@ info(_) ->
                 <<"pcr-read">>,
                 <<"attestation">>,
                 <<"boot-attestation">>,
+                <<"credential-subject">>,
+                <<"activate-credential">>,
+                <<"verify-peer">>,
                 <<"verify">>
             ]
     }.
@@ -137,6 +155,44 @@ info(_Base, _Req, _Opts) ->
                       "subject ID, quotes the selected PCRs, signs the full "
                       "message, stores it by signed ID, and links the stable "
                       "boot-attestation path to that signed ID.">>
+            },
+            <<"credential-subject">> => #{
+                <<"description">> =>
+                    <<"Return the public TPM material needed for "
+                      "TPM2_MakeCredential: EK certificate and public area, "
+                      "AK public area, and the AK Name.">>
+            },
+            <<"activate-credential">> => #{
+                <<"description">> =>
+                    <<"Run TPM2_ActivateCredential with the node's loaded AK "
+                      "and EK. Used by verifiers and green-zone admission to "
+                      "prove the AK and EK are resident in the same TPM. The "
+                      "HTTP endpoint returns a MAC proof, not the recovered "
+                      "secret; local callers that need the secret use the "
+                      "Erlang activate_credential_secret/2 API.">>,
+                <<"request">> => #{
+                    <<"credential-blob">> =>
+                        <<"base64url TPM2B_ID_OBJECT from MakeCredential">>,
+                    <<"secret">> =>
+                        <<"base64url TPM2B_ENCRYPTED_SECRET from "
+                          "MakeCredential">>
+                }
+            },
+            <<"verify-peer">> => #{
+                <<"description">> =>
+                    <<"Fetch a peer boot-attestation and credential subject, "
+                      "verify both the cached boot evidence and a fresh "
+                      "nonce-bound attestation, check EK certificate/public "
+                      "consistency, complete MakeCredential/ActivateCredential, "
+                      "then sign and cache a public peer-attestation "
+                      "containing the verified peer material, freshness proof, "
+                      "scope, validity, and activation transcript.">>,
+                <<"request">> => #{
+                    <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>,
+                    <<"peer-attestation-ttl-seconds">> =>
+                        <<"Optional positive integer validity window. If "
+                          "absent, the signed attestation has no upper expiry.">>
+                }
             }
         }
     },
@@ -365,18 +421,10 @@ quote(_Base, Req, Opts) ->
         {ok, AkTr} ->
             case nif_quote(AkTr, Pcrs, Nonce) of
                 {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
+                    QuoteBody = quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                     {ok, #{
                         <<"status">> => 200,
-                        <<"body">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)]),
+                        <<"body">> => QuoteBody#{
                             <<"ak-pub-pem">> => ak_pub_pem(Opts)
                         }
                     }};
@@ -414,14 +462,13 @@ pcr_read(_Base, Req, Opts) ->
 %% what one HyperBEAM node uses to verify a peer, intended to be
 %% reached via:
 %%
-%%   ~relay@1.0/call&relay-path="http://PEER:PORT/~tpm2@2.0a/attestation"
-%%       /verify~tpm2@2.0a
+%%   ~relay@1.0/call&relay-path="http://PEER:PORT/~tpm@2.0a/attestation"
+%%       /verify~tpm@2.0a
 %%
 %% `Base' is the attestation envelope (same shape emitted by
 %% `attestation/3'). Options in `Req':
-%%   trusted-ca-pem : PEM bytes of the TPM vendor root CA to trust
-%%                    for the EK cert chain. Defaults to the value of
-%%                    `lapee_tpm_ca_cert' in `Opts' (a file path).
+%%   trusted-ca : base64url PEM bytes of the TPM vendor root CA to trust.
+%%                Defaults to `lapee_tpm_ca_cert' in `Opts' (a file path).
 %%
 %% Return shape (always 200 -- the `verified' bool is the real verdict):
 %%   verified : boolean
@@ -429,15 +476,18 @@ pcr_read(_Base, Req, Opts) ->
 %%   checks   : list of per-check reports in stable order
 %%   Each check: #{ name, ok, detail }
 verify(Base, Req, Opts) ->
-    Envelope = resolve_envelope(Base, Req, Opts),
+    Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
     TrustedCaPem = resolve_trusted_ca(Req, Opts),
-    CaSource = trust_anchor_source(Req, Opts, TrustedCaPem),
+    CaSource = trust_anchor_source(Req, TrustedCaPem),
     Checks = [
-        safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem) end,
+        safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem, Opts) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
                    <<"core">>),
-        safely_run(fun() -> chk_quote(Envelope) end,
+        safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
                    <<"TPM2_Quote signature + pcrDigest + nonce all valid">>,
+                   <<"core">>),
+        safely_run(fun() -> chk_ak_policy_bound(Envelope) end,
+                   <<"AK authPolicy is PCR-bound to the quoted boot state">>,
                    <<"core">>),
         safely_run(fun() -> chk_event_log_replay(Envelope) end,
                    <<"Runtime event log replay of PCR 15 matches quoted value">>,
@@ -488,27 +538,70 @@ verify(Base, Req, Opts) ->
         }
     }}.
 
+normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
+    case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
+        Body when is_map(Body) ->
+            case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
+                Tpm when is_map(Tpm) -> normalise_attestation(Body, Opts);
+                _ -> normalise_attestation_body(Envelope, Opts)
+            end;
+        _ -> normalise_attestation_body(Envelope, Opts)
+    end;
+normalise_attestation(Other, _Opts) ->
+    Other.
+
+normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
+    case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
+        Tpm when is_map(Tpm) ->
+            Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
+            ExtendedSubject =
+                hb_maps:get(<<"extended-subject">>, Tpm, undefined, #{}),
+            LegacyNodeID =
+                case Node of
+                    M1 when is_map(M1) ->
+                        hb_util:human_id(
+                            hb_util:native_id(
+                                hb_message:id(M1, all, Opts)));
+                    _ -> undefined
+                end,
+            NodeID =
+                case ExtendedSubject of
+                    B when is_binary(B), byte_size(B) > 0 -> B;
+                    _ -> LegacyNodeID
+                end,
+            Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
+            Tpm#{
+                <<"lapee-attestation-version">> =>
+                    hb_maps:get(<<"lapee-attestation-version">>,
+                                Envelope, <<"1.0">>, #{}),
+                <<"tpm-quote">> => Quote,
+                <<"node-message">> => Node,
+                <<"node-message-id">> => NodeID,
+                <<"wallet-address">> =>
+                    case Node of
+                        M2 when is_map(M2) ->
+                            hb_maps:get(<<"address">>, M2, null, #{});
+                        _ -> null
+                    end
+            };
+        _ -> Envelope
+    end.
+
 %% Classify which source produced the trust anchor actually used
 %% by `resolve_trusted_ca/2'. Returns a binary: "request", "node_config",
 %% or "none" (when no anchor was found anywhere -- the chain check
 %% will then fail with a targeted "missing or unparseable" message).
-trust_anchor_source(Req, _Opts, <<>>) ->
-    case {hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}),
-          hb_maps:get(<<"trusted-ca-pem">>, Req, undefined, #{})} of
-        {undefined, undefined} -> <<"none">>;
-        _ -> <<"request_but_empty">>
-    end;
-trust_anchor_source(Req, _Opts, _Pem) ->
-    case {hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}),
-          hb_maps:get(<<"trusted-ca-pem">>, Req, undefined, #{})} of
+trust_anchor_source(Req, Pem) ->
+    case {hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}), Pem} of
+        {undefined, <<>>} -> <<"none">>;
+        {_Value, <<>>} -> <<"request_but_empty">>;
         {B, _} when is_binary(B), byte_size(B) > 0 -> <<"request">>;
-        {_, P} when is_binary(P), byte_size(P) > 0 -> <<"request">>;
         _ -> <<"node_config">>
     end.
 
-%% Wrap any check in a try/catch so one misformed field doesn't take
+%% Wrap any check in a try/catch so one malformed field doesn't take
 %% down the whole verifier -- the relevant check just becomes `ok=false,
-%% detail=<exception info>'.
+%% detail=exception.
 safely_run(F, Name, Severity) ->
     try F() of
         {ok, Detail}    -> #{ <<"name">> => Name,
@@ -520,12 +613,10 @@ safely_run(F, Name, Severity) ->
                               <<"detail">> => Detail,
                               <<"severity">> => Severity }
     catch
-        Class:Reason:Stack ->
+        _:_ ->
             #{ <<"name">> => Name,
                <<"ok">> => false,
-               <<"detail">> =>
-                    iolist_to_binary(io_lib:format(
-                        "exception ~p:~p at ~p", [Class, Reason, Stack])),
+               <<"detail">> => <<"exception">>,
                <<"severity">> => Severity }
     end.
 
@@ -537,7 +628,7 @@ safely_run(F, Name, Severity) ->
 %%   3. If Base has a `body' key whose value has
 %%      `lapee_attestation_version', unwrap it (the common case:
 %%      verify is invoked as the second segment of
-%%      `.../attestation/verify~tpm2@2.0a' and Base is the response
+%%      `.../attestation/verify~tpm@2.0a' and Base is the response
 %%      message produced by `attestation/3').
 %% Reviewer pass 10 fuzzer: guard on `is_map(Base)' so a
 %% non-map Base (list, binary, atom) does not crash
@@ -565,39 +656,15 @@ is_envelope(M) when is_map(M) ->
 is_envelope(_) ->
     false.
 
-%% Resolve the trust anchor in priority order:
-%%
-%%   1. `Req/trusted-ca'     -- base64url-encoded PEM bytes (the
-%%                             HyperBEAM wire convention; the safe
-%%                             form over URL-encoded GET).
-%%   2. `Req/trusted-ca-pem' -- raw PEM text (back-compat; unsafe
-%%                             over URL-encoded GET because `+' is
-%%                             treated as literal `+', not space).
-%%   3. Opts/`lapee_tpm_ca_cert' -- node-configured CA PEM path.
-%%                             Default `/etc/lapee/tpm-ca.crt'.
-%%
-%% Keeping BOTH forms in sync across verify / verify-peer / the
-%% chain-URL path is essential: an earlier version only handled
-%% `trusted-ca-pem' here, so `.../verify~tpm-interpret@1.0?trusted-
-%% ca=<rogue-b64>' silently fell back to the node's configured CA
-%% and rubber-stamped the caller's rogue anchor as "ok" because
-%% the legitimate CA actually did verify. A rogue-CA-with-same-CN
-%% adversarial test now catches that.
 resolve_trusted_ca(Req, Opts) ->
     case hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 ->
             try hb_util:decode(B) of
                 Decoded when is_binary(Decoded), byte_size(Decoded) > 0 ->
                     Decoded;
-                _ -> resolve_trusted_ca_pem(Req, Opts)
-            catch _:_ -> resolve_trusted_ca_pem(Req, Opts)
+                _ -> <<>>
+            catch _:_ -> <<>>
             end;
-        _ -> resolve_trusted_ca_pem(Req, Opts)
-    end.
-
-resolve_trusted_ca_pem(Req, Opts) ->
-    case hb_maps:get(<<"trusted-ca-pem">>, Req, undefined, Opts) of
-        Pem when is_binary(Pem), byte_size(Pem) > 0 -> Pem;
         _ -> resolve_trusted_ca_from_config(Opts)
     end.
 
@@ -621,37 +688,18 @@ resolve_trusted_ca_from_config(Opts) ->
 %% implementation -- was a rubber stamp: pkix would surface
 %% `{bad_cert, selfsigned_peer}` for a rogue EK and the callback
 %% would tell it "that's fine", defeating the whole chain check.
-chk_ek_chain(Envelope, TrustedCaPem) ->
-    EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, #{}),
-    case {decode_pem_cert(EkPem), decode_pem_cert(TrustedCaPem)} of
-        {{ok, EkDer}, {ok, CaDer}} ->
-            %% pkix_decode_cert on the CA can raise if the PEM
-            %% structurally parsed but the DER is malformed (ASN.1
-            %% decode errors). Catch here so the check cleanly
-            %% returns {error, _} with a useful message instead of
-            %% bubbling as a raw exception.
-            try public_key:pkix_decode_cert(CaDer, otp) of
-                CaOtp ->
-                    case public_key:pkix_path_validation(
-                            CaOtp, [EkDer],
-                            [{verify_fun, ek_chain_verify_fun()}]) of
-                        {ok, _} ->
-                            {ok, <<"OpenSSL pkix_path_validation ok">>};
-                        {error, Why} ->
-                            {error, diagnose_chain_failure(Why, EkDer, CaDer)}
-                    end
-            catch
-                Class:Reason ->
-                    {error,
-                        iolist_to_binary(io_lib:format(
-                            "trusted CA is structurally PEM-shaped but "
-                            "not a valid DER certificate (~p:~p); likely "
-                            "corrupted over the wire (e.g. URL-encoding "
-                            "mangled a PEM boundary). Use the `trusted-ca' "
-                            "key with base64url-encoded PEM bytes for "
-                            "unambiguous transport.",
-                            [Class, Reason]))}
-            end;
+chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
+    EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, Opts),
+    ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, Opts),
+    case {decode_pem_cert(EkPem), decode_pem_certs(TrustedCaPem)} of
+        {{ok, EkDer}, {ok, TrustedDers}} ->
+            PeerChainDers =
+                case decode_pem_certs(ChainPem) of
+                    {ok, D} -> D;
+                    {error, empty} -> [];
+                    {error, _} -> []
+                end,
+            validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts);
         {_, {error, _}} ->
             {error, <<"trusted CA missing or unparseable; set "
                       "`lapee_tpm_ca_cert' in node config or pass "
@@ -661,6 +709,238 @@ chk_ek_chain(Envelope, TrustedCaPem) ->
             {error, iolist_to_binary(io_lib:format("ek_cert_pem invalid: ~p",
                                                     [Why]))}
     end.
+
+validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
+    validate_ek_chain(EkDer, PeerChainDers, TrustedDers, #{}).
+validate_ek_chain(_EkDer, _PeerChainDers, [], _Opts) ->
+    {error, <<"trusted CA missing or unparseable">>};
+validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
+    case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
+        {ok, _} = Ok -> Ok;
+        {error, Reasons} ->
+            %% Local roots + envelope-supplied intermediates didn't
+            %% close the chain. Try AIA caIssuers walking from the
+            %% leaf upward (e.g. Intel ODCA's per-SoC issuing CAs are
+            %% only published at tsci.intel.com and are not part of
+            %% the keylime corpus). Disabled-by-config short-circuits
+            %% to the original error.
+            case lapee_aia:enabled(Opts) of
+                false ->
+                    {error, render_chain_failure(Reasons, TrustedDers,
+                                                 <<"AIA disabled">>)};
+                true ->
+                    case extend_chain_via_aia(EkDer, PeerChainDers,
+                                              TrustedDers, Opts) of
+                        {extended, ExtendedChainDers, FetchSummary} ->
+                            case attempt_chain(EkDer, ExtendedChainDers,
+                                               TrustedDers) of
+                                {ok, Detail} ->
+                                    {ok, iolist_to_binary([
+                                        Detail, <<" [via AIA: ">>,
+                                        FetchSummary, <<"]">>])};
+                                {error, Reasons2} ->
+                                    {error,
+                                        render_chain_failure(
+                                            Reasons2, TrustedDers,
+                                            iolist_to_binary([
+                                                <<"AIA fetched ">>,
+                                                FetchSummary,
+                                                <<", chain still invalid">>
+                                            ]))}
+                            end;
+                        {no_extension, Why} ->
+                            {error, render_chain_failure(
+                                Reasons, TrustedDers, Why)}
+                    end
+            end
+    end.
+
+attempt_chain(EkDer, PeerChainDers, TrustedDers) ->
+    Attempts =
+        [
+            validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, Anchor)
+        ||
+            Anchor <- TrustedDers
+        ],
+    case [Detail || {ok, Detail} <- Attempts] of
+        [Detail | _] -> {ok, Detail};
+        [] -> {error, [Reason || {error, Reason} <- Attempts]}
+    end.
+
+render_chain_failure(Reasons, TrustedDers, AiaNote) ->
+    iolist_to_binary(io_lib:format(
+        "chain invalid for all ~B trusted anchor candidate(s) (~s): ~p",
+        [length(TrustedDers), AiaNote, Reasons])).
+
+%% Walk the leaf -> known-intermediates list from the bottom up,
+%% asking each cert's AIA extension for its issuer URL and fetching
+%% any cert that isn't already in the candidate set. Stops when the
+%% next cert's issuer matches a TrustedDer subject, when AIA returns
+%% nothing fetchable, or after `?AIA_MAX_DEPTH' hops -- whichever
+%% comes first.
+-define(AIA_MAX_DEPTH, 5).
+
+extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
+    aia_walk([EkDer | PeerChainDers], PeerChainDers, TrustedDers,
+             Opts, ?AIA_MAX_DEPTH, []).
+
+aia_walk(_Trail, AccChain, _Trusted, _Opts, 0, Fetches) ->
+    summarise_aia_walk(AccChain, Fetches, <<"max-depth reached">>);
+aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
+    %% Use the most-recently-added cert in the trail as the "current"
+    %% subject whose issuer we'd like to find next.
+    Tip = hd(lists:reverse(Trail)),
+    case aia_fetch_for(Tip, AccChain, Trusted, Opts) of
+        skip ->
+            summarise_aia_walk(AccChain, Fetches, <<"chain already reaches a root">>);
+        {fetched, NewIssuerDer, Url} ->
+            aia_walk(
+                Trail ++ [NewIssuerDer],
+                AccChain ++ [NewIssuerDer],
+                Trusted, Opts,
+                Budget - 1,
+                [Url | Fetches]
+            );
+        {error, Why} ->
+            summarise_aia_walk(AccChain, Fetches,
+                iolist_to_binary(io_lib:format("AIA hop failed: ~p", [Why])))
+    end.
+
+summarise_aia_walk(_AccChain, [], Why) ->
+    {no_extension, Why};
+summarise_aia_walk(AccChain, Fetches, _Why) ->
+    Summary = iolist_to_binary(io_lib:format(
+        "fetched ~B intermediate(s)", [length(Fetches)])),
+    {extended, AccChain, Summary}.
+
+%% For a given subject DER, decide whether AIA fetch is needed and, if
+%% so, fetch and return the issuer. Returns:
+%%   skip                         - issuer matches a known trusted root
+%%   {fetched, IssuerDer, Url}    - fetched a new intermediate
+%%   {error, Why}                 - AIA had no URL or fetch failed.
+aia_fetch_for(Der, AccChain, Trusted, Opts) ->
+    try public_key:pkix_decode_cert(Der, otp) of
+        Otp ->
+            Tbs = Otp#'OTPCertificate'.tbsCertificate,
+            IssuerDn = public_key:pkix_normalize_name(
+                Tbs#'OTPTBSCertificate'.issuer),
+            case issuer_known(IssuerDn, AccChain ++ Trusted) of
+                true -> skip;
+                false ->
+                    case lapee_aia:caissuers_urls(Otp) of
+                        [] -> {error, no_aia_url};
+                        Urls ->
+                            try_aia_urls(Urls, IssuerDn, Opts)
+                    end
+            end
+    catch _:Reason -> {error, {decode_failed, Reason}}
+    end.
+
+try_aia_urls([], _IssuerDn, _Opts) -> {error, all_aia_urls_failed};
+try_aia_urls([Url | Rest], IssuerDn, Opts) ->
+    case lapee_aia:fetch_issuer(Url, Opts) of
+        {ok, IssuerDer} ->
+            try
+                Otp = public_key:pkix_decode_cert(IssuerDer, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                case Subject =:= IssuerDn of
+                    true -> {fetched, IssuerDer, Url};
+                    false -> try_aia_urls(Rest, IssuerDn, Opts)
+                end
+            catch _:_ -> try_aia_urls(Rest, IssuerDn, Opts)
+            end;
+        _ -> try_aia_urls(Rest, IssuerDn, Opts)
+    end.
+
+issuer_known(IssuerDn, Ders) ->
+    lists:any(
+        fun(Der) ->
+            try
+                Otp = public_key:pkix_decode_cert(Der, otp),
+                Tbs = Otp#'OTPCertificate'.tbsCertificate,
+                Subject = public_key:pkix_normalize_name(
+                    Tbs#'OTPTBSCertificate'.subject),
+                Subject =:= IssuerDn
+            catch _:_ -> false
+            end
+        end,
+        Ders).
+
+validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
+    try public_key:pkix_decode_cert(AnchorDer, otp) of
+        AnchorOtp ->
+            validate_ek_chain_paths(
+                AnchorOtp,
+                EkDer,
+                candidate_intermediate_chains(
+                    PeerChainDers, TrustedDers, AnchorDer),
+                AnchorDer)
+    catch
+        Class:Reason ->
+            {error,
+                iolist_to_binary(io_lib:format(
+                    "trusted CA bundle contains a structurally PEM-shaped "
+                    "entry that is not a valid DER certificate (~p:~p); "
+                    "likely corrupted over the wire. Use `trusted-ca' with "
+                    "base64url-encoded PEM bytes for unambiguous transport.",
+                    [Class, Reason]))}
+    end.
+
+candidate_intermediate_chains(PeerChainDers, TrustedDers, AnchorDer) ->
+    ExtraTrusted = [Der || Der <- TrustedDers, Der =/= AnchorDer],
+    unique_chains([
+        PeerChainDers,
+        PeerChainDers ++ ExtraTrusted
+    ]).
+
+unique_chains(Chains) ->
+    lists:foldl(
+        fun(Chain, Acc) ->
+            case lists:member(Chain, Acc) of
+                true -> Acc;
+                false -> Acc ++ [Chain]
+            end
+        end,
+        [],
+        Chains).
+
+validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
+    Attempts =
+        [
+            {Intermediates, Path,
+             public_key:pkix_path_validation(
+                AnchorOtp,
+                Path,
+                [{verify_fun, ek_chain_verify_fun()}])}
+        ||
+            Intermediates <- IntermediateChains,
+            Path <- ek_cert_path_orders(EkDer, Intermediates)
+        ],
+    case [{Intermediates, Result} || {Intermediates, _Path, {ok, _} = Result}
+                                <- Attempts] of
+        [{Intermediates, {ok, _}} | _] ->
+            {ok, iolist_to_binary(io_lib:format(
+                "pkix_path_validation ok using ~B intermediate "
+                "candidate(s)", [length(Intermediates)]))};
+        [] ->
+            Reasons = [
+                diagnose_chain_failure(Why, EkDer, AnchorDer)
+            ||
+                {_Intermediates, _Path, {error, Why}} <- Attempts
+            ],
+            {error, iolist_to_binary(io_lib:format(
+                "chain invalid across ~B path candidate(s): ~p",
+                [length(Attempts), Reasons]))}
+    end.
+
+ek_cert_path_orders(EkDer, Intermediates) ->
+    unique_chains([
+        lists:reverse(Intermediates) ++ [EkDer],
+        Intermediates ++ [EkDer],
+        [EkDer | Intermediates]
+    ]).
 
 %% Produce a targeted error message for common pkix_path_validation
 %% failures. The most confusing one in practice is `{bad_cert,
@@ -710,19 +990,13 @@ diagnose_chain_failure(Why, EkDer, CaDer) ->
 %% Mirrors `dev_tpm_interpret:ek_verify_fun/3' semantics (kept in
 %% sync deliberately; a divergence here would mean `dev_tpm2:verify/3'
 %% accepts a chain the parser-side `validate_ek_chain/3' rejects, or
-%% vice-versa). Two TCG OIDs are whitelisted as critical extensions
-%% that real-world EK certs always carry:
-%%
-%%   2.23.133.8.1    id-tcg-kp-EKCertificate  (EKU)
-%%   2.23.133.2.16   id-tcg-tpmSpecification  (spec-version attr)
-%%
-%% OTP's default path validator treats critical extensions it doesn't
-%% recognise as `{bad_cert, {not_supported_extension, _}}' -- without
-%% this whitelist, real Nuvoton / Infineon / STMicro EK certs all
-%% fail. Non-TCG critical extensions still fail. Non-critical
-%% extensions under the TCG arc `2.23.133.*' are accepted;
-%% non-TCG non-critical extensions fall through as `unknown' so
-%% pkix's own defaults apply.
+%% vice-versa). TCG EK-profile OIDs are metadata, so unknown critical
+%% and non-critical extensions under `2.23.133.*' are accepted while
+%% the cryptographic issuer/signature/path checks still run normally.
+%% TPM EK leaf certificates also legitimately carry keyEncipherment
+%% key usage plus the TCG EK EKU rather than the generic TLS leaf
+%% usages OTP expects; accept `invalid_key_usage' only for that exact
+%% EK-leaf shape.
 ek_chain_verify_fun() ->
     {fun ek_chain_verify_fun/3, []}.
 
@@ -732,10 +1006,14 @@ ek_chain_verify_fun(_, {bad_cert, {not_supported_extension, Ext}},
         #'Extension'{extnID = Id} -> Id;
         _ -> undefined
     end,
-    case ExtId of
-        {2, 23, 133, 8, 1}   -> {valid, UserState};
-        {2, 23, 133, 2, 16}  -> {valid, UserState};
-        _ -> {fail, {not_supported_extension, Ext}}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {fail, {not_supported_extension, Ext}}
+    end;
+ek_chain_verify_fun(Cert, {bad_cert, invalid_key_usage}, UserState) ->
+    case tpm_ek_leaf_cert(Cert) of
+        true -> {valid, UserState};
+        false -> {fail, invalid_key_usage}
     end;
 ek_chain_verify_fun(_, {bad_cert, Reason}, _UserState) ->
     {fail, Reason};
@@ -743,75 +1021,124 @@ ek_chain_verify_fun(_, {extension, #'Extension'{extnID = ExtId}},
                     UserState) ->
     %% Called for each non-critical unknown extension. Accept any
     %% OID under the TCG arc 2.23.133.x (EK metadata attributes).
-    case ExtId of
-        {2, 23, 133, _, _}    -> {valid, UserState};
-        {2, 23, 133, _, _, _} -> {valid, UserState};
-        _                     -> {unknown, UserState}
+    case is_tcg_oid(ExtId) of
+        true -> {valid, UserState};
+        false -> {unknown, UserState}
     end;
 ek_chain_verify_fun(_, valid, UserState)      -> {valid, UserState};
 ek_chain_verify_fun(_, valid_peer, UserState) -> {valid, UserState}.
 
+tpm_ek_leaf_cert(Cert) ->
+    try
+        Otp = case Cert of
+            #'OTPCertificate'{} -> Cert;
+            Der when is_binary(Der) -> public_key:pkix_decode_cert(Der, otp)
+        end,
+        Tbs = Otp#'OTPCertificate'.tbsCertificate,
+        Extensions = cert_extensions(Tbs),
+        extension_value(?'id-ce-basicConstraints', Extensions)
+            =:= #'BasicConstraints'{cA = false, pathLenConstraint = asn1_NOVALUE}
+            andalso lists:member(
+                ?TCG_EK_CERT_OID,
+                extension_value(?'id-ce-extKeyUsage', Extensions))
+    catch _:_ ->
+        false
+    end.
+
+is_tcg_oid(Oid) when is_tuple(Oid) ->
+    lists:prefix([2, 23, 133], tuple_to_list(Oid));
+is_tcg_oid(_) ->
+    false.
+
 %%---- check 2: quote signature + extraData + pcrDigest -----------------
-chk_quote(Envelope) ->
+chk_quote(Envelope, ExpectedNonce) ->
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
     AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
+    AkQualifiedName =
+        safe_decode(hb_maps:get(<<"ak-qualified-name">>, Envelope, <<>>, #{})),
     Quoted = hb_util:decode(hb_maps:get(<<"quoted">>, Q, <<>>, #{})),
     Sig    = hb_util:decode(hb_maps:get(<<"signature">>, Q, <<>>, #{})),
     Nonce  = hb_util:decode(hb_maps:get(<<"nonce">>, Q, <<>>, #{})),
     Sel    = hb_maps:get(<<"pcr-selection">>, Q, [], #{}),
     PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
 
-    %% Signature: RSA-PSS with SHA-256, salt 32 (matches the NIF).
-    case decode_pem_rsa_pub(AkPem) of
-        {ok, RSAPub} ->
-            case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
-                true ->
-                    chk_tpms_attest(Quoted, Nonce, Sel, PcrMap);
-                false ->
-                    {error, <<"RSA-PSS(SHA256) verify of TPMS_ATTEST failed">>}
-            end;
-        {error, Why} ->
-            {error, iolist_to_binary(io_lib:format("ak_pub_pem invalid: ~p",
-                                                    [Why]))}
+    case ExpectedNonce =/= undefined andalso Nonce =/= ExpectedNonce of
+        true ->
+            {error, <<"quote nonce does not match verifier challenge">>};
+        false ->
+            %% Signature: RSA-PSS with SHA-256, salt 32 (matches the NIF).
+            case decode_pem_rsa_pub(AkPem) of
+                {ok, RSAPub} ->
+                    case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
+                        true ->
+                            chk_tpms_attest(
+                                Quoted, Nonce, Sel, PcrMap,
+                                AkQualifiedName);
+                        false ->
+                            {error, <<"RSA-PSS(SHA256) verify of "
+                                      "TPMS_ATTEST failed">>}
+                    end;
+                {error, Why} ->
+                    {error, iolist_to_binary(
+                        io_lib:format("ak_pub_pem invalid: ~p", [Why]))}
+            end
     end.
 
 %% Parse TPMS_ATTEST: magic(4) + type(2) + qualifiedSigner(TPM2B) +
 %% extraData(TPM2B) + clockInfo(17) + firmwareVersion(8) +
 %% attested(TPMS_QUOTE_INFO = TPML_PCR_SELECTION + TPM2B_DIGEST).
-chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap) ->
+chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
+                ExpectedQualifiedSigner) ->
     try
-        <<_Magic:4/binary, _Type:2/binary, Rest0/binary>> = Quoted,
+        <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
+          Rest0/binary>> = Quoted,
         {QualifiedSigner, Rest1} = tpm2b(Rest0),
         {ExtraData, Rest2}       = tpm2b(Rest1),
-        _ = QualifiedSigner,
         %% clockInfo (17) + firmwareVersion (8) = 25 bytes
         <<_ClockFwInfo:25/binary, NSel:32/unsigned-big,
           SelAndDigest/binary>> = Rest2,
-        RestAfterSel = skip_pcr_selections(NSel, SelAndDigest),
+        {SignedSelections, RestAfterSel} =
+            parse_pcr_selections(NSel, SelAndDigest),
         {PcrDigest, _} = tpm2b(RestAfterSel),
-        case ExtraData of
-            ExpectedNonce ->
+        case {QualifiedSigner, ExtraData} of
+            {ExpectedQualifiedSigner, ExpectedNonce}
+                    when byte_size(ExpectedQualifiedSigner) > 0 ->
+                SignedIndices = signed_sha256_pcr_indices(SignedSelections),
+                ReportedIndices = normalize_pcr_indices(SelIndices),
+                case SignedIndices of
+                    ReportedIndices -> ok;
+                    _ ->
+                        throw({tpms_attest_error,
+                               <<"TPMS_ATTEST PCR selection does not match "
+                                 "reported pcr-selection">>})
+                end,
                 %% Verify pcrDigest = sha256(pcr_values concatenated in
-                %% selection order).
-                Computed = compute_pcr_digest(SelIndices, PcrMap),
+                %% the signed TPM PCR selection order.
+                Computed = compute_pcr_digest(SignedIndices, PcrMap),
                 case Computed of
                     PcrDigest ->
                         {ok,
                             iolist_to_binary(io_lib:format(
                                 "sig ok; extraData matches nonce (~B bytes); "
                                 "pcrDigest matches ~B reported PCRs",
-                                [byte_size(ExtraData), length(SelIndices)]))};
+                                [byte_size(ExtraData),
+                                 length(SignedIndices)]))};
                     _ ->
                         {error, <<"quote pcrDigest does not match "
                                   "sha256(pcr_values)">>}
                 end;
-            _ ->
+            {_, ExpectedNonce} ->
+                {error, <<"TPMS_ATTEST qualifiedSigner does not match "
+                          "attested AK qualified name">>};
+            {_, _} ->
                 {error,
                     iolist_to_binary(io_lib:format(
                         "extraData != nonce (got ~B bytes, expected ~B)",
                         [byte_size(ExtraData), byte_size(ExpectedNonce)]))}
         end
     catch
+        throw:{tpms_attest_error, Reason} ->
+            {error, Reason};
         error:{badmatch, _} ->
             {error, <<"TPMS_ATTEST parse error (truncated or wrong shape)">>}
     end.
@@ -819,10 +1146,43 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap) ->
 tpm2b(<<Size:16/unsigned-big, Payload:Size/binary, Rest/binary>>) ->
     {Payload, Rest}.
 
-skip_pcr_selections(0, Rest) -> Rest;
-skip_pcr_selections(N, <<_Hash:16/unsigned-big, SizeSelect:8/unsigned-big,
-                         _Selection:SizeSelect/binary, Rest/binary>>) ->
-    skip_pcr_selections(N - 1, Rest).
+parse_pcr_selections(Count, Bin) ->
+    parse_pcr_selections(Count, Bin, []).
+
+parse_pcr_selections(0, Rest, Acc) ->
+    {lists:reverse(Acc), Rest};
+parse_pcr_selections(N, <<Hash:16/unsigned-big, SizeSelect:8/unsigned-big,
+                          Selection:SizeSelect/binary, Rest/binary>>, Acc)
+        when N > 0 ->
+    parse_pcr_selections(
+        N - 1, Rest, [{Hash, pcr_select_indices(Selection)} | Acc]).
+
+pcr_select_indices(Selection) ->
+    pcr_select_indices(Selection, 0, []).
+
+pcr_select_indices(<<>>, _Base, Acc) ->
+    lists:reverse(Acc);
+pcr_select_indices(<<Byte:8/unsigned, Rest/binary>>, Base, Acc) ->
+    Bits = [Base + I || I <- lists:seq(0, 7),
+                        (Byte band (1 bsl I)) =/= 0],
+    pcr_select_indices(Rest, Base + 8, lists:reverse(Bits) ++ Acc).
+
+signed_sha256_pcr_indices(Selections) ->
+    case [Indices || {16#000B, Indices} <- Selections] of
+        [] ->
+            throw({tpms_attest_error,
+                   <<"TPMS_ATTEST has no SHA-256 PCR selection">>});
+        Lists ->
+            lists:append(Lists)
+    end.
+
+normalize_pcr_indices(Indices) when is_list(Indices) ->
+    lists:sort([normalize_pcr_index(I) || I <- Indices]);
+normalize_pcr_indices(_) ->
+    [].
+
+normalize_pcr_index(I) when is_integer(I) -> I;
+normalize_pcr_index(B) when is_binary(B) -> binary_to_integer(B).
 
 compute_pcr_digest(Indices, PcrMap) ->
     Concat =
@@ -837,6 +1197,76 @@ compute_pcr_digest(Indices, PcrMap) ->
             end,
             <<>>, Indices),
     crypto:hash(sha256, Concat).
+
+%%---- check 3: AK authPolicy binds the AK to quoted PCRs ---------------
+chk_ak_policy_bound(Envelope) ->
+    AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, #{})),
+    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
+    case tpm2b_public_auth_policy(AkPublic) of
+        {ok, <<>>} ->
+            {error, <<"AK authPolicy is empty">>};
+        {ok, Policy} when byte_size(Policy) =:= 32 ->
+            ExpectedPolicy = ak_policy_digest_result(?AK_POLICY_PCRS, PcrMap),
+            case ExpectedPolicy of
+                {ok, Policy} ->
+                    {ok, <<"AK authPolicy matches the LapEE PCR policy">>};
+                {missing_pcr, I} ->
+                    {error, iolist_to_binary(
+                        io_lib:format("quote omitted AK policy PCR ~B", [I]))};
+                invalid ->
+                    {error, <<"could not compute AK policy digest">>};
+                _ ->
+                    {error, <<"AK authPolicy does not match quoted PCR state">>}
+            end;
+        {ok, _} ->
+            {error, <<"AK authPolicy has unexpected size">>};
+        {error, Why} ->
+            {error, iolist_to_binary(
+                io_lib:format("bad AK TPMT_PUBLIC authPolicy: ~p", [Why]))}
+    end.
+
+ak_policy_digest(Pcrs, PcrMap) ->
+    PcrPolicy = policy_pcr_digest(Pcrs, PcrMap),
+    ActivatePolicy =
+        crypto:hash(
+            sha256,
+            <<PcrPolicy/binary,
+              ?TPM_CC_POLICY_COMMAND_CODE:32/unsigned-big,
+              ?TPM_CC_ACTIVATE_CREDENTIAL:32/unsigned-big>>),
+    crypto:hash(
+        sha256,
+        <<0:256, ?TPM_CC_POLICY_OR:32/unsigned-big,
+          PcrPolicy/binary, ActivatePolicy/binary>>).
+
+policy_pcr_digest(Pcrs, PcrMap) ->
+    PcrDigest = compute_pcr_digest(Pcrs, PcrMap),
+    Selection = policy_pcr_selection(Pcrs),
+    crypto:hash(sha256, <<0:256, ?TPM_CC_POLICY_PCR:32/unsigned-big,
+                          Selection/binary, PcrDigest/binary>>).
+
+policy_pcr_selection(Pcrs) ->
+    Selected = normalize_pcr_indices(Pcrs),
+    SelectBytes =
+        << <<(pcr_select_byte(Selected, Byte)):8/unsigned>>
+           || Byte <- lists:seq(0, 2) >>,
+    <<1:32/unsigned-big, 16#000B:16/unsigned-big, 3:8/unsigned-big,
+      SelectBytes/binary>>.
+
+pcr_select_byte(Pcrs, Byte) ->
+    lists:foldl(
+        fun(I, Acc) when I div 8 =:= Byte -> Acc bor (1 bsl (I rem 8));
+           (_, Acc) -> Acc
+        end,
+        0,
+        Pcrs).
+
+ak_policy_digest_result(Pcrs, PcrMap) ->
+    try {ok, ak_policy_digest(Pcrs, PcrMap)}
+    catch
+        throw:{missing_pcr, I} -> {missing_pcr, I};
+        _:_ -> invalid
+    end.
 
 %%---- check 3: event-log replay matches quoted PCR 15 ------------------
 %%
@@ -895,18 +1325,13 @@ int_pcr(V) when is_binary(V)  -> binary_to_integer(V).
 %% AK-signed quote cryptographically proves the AK pub was bound
 %% into this measured-boot session's PCR 15 trajectory.
 %%
-%% Reviewer 7 note: in the real boot sequence the on/start hook
-%% (which fires `EV_HYPERBEAM_NODE_IDENTITY_EXTEND' at seq 0) runs
-%% BEFORE the first `/attestation' request reaches `init_chain',
-%% so the AK-pub-extend lands at seq 1, not seq 0. The verifier
-%% does not pin seq position -- it only checks PRESENCE of an
-%% `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event with the right digest --
-%% so ordering is a documentation detail, not an enforcement one.
-%%
 %% Verifier: find an event in the runtime event log with
 %% event-type = `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' whose decoded digest
-%% equals `sha256(envelope.ak-pub-pem)'. The producer emits this at
-%% seq 0 via `extend_with_ak_pubkey/1' from `init_chain/1'.
+%% equals `sha256(envelope.ak-pub-pem)'. Position-agnostic: the
+%% producer emits this from `extend_with_ak_pubkey/1' inside
+%% `init_chain/1', and any later log entries (boot-subject extend,
+%% TCG log tip commitment, manual `extend/3' calls) do not displace
+%% the binding.
 %%
 %% Absent = paper property violated. An envelope without this event
 %% has no cryptographic proof that the AK pub is tied to the
@@ -1162,6 +1587,19 @@ decode_pem_cert(Pem) when is_binary(Pem) ->
         Other -> {error, {unexpected_pem_content, Other}}
     end.
 
+decode_pem_certs(<<>>) -> {error, empty};
+decode_pem_certs(Pem) when is_binary(Pem) ->
+    Certs =
+        [
+            Der
+        ||
+            {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)
+        ],
+    case Certs of
+        [] -> {error, empty};
+        _ -> {ok, Certs}
+    end.
+
 decode_pem_rsa_pub(<<>>) -> {error, empty};
 decode_pem_rsa_pub(Pem) when is_binary(Pem) ->
     %% Reviewer pass 13 (crypto primitives): removed a dead
@@ -1315,6 +1753,620 @@ boot_attestation_locked(Opts) ->
             end
     end.
 
+credential_subject(_Base, _Req, Opts) ->
+    case ensure_ak(Opts) of
+        {ok, _AkTr} ->
+            Subject = credential_subject_body(Opts),
+            {ok, #{
+                <<"status">> => 200,
+                <<"body">> => hb_message:commit(Subject, Opts)
+            }};
+        {error, Reason} ->
+            error_resp(500, <<"credential_subject_failed">>, Reason)
+    end.
+
+credential_subject_body(Opts) ->
+    #{
+        <<"type">> => <<"lapee-tpm-credential-subject">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => erlang:system_time(second),
+        <<"ek-cert-pem">> => ek_cert_pem(Opts),
+        <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
+        <<"ek-cert-source">> => ek_cert_source(),
+        <<"ek-cert-chain-diagnostics">> => ek_cert_chain_diagnostics(),
+        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+        <<"ek-public">> => ek_public(Opts),
+        <<"ek-name">> => ek_name(Opts),
+        <<"ek-qualified-name">> => ek_qualified_name(Opts),
+        <<"ak-pub-pem">> => ak_pub_pem(Opts),
+        <<"ak-public">> => ak_public(Opts),
+        <<"ak-name">> => ak_name(Opts),
+        <<"ak-qualified-name">> => ak_qualified_name(Opts),
+        <<"tpm-properties">> => tpm_properties()
+    }.
+
+activate_credential(_Base, Req, Opts) ->
+    with_ok(
+        fun() ->
+            {ok, CertInfo} = activate_credential_secret(Req, Opts),
+            Msg = hb_message:commit(
+                credential_activation_public_body(CertInfo, Req, Opts),
+                Opts),
+            #{<<"status">> => 200, <<"body">> => Msg}
+        end).
+
+activate_credential_secret(Credential, Opts) ->
+    CredentialBlob = decode_required(<<"credential-blob">>, Credential, Opts),
+    Secret = decode_required(<<"secret">>, Credential, Opts),
+    {ok, AkTr} = ensure_ak(Opts),
+    EKTr = persistent_term:get({dev_tpm2, ek_tr}),
+    case nif_activate_credential(AkTr, EKTr, CredentialBlob, Secret) of
+        {ok, CertInfo} -> {ok, CertInfo};
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"activate-credential">> => reason_to_text(Reason)}})
+    end.
+
+credential_activation_public_body(CertInfo, Credential, Opts) ->
+    Now = erlang:system_time(second),
+    AkName = ak_name(Opts),
+    #{
+        <<"type">> => <<"lapee-tpm-credential-activation">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => Now,
+        <<"ak-name">> => AkName,
+        <<"credential-secret-sha256">> =>
+            hb_util:encode(crypto:hash(sha256, CertInfo)),
+        <<"proof-alg">> => <<"HMAC-SHA256">>,
+        <<"credential-secret-proof">> =>
+            hb_util:encode(
+                credential_activation_proof(
+                    CertInfo, Credential, AkName, Now))
+    }.
+
+verify_peer(_Base, Req, Opts) ->
+    case peer_url(Req, Opts) of
+        undefined ->
+            error_resp(400, <<"missing_peer_url">>,
+                       <<"verify-peer requires `url' or `peer'.">>);
+        Url0 ->
+            Url = strip_trailing_slash(Url0),
+            case verify_peer_url(Url, Req, Opts) of
+                {ok, Signed} ->
+                    {ok, #{<<"status">> => 200, <<"body">> => Signed}};
+                {error, #{<<"status">> := _} = Body} ->
+                    {ok, Body};
+                {error, Reason} ->
+                    error_resp(502, <<"verify_peer_failed">>, Reason)
+            end
+    end.
+
+verify_peer_url(Url, Req, Opts) ->
+    with_ok(
+        fun() ->
+            Boot0 = lapee_http_json:get(
+                Url, <<"/~tpm@2.0a/boot-attestation">>, Opts),
+            Boot = resolve_subject_body(Boot0, Opts),
+            Subject0 =
+                lapee_http_json:get(
+                    Url, <<"/~tpm@2.0a/credential-subject">>, Opts),
+            Subject = resolve_subject_body(Subject0, Opts),
+            FreshNonce = crypto:strong_rand_bytes(32),
+            Fresh0 = lapee_http_json:get(
+                Url, fresh_attestation_path(FreshNonce), Opts),
+            Fresh = resolve_subject_body(Fresh0, Opts),
+            BootEnv = normalise_attestation(Boot, Opts),
+            FreshEnv = normalise_attestation(Fresh, Opts),
+            BootVerifyReq =
+                (maps:remove(<<"nonce">>, Req))#{<<"envelope">> => BootEnv},
+            {ok, #{<<"body">> := BootVerifyBody}} =
+                verify(BootEnv, BootVerifyReq, Opts),
+            case hb_maps:get(<<"verified">>, BootVerifyBody, false, #{}) of
+                true -> ok;
+                false ->
+                    throw({boot_attestation_error,
+                           #{<<"peer-boot-verification">> => BootVerifyBody}})
+            end,
+            FreshVerifyReq = Req#{
+                <<"envelope">> => FreshEnv,
+                <<"nonce">> => hb_util:encode(FreshNonce)
+            },
+            {ok, #{<<"body">> := FreshVerifyBody}} =
+                verify(FreshEnv, FreshVerifyReq, Opts),
+            case hb_maps:get(<<"verified">>, FreshVerifyBody, false, #{}) of
+                true -> ok;
+                false ->
+                    throw({boot_attestation_error,
+                           #{<<"peer-fresh-verification">> =>
+                                FreshVerifyBody}})
+            end,
+            ok = ensure_attestation_subjects_match(BootEnv, FreshEnv),
+            ok = ensure_subject_matches_boot(Subject, BootEnv),
+            ok = ensure_subject_matches_boot(Subject, FreshEnv),
+            ok = ensure_ak_public_matches_subject(Subject),
+            ok = ensure_ek_public_matches_cert(Subject),
+            Challenge = crypto:strong_rand_bytes(32),
+            Credential = make_credential_for_subject(Subject, Challenge),
+            Activation = activate_peer_credential(Url, Credential, Opts),
+            ok = ensure_activation_secret(
+                Activation, Credential, Challenge, Subject, Opts),
+            Now = erlang:system_time(second),
+            Signed = hb_message:commit(
+                #{
+                    <<"type">> => <<"green-zone-peer-attestation">>,
+                    <<"version">> => <<"1.0">>,
+                    <<"issued-at-unix">> => Now,
+                    <<"validity">> =>
+                        peer_attestation_validity(Now, Req, Opts),
+                    <<"peer-url">> => Url,
+                    <<"peer-scope">> =>
+                        peer_attestation_scope(
+                            Url, Boot, Fresh, Subject, Req, Opts),
+                    <<"peer-boot-attestation">> => Boot,
+                    <<"peer-fresh-attestation">> => Fresh,
+                    <<"peer-credential-subject">> => Subject,
+                    <<"boot-verification">> => BootVerifyBody,
+                    <<"verification">> => FreshVerifyBody,
+                    <<"freshness">> => #{
+                        <<"verified">> => true,
+                        <<"nonce-sha256">> =>
+                            hb_util:encode(
+                                crypto:hash(sha256, FreshNonce)),
+                        <<"fresh-attestation-id">> =>
+                            attestation_id(Fresh, Opts)
+                    },
+                    <<"credential-activation">> => #{
+                        <<"verified">> => true,
+                        <<"challenge-sha256">> =>
+                            hb_util:encode(crypto:hash(sha256, Challenge)),
+                        <<"credential-blob">> =>
+                            hb_maps:get(<<"credential-blob">>,
+                                        Credential, <<>>, #{}),
+                        <<"secret">> =>
+                            hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
+                        <<"response">> => Activation
+                    }
+                },
+                Opts),
+            ok = store_peer_attestation(Signed, Opts),
+            Signed
+        end).
+
+peer_url(Req, Opts) ->
+    first_defined([
+        hb_maps:get(<<"url">>, Req, undefined, Opts),
+        hb_maps:get(<<"peer">>, Req, undefined, Opts)
+    ]).
+
+strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
+    case binary:last(B) of
+        $/ -> binary:part(B, 0, byte_size(B) - 1);
+        _  -> B
+    end;
+strip_trailing_slash(B) ->
+    B.
+
+resolve_subject_body(Msg, Opts) when is_map(Msg) ->
+    case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
+        Body when is_map(Body) -> Body;
+        _ -> Msg
+    end;
+resolve_subject_body(Other, _Opts) ->
+    Other.
+
+make_credential_for_subject(Subject, Secret) ->
+    EkPublic = hb_util:decode(
+        hb_maps:get(<<"ek-public">>, Subject, <<>>, #{})),
+    AkName = hb_util:decode(
+        hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
+    case nif_make_credential(EkPublic, AkName, Secret) of
+        {ok, #{credential_blob := Blob, secret := EncSecret}} ->
+            #{
+                <<"credential-blob">> => hb_util:encode(Blob),
+                <<"secret">> => hb_util:encode(EncSecret)
+            };
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"make-credential">> => reason_to_text(Reason)}})
+    end.
+
+activate_peer_credential(Url, Credential, Opts) ->
+    Req = #{
+        <<"credential-blob">> =>
+            hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
+        <<"secret">> =>
+            hb_maps:get(<<"secret">>, Credential, <<>>, #{})
+    },
+    resolve_subject_body(
+        lapee_http_json:post(
+            Url,
+            <<"/~tpm@2.0a/activate-credential">>,
+            Req,
+            Opts),
+        Opts).
+
+fresh_attestation_path(Nonce) ->
+    <<"/~tpm@2.0a/attestation?nonce=",
+      (hb_util:encode(Nonce))/binary>>.
+
+peer_attestation_validity(Now, Req, Opts) ->
+    Base = #{<<"not-before-unix">> => Now},
+    case peer_attestation_ttl(Req, Opts) of
+        undefined -> Base;
+        TTL -> Base#{<<"expires-at-unix">> => Now + TTL}
+    end.
+
+peer_attestation_ttl(Req, Opts) ->
+    parse_positive_integer(first_defined([
+        hb_maps:get(
+            <<"peer-attestation-ttl-seconds">>, Req, undefined, Opts),
+        hb_opts:get(
+            <<"peer-attestation-ttl-seconds">>, undefined, Opts)
+    ])).
+
+peer_attestation_scope(Url, Boot, Fresh, Subject, Req, Opts) ->
+    #{
+        <<"peer-url">> => Url,
+        <<"boot-attestation-id">> => attestation_id(Boot, Opts),
+        <<"fresh-attestation-id">> => attestation_id(Fresh, Opts),
+        <<"ek-public-sha256">> =>
+            encoded_field_sha256(<<"ek-public">>, Subject, Opts),
+        <<"ak-name-sha256">> =>
+            encoded_field_sha256(<<"ak-name">>, Subject, Opts),
+        <<"consumer-scope">> =>
+            hb_maps:get(
+                <<"peer-attestation-scope">>, Req, null, Opts)
+    }.
+
+attestation_id(Attestation, Opts) when is_map(Attestation) ->
+    hb_message:id(Attestation, all, Opts);
+attestation_id(Other, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
+
+encoded_field_sha256(Key, Msg, Opts) ->
+    hb_util:encode(
+        crypto:hash(
+            sha256,
+            safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
+
+encoded_message_sha256(Msg) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Msg))).
+
+first_defined([]) -> undefined;
+first_defined([undefined | Rest]) -> first_defined(Rest);
+first_defined([V | _]) -> V.
+
+parse_positive_integer(undefined) ->
+    undefined;
+parse_positive_integer(N) when is_integer(N), N > 0 ->
+    N;
+parse_positive_integer(B) when is_binary(B) ->
+    try binary_to_integer(B) of
+        N when N > 0 -> N;
+        _ -> undefined
+    catch _:_ -> undefined
+    end;
+parse_positive_integer(_) ->
+    undefined.
+
+ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
+    ok = ensure_activation_envelope(Activation, Subject, Opts),
+    ExpectedHash = hb_util:encode(crypto:hash(sha256, Expected)),
+    AkName = hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts),
+    IssuedAt = hb_maps:get(<<"issued-at-unix">>, Activation, 0, Opts),
+    ExpectedProof =
+        credential_activation_proof(Expected, Credential, AkName, IssuedAt),
+    GotHash = hb_maps:get(
+        <<"credential-secret-sha256">>, Activation, <<>>, Opts),
+    GotProof = safe_decode(
+        hb_maps:get(<<"credential-secret-proof">>, Activation, <<>>, Opts)),
+    case {GotHash, GotProof} of
+        {ExpectedHash, ExpectedProof} -> ok;
+        _ -> throw({boot_attestation_error,
+                    #{<<"credential-activation">> =>
+                        <<"activation proof did not match challenge">>}})
+    end.
+
+ensure_activation_envelope(Activation, Subject, Opts) ->
+    Checks = [
+        {eq, <<"type">>, <<"lapee-tpm-credential-activation">>},
+        {eq, <<"version">>, <<"1.0">>},
+        {eq, <<"proof-alg">>, <<"HMAC-SHA256">>},
+        {binary, <<"ak-name">>},
+        {integer, <<"issued-at-unix">>},
+        {binary, <<"credential-secret-sha256">>},
+        {binary, <<"credential-secret-proof">>}
+    ],
+    lists:foreach(
+        fun
+            ({eq, Key, Expected}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    Expected -> ok;
+                    _ -> bad_activation(Key)
+                end;
+            ({binary, Key}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    B when is_binary(B), byte_size(B) > 0 -> ok;
+                    _ -> bad_activation(Key)
+                end;
+            ({integer, Key}) ->
+                case hb_maps:get(Key, Activation, undefined, Opts) of
+                    I when is_integer(I), I > 0 -> ok;
+                    _ -> bad_activation(Key)
+                end
+        end,
+        Checks),
+    case Subject of
+        undefined -> ok;
+        _ ->
+            ExpectedAk = hb_maps:get(<<"ak-name">>, Subject, <<>>, Opts),
+            case hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts) of
+                ExpectedAk when byte_size(ExpectedAk) > 0 -> ok;
+                _ -> bad_activation(<<"ak-name">>)
+            end
+    end.
+
+bad_activation(Key) ->
+    throw({boot_attestation_error,
+           #{<<"credential-activation">> =>
+                <<Key/binary, " invalid">>}}).
+
+credential_activation_proof(Secret, Credential, AkName, IssuedAt) ->
+    crypto:mac(
+        hmac,
+        sha256,
+        Secret,
+        credential_activation_proof_context(Credential, AkName, IssuedAt)).
+
+credential_activation_proof_context(Credential, AkName, IssuedAt) ->
+    Blob = hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
+    EncSecret = hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
+    <<"lapee-tpm-credential-activation-v1\n",
+      "type:lapee-tpm-credential-activation\n",
+      "version:1.0\n",
+      "proof-alg:HMAC-SHA256\n",
+      "ak-name:", AkName/binary, "\n",
+      "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
+      "credential-blob:", Blob/binary, "\n",
+      "secret:", EncSecret/binary>>.
+
+ensure_subject_matches_boot(Subject, BootEnv) ->
+    Pairs = [
+        {<<"ek-public">>, <<"EK public area">>},
+        {<<"ek-pub-pem">>, <<"EK public PEM">>},
+        {<<"ek-name">>, <<"EK name">>},
+        {<<"ek-qualified-name">>, <<"EK qualified name">>},
+        {<<"ak-name">>, <<"AK name">>},
+        {<<"ak-public">>, <<"AK public area">>},
+        {<<"ak-pub-pem">>, <<"AK public PEM">>},
+        {<<"ak-qualified-name">>, <<"AK qualified name">>}
+    ],
+    lists:foreach(
+        fun({Key, Label}) ->
+            case {hb_maps:get(Key, Subject, <<>>, #{}),
+                  hb_maps:get(Key, BootEnv, <<>>, #{})} of
+                {V, V} when is_binary(V), byte_size(V) > 0 -> ok;
+                {V, V} when is_list(V), V =/= [] -> ok;
+                _ ->
+                    throw({boot_attestation_error,
+                           #{<<"credential-subject">> =>
+                                <<Label/binary,
+                                  " mismatch between subject and "
+                                  "boot-attestation">>}})
+            end
+        end,
+        Pairs),
+    ok.
+
+ensure_attestation_subjects_match(BootEnv, FreshEnv) ->
+    case {
+        hb_maps:get(<<"node-message-id">>, BootEnv, <<>>, #{}),
+        hb_maps:get(<<"node-message-id">>, FreshEnv, <<>>, #{})
+    } of
+        {ID, ID} when is_binary(ID), byte_size(ID) > 0 -> ok;
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"peer-attestation">> =>
+                        <<"boot and fresh attestation subjects differ">>}})
+    end.
+
+ensure_ak_public_matches_subject(Subject) ->
+    AkPublic = hb_maps:get(<<"ak-public">>, Subject, <<>>, #{}),
+    AkPem = hb_maps:get(<<"ak-pub-pem">>, Subject, <<>>, #{}),
+    AkName = safe_decode(hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
+    case {rsa_pub_from_tpm2b_public(safe_decode(AkPublic)),
+          decode_pem_rsa_pub(AkPem),
+          tpm2b_public_name(safe_decode(AkPublic))} of
+        {{ok, Rsa}, {ok, Rsa}, {ok, AkName}} when byte_size(AkName) > 0 ->
+            ok;
+        {{error, Why}, _, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK TPMT_PUBLIC: ~p", [Why]))}});
+        {_, {error, Why}, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-pub-pem">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK public PEM: ~p", [Why]))}});
+        {_, _, {error, Why}} ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad AK name derivation: ~p",
+                                          [Why]))}});
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"ak-public">> =>
+                        <<"AK TPMT_PUBLIC, public PEM, and name do not "
+                          "match">>}})
+    end.
+
+ensure_ek_public_matches_cert(Subject) ->
+    EkPublic = hb_maps:get(<<"ek-public">>, Subject, <<>>, #{}),
+    EkPem = hb_maps:get(<<"ek-pub-pem">>, Subject, <<>>, #{}),
+    CertPem = hb_maps:get(<<"ek-cert-pem">>, Subject, <<>>, #{}),
+    case {rsa_pub_from_tpm2b_public(safe_decode(EkPublic)),
+          decode_pem_rsa_pub(EkPem),
+          cert_rsa_pub(CertPem)} of
+        {{ok, Rsa}, {ok, Rsa}, {ok, Rsa}} -> ok;
+        {{error, Why}, _, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-public">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad EK TPMT_PUBLIC: ~p", [Why]))}});
+        {_, {error, Why}, _} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-pub-pem">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad EK public PEM: ~p", [Why]))}});
+        {_, _, {error, Why}} ->
+            throw({boot_attestation_error,
+                   #{<<"ek-cert-pem">> =>
+                        iolist_to_binary(
+                            io_lib:format("bad EK cert PEM: ~p", [Why]))}});
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"ek-public">> =>
+                        <<"EK TPMT_PUBLIC, public PEM, and certificate "
+                          "public key do not match">>}})
+    end.
+
+store_peer_attestation(Signed, Opts) ->
+    SignedID = hb_message:id(Signed, signed, Opts),
+    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
+    lists:foreach(
+        fun(Path) -> ok = hb_cache:link(SignedID, Path, Opts) end,
+        peer_attestation_cache_paths(Signed, SignedID, Opts)),
+    ok.
+
+peer_attestation_cache_paths(Signed, SignedID, Opts) ->
+    Prefix = ?PEER_ATTESTATION_PREFIX,
+    PeerURL = hb_maps:get(<<"peer-url">>, Signed, <<>>, Opts),
+    PeerURLHash = hb_util:encode(crypto:hash(sha256, PeerURL)),
+    Scope = hb_maps:get(<<"peer-scope">>, Signed, #{}, Opts),
+    EkHash = hb_maps:get(<<"ek-public-sha256">>, Scope, <<"unknown">>, Opts),
+    BootID =
+        hb_maps:get(<<"boot-attestation-id">>, Scope, <<"unknown">>, Opts),
+    ConsumerScopeHash =
+        encoded_message_sha256(
+            hb_maps:get(<<"consumer-scope">>, Scope, null, Opts)),
+    [
+        <<Prefix/binary, "/by-id/", SignedID/binary>>,
+        <<Prefix/binary,
+          "/by-peer-url-sha256/", PeerURLHash/binary,
+          "/by-ek-public-sha256/", EkHash/binary,
+          "/by-boot-attestation-id/", BootID/binary,
+          "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
+          "/", SignedID/binary>>
+    ].
+
+rsa_pub_from_tpm2b_public(Tpm2BPublic) ->
+    try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
+        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
+          _Attrs:32/unsigned-big, Rest0/binary>> = Public,
+        {_AuthPolicy, Rest1} = tpm2b(Rest0),
+        Rest2 = skip_tpm2_public_symmetric(Rest1),
+        Rest3 = skip_tpm2_rsa_scheme(Rest2),
+        <<_KeyBits:16/unsigned-big, Exponent0:32/unsigned-big,
+          Rest4/binary>> = Rest3,
+        {ModulusBin, _Rest5} = tpm2b(Rest4),
+        Exponent =
+            case Exponent0 of
+                0 -> 65537;
+                _ -> Exponent0
+            end,
+        {ok, #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = Exponent
+        }}
+    catch
+        _:_ -> {error, bad_tpm2b_public}
+    end.
+
+tpm2b_public_body(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
+    {ok, Public};
+tpm2b_public_body(_) ->
+    {error, bad_tpm2b_public}.
+
+tpm2b_public_name(Tpm2BPublic) ->
+    case tpm2b_public_body(Tpm2BPublic) of
+        {ok, <<_Type:16/unsigned-big, NameAlg:16/unsigned-big, _/binary>>
+                = Public} ->
+            case tpm_name_hash_alg(NameAlg) of
+                {ok, HashAlg} ->
+                    {ok, <<NameAlg:16/unsigned-big,
+                           (crypto:hash(HashAlg, Public))/binary>>};
+                {error, _} = E -> E
+            end;
+        {error, _} = E -> E
+    end.
+
+tpm2b_public_auth_policy(Tpm2BPublic) ->
+    try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
+        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
+          _Attrs:32/unsigned-big, Rest/binary>> = Public,
+        {AuthPolicy, _} = tpm2b(Rest),
+        {ok, AuthPolicy}
+    catch
+        _:_ -> {error, bad_tpm2b_public}
+    end.
+
+tpm_name_hash_alg(16#0004) -> {ok, sha};
+tpm_name_hash_alg(16#000B) -> {ok, sha256};
+tpm_name_hash_alg(16#000C) -> {ok, sha384};
+tpm_name_hash_alg(16#000D) -> {ok, sha512};
+tpm_name_hash_alg(Other) -> {error, {unsupported_name_alg, Other}}.
+
+skip_tpm2_public_symmetric(<<16#0006:16/unsigned-big,
+                             _KeyBits:16/unsigned-big,
+                             _Mode:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_public_symmetric(<<16#0010:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_public_symmetric(_) ->
+    throw(bad_tpm2b_public_symmetric).
+
+skip_tpm2_rsa_scheme(<<16#0010:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_rsa_scheme(<<_Scheme:16/unsigned-big,
+                       _HashAlg:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_rsa_scheme(_) ->
+    throw(bad_tpm2b_public_scheme).
+
+cert_rsa_pub(Pem) ->
+    case decode_pem_cert(Pem) of
+        {ok, Der} ->
+            try public_key:pkix_decode_cert(Der, otp) of
+                #'OTPCertificate'{tbsCertificate = Tbs} ->
+                    case Tbs#'OTPTBSCertificate'.subjectPublicKeyInfo of
+                        #'OTPSubjectPublicKeyInfo'{
+                            subjectPublicKey = #'RSAPublicKey'{} = Rsa} ->
+                            {ok, Rsa};
+                        Other -> {error, {unsupported_cert_pubkey, Other}}
+                    end
+            catch C:R -> {error, {C, R}}
+            end;
+        {error, _} = E -> E
+    end.
+
+decode_required(Key, Req, Opts) ->
+    case hb_maps:get(Key, Req, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 ->
+            hb_util:decode(B);
+        _ ->
+            throw({boot_attestation_error,
+                   #{Key => <<"missing required base64url field">>}})
+    end.
+
+safe_decode(B) when is_binary(B) ->
+    try hb_util:decode(B) catch _:_ -> <<>> end;
+safe_decode(_) ->
+    <<>>.
+
 generate_boot_attestation(Opts) ->
     with_ok(
         fun() ->
@@ -1343,12 +2395,10 @@ with_ok(Fun) ->
     catch
         throw:{boot_attestation_error, Reason} ->
             {error, Reason};
-        Class:Reason:Stacktrace ->
+        Class:Reason ->
             {error, #{
                 <<"class">> => to_bin(Class),
-                <<"reason">> => to_bin(Reason),
-                <<"stacktrace">> =>
-                    iolist_to_binary(io_lib:format("~p", [Stacktrace]))
+                <<"reason">> => to_bin(Reason)
             }}
     end.
 
@@ -1390,28 +2440,33 @@ boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
                         <<"ek-cert-chain-diagnostics">> =>
                             ek_cert_chain_diagnostics(),
                         <<"tpm-properties">> => tpm_properties(),
+                        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+                        <<"ek-public">> => ek_public(Opts),
+                        <<"ek-name">> => ek_name(Opts),
+                        <<"ek-qualified-name">> => ek_qualified_name(Opts),
                         <<"ak-pub-pem">> => ak_pub_pem(Opts),
+                        <<"ak-public">> => ak_public(Opts),
+                        <<"ak-name">> => ak_name(Opts),
+                        <<"ak-qualified-name">> => ak_qualified_name(Opts),
                         <<"ak-hierarchy">> => <<"endorsement">>,
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
-                        <<"quote">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)])
-                        },
+                        <<"quote">> => quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                         <<"runtime-event-log">> => event_log(Opts),
                         <<"tcg-event-log">> => hb_util:encode(TcgLogBin),
                         <<"tcg-event-log-source-path">> => TcgLogSource,
                         <<"tcg-event-log-length-bytes">> =>
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
-                            infer_log_format(TcgLogBin)
+                            infer_log_format(TcgLogBin),
+                        %% Derived signals from the firmware-side TCG
+                        %% event log replay -- exposed in the signed
+                        %% boot-attestation so green-zone templates and
+                        %% external auditors can pin policy-actionable
+                        %% facts (currently `secure-boot.enabled') without
+                        %% re-walking the log themselves. Mirrors the
+                        %% interpret-side `policy-verdict.signals' shape.
+                        <<"signals">> => dev_tpm_tcg:boot_signals(TcgLogBin)
                     };
                 {error, Reason} ->
                     throw({boot_attestation_error,
@@ -1457,15 +2512,7 @@ attestation(_Base, Req, Opts) ->
                     {TcgLogBin, TcgLogSource} =
                         read_tcg_event_log_with_source(),
                     TcgLogFormat = infer_log_format(TcgLogBin),
-                    NodeMsg = get_node_msg(Opts),
-                    NodeMsgId =
-                        case NodeMsg of
-                            undefined -> null;
-                            _ ->
-                                hb_util:human_id(
-                                    hb_util:native_id(
-                                        hb_message:id(NodeMsg, all, Opts)))
-                        end,
+                    {NodeMsg, NodeMsgId} = attested_subject(Opts),
                     Envelope = #{
                         <<"lapee-attestation-version">> => <<"0.4">>,
                         <<"issued-at-unix">> =>
@@ -1496,6 +2543,10 @@ attestation(_Base, Req, Opts) ->
                         %% "what chip is this" from ground truth.
                         <<"tpm-properties">> =>
                             tpm_properties(),
+                        <<"ek-pub-pem">> => ek_pub_pem(Opts),
+                        <<"ek-public">> => ek_public(Opts),
+                        <<"ek-name">> => ek_name(Opts),
+                        <<"ek-qualified-name">> => ek_qualified_name(Opts),
                         %% Runtime kernel + SMBIOS snapshot so
                         %% claim.cpu / claim.iommu / claim.lockdown
                         %% resolve to concrete values even when the
@@ -1505,6 +2556,9 @@ attestation(_Base, Req, Opts) ->
                         <<"platform-probes">> =>
                             platform_probes(),
                         <<"ak-pub-pem">> => AKPubPem,
+                        <<"ak-public">> => ak_public(Opts),
+                        <<"ak-name">> => ak_name(Opts),
+                        <<"ak-qualified-name">> => ak_qualified_name(Opts),
                         %% v1.2.2 paper P3: AK is a primary under
                         %% the Endorsement hierarchy (see
                         %% native/lapee_tpm_nif/lapee_tpm_nif.c
@@ -1549,17 +2603,8 @@ attestation(_Base, Req, Opts) ->
                         %; the verifier's paper-P4 check clean).
                         <<"tpm-session-mode">> =>
                             <<"hmac-aes128cfb">>,
-                        <<"tpm-quote">> => #{
-                            <<"pcr-selection">> => Pcrs,
-                            <<"nonce">> => hb_util:encode(Nonce),
-                            <<"quoted">> => hb_util:encode(Q),
-                            <<"signature">> => hb_util:encode(Sig),
-                            <<"pcr-values">> =>
-                                maps:from_list(
-                                    [{integer_to_binary(I),
-                                      hb_util:encode(V)}
-                                     || {I, V} <- maps:to_list(PcrMap)])
-                        },
+                        <<"tpm-quote">> =>
+                            quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                         <<"runtime-event-log">> => EventLog,
                         %% Firmware-side TCG event log (PCRs 0-14
                         %% measurements the kernel exposes).
@@ -1599,6 +2644,18 @@ attestation(_Base, Req, Opts) ->
             error_resp(500, <<"ak_unavailable">>, Reason)
     end.
 
+quote_body(Pcrs, Nonce, Quoted, Signature, PcrMap) ->
+    #{
+        <<"pcr-selection">> => Pcrs,
+        <<"nonce">> => hb_util:encode(Nonce),
+        <<"quoted">> => hb_util:encode(Quoted),
+        <<"signature">> => hb_util:encode(Signature),
+        <<"pcr-values">> =>
+            maps:from_list(
+                [{integer_to_binary(I), hb_util:encode(V)}
+                 || {I, V} <- maps:to_list(PcrMap)])
+    }.
+
 %%%============================================================================
 %%% Runtime event log
 %%%============================================================================
@@ -1611,18 +2668,14 @@ event_log(_Opts) ->
     end.
 
 append_event(Pcr, Payload) ->
-    Seq = case persistent_term:get({dev_tpm2, event_seq}, 0) of
-        N -> N
-    end,
+    Seq = persistent_term:get({dev_tpm2, event_seq}, 0),
     NewSeq = Seq + 1,
     Entry = Payload#{
         <<"seq">> => Seq,
         <<"pcr">> => Pcr,
         <<"emitted-at-unix">> => erlang:system_time(second)
     },
-    Old = case persistent_term:get({dev_tpm2, event_log}, []) of
-        L when is_list(L) -> L
-    end,
+    Old = persistent_term:get({dev_tpm2, event_log}, []),
     persistent_term:put({dev_tpm2, event_log}, Old ++ [Entry]),
     persistent_term:put({dev_tpm2, event_seq}, NewSeq),
     ok.
@@ -1672,27 +2725,27 @@ pcr_int(B) when is_binary(B) ->
 %% is not supported (HyperBEAM wire convention is base64url
 %% everywhere).
 resolve_nonce(Req) when is_map(Req) ->
-    case maps:get(<<"nonce">>, Req, undefined) of
-        undefined ->
-            crypto:strong_rand_bytes(32);
-        B when is_binary(B) ->
-            Decoded =
-                try hb_util:decode(B)
-                catch _:_ -> B
-                end,
-            %% Reviewer pass 13 (crypto primitives): TPM2B_DATA
-            %% caps extraData at 64 bytes (TCG TPM 2.0 Part 2 §
-            %% 10.4.1). The NIF would otherwise reject with
-            %% enif_make_badarg and the HTTP response would be a
-            %% less-helpful 400. Canonical nonces are 32 bytes
-            %% (`crypto:strong_rand_bytes(32)'); anything larger
-            %% is either caller confusion or a padding attempt.
-            case byte_size(Decoded) > 64 of
-                true -> crypto:strong_rand_bytes(32);
-                false -> Decoded
-            end
+    case decoded_nonce(Req) of
+        undefined -> crypto:strong_rand_bytes(32);
+        Decoded when byte_size(Decoded) > 64 -> crypto:strong_rand_bytes(32);
+        Decoded -> Decoded
     end;
 resolve_nonce(_) -> crypto:strong_rand_bytes(32).
+
+expected_nonce(Req) ->
+    decoded_nonce(Req).
+
+decoded_nonce(Req) when is_map(Req) ->
+    case maps:get(<<"nonce">>, Req, undefined) of
+        undefined -> undefined;
+        B when is_binary(B) ->
+            try hb_util:decode(B)
+            catch _:_ -> B
+            end;
+        _ -> undefined
+    end;
+decoded_nonce(_) ->
+    undefined.
 
 %% @doc Produce a 32-byte SHA-256 digest for a subject.
 %%
@@ -1731,6 +2784,45 @@ get_node_msg(Opts) ->
     case persistent_term:get({dev_tpm2, attested_node_msg}, undefined) of
         undefined -> hb_opts:get(lapee_attested_node_msg, undefined, Opts);
         Msg -> Msg
+    end.
+
+attested_subject(Opts) ->
+    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
+        {ok, Boot} ->
+            case subject_from_boot_attestation(Boot, Opts) of
+                {Subject, SubjectID} -> {Subject, SubjectID};
+                undefined -> legacy_attested_subject(Opts)
+            end;
+        _ ->
+            legacy_attested_subject(Opts)
+    end.
+
+subject_from_boot_attestation(Boot, Opts) when is_map(Boot) ->
+    System = hb_maps:get(<<"system">>, Boot, undefined, Opts),
+    Node = hb_maps:get(<<"node">>, Boot, undefined, Opts),
+    Tpm = hb_maps:get(<<"tpm">>, Boot, #{}, Opts),
+    SubjectID = hb_maps:get(<<"extended-subject">>, Tpm, undefined, Opts),
+    case {System, Node, SubjectID} of
+        {S, N, ID}
+                when is_map(S), is_map(N), is_binary(ID),
+                     byte_size(ID) =:= 43 ->
+            {#{<<"system">> => S, <<"node">> => N}, ID};
+        _ ->
+            undefined
+    end;
+subject_from_boot_attestation(_Boot, _Opts) ->
+    undefined.
+
+legacy_attested_subject(Opts) ->
+    case get_node_msg(Opts) of
+        undefined ->
+            {null, null};
+        Msg ->
+            {
+                Msg,
+                hb_util:human_id(
+                    hb_util:native_id(hb_message:id(Msg, all, Opts)))
+            }
     end.
 
 %%%============================================================================
@@ -1795,9 +2887,10 @@ init_chain(Opts) ->
             %% snapshot (important for reproducible claim digests).
             capture_platform_probes(),
             case nif_create_ek() of
-                {ok, #{esys_tr := EKTr, public_pem := EKPem}} ->
+                {ok, #{esys_tr := EKTr, public_pem := EKPem} = EKInfo} ->
                     persistent_term:put({dev_tpm2, ek_tr}, EKTr),
                     persistent_term:put({dev_tpm2, ek_pub_pem}, EKPem),
+                    cache_tpm_public_terms(ek, EKInfo),
                     %% Pull the TPM's real EK certificate out of NV
                     %% storage. If no EK cert is provisioned we record
                     %% the absence explicitly -- we do NOT fabricate a
@@ -1806,9 +2899,10 @@ init_chain(Opts) ->
                     %% over. See fetch_ek_cert_from_nv/1.
                     fetch_ek_cert_from_nv(Opts),
                     case nif_create_signing_key(EKTr) of
-                        {ok, #{esys_tr := AKTr, public_pem := AKPem}} ->
+                        {ok, #{esys_tr := AKTr, public_pem := AKPem} = AKInfo} ->
                             persistent_term:put({dev_tpm2, ak_tr}, AKTr),
                             persistent_term:put({dev_tpm2, ak_pub_pem}, AKPem),
+                            cache_tpm_public_terms(ak, AKInfo),
                             %% Paper ephemeral-node-key-binding P5:
                             %% "as the last step before attestation,
                             %% HyperBEAM extends PCR 15 with the public
@@ -1840,6 +2934,18 @@ init_chain(Opts) ->
         {error, _} = E -> E
     end.
 
+cache_tpm_public_terms(Prefix, Info) ->
+    lists:foreach(
+        fun({Key, Slot}) ->
+            case maps:get(Key, Info, undefined) of
+                undefined -> ok;
+                V -> persistent_term:put({dev_tpm2, Prefix, Slot}, V)
+            end
+        end,
+        [{tpm2b_public, public},
+         {name, name},
+         {qualified_name, qualified_name}]).
+
 ek_cert_pem(Opts) ->
     case persistent_term:get({dev_tpm2, ek_cert_pem}, undefined) of
         undefined ->
@@ -1854,6 +2960,35 @@ ak_pub_pem(Opts) ->
             _ = ensure_ak(Opts),
             persistent_term:get({dev_tpm2, ak_pub_pem}, <<>>);
         P -> P
+    end.
+
+ek_pub_pem(Opts) ->
+    case persistent_term:get({dev_tpm2, ek_pub_pem}, undefined) of
+        undefined ->
+            _ = ensure_ak(Opts),
+            persistent_term:get({dev_tpm2, ek_pub_pem}, <<>>);
+        P -> P
+    end.
+
+ek_public(Opts) -> encoded_cached(ek, public, Opts).
+ek_name(Opts) -> encoded_cached(ek, name, Opts).
+ek_qualified_name(Opts) -> encoded_cached(ek, qualified_name, Opts).
+ak_public(Opts) -> encoded_cached(ak, public, Opts).
+ak_name(Opts) -> encoded_cached(ak, name, Opts).
+ak_qualified_name(Opts) -> encoded_cached(ak, qualified_name, Opts).
+
+encoded_cached(Prefix, Slot, Opts) ->
+    case raw_cached(Prefix, Slot, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> hb_util:encode(B);
+        _ -> <<>>
+    end.
+
+raw_cached(Prefix, Slot, Opts) ->
+    case persistent_term:get({dev_tpm2, Prefix, Slot}, undefined) of
+        undefined ->
+            _ = ensure_ak(Opts),
+            persistent_term:get({dev_tpm2, Prefix, Slot}, <<>>);
+        V -> V
     end.
 
 %% Capture TPM identity via TPM2_GetCapability (TPM_PT_MANUFACTURER,
@@ -1976,22 +3111,16 @@ read_cpuinfo_stanza() ->
 line_to_kv(Line, Acc) ->
     case binary:split(Line, <<":">>, []) of
         [Key, Val] ->
-            K = normalise_kv_key(string:trim(Key)),
-            V = string:trim(Val),
+            K = binary:replace(
+                string:lowercase(string:trim(Key)),
+                <<" ">>,
+                <<"-">>,
+                [global]),
             %% Only the first occurrence counts (first processor
             %% stanza); skip subsequent duplicates.
-            case maps:is_key(K, Acc) of
-                true -> Acc;
-                false -> Acc#{K => V}
-            end;
+            maps:merge(#{K => string:trim(Val)}, Acc);
         _ -> Acc
     end.
-
-normalise_kv_key(K) ->
-    %% /proc/cpuinfo uses space-separated lowercase words; our
-    %% kebab-case wire convention matches.
-    Lowered = string:lowercase(K),
-    binary:replace(Lowered, <<" ">>, <<"-">>, [global]).
 
 %% Count the entries in /sys/kernel/iommu_groups/. Each group
 %% corresponds to one IOMMU-enforced isolation domain. Zero
@@ -2010,8 +3139,7 @@ count_iommu_groups() ->
 %% kernels expose under /sys/kernel/iommu_groups/.
 is_group_dir(E) ->
     case string:to_integer(E) of
-        {N, <<>>} when is_integer(N) -> true;
-        {N, ""}   when is_integer(N) -> true;
+        {N, Rest} when is_integer(N) -> Rest =:= <<>> orelse Rest =:= "";
         _                            -> false
     end.
 
@@ -2747,6 +3875,18 @@ nif_create_signing_key(EKTr) ->
         M -> catch M:create_signing_key(EKTr)
     end.
 
+nif_make_credential(EKPublic, AKName, Secret) ->
+    case nif_module() of
+        not_loaded -> {error, nif_not_loaded};
+        M -> catch M:make_credential(EKPublic, AKName, Secret)
+    end.
+
+nif_activate_credential(AKTr, EKTr, CredentialBlob, Secret) ->
+    case nif_module() of
+        not_loaded -> {error, nif_not_loaded};
+        M -> catch M:activate_credential(AKTr, EKTr, CredentialBlob, Secret)
+    end.
+
 nif_quote(AKTr, Pcrs, Nonce) ->
     case nif_module() of
         not_loaded -> {error, nif_not_loaded};
@@ -2767,6 +3907,9 @@ info_shape_test() ->
     ?assert(lists:member(<<"quote">>, Exports)),
     ?assert(lists:member(<<"pcr-read">>, Exports)),
     ?assert(lists:member(<<"attestation">>, Exports)),
+    ?assert(lists:member(<<"credential-subject">>, Exports)),
+    ?assert(lists:member(<<"activate-credential">>, Exports)),
+    ?assert(lists:member(<<"verify-peer">>, Exports)),
     %% No standalone tcg-event-log endpoint -- the log travels
     %% INSIDE the attested attestation envelope. A standalone
     %% un-attested path would let a malicious node serve one
@@ -2780,7 +3923,228 @@ info_docs_test() ->
     ?assert(maps:is_key(<<"api">>, Body)),
     Api = maps:get(<<"api">>, Body),
     ?assert(maps:is_key(<<"extend">>, Api)),
-    ?assert(maps:is_key(<<"attestation">>, Api)).
+    ?assert(maps:is_key(<<"attestation">>, Api)),
+    ?assert(maps:is_key(<<"credential-subject">>, Api)),
+    ?assert(maps:is_key(<<"activate-credential">>, Api)),
+    ?assert(maps:is_key(<<"verify-peer">>, Api)).
+
+peer_attestation_cache_paths_test() ->
+    Signed = #{<<"peer-url">> => <<"http://peer.example:8734">>},
+    SignedID = <<"signed-id">>,
+    PeerURLHash = hb_util:encode(
+        crypto:hash(sha256, <<"http://peer.example:8734">>)),
+    ConsumerScopeHash = encoded_message_sha256(null),
+    Prefix = ?PEER_ATTESTATION_PREFIX,
+    ?assertEqual(
+        [
+            <<Prefix/binary, "/by-id/", SignedID/binary>>,
+            <<Prefix/binary,
+              "/by-peer-url-sha256/", PeerURLHash/binary,
+              "/by-ek-public-sha256/unknown",
+              "/by-boot-attestation-id/unknown",
+              "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
+              "/", SignedID/binary>>
+        ],
+        peer_attestation_cache_paths(Signed, SignedID, #{})).
+
+credential_activation_public_body_hides_secret_test() ->
+    Credential = #{
+        <<"credential-blob">> => hb_util:encode(<<"blob">>),
+        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
+    },
+    Secret = <<"ring-secret-must-not-be-exported">>,
+    persistent_term:put({dev_tpm2, ak, name}, <<"ak-name">>),
+    try
+        Body = credential_activation_public_body(Secret, Credential, #{}),
+        ?assertNot(maps:is_key(<<"credential-secret">>, Body)),
+        ?assert(maps:is_key(<<"credential-secret-sha256">>, Body)),
+        ?assert(maps:is_key(<<"credential-secret-proof">>, Body)),
+        ?assertEqual(ok,
+            ensure_activation_secret(Body, Credential, Secret, undefined, #{}))
+    after
+        persistent_term:erase({dev_tpm2, ak, name})
+    end.
+
+credential_activation_public_proof_rejects_wrong_secret_test() ->
+    Credential = #{
+        <<"credential-blob">> => hb_util:encode(<<"blob">>),
+        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
+    },
+    IssuedAt = 123,
+    AkName = <<"ak-name">>,
+    Activation = #{
+        <<"type">> => <<"lapee-tpm-credential-activation">>,
+        <<"version">> => <<"1.0">>,
+        <<"issued-at-unix">> => IssuedAt,
+        <<"ak-name">> => AkName,
+        <<"proof-alg">> => <<"HMAC-SHA256">>,
+        <<"credential-secret-sha256">> =>
+            hb_util:encode(crypto:hash(sha256, <<"secret-a">>)),
+        <<"credential-secret-proof">> =>
+            hb_util:encode(
+                credential_activation_proof(
+                    <<"secret-a">>, Credential, AkName, IssuedAt))
+    },
+    ?assertThrow(
+        {boot_attestation_error, #{
+            <<"credential-activation">> :=
+                <<"activation proof did not match challenge">>
+        }},
+        ensure_activation_secret(Activation, Credential, <<"secret-b">>,
+                                 undefined, #{})).
+
+verify_peer_requires_boot_fresh_subject_match_test() ->
+    ?assertEqual(ok,
+        ensure_attestation_subjects_match(
+            #{<<"node-message-id">> => <<"subject-a">>},
+            #{<<"node-message-id">> => <<"subject-a">>})),
+    ?assertThrow(
+        {boot_attestation_error, #{<<"peer-attestation">> := _}},
+        ensure_attestation_subjects_match(
+            #{<<"node-message-id">> => <<"subject-a">>},
+            #{<<"node-message-id">> => <<"subject-b">>})).
+
+chk_quote_rejects_verifier_nonce_mismatch_test() ->
+    Envelope = #{
+        <<"tpm-quote">> => #{
+            <<"nonce">> => hb_util:encode(<<"quote-nonce">>),
+            <<"quoted">> => hb_util:encode(<<>>),
+            <<"signature">> => hb_util:encode(<<>>),
+            <<"pcr-selection">> => [],
+            <<"pcr-values">> => #{}
+        },
+        <<"ak-pub-pem">> => <<>>,
+        <<"ak-qualified-name">> => hb_util:encode(<<"ak">>)
+    },
+    ?assertEqual(
+        {error, <<"quote nonce does not match verifier challenge">>},
+        chk_quote(Envelope, <<"verifier-nonce">>)).
+
+rsa_pub_from_tpm2b_public_test() ->
+    ModulusBin = <<1:2048>>,
+    Public = test_rsa_tpm2b_public(ModulusBin, 0),
+    ?assertEqual(
+        {ok, #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = 65537
+        }},
+        rsa_pub_from_tpm2b_public(Public)).
+
+ensure_ak_public_matches_subject_test() ->
+    ModulusBin = <<1:2048>>,
+    Public = test_rsa_tpm2b_public(ModulusBin, 0),
+    {ok, Rsa} = rsa_pub_from_tpm2b_public(Public),
+    {ok, Name} = tpm2b_public_name(Public),
+    Subject = #{
+        <<"ak-public">> => hb_util:encode(Public),
+        <<"ak-pub-pem">> => test_rsa_public_pem(Rsa),
+        <<"ak-name">> => hb_util:encode(Name)
+    },
+    ?assertEqual(ok, ensure_ak_public_matches_subject(Subject)),
+    ?assertThrow(
+        {boot_attestation_error, #{<<"ak-public">> := _}},
+        ensure_ak_public_matches_subject(
+            Subject#{<<"ak-name">> => hb_util:encode(<<"wrong-name">>)})).
+
+ak_policy_bound_test() ->
+    ModulusBin = <<1:2048>>,
+    PcrMap =
+        maps:from_list(
+            [{integer_to_binary(I),
+              hb_util:encode(crypto:strong_rand_bytes(32))}
+             || I <- ?AK_POLICY_PCRS]),
+    Policy = ak_policy_digest(?AK_POLICY_PCRS, PcrMap),
+    Public = test_rsa_tpm2b_public(ModulusBin, 0, Policy),
+    ?assertEqual({ok, Policy}, tpm2b_public_auth_policy(Public)),
+    Envelope = #{
+        <<"ak-public">> => hb_util:encode(Public),
+        <<"tpm-quote">> => #{<<"pcr-values">> => PcrMap}
+    },
+    ?assertMatch({ok, _}, chk_ak_policy_bound(Envelope)),
+    ?assertMatch(
+        {error, <<"AK authPolicy is empty">>},
+        chk_ak_policy_bound(
+            Envelope#{
+                <<"ak-public">> =>
+                    hb_util:encode(test_rsa_tpm2b_public(ModulusBin, 0))
+            })),
+    ?assertMatch(
+        {error, <<"AK authPolicy does not match quoted PCR state">>},
+        chk_ak_policy_bound(
+            Envelope#{<<"ak-public">> =>
+                hb_util:encode(
+                    test_rsa_tpm2b_public(
+                        ModulusBin, 0, crypto:strong_rand_bytes(32)))})).
+
+tpms_attest_qualified_signer_must_match_ak_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    ?assertMatch(
+        {ok, _},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)),
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST qualifiedSigner does not match "
+                  "attested AK qualified name">>},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, <<"other-ak">>)).
+
+tpms_attest_rejects_reported_selection_mismatch_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST PCR selection does not match "
+                  "reported pcr-selection">>},
+        chk_tpms_attest(Quoted, Nonce, [1], PcrMap, QualifiedSigner)).
+
+tpms_attest_requires_quote_magic_type_test() ->
+    Nonce = crypto:strong_rand_bytes(32),
+    QualifiedSigner = <<"ak-qualified-name">>,
+    Pcr0 = crypto:strong_rand_bytes(32),
+    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
+    Quoted0 = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
+    <<_MagicType:6/binary, Rest/binary>> = Quoted0,
+    Quoted = <<0:32/unsigned-big, 16#8018:16/unsigned-big, Rest/binary>>,
+    ?assertEqual(
+        {error, <<"TPMS_ATTEST parse error (truncated or wrong shape)">>},
+        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)).
+
+test_tpm2b(Bin) ->
+    <<(byte_size(Bin)):16/unsigned-big, Bin/binary>>.
+
+test_rsa_tpm2b_public(ModulusBin, Exponent) ->
+    test_rsa_tpm2b_public(ModulusBin, Exponent, <<>>).
+
+test_rsa_tpm2b_public(ModulusBin, Exponent, AuthPolicy) ->
+    Body = <<
+        16#0001:16/unsigned-big,
+        16#000B:16/unsigned-big,
+        0:32/unsigned-big,
+        (test_tpm2b(AuthPolicy))/binary,
+        16#0010:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        2048:16/unsigned-big,
+        Exponent:32/unsigned-big,
+        (test_tpm2b(ModulusBin))/binary
+    >>,
+    test_tpm2b(Body).
+
+test_rsa_public_pem(Rsa) ->
+    public_key:pem_encode([public_key:pem_entry_encode('RSAPublicKey', Rsa)]).
+
+test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0) ->
+    PcrDigest = crypto:hash(sha256, Pcr0),
+    Selection = <<16#000B:16/unsigned-big, 3:8/unsigned-big, 1, 0, 0>>,
+    QuoteInfo = <<1:32/unsigned-big, Selection/binary,
+                  (test_tpm2b(PcrDigest))/binary>>,
+    <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
+      (test_tpm2b(QualifiedSigner))/binary,
+      (test_tpm2b(Nonce))/binary,
+      0:(25 * 8), QuoteInfo/binary>>.
 
 %% The TCG event log source-path + length + format fields
 %% travel attested alongside tcg-event-log itself, so a
@@ -2947,41 +4311,16 @@ chk_tcg_event_log_replay_rejects_tampered_fixture_test() ->
     },
     ?assertMatch({error, _}, chk_tcg_event_log_replay(Envelope)).
 
-%% Regression test: `resolve_trusted_ca' must honour inline
-%% request-supplied anchors in priority order -- base64url
-%% `trusted-ca' wins over raw `trusted-ca-pem', which wins over
-%% node config. An earlier version only handled `trusted-ca-pem'
-%% here, so a caller supplying a ROGUE CA via `trusted-ca' on
-%% the chain-URL path had the whole parameter silently dropped
-%% -- leaving the node's configured (legitimate) CA to
-%% rubber-stamp the chain as OK.
 resolve_trusted_ca_priority_test() ->
-    InlinePemBin = <<"-----BEGIN CERTIFICATE-----\ninline-pem\n"
-                    "-----END CERTIFICATE-----">>,
-    %% Base64url-encoded bytes of a DISTINCT PEM.
     B64uPem = <<"-----BEGIN CERTIFICATE-----\nbase64url-pem\n"
                 "-----END CERTIFICATE-----">>,
     B64u = hb_util:encode(B64uPem),
-    %% (1) `trusted-ca' wins when both inline forms are present.
     ?assertEqual(B64uPem,
-                 resolve_trusted_ca(#{<<"trusted-ca">> => B64u,
-                                      <<"trusted-ca-pem">> => InlinePemBin},
-                                    #{})),
-    %% (2) `trusted-ca-pem' is used when `trusted-ca' is absent.
-    ?assertEqual(InlinePemBin,
-                 resolve_trusted_ca(#{<<"trusted-ca-pem">> => InlinePemBin},
-                                    #{})),
-    %% (3) Empty/malformed `trusted-ca' falls through to
-    %%     `trusted-ca-pem', not to config.
-    ?assertEqual(InlinePemBin,
-                 resolve_trusted_ca(#{<<"trusted-ca">> => <<>>,
-                                      <<"trusted-ca-pem">> => InlinePemBin},
-                                    #{})),
-    %% (4) Neither inline nor config -> empty binary (triggers clean
-    %%     "trusted CA missing" error downstream in chk_ek_chain).
-    %% Supply a nonexistent config path so file:read_file returns
-    %% error; the default /etc/lapee/... likely isn't present in
-    %% the test env either.
+                 resolve_trusted_ca(#{<<"trusted-ca">> => B64u}, #{})),
+    ?assertEqual(<<>>,
+                 resolve_trusted_ca(
+                    #{<<"trusted-ca">> => <<"%%%not-base64url%%%">>},
+                    #{lapee_tpm_ca_cert => <<"/nonexistent/ca.pem">>})),
     ?assertEqual(<<>>,
                  resolve_trusted_ca(#{},
                                     #{lapee_tpm_ca_cert =>
@@ -3081,6 +4420,26 @@ chk_binding_rejects_empty_id_test() ->
     },
     ?assertMatch({error, _}, chk_binding(EnvelopeShortId)).
 
+normalise_boot_attestation_uses_extended_subject_test() ->
+    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
+    Node = #{<<"address">> => <<"node-address">>},
+    Subject = #{<<"system">> => System, <<"node">> => Node},
+    SubjectID = hb_message:id(Subject, all, #{}),
+    NodeOnlyID =
+        hb_util:human_id(
+            hb_util:native_id(hb_message:id(Node, all, #{}))),
+    Envelope = Subject#{
+        <<"tpm">> => #{
+            <<"extended-subject">> => SubjectID,
+            <<"quote">> => #{}
+        }
+    },
+    Normalised = normalise_attestation(Envelope, #{}),
+    ?assertNotEqual(NodeOnlyID, SubjectID),
+    ?assertEqual(SubjectID,
+                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
+                             #{})).
+
 ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
         [16#01C00003 | lists:seq(16#01C00100, 16#01C001FF)],
@@ -3088,6 +4447,17 @@ ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
         lists:seq(16#01C00100, 16#01C001FF),
         ek_cert_chain_handles(16#01C000FF)).
+
+intel_odca_ek_chain_accepts_tcg_key_usage_test() ->
+    EkDer = pem_fixture_der("intel-mtl-odca-ek-cert.pem"),
+    ChainDers = pem_fixture_ders("intel-mtl-odca-tpm-chain.pem"),
+    TrustedDers = [
+        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem"),
+        root_ca_fixture_der("INTEL_ODCA_MTL_00003043_CA2.pem"),
+        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem")
+    ],
+    ?assertMatch({ok, _},
+                 validate_ek_chain(EkDer, ChainDers, TrustedDers)).
 
 split_concatenated_ders_skips_non_cert_gaps_test() ->
     Der = root_ca_fixture_der(),
@@ -3104,6 +4474,72 @@ split_concatenated_ders_reports_offsets_test() ->
         split_concatenated_ders_with_offsets(
           <<Der/binary, Gap/binary, Der/binary>>)).
 
+candidate_intermediate_chains_keeps_direct_anchor_path_test() ->
+    Peer = <<"peer-chain-cert">>,
+    Anchor = <<"issuer-anchor">>,
+    OtherTrusted = <<"root-anchor">>,
+    ?assertEqual(
+        [[Peer], [Peer, OtherTrusted]],
+        candidate_intermediate_chains([Peer],
+                                      [Anchor, OtherTrusted],
+                                      Anchor)),
+    ?assertEqual(
+        [[], [OtherTrusted]],
+        candidate_intermediate_chains([],
+                                      [Anchor, OtherTrusted],
+                                      Anchor)).
+
+%% AIA fallback: a real Intel ADL EK leaf + ROM/Kernel/PTT
+%% intermediates pin against an Intel ODCA root + the CSME
+%% Intermediate CA, but the per-SoC `ODCA 2 CSME P_ADL 00002820
+%% Issuing CA' is missing from the local corpus. Without AIA the
+%% chain fails. With AIA -- pre-cached via persistent_term so the
+%% test never hits the network -- the chain extension picks up the
+%% missing intermediate and validation succeeds.
+aia_extends_chain_for_missing_intel_adl_intermediate_test() ->
+    Leaf = aia_fixture_pem("intel-adl-ek-leaf.pem"),
+    PeerChain = aia_fixture_pems("intel-adl-ek-chain.pem"),
+    Roots = [
+        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem"),
+        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem")
+    ],
+    %% Disabled: chain incomplete, verifier rejects.
+    {error, _} = validate_ek_chain(Leaf, PeerChain, Roots,
+        #{<<"lapee-aia-fetch-enabled">> => false}),
+    %% Pre-cache the Intel ADL Issuing CA fetch result so the test
+    %% exercises the AIA wiring without hitting the network.
+    AdlIssuingDer = aia_fixture_pem("intel-adl-issuing-ca-2820.pem"),
+    AdlUrl = aia_url_from_chain(PeerChain),
+    persistent_term:put({lapee_aia, fetched, AdlUrl}, AdlIssuingDer),
+    try
+        {ok, Detail} = validate_ek_chain(Leaf, PeerChain, Roots, #{}),
+        ?assert(byte_size(Detail) > 0)
+    after
+        persistent_term:erase({lapee_aia, fetched, AdlUrl})
+    end.
+
+aia_fixture_pem(Name) ->
+    Pems = aia_fixture_pems(Name),
+    hd(Pems).
+
+aia_fixture_pems(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "aia-fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "aia-fixtures", Name])
+    ],
+    [Pem] = [Bin || P <- Paths, {ok, Bin} <- [file:read_file(P)]],
+    [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)].
+
+aia_url_from_chain(ChainDers) ->
+    %% Walk the chain and return the AIA caIssuers URL of the cert
+    %% whose issuer DN is the missing ADL Issuing CA. Any cert in
+    %% the fixture chain whose AIA points at the ADL Issuing CA URL
+    %% is acceptable.
+    Urls = lists:flatten([lapee_aia:caissuers_urls(D) || D <- ChainDers]),
+    [Url | _] = Urls,
+    Url.
+
 parse_chain_group_reads_cert_across_nv_boundary_test() ->
     Der = root_ca_fixture_der(),
     Split = byte_size(Der) - 17,
@@ -3118,16 +4554,33 @@ parse_chain_group_reads_cert_across_nv_boundary_test() ->
         maps:get(<<"span-handles">>, CertDiag)).
 
 root_ca_fixture_der() ->
+    root_ca_fixture_der("INTEL_RT.pem").
+
+root_ca_fixture_der(Name) ->
     Paths = [
         filename:join(["priv", "tpm-interpret", "root-cas",
-                       "INTEL_RT.pem"]),
+                       Name]),
         filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
-                       "root-cas", "INTEL_RT.pem"])
+                       "root-cas", Name])
     ],
     Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
     [{'Certificate', Der, not_encrypted} | _] =
         public_key:pem_decode(hd(Pems)),
     Der.
+
+pem_fixture_der(Name) ->
+    [Der | _] = pem_fixture_ders(Name),
+    Der.
+
+pem_fixture_ders(Name) ->
+    Paths = [
+        filename:join(["priv", "tpm-interpret", "fixtures", Name]),
+        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
+                       "fixtures", Name])
+    ],
+    Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
+    [Der || {'Certificate', Der, not_encrypted} <-
+                public_key:pem_decode(hd(Pems))].
 
 %% Regression test: the verify_fun used in chk_ek_chain must reject
 %% every structural / trust failure pkix can report, while letting

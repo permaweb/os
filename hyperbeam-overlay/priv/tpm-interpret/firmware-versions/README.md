@@ -51,7 +51,7 @@ Or, when multiple independent families share a file:
 1. Observe the target platform's CRTM string:
    ```
    # On Linux with a hardware TPM:
-   curl http://localhost:18734/~tpm2@2.0a/attestation \
+   curl http://localhost:18734/~tpm@2.0a/attestation \
        -H 'accept: application/json@1.0' \
        -H 'accept-bundle: true' \
      | jq -r '.body.interpretation.pcrs."0".derived."crtm-version"'

@@ -95,15 +95,7 @@ load_fresh() ->
     }.
 
 read_json_map(Path, InnerKey) ->
-    case file:read_file(Path) of
-        {ok, Bin} ->
-            try
-                Decoded = json:decode(Bin),
-                maps:get(InnerKey, Decoded, #{})
-            catch _:_ -> #{}
-            end;
-        _ -> #{}
-    end.
+    maps:get(InnerKey, read_json(Path), #{}).
 
 read_dir_of_json(Dir) ->
     case file:list_dir(Dir) of
@@ -117,8 +109,7 @@ read_dir_of_json(Dir) ->
 
 read_json(Path) ->
     case file:read_file(Path) of
-        {ok, Bin} ->
-            try json:decode(Bin) catch _:_ -> #{} end;
+        {ok, Bin} -> try json:decode(Bin) catch _:_ -> #{} end;
         _ -> #{}
     end.
 
@@ -126,8 +117,9 @@ read_cert_roots(Dir) ->
     case file:list_dir(Dir) of
         {ok, Files} ->
             [#{<<"name">> => list_to_binary(filename:rootname(F)),
-               <<"pem">>  => element(2, file:read_file(
-                                filename:join(Dir, F)))}
-             || F <- Files, filename:extension(F) =:= ".pem"];
+               <<"pem">>  => Pem}
+             || F <- Files, filename:extension(F) =:= ".pem",
+                {ok, Pem} <-
+                    [file:read_file(filename:join(Dir, F))]];
         _ -> []
     end.

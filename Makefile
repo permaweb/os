@@ -68,6 +68,10 @@
 #                             over the forwarded network port.
 #   make hb-usb-qemu-gui    — same with a Cocoa window so the
 #                             operator can watch the splash.
+#   make qemu-green-zone-cluster
+#                           — boot four QEMU+swtpm nodes, admit three
+#                             into a green-zone, and prove the fourth is
+#                             rejected and cannot sign as the ring.
 #   make hb-fetch           — populate build/hyperbeam/src-edge
 #                             with the pinned verifier source.
 #   make hb-wifi-apply      — inject host-side wifi.conf into the
@@ -133,6 +137,7 @@ NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
 NO_TME_SIGNED_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme-signed.img
 NO_TME_SIGNED_UKI = $(BUILD_DIR)/images/lapee-no-tme.signed.efi
 SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
+SB_PROVISION_BUILDROOT_VOLUME = lapee-buildroot-sb-provisioner
 SB_PROVISION_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner.img
 SB_PROVISION_KERNEL = $(SB_PROVISION_BUILD_DIR)/kernel/vmlinuz-lapee
 SB_PROVISION_INITRAMFS = $(SB_PROVISION_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
@@ -163,7 +168,8 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         hb-usb-no-tme-signed-image hb-usb-no-tme-signed-write \
         hb-sb-keys hb-sb-provisioner-image hb-sb-provisioner-write \
         hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
-        hb-usb-qemu hb-usb-qemu-gui hb-fetch gather-wifi-creds hb-wifi-apply hb-sb-apply \
+        hb-usb-qemu hb-usb-qemu-gui qemu-green-zone-cluster hb-fetch \
+        gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
 
 help:
@@ -430,8 +436,13 @@ hb-sb-provisioner-image: toolchain
 	    echo "secureboot/enrol/KEK.auth missing. Run: make hb-sb-keys"; exit 1; }
 	@test -f secureboot/enrol/PK.auth || { \
 	    echo "secureboot/enrol/PK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	@if docker volume inspect $(SB_PROVISION_BUILDROOT_VOLUME) >/dev/null 2>&1; then \
+	    docker run --rm $(DOCKER_PLATFORM) \
+	        -v $(SB_PROVISION_BUILDROOT_VOLUME):/build \
+	        $(BUILD_IMAGE) bash -c "rm -rf /build/out/build/lapee-sb-provisioner"; \
+	fi
 	$(MAKE) buildroot \
-	    BUILDROOT_VOLUME=lapee-buildroot-sb-provisioner \
+	    BUILDROOT_VOLUME=$(SB_PROVISION_BUILDROOT_VOLUME) \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-sb-provisioner-fragment.config" \
 	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-sb-provisioner.extra"
@@ -481,6 +492,9 @@ hb-usb-qemu:
 
 hb-usb-qemu-gui:
 	./scripts/boot-usb-image.sh --gui
+
+qemu-green-zone-cluster:
+	./scripts/qemu-green-zone-cluster.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \

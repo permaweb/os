@@ -52,6 +52,9 @@ all(_Base, _Req, _Opts) ->
 
 report_from_root(Root0) ->
     Root = normalise_root(Root0),
+    BootGuard = boot_guard_report(Root),
+    Edac = edac_report(Root),
+    MemoryController = memory_controller_probe_report(Root, Edac),
     #{
         <<"device">> => <<"system@1.0">>,
         <<"schema">> => <<"lapee-system-report@1">>,
@@ -60,9 +63,9 @@ report_from_root(Root0) ->
         <<"evidence-model">> => evidence_model(),
         <<"kernel">> => kernel_report(Root),
         <<"cpu">> => cpu_report(Root),
-        <<"memory">> => memory_report(Root),
-        <<"firmware">> => firmware_report(Root),
-        <<"hardware-probes">> => hardware_probes_report(Root),
+        <<"memory">> => memory_report(Root, Edac, MemoryController),
+        <<"firmware">> => firmware_report(Root, BootGuard),
+        <<"hardware-probes">> => hardware_probes_report(BootGuard, MemoryController),
         <<"tpm">> => tpm_report(Root),
         <<"iommu">> => iommu_report(Root),
         <<"integrity">> => integrity_report(Root),
@@ -128,9 +131,7 @@ cpu_report(Root) ->
         }
     }.
 
-memory_report(Root) ->
-    Edac = edac_report(Root),
-    ControllerProbes = memory_controller_probe_report(Root, Edac),
+memory_report(Root, Edac, ControllerProbes) ->
     #{
         <<"meminfo">> => meminfo_report(Root),
         <<"sysfs-memory">> => sysfs_memory_report(Root),
@@ -146,20 +147,18 @@ memory_report(Root) ->
         }
     }.
 
-firmware_report(Root) ->
+firmware_report(Root, BootGuard) ->
     #{
         <<"dmi">> => dmi_report(Root),
         <<"efi">> => efi_report(Root),
-        <<"boot-guard">> => boot_guard_report(Root)
+        <<"boot-guard">> => BootGuard
     }.
 
-hardware_probes_report(Root) ->
-    Edac = edac_report(Root),
+hardware_probes_report(BootGuard, MemoryController) ->
     #{
         <<"schema">> => <<"lapee-hardware-probes@1">>,
-        <<"boot-guard">> => boot_guard_report(Root),
-        <<"memory-controller">> =>
-            memory_controller_probe_report(Root, Edac),
+        <<"boot-guard">> => BootGuard,
+        <<"memory-controller">> => MemoryController,
         <<"collection">> => #{
             <<"userspace-pcode-mailbox-writes">> => false,
             <<"notes">> =>
@@ -500,7 +499,7 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
             <<"offset">> => u32_hex(?MTL_MEM_SS_INFO_GLOBAL)
         }
     },
-    case read_u32_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL) of
+    case read_uint_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL, 4) of
         {ok, Raw} ->
             Status = intel_mtl_dram_status(Raw),
             Common#{
@@ -682,7 +681,7 @@ efi_byte_state(_, _) -> <<"unknown">>.
 
 boot_guard_report(Root) ->
     Path = "/dev/cpu/0/msr",
-    case read_u64_le_at(Root, Path, ?MSR_BOOT_GUARD_SACM_INFO) of
+    case read_uint_le_at(Root, Path, ?MSR_BOOT_GUARD_SACM_INFO, 8) of
         {ok, Raw} ->
             #{
                 <<"available">> => true,
@@ -691,34 +690,28 @@ boot_guard_report(Root) ->
                 <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
                 <<"raw-hex">> => u64_hex(Raw),
                 <<"decoded">> => boot_guard_decode(Raw),
-                <<"notes">> => boot_guard_notes(<<"dev-cpu-msr">>)
+                <<"notes">> => boot_guard_notes()
             };
         {error, Reason} ->
-            boot_guard_unavailable(
-                <<"dev-cpu-msr">>,
-                to_bin(Path),
-                Reason)
+            boot_guard_unavailable(Reason)
     end.
 
-boot_guard_unavailable(Source, Interface, Reason) ->
+boot_guard_unavailable(Reason) ->
     #{
         <<"available">> => false,
-        <<"source">> => Source,
-        <<"interface">> => Interface,
+        <<"source">> => <<"dev-cpu-msr">>,
+        <<"interface">> => <<"/dev/cpu/0/msr">>,
         <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
         <<"error">> => to_bin(Reason),
-        <<"notes">> => boot_guard_notes(Source)
+        <<"notes">> => boot_guard_notes()
     }.
 
-boot_guard_notes(<<"dev-cpu-msr">>) ->
-    <<"MSR_BOOT_GUARD_SACM_INFO read through /dev/cpu/0/msr. This is a "
-      "neutral runtime observation of the S-ACM-exported status register; "
+boot_guard_notes() ->
+    <<"This probe reads MSR_BOOT_GUARD_SACM_INFO through /dev/cpu/0/msr "
+      "when the kernel exposes it. It is a neutral runtime observation of "
+      "the S-ACM-exported status register; "
       "TPM/TCG event-log Boot Guard measurements remain separate firmware "
-      "evidence.">>;
-boot_guard_notes(_) ->
-    <<"MSR_BOOT_GUARD_SACM_INFO was not readable through the configured "
-      "kernel interfaces. Boot Guard evidence may still be available "
-      "indirectly in the TPM/TCG event log and should be interpreted there.">>.
+      "evidence.">>.
 
 boot_guard_decode(Raw) ->
     #{
@@ -1047,34 +1040,20 @@ read_lines(Root, Abs) ->
             []
     end.
 
-read_u32_le_at(Root, Abs, Offset) ->
-    case file:open(root_path(Root, Abs), [read, raw, binary]) of
-        {ok, Io} ->
-            try
-                case file:pread(Io, Offset, 4) of
-                    {ok, <<Value:32/little-unsigned-integer>>} ->
-                        {ok, Value};
-                    {ok, _} ->
-                        {error, 'short-read'};
-                    eof ->
-                        {error, eof};
-                    {error, Reason} ->
-                        {error, Reason}
-                end
-            after
-                file:close(Io)
-            end;
-        {error, Reason} ->
-            {error, Reason}
+read_uint_le_at(Root, Abs, Offset, Bytes) ->
+    Bits = Bytes * 8,
+    case read_exact_at(Root, Abs, Offset, Bytes) of
+        {ok, <<Value:Bits/little-unsigned-integer>>} -> {ok, Value};
+        Error -> Error
     end.
 
-read_u64_le_at(Root, Abs, Offset) ->
+read_exact_at(Root, Abs, Offset, Bytes) ->
     case file:open(root_path(Root, Abs), [read, raw, binary]) of
         {ok, Io} ->
             try
-                case file:pread(Io, Offset, 8) of
-                    {ok, <<Value:64/little-unsigned-integer>>} ->
-                        {ok, Value};
+                case file:pread(Io, Offset, Bytes) of
+                    {ok, Bin} when byte_size(Bin) =:= Bytes ->
+                        {ok, Bin};
                     {ok, _} ->
                         {error, 'short-read'};
                     eof ->
@@ -1091,28 +1070,14 @@ read_u64_le_at(Root, Abs, Offset) ->
 
 read_cpuid_leaf(Root, Abs, Leaf, Subleaf) ->
     Offset = (Subleaf bsl 32) bor Leaf,
-    case file:open(root_path(Root, Abs), [read, raw, binary]) of
-        {ok, Io} ->
-            try
-                case file:pread(Io, Offset, 16) of
-                    {ok, <<Eax:32/little-unsigned-integer,
-                           Ebx:32/little-unsigned-integer,
-                           Ecx:32/little-unsigned-integer,
-                           Edx:32/little-unsigned-integer>>} ->
-                        {ok, #{eax => Eax, ebx => Ebx,
-                               ecx => Ecx, edx => Edx}};
-                    {ok, _} ->
-                        {error, 'short-read'};
-                    eof ->
-                        {error, eof};
-                    {error, Reason} ->
-                        {error, Reason}
-                end
-            after
-                file:close(Io)
-            end;
-        {error, Reason} ->
-            {error, Reason}
+    case read_exact_at(Root, Abs, Offset, 16) of
+        {ok, <<Eax:32/little-unsigned-integer,
+               Ebx:32/little-unsigned-integer,
+               Ecx:32/little-unsigned-integer,
+               Edx:32/little-unsigned-integer>>} ->
+            {ok, #{eax => Eax, ebx => Ebx, ecx => Ecx, edx => Edx}};
+        Error ->
+            Error
     end.
 
 read_attr_map(Root, Abs, Names) ->
@@ -1288,17 +1253,19 @@ report_fixture_root_test() ->
             <<"0x8086\n">>),
         write_fixture(Root, "/sys/class/drm/card0/device/device",
             <<"0x7d45\n">>),
-        write_u32_fixture(
+        write_uint_fixture(
             Root,
             "/sys/class/drm/card0/device/resource0",
             ?MTL_MEM_SS_INFO_GLOBAL,
-            2 bor (8 bsl 4) bor (3 bsl 8)),
-        write_u64_fixture(
+            2 bor (8 bsl 4) bor (3 bsl 8),
+            32),
+        write_uint_fixture(
             Root,
             "/dev/cpu/0/msr",
             ?MSR_BOOT_GUARD_SACM_INFO,
             (1 bsl 32) bor (1 bsl 6) bor (1 bsl 5) bor
-                (1 bsl 3) bor (2 bsl 1)),
+                (1 bsl 3) bor (2 bsl 1),
+            64),
         make_dir_p(Root, "/sys/class/drm/card0-eDP-1"),
         write_fixture(Root, "/sys/class/drm/card0-eDP-1/status",
             <<"connected\n">>),
@@ -1390,22 +1357,12 @@ write_fixture(Root, Abs, Data) ->
     ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Data).
 
-write_u32_fixture(Root, Abs, Offset, Value) ->
+write_uint_fixture(Root, Abs, Offset, Value, Bits) ->
     Path = root_path(Root, Abs),
     ok = filelib:ensure_dir(Path),
     {ok, Io} = file:open(Path, [write, raw, binary]),
     try
-        ok = file:pwrite(Io, Offset, <<Value:32/little-unsigned-integer>>)
-    after
-        file:close(Io)
-    end.
-
-write_u64_fixture(Root, Abs, Offset, Value) ->
-    Path = root_path(Root, Abs),
-    ok = filelib:ensure_dir(Path),
-    {ok, Io} = file:open(Path, [write, raw, binary]),
-    try
-        ok = file:pwrite(Io, Offset, <<Value:64/little-unsigned-integer>>)
+        ok = file:pwrite(Io, Offset, <<Value:Bits/little-unsigned-integer>>)
     after
         file:close(Io)
     end.
