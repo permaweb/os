@@ -250,9 +250,10 @@ make hb-sb-provisioner-write DEV=/dev/diskN
 ```
 
 Boot that USB once with firmware in Secure Boot Setup Mode. It should print
-the enrollment progress and then stop. Power off, enable Secure Boot if the
-firmware did not do so automatically, then flash and boot the signed runtime
-image:
+the enrollment progress and then stop. Some firmware still reports
+`SetupMode=1` until the next power cycle even after accepting `PK`. Power
+off, enable Secure Boot if the firmware did not do so automatically, then
+flash and boot the signed runtime image:
 
 ```sh
 make hb-usb-no-tme-signed-write DEV=/dev/diskN

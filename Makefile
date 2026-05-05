@@ -137,6 +137,7 @@ NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
 NO_TME_SIGNED_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme-signed.img
 NO_TME_SIGNED_UKI = $(BUILD_DIR)/images/lapee-no-tme.signed.efi
 SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
+SB_PROVISION_BUILDROOT_VOLUME = lapee-buildroot-sb-provisioner
 SB_PROVISION_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner.img
 SB_PROVISION_KERNEL = $(SB_PROVISION_BUILD_DIR)/kernel/vmlinuz-lapee
 SB_PROVISION_INITRAMFS = $(SB_PROVISION_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
@@ -435,8 +436,13 @@ hb-sb-provisioner-image: toolchain
 	    echo "secureboot/enrol/KEK.auth missing. Run: make hb-sb-keys"; exit 1; }
 	@test -f secureboot/enrol/PK.auth || { \
 	    echo "secureboot/enrol/PK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	@if docker volume inspect $(SB_PROVISION_BUILDROOT_VOLUME) >/dev/null 2>&1; then \
+	    docker run --rm $(DOCKER_PLATFORM) \
+	        -v $(SB_PROVISION_BUILDROOT_VOLUME):/build \
+	        $(BUILD_IMAGE) bash -c "rm -rf /build/out/build/lapee-sb-provisioner"; \
+	fi
 	$(MAKE) buildroot \
-	    BUILDROOT_VOLUME=lapee-buildroot-sb-provisioner \
+	    BUILDROOT_VOLUME=$(SB_PROVISION_BUILDROOT_VOLUME) \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-sb-provisioner-fragment.config" \
 	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-sb-provisioner.extra"

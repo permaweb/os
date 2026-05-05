@@ -273,7 +273,7 @@ run_secure_boot_provisioner() {
             > /dev/console 2>&1; then
         sync 2>/dev/null || true
         sbp_log ""
-        sbp_log "Secure Boot keys enrolled."
+        sbp_log "Secure Boot enrolment completed."
         sbp_log "Power off, enable Secure Boot, then boot the signed LapEE image."
     else
         _rc=$?
