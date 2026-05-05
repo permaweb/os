@@ -187,6 +187,35 @@ sbp_log() {
     printf '%s\n' "$*" > /dev/console 2>/dev/null || true
 }
 
+sbp_warning_screen() {
+    printf '\033[0m\033[41;37;1m\033[48;5;52m\033[38;5;231m\033[2J\033[H' \
+        > /dev/console 2>/dev/null || true
+}
+
+sbp_confirm_enrolment() {
+    sbp_warning_screen
+    cat > /dev/console <<'EOF'
+LapEE Secure Boot Enrolment.
+
+!!! CAUTION !!!
+Performing this operation is irreversible and will render your machine unable to boot other operating systems. There is a very real possibility that it will cause harm to the viability of the attached hardware. Nobody will help you, and nobody can save your machine.
+
+Type 'I UNDERSTAND.' to perform LapEE enrolment anyway and grow the decentralized supercomputer. You have been warned.
+EOF
+
+    while :; do
+        printf '\n> ' > /dev/console 2>/dev/null || true
+        IFS= read -r _sbp_answer < /dev/console || _sbp_answer=""
+        if [ "$_sbp_answer" = "I UNDERSTAND." ]; then
+            printf '\nProceeding with LapEE Secure Boot enrolment.\n\n' \
+                > /dev/console 2>/dev/null || true
+            return 0
+        fi
+        printf '\nInput did not match. Type exactly: I UNDERSTAND.\n' \
+            > /dev/console 2>/dev/null || true
+    done
+}
+
 run_secure_boot_provisioner() {
     sbp_log ""
     sbp_log "Secure Boot provisioning mode."
@@ -230,6 +259,7 @@ run_secure_boot_provisioner() {
     fi
 
     sbp_log "Found provisioning bundle on $_esp_found."
+    sbp_confirm_enrolment
     sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
     if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
             > /dev/console 2>&1; then
