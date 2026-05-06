@@ -93,8 +93,6 @@ if [ "$LAPEE_DEBUG" = "1" ]; then
     debug_log "[debug] splash disabled; boot stage logs are visible on /dev/console"
 elif [ "$LAPEE_MODE" = "sb-provision" ]; then
     dmesg -n 4 2>/dev/null || true
-    printf '%s\n' "=== LAPEE SECURE BOOT PROVISIONER ===" > /dev/console 2>/dev/null || true
-    printf '%s\n' "This image enrolls LapEE operator Secure Boot keys, then stops." > /dev/console 2>/dev/null || true
 else
     # Calm /dev/console down so the splash daemon's 12 fps redraw isn't
     # fighting kernel printk. With `dmesg -n 1' only KERN_ALERT/EMERG
@@ -117,15 +115,19 @@ mkdir -p /run/lapee
 STATUS_FILE=/run/lapee/status
 printf 'Starting LapEE.\n' > "$STATUS_FILE" 2>/dev/null || true
 export LAPEE_STATUS="$STATUS_FILE"
+PROVISION_INPUT_FILE=/run/lapee/sb-provision-input
+: > "$PROVISION_INPUT_FILE" 2>/dev/null || true
+export LAPEE_PROVISION_INPUT="$PROVISION_INPUT_FILE"
 SPLASH_LAYOUT=$(cmdline_value lapee.splash || true)
+if [ "$LAPEE_MODE" = "sb-provision" ]; then
+    SPLASH_LAYOUT=provision
+fi
 case "$SPLASH_LAYOUT" in
-    qr|max|full|deck|sigil|blue|orbit|matrix|plaque|classic)
+    qr|max|full|deck|sigil|blue|orbit|matrix|plaque|provision|classic)
         export LAPEE_SPLASH_LAYOUT="$SPLASH_LAYOUT"
         ;;
 esac
 if [ "$LAPEE_DEBUG" = "1" ]; then
-    SPLASH_PID=""
-elif [ "$LAPEE_MODE" = "sb-provision" ]; then
     SPLASH_PID=""
 else
     ERL=$(ls -1 /usr/lib/hyperbeam/erts-*/bin/erl 2>/dev/null | head -1)
@@ -138,8 +140,16 @@ else
                     /usr/lib/hyperbeam/lib/*/ebin \
                -noshell -noinput \
                -run lapee_splash main \
-            > /dev/null 2>/dev/null </dev/null &
+            > /dev/null 2>/run/lapee/splash.err </dev/null &
         SPLASH_PID=$!
+        if [ "$LAPEE_MODE" = "sb-provision" ]; then
+            sleep 1
+            if ! kill -0 "$SPLASH_PID" 2>/dev/null &&
+               [ -s /run/lapee/splash.err ] &&
+               [ -w /dev/ttyS0 ]; then
+                cat /run/lapee/splash.err > /dev/ttyS0 2>/dev/null || true
+            fi
+        fi
     fi
 fi
 
@@ -184,7 +194,10 @@ halt_boot() {
 }
 
 sbp_log() {
-    printf '%s\n' "$*" > /dev/console 2>/dev/null || true
+    status "$*"
+    if [ -w /dev/ttyS0 ]; then
+        printf '%s\n' "$*" > /dev/ttyS0 2>/dev/null || true
+    fi
 }
 
 sbp_mount_efivars_rw() {
@@ -197,32 +210,44 @@ sbp_mount_efivars_rw() {
         efivarfs /sys/firmware/efi/efivars 2>/dev/null
 }
 
-sbp_warning_screen() {
-    printf '\033[0m\033[41;37;1m\033[48;5;52m\033[38;5;231m\033[2J\033[H' \
-        > /dev/console 2>/dev/null || true
+sbp_set_input() {
+    printf '%s' "$*" > "$PROVISION_INPUT_FILE" 2>/dev/null || true
+}
+
+sbp_char_hex() {
+    printf '%s' "$1" | od -An -tx1 2>/dev/null | tr -d ' \n'
 }
 
 sbp_confirm_enrolment() {
-    sbp_warning_screen
-    cat > /dev/console <<'EOF'
-LapEE Secure Boot Enrolment.
-
-!!! CAUTION !!!
-Performing this operation is irreversible and will render your machine unable to boot other operating systems. There is a very real possibility that it will cause harm to the viability of the attached hardware. Nobody will help you, and nobody can save your machine.
-
-Type 'I UNDERSTAND.' to perform LapEE enrolment anyway and grow the decentralized supercomputer. You have been warned.
-EOF
-
+    _sbp_answer=""
+    sbp_set_input "$_sbp_answer"
+    sbp_log "Type I UNDERSTAND. to continue."
+    _sbp_stty=$(stty -F /dev/console -g 2>/dev/null || true)
+    stty -F /dev/console raw -echo 2>/dev/null || true
     while :; do
-        printf '\n> ' > /dev/console 2>/dev/null || true
-        IFS= read -r _sbp_answer < /dev/console || _sbp_answer=""
-        if [ "$_sbp_answer" = "I UNDERSTAND." ]; then
-            printf '\nProceeding with LapEE Secure Boot enrolment.\n\n' \
-                > /dev/console 2>/dev/null || true
-            return 0
-        fi
-        printf '\nInput did not match. Type exactly: I UNDERSTAND.\n' \
-            > /dev/console 2>/dev/null || true
+        IFS= read -r -n 1 _sbp_ch < /dev/console || _sbp_ch=""
+        _sbp_hex=$(sbp_char_hex "$_sbp_ch")
+        case "$_sbp_hex" in
+            ""|0a|0d)
+                if [ "$_sbp_answer" = "I UNDERSTAND." ]; then
+                    [ -n "$_sbp_stty" ] && \
+                        stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
+                    sbp_log "Proceeding with LapEE Secure Boot enrolment."
+                    return 0
+                fi
+                _sbp_answer=""
+                sbp_log "Input did not match. Type exactly: I UNDERSTAND."
+                ;;
+            08|7f)
+                _sbp_answer=${_sbp_answer%?}
+                ;;
+            *)
+                if [ ${#_sbp_answer} -lt 80 ]; then
+                    _sbp_answer="${_sbp_answer}${_sbp_ch}"
+                fi
+                ;;
+        esac
+        sbp_set_input "$_sbp_answer"
     done
 }
 
@@ -270,7 +295,7 @@ run_secure_boot_provisioner() {
     sbp_confirm_enrolment
     sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
     if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
-            > /dev/console 2>&1; then
+            > /run/lapee/sb-provisioner.log 2>&1; then
         sync 2>/dev/null || true
         sbp_log ""
         sbp_log "Secure Boot enrolment completed."

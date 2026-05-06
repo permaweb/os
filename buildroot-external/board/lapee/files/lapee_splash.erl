@@ -59,6 +59,8 @@ probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
 probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm@2.0a/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 status_path()      -> os:getenv("LAPEE_STATUS",      "/run/lapee/status").
+provision_input_path() ->
+    os:getenv("LAPEE_PROVISION_INPUT", "/run/lapee/sb-provision-input").
 
 splash_layout() ->
     case os:getenv("LAPEE_SPLASH_LAYOUT") of
@@ -75,6 +77,7 @@ splash_layout() ->
                 "orbit"   -> orbit;
                 "matrix"  -> matrix;
                 "plaque"  -> plaque;
+                "provision" -> provision;
                 "classic" -> classic;
                 _         -> blue
             end
@@ -521,6 +524,7 @@ render(#{cols := W, rows := H, layout := Layout, frame := Frame,
         {_, orbit}      -> render_orbit_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, matrix}     -> render_matrix_grid(W, H, Yaw, Lid, Footer, Frame);
         {_, plaque}     -> render_plaque_grid(W, H, Yaw, Lid, Footer, Frame);
+        {_, provision}  -> render_provision_grid(W, H, Yaw, Lid, Footer);
         _               -> render_qr_grid(W, H, Yaw, Lid, Footer, Frame, Ip)
     end,
     %% Emit: cursor home, theme colour, then row by row separated
@@ -698,6 +702,57 @@ render_blue_grid(W, H, Yaw, Lid, Footer, _Frame, Ip) ->
                         RightX + RightW * 0.58 - 5, H * 0.69, Scale),
     Grid2 = overlay_lines(Grid1, W, H, 6, 3, blue_left_top_lines(LeftW)),
     draw_blue_qr_panel(Grid2, W, H, 6, 17, LeftW - 4, Url, Footer, Ip).
+
+render_provision_grid(W, H, Yaw, Lid, Footer) ->
+    Grid0 = #{},
+    LeftW = max(48, min(72, W div 2)),
+    Gap = 3,
+    RightX = LeftW + Gap,
+    RightW = max(34, W - RightX - 2),
+    Scale = max(8.0, min(RightW / 4.05, (H - 4) / 1.9)),
+    Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
+                        RightX + RightW * 0.58 - 5, H * 0.69, Scale),
+    Grid2 = overlay_lines(Grid1, W, H, 6, 3,
+        ["LapEE Secure Boot Enrolment.", "",
+         "This image writes operator",
+         "Secure Boot keys to firmware."]),
+    draw_provision_panel(Grid2, W, H, 6, 15, LeftW - 4, Footer).
+
+draw_provision_panel(Grid, W, H, X, Y, ColW, Footer) ->
+    PanelW = min(64, max(36, ColW)),
+    PanelH = max(12, min(H - Y - 2, 30)),
+    TextW = PanelW - 4,
+    Grid1 = draw_box(fill_rect(Grid, W, H, X + 1, Y + 1,
+                               PanelW - 2, PanelH - 2),
+                     W, H, X, Y, PanelW, PanelH),
+    WarningLines = provision_warning_lines(TextW, PanelH - 8),
+    Grid2 = overlay_lines(Grid1, W, H, X + 2, Y + 2, WarningLines),
+    Input = "> " ++ read_provision_input() ++ "_",
+    InputLines = wrap_status_lines(Input, TextW, 3),
+    InputY = Y + PanelH - 5,
+    Grid3 = overlay_lines(Grid2, W, H, X + 2, InputY, InputLines),
+    overlay_text(Grid3, W, H, X + 2, Y + PanelH - 2,
+                 fit_text(Footer, TextW)).
+
+provision_warning_lines(Width, MaxLines) ->
+    Paragraphs = [
+        "!!! CAUTION !!!",
+        "Performing this operation is irreversible and will render your machine unable to boot other operating systems.",
+        "There is a very real possibility that it will cause harm to the viability of the attached hardware.",
+        "Nobody will help you, and nobody can save your machine.",
+        "Type 'I UNDERSTAND.' to perform LapEE enrolment anyway and grow the decentralized supercomputer. You have been warned."
+    ],
+    Lines0 = lists:append([wrap_words(string:tokens(P, " \t\r\n"), Width)
+                           || P <- Paragraphs]),
+    lists:sublist(Lines0, MaxLines).
+
+read_provision_input() ->
+    case file:read_file(provision_input_path()) of
+        {ok, Bin} ->
+            fit_text(binary_to_list(Bin), 80);
+        _ ->
+            ""
+    end.
 
 blue_left_top_lines(LeftW) ->
     Max = max(12, LeftW - 3),
@@ -1200,6 +1255,7 @@ theme_prefix(matrix, ready, _)  -> <<"\e[1;32m">>;
 theme_prefix(matrix, _, _)      -> <<"\e[0;32m">>;
 theme_prefix(plaque, ready, _)  -> <<"\e[1;37m">>;
 theme_prefix(plaque, _, _)      -> <<"\e[0;37m">>;
+theme_prefix(provision, _, _)   -> provision_theme_prefix();
 theme_prefix(classic, ready, _) -> <<"\e[1;37m">>;
 theme_prefix(classic, _, _)     -> <<"\e[0;37m">>.
 
@@ -1209,6 +1265,12 @@ blue_theme_prefix() ->
     %% 15 (bright white foreground) to a clean white, then draw every
     %% full-width row as bright white text on that blue block colour.
     <<"\e]P415123a\e]Pff8fbff\e[1;37;44m">>.
+
+provision_theme_prefix() ->
+    %% Remap ANSI red to a deep warning red and draw white-on-red full
+    %% rows. The provisioner is intentionally visually distinct from
+    %% the production blue proof splash.
+    <<"\e]P1400000\e]Pff8fbff\e[1;37;41m">>.
 
 draw_laptop(Grid0, W, H, Yaw, Lid, Xc, Yc, Scale) ->
     Edges = laptop_edges(Lid),
