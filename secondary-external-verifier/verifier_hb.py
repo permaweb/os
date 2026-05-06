@@ -31,21 +31,19 @@ Checks:
   3. Quote's extraData == nonce field of the envelope.
   4. Quote's pcrDigest == SHA-256(pcr0||pcr1||...||pcr15) in the
      order given by `pcr-selection'.
-  5. PCR 15 replay: starting at all-zero, extend every PCR-15 event
+  5. AK authPolicy equals the LapEE policy over PCRs
+     [0,1,7,10,11,14,15]. Including PCR 15 proves AK use is gated by
+     the boot-subject measurement.
+  6. PCR 15 replay: starting at all-zero, extend every PCR-15 event
      in `runtime-event-log' in `seq' order; result must equal the
      quoted PCR-15 value.
-  6. Some PCR-15 event has digest equal to `node-message-id'. That
+  7. Some PCR-15 event has digest equal to `node-message-id'. That
      closes the loop: TPM state commits to the running node's
      identity hash. Match by digest, not by seq position -- the
      binding event-type is `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT'
      when on.start drives `~tpm@2.0a/boot-attestation' (the
      production path) and `EV_HYPERBEAM_NODE_IDENTITY_EXTEND'
      when a caller drives `~tpm@2.0a/extend' directly.
-  7. Some `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event on PCR 15 has
-     digest equal to sha256(ak-pub-pem). Paper P5: AK is bound
-     to the measured-boot session. Match by event-type + digest;
-     the extend lands at seq 0 of the runtime log under the
-     production boot-attestation flow.
   8. node-message + node-message-id present, IDs are base64url 32 bytes.
 """
 from __future__ import annotations
@@ -59,16 +57,17 @@ import sys
 import tempfile
 
 EXPECTED_VERSION = "0.4"
+AK_POLICY_PCRS = [0, 1, 7, 10, 11, 14, 15]
+TPM_CC_ACTIVATE_CREDENTIAL = 0x00000147
+TPM_CC_POLICY_COMMAND_CODE = 0x0000016C
+TPM_CC_POLICY_OR = 0x00000171
+TPM_CC_POLICY_PCR = 0x0000017F
 
 
 def b64url_decode(s: str) -> bytes:
     """Decode base64url without padding (Arweave/HB convention)."""
     pad = "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s + pad)
-
-
-def b64url_encode(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
 
 
 def unwrap_envelope(raw):
@@ -430,6 +429,111 @@ def _verify_quote(envelope):
 
 
 # ----------------------------------------------------------------------
+# 4b. AK authPolicy binds AK use to the LapEE PCR policy, including PCR 15
+# ----------------------------------------------------------------------
+def _tpm2b(buf, off=0):
+    if off + 2 > len(buf):
+        raise ValueError("truncated TPM2B size")
+    size = int.from_bytes(buf[off:off + 2], "big")
+    off += 2
+    if off + size > len(buf):
+        raise ValueError("truncated TPM2B payload")
+    return buf[off:off + size], off + size
+
+
+def _ak_auth_policy(envelope):
+    public_blob = b64url_decode(envelope.get("ak-public", ""))
+    public, _ = _tpm2b(public_blob, 0)
+    off = 0
+    if len(public) < 8:
+        raise ValueError("truncated TPMT_PUBLIC")
+    typ = int.from_bytes(public[off:off + 2], "big")
+    off += 2
+    off += 2  # nameAlg
+    off += 4  # objectAttributes
+    if typ != 0x0001:
+        raise ValueError(f"unsupported AK public type 0x{typ:04x}")
+    auth_policy, _ = _tpm2b(public, off)
+    return auth_policy
+
+
+def _policy_pcr_selection(pcrs):
+    selected = sorted(pcrs)
+    pcr_select = bytearray(3)
+    for pcr in selected:
+        pcr_select[pcr // 8] |= 1 << (pcr % 8)
+    return (
+        (1).to_bytes(4, "big") +
+        (0x000B).to_bytes(2, "big") +
+        bytes([3]) +
+        bytes(pcr_select)
+    )
+
+
+def _compute_pcr_digest(pcrs, pcr_values):
+    h = hashlib.sha256()
+    for pcr in pcrs:
+        value = pcr_values.get(str(pcr))
+        if value is None:
+            raise KeyError(pcr)
+        h.update(b64url_decode(value))
+    return h.digest()
+
+
+def _expected_ak_policy_digest(pcrs, pcr_values):
+    pcr_digest = _compute_pcr_digest(pcrs, pcr_values)
+    selection = _policy_pcr_selection(pcrs)
+    pcr_policy = hashlib.sha256(
+        b"\x00" * 32 +
+        TPM_CC_POLICY_PCR.to_bytes(4, "big") +
+        selection +
+        pcr_digest
+    ).digest()
+    activate_policy = hashlib.sha256(
+        pcr_policy +
+        TPM_CC_POLICY_COMMAND_CODE.to_bytes(4, "big") +
+        TPM_CC_ACTIVATE_CREDENTIAL.to_bytes(4, "big")
+    ).digest()
+    return hashlib.sha256(
+        b"\x00" * 32 +
+        TPM_CC_POLICY_OR.to_bytes(4, "big") +
+        pcr_policy +
+        activate_policy
+    ).digest()
+
+
+def _verify_ak_policy_bound(envelope):
+    try:
+        policy = _ak_auth_policy(envelope)
+        pcr_values = envelope["tpm-quote"]["pcr-values"]
+        expected = _expected_ak_policy_digest(AK_POLICY_PCRS, pcr_values)
+    except KeyError as e:
+        return Check(
+            "AK authPolicy is PCR-bound to quoted boot state",
+            False,
+            f"quote omitted AK policy PCR {e.args[0]}")
+    except Exception as e:
+        return Check(
+            "AK authPolicy is PCR-bound to quoted boot state",
+            False,
+            str(e)[:200])
+    if not policy:
+        return Check(
+            "AK authPolicy is PCR-bound to quoted boot state",
+            False,
+            "AK authPolicy is empty")
+    if policy != expected:
+        return Check(
+            "AK authPolicy is PCR-bound to quoted boot state",
+            False,
+            f"policy={policy.hex()[:16]} expected={expected.hex()[:16]}")
+    return Check(
+        "AK authPolicy is PCR-bound to quoted boot state",
+        True,
+        f"policy covers PCRs {AK_POLICY_PCRS}")
+
+
+# ----------------------------------------------------------------------
 # 5. PCR-15 replay matches quote
 # ----------------------------------------------------------------------
 def _pcr15_events_in_order(envelope):
@@ -483,35 +587,6 @@ def _verify_node_msg_binding(envelope):
 
 
 # ----------------------------------------------------------------------
-# 7. EV_HYPERBEAM_KEY_PUBKEY_EXTEND commits to AK pub PEM (paper P5)
-# ----------------------------------------------------------------------
-def _verify_ak_pubkey_binding(envelope):
-    events = _pcr15_events_in_order(envelope)
-    binders = [e for e in events
-               if e.get("event-type") == "EV_HYPERBEAM_KEY_PUBKEY_EXTEND"]
-    if not binders:
-        return Check(
-            "PCR 15 commits to AK pub PEM (paper P5)",
-            False,
-            "no EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in PCR-15 log")
-    ak_pem = envelope["ak-pub-pem"].encode()
-    expected_digest = b64url_encode(hashlib.sha256(ak_pem).digest())
-    matches = [e for e in binders if e.get("digest") == expected_digest]
-    if not matches:
-        return Check(
-            "PCR 15 commits to AK pub PEM (paper P5)",
-            False,
-            f"EV_HYPERBEAM_KEY_PUBKEY_EXTEND digests do not match "
-            f"sha256(ak-pub-pem)={expected_digest[:16]}...")
-    e = matches[0]
-    return Check(
-        "PCR 15 commits to AK pub PEM (paper P5)",
-        True,
-        f"seq={e.get('seq')} EV_HYPERBEAM_KEY_PUBKEY_EXTEND digest "
-        f"{expected_digest[:16]}... matches sha256(ak-pub-pem)")
-
-
-# ----------------------------------------------------------------------
 # 8. node-message + id present and correctly shaped
 # ----------------------------------------------------------------------
 def _verify_node_msg_shape(envelope):
@@ -554,9 +629,9 @@ def verify(envelope, roots_dir, aia_enabled=True):
                                "ek-cert-chain-pem", ""),
                            aia_enabled=aia_enabled),
         *_verify_quote(envelope),
+        _verify_ak_policy_bound(envelope),
         _verify_pcr15_replay(envelope),
         _verify_node_msg_binding(envelope),
-        _verify_ak_pubkey_binding(envelope),
         _verify_node_msg_shape(envelope),
     ]
 

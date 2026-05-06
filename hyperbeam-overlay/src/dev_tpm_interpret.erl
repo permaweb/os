@@ -3313,24 +3313,11 @@ collect_policy_signals(Claim, Envelope) ->
         %% values); this is not (requires a TPM-held AK private).
         <<"quote-signature-verified">> =>
             verify_quote_signature(Envelope),
-        %% v1.2 paper-to-code pass P5: the AK pub is supposed to be
-        %% extended into PCR 15 at init_chain time (see paper
-        %% ephemeral-node-key-binding). An envelope without a
-        %% matching EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in the
-        %% runtime event log does not prove the AK pub is bound to
-        %% the measured-boot session. Computed here (mirrors
-        %% dev_tpm2:chk_ak_pubkey_binding/1) so the cross-node
-        %% verdict path also gates on it.
-        <<"ak-pubkey-extend-verified">> =>
-            verify_ak_pubkey_extend(Envelope),
         %% v1.2.2 paper P5-ext (AO-Core hashpath continuity): the
         %% TPM event log tip is committed into PCR 15 as the step
-        %% immediately after the AK pub extension, so every
-        %% subsequent AO-Core hashpath entry carries a commitment
-        %% to the full boot measurement chain (paper Section AO-
-        %% Core Continuity: "HyperBEAM seeds its AO-Core chain
-        %% with a commitment to the TPM event log tip immediately
-        %% after key-pubkey-extend"). Computed by locating an
+        %% before AK creation, so every subsequent AK-authorized
+        %% quote carries a commitment to the full boot measurement
+        %% chain. Computed by locating an
         %% EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT event on PCR 15
         %% whose digest matches sha256(envelope.tcg-event-log).
         <<"hashpath-continuity-verified">> =>
@@ -3392,7 +3379,6 @@ classify_policy_findings(S) ->
          ek_finding(S),
          ak_finding(S),
          ek_ak_binding_finding(S),      %% v1.2 red-team warn
-         ak_pubkey_extend_finding(S),   %% v1.2 paper-to-code P5
          hashpath_continuity_finding(S), %% v1.2.2 paper P5-ext
          tpm_session_mode_finding(S),    %% v1.2.2 paper P4
          wallet_tpm_binding_finding(S),  %% v1.2.2 root-of-trust
@@ -3854,35 +3840,6 @@ quote_signature_finding(#{<<"quote-signature-verified">> := <<"unknown">>}) ->
               "without both.">>);
 quote_signature_finding(_) -> ok.
 
-%% v1.2 paper-to-code pass P5: verifier gate on the producer having
-%% extended the AK public PEM into PCR 15 at init_chain time. Without
-%% this, the paper's "a verifier replaying the event log observes
-%% key-pubkey-extend land in PCR 15" property is not enforced -- an
-%% attacker could present a freshly-generated AK pub + a quote over
-%% a TPM they control and the verifier would have no signal to
-%% reject.
-ak_pubkey_extend_finding(
-  #{<<"ak-pubkey-extend-verified">> := true}) -> ok;
-ak_pubkey_extend_finding(
-  #{<<"ak-pubkey-extend-verified">> := false}) ->
-    finding(critical, <<"ak-pubkey-extend-missing">>,
-            <<"ak">>,
-            <<"No EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in the "
-              "runtime event log matches sha256(ak-pub-pem). "
-              "Paper ephemeral-node-key-binding P5 requires the "
-              "AK pub to be extended into PCR 15 at init_chain "
-              "time; without it, the quote cannot be "
-              "cryptographically tied to THIS measured-boot "
-              "session's key material.">>);
-ak_pubkey_extend_finding(
-  #{<<"ak-pubkey-extend-verified">> := <<"unknown">>}) ->
-    finding(critical, <<"ak-pubkey-extend-unknown">>,
-            <<"ak">>,
-            <<"Cannot evaluate the AK pub PCR-15 binding: envelope "
-              "is missing ak-pub-pem or runtime_event_log. Paper "
-              "ephemeral-node-key-binding P5 requires both.">>);
-ak_pubkey_extend_finding(_) -> ok.
-
 %% v1.2.2 paper P5-ext: AO-Core hashpath continuity finding.
 %%
 %%   true           -> ok (paper property held)
@@ -3904,7 +3861,7 @@ hashpath_continuity_finding(
               "runtime event log with digest = sha256(tcg-event-log). "
               "Paper AO-Core continuity (P5-ext) requires the TPM "
               "event log tip to be extended into PCR 15 immediately "
-              "after the AK pub, so every AO-Core hashpath entry "
+              "before AK creation, so every AO-Core hashpath entry "
               "carries a commitment to the full boot chain. Without "
               "it, the two logs (TPM + AO-Core) remain parallel but "
               "are not cross-linked.">>);
@@ -4081,49 +4038,6 @@ verify_quote_signature(E) ->
                             false -> false
                         end;
                     _ -> <<"unknown">>
-                end
-            catch _:_ -> <<"unknown">>
-            end
-    end.
-
-%% Verify the AK pub PEM was extended into PCR 15 during init_chain.
-%% Mirrors `dev_tpm2:chk_ak_pubkey_binding/1' so the cross-node
-%% interpret path gates on the same signal as the direct-crypto
-%% verify path.
-%%
-%% Returns:
-%%   `true'          if an EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in the
-%%                   runtime event log carries `digest =
-%%                   sha256(ak-pub-pem)'.
-%%   `false'         if events exist (and AK pub is present) but none
-%%                   match.
-%%   `<<"unknown">>' if ak-pub-pem is absent or the event log is
-%%                   empty / unreadable -- we cannot distinguish
-%%                   missing-evidence from actual-absence.
-verify_ak_pubkey_extend(E) ->
-    AkPem = hb_maps:get(<<"ak-pub-pem">>, E, <<>>, #{}),
-    Log = hb_maps:get(<<"runtime-event-log">>, E, [], #{}),
-    case {AkPem, Log} of
-        {<<>>, _} -> <<"unknown">>;
-        {_, []}   -> <<"unknown">>;
-        {Pem, Events} ->
-            try
-                Expected = crypto:hash(sha256, Pem),
-                %% Must be a PCR-15 event (paper P5 is specifically
-                %% about PCR 15; a correctly-shaped event in another
-                %% PCR does not satisfy the property). Matches the
-                %% dev_tpm2:chk_ak_pubkey_binding/1 core-side filter.
-                Match = [X || X <- Events,
-                              is_map(X),
-                              ev_pcr(X) =:= 15,
-                              maps:get(<<"event-type">>, X, <<>>) =:=
-                                  <<"EV_HYPERBEAM_KEY_PUBKEY_EXTEND">>,
-                              hb_util:decode(
-                                maps:get(<<"digest">>, X, <<>>)) =:=
-                                  Expected],
-                case Match of
-                    [_|_] -> true;
-                    []    -> false
                 end
             catch _:_ -> <<"unknown">>
             end
@@ -11220,90 +11134,6 @@ v1_2_forged_envelope_without_sig_is_untrusted_test() ->
     ?assert(lists:member(<<"quote-signature-unknown">>, CodeSet)),
     ?assert(lists:member(<<"ek-cert-missing">>, CodeSet)),
     ?assert(lists:member(<<"ak-pub-missing">>, CodeSet)).
-
-%%--------------------------------------------------------------------
-%% v1.2 batch 9 / paper-to-code pass 6 tests
-%%--------------------------------------------------------------------
-
-%% verify_ak_pubkey_extend: returns true | false | <<"unknown">>
-%% based on whether a matching EV_HYPERBEAM_KEY_PUBKEY_EXTEND event
-%% for the envelope's ak-pub-pem is present in the runtime event log.
-v1_2_verify_ak_pubkey_extend_shapes_test() ->
-    AkPem = <<"-----BEGIN PUBLIC KEY-----\nAK\n-----END PUBLIC KEY-----\n">>,
-    GoodEvent = #{
-        <<"pcr">> => 15,
-        <<"event-type">> => <<"EV_HYPERBEAM_KEY_PUBKEY_EXTEND">>,
-        <<"digest">> => hb_util:encode(crypto:hash(sha256, AkPem))
-    },
-    %% (1) Missing ak-pub-pem -> unknown.
-    ?assertEqual(<<"unknown">>,
-                 verify_ak_pubkey_extend(
-                   #{<<"runtime-event-log">> => [GoodEvent]})),
-    %% (2) Empty event log -> unknown.
-    ?assertEqual(<<"unknown">>,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => []})),
-    %% (3) Event with wrong type -> false.
-    WrongType = GoodEvent#{<<"event-type">> =>
-                               <<"EV_HYPERBEAM_NODE_IDENTITY_EXTEND">>},
-    ?assertEqual(false,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => [WrongType]})),
-    %% (4) Event with wrong digest -> false.
-    WrongDig = GoodEvent#{<<"digest">> =>
-                              hb_util:encode(
-                                crypto:hash(sha256, <<"other">>))},
-    ?assertEqual(false,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => [WrongDig]})),
-    %% (5) Correct event -> true.
-    ?assertEqual(true,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => [GoodEvent]})),
-    %% (6) Reviewer 7 follow-up: a correctly-shaped event in the
-    %% wrong PCR (not 15) must NOT satisfy P5. The core check
-    %% `dev_tpm2:chk_ak_pubkey_binding/1' already filters by
-    %% pcr=15; the interpret-side mirror now does too.
-    WrongPcrEvent = GoodEvent#{<<"pcr">> => 11},
-    ?assertEqual(false,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => [WrongPcrEvent]})),
-    %% (7) Integer-binary-encoded PCR field (round-trip via JSON).
-    %% Must still be recognised as PCR 15.
-    GoodEventBin = GoodEvent#{<<"pcr">> => <<"15">>},
-    ?assertEqual(true,
-                 verify_ak_pubkey_extend(
-                   #{<<"ak-pub-pem">> => AkPem,
-                     <<"runtime-event-log">> => [GoodEventBin]})),
-    ok.
-
-%% ak_pubkey_extend_finding: true -> ok; false -> critical;
-%% unknown -> critical. Paper ephemeral-node-key-binding P5 demands
-%% this is a gating signal, not a warning.
-v1_2_ak_pubkey_extend_finding_severity_test() ->
-    ?assertEqual(ok,
-                 ak_pubkey_extend_finding(
-                   #{<<"ak-pubkey-extend-verified">> => true})),
-    FalseF = ak_pubkey_extend_finding(
-               #{<<"ak-pubkey-extend-verified">> => false}),
-    ?assertMatch(#{<<"severity">> := critical}, FalseF),
-    ?assertEqual(<<"ak-pubkey-extend-missing">>,
-                 maps:get(<<"code">>, FalseF)),
-    UnknownF = ak_pubkey_extend_finding(
-                 #{<<"ak-pubkey-extend-verified">> => <<"unknown">>}),
-    ?assertMatch(#{<<"severity">> := critical}, UnknownF),
-    ?assertEqual(<<"ak-pubkey-extend-unknown">>,
-                 maps:get(<<"code">>, UnknownF)),
-    %% Absent from signal map -> ok (catch-all): some callers
-    %% synthesise signals maps in tests; the finding only fires
-    %% when collect_policy_signals/2 has populated the key.
-    ?assertEqual(ok, ak_pubkey_extend_finding(#{})),
-    ok.
 
 %% v1.2 batch 9 / paper-to-code HIGH-2: lockdown_finding must emit
 %% a finding for `none' / `unknown' / absent lockdown-level, not

@@ -6,8 +6,9 @@
 %%% hook invokes `boot-attestation'. The device gathers the neutral
 %%% `~system@1.0/all' report and the public `~meta@1.0/info' node
 %%% message, extends PCR 15 with that combined subject's AO-Core ID,
-%%% quotes the selected PCR set, signs the resulting boot-attestation
-%%% message, and caches it under a stable pseudo-path.
+%%% creates an AK whose authPolicy includes PCR 15 at that value, quotes
+%%% the selected PCR set, signs the resulting boot-attestation message,
+%%% and caches it under a stable pseudo-path.
 %%%
 %%% Any party can then request `attestation', which returns a signed
 %%% envelope containing:
@@ -43,9 +44,9 @@
 
 %% Default PCR that HyperBEAM extends with the node-message identity.
 -define(NODE_IDENTITY_PCR, 15).
-%% PCRs that gate the AK. PCR 15 is deliberately excluded because LapEE
-%% extends it with runtime node/subject evidence after AK creation.
--define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14]).
+%% PCRs that gate the AK. PCR 15 carries the LapEE boot subject, so the
+%% AK is only usable by the TPM after the measured node config is present.
+-define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14, 15]).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
 -define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
@@ -152,9 +153,11 @@ info(_Base, _Req, _Opts) ->
                     <<"Produce or return the singleton boot attestation. "
                       "The first call gathers ~system@1.0/all and "
                       "~meta@1.0/info, extends PCR 15 with their combined "
-                      "subject ID, quotes the selected PCRs, signs the full "
-                      "message, stores it by signed ID, and links the stable "
-                      "boot-attestation path to that signed ID.">>
+                      "subject ID before AK creation, creates an AK whose "
+                      "authPolicy includes PCR 15, quotes the selected PCRs, "
+                      "signs the full message, stores it by signed ID, and "
+                      "links the stable boot-attestation path to that "
+                      "signed ID.">>
             },
             <<"credential-subject">> => #{
                 <<"description">> =>
@@ -228,134 +231,88 @@ extend(Base, Req, Opts) ->
     Subject = resolve_subject(Base, Req, Opts),
     Pcr = resolve_pcr(Req, ?NODE_IDENTITY_PCR, Opts),
     Digest = digest_of(Subject, Opts),
-    case nif_pcr_extend(Pcr, Digest) of
+    case pcr_extend_allowed(Pcr) of
         ok ->
-            %% Remember the subject (and its id) so that a later
-            %% `attestation' call can embed the same node message the
-            %% TPM committed to. The hook-dispatch path does not thread
-            %% the extended subject through `Opts', so we use
-            %% `persistent_term' -- same pattern as the event log.
-            case Subject of
-                S when is_map(S), Pcr =:= ?NODE_IDENTITY_PCR ->
-                    persistent_term:put(
-                        {dev_tpm2, attested_node_msg}, S);
-                _ -> ok
-            end,
-            EventDescription =
-                case Subject of
-                    S0 when is_map(S0) ->
-                        iolist_to_binary(
-                            io_lib:format(
-                                "hb_message:id(Subject, all) over "
-                                "~B-key message",
-                                [maps:size(S0)]));
-                    _ -> <<"binary subject (non-message)">>
-                end,
-            _ = append_event(Pcr,
-                #{
-                    <<"event-type">> =>
-                        <<"EV_HYPERBEAM_NODE_IDENTITY_EXTEND">>,
-                    <<"description">> => EventDescription,
-                    <<"digest">> => hb_util:encode(Digest),
-                    <<"subject-is-message">> =>
-                        is_map(Subject)
-                }
-            ),
-            After = case nif_pcr_read(Pcr) of
-                {ok, V} -> hb_util:encode(V);
-                _ -> <<"?">>
-            end,
-            {ok, #{
-                <<"status">> => 200,
-                <<"body">> => #{
-                    <<"pcr">> => Pcr,
-                    <<"digest">> => hb_util:encode(Digest),
-                    <<"pcr-after">> => After
-                }
-            }};
+            case nif_pcr_extend(Pcr, Digest) of
+                ok ->
+                    %% Remember the subject (and its id) so that a later
+                    %% `attestation' call can embed the same node message the
+                    %% TPM committed to. The hook-dispatch path does not thread
+                    %% the extended subject through `Opts', so we use
+                    %% `persistent_term' -- same pattern as the event log.
+                    case Subject of
+                        S when is_map(S), Pcr =:= ?NODE_IDENTITY_PCR ->
+                            persistent_term:put(
+                                {dev_tpm2, attested_node_msg}, S);
+                        _ -> ok
+                    end,
+                    EventDescription =
+                        case Subject of
+                            S0 when is_map(S0) ->
+                                iolist_to_binary(
+                                    io_lib:format(
+                                        "hb_message:id(Subject, all) over "
+                                        "~B-key message",
+                                        [maps:size(S0)]));
+                            _ -> <<"binary subject (non-message)">>
+                        end,
+                    _ = append_event(Pcr,
+                        #{
+                            <<"event-type">> =>
+                                <<"EV_HYPERBEAM_NODE_IDENTITY_EXTEND">>,
+                            <<"description">> => EventDescription,
+                            <<"digest">> => hb_util:encode(Digest),
+                            <<"subject-is-message">> =>
+                                is_map(Subject)
+                        }
+                    ),
+                    After = case nif_pcr_read(Pcr) of
+                        {ok, V} -> hb_util:encode(V);
+                        _ -> <<"?">>
+                    end,
+                    {ok, #{
+                        <<"status">> => 200,
+                        <<"body">> => #{
+                            <<"pcr">> => Pcr,
+                            <<"digest">> => hb_util:encode(Digest),
+                            <<"pcr-after">> => After
+                        }
+                    }};
+                {error, Reason} ->
+                    {error, #{
+                        <<"status">> => 500,
+                        <<"body">> => #{
+                            <<"error">> => <<"pcr_extend_failed">>,
+                            <<"reason">> => hb_util:bin(Reason)
+                        }
+                    }}
+            end;
         {error, Reason} ->
-            {error, #{
-                <<"status">> => 500,
-                <<"body">> => #{
-                    <<"error">> => <<"pcr_extend_failed">>,
-                    <<"reason">> => hb_util:bin(Reason)
-                }
-            }}
+            error_resp(403, <<"pcr_extend_forbidden">>, Reason)
     end.
 
-%% @doc Extend PCR 15 with the attestation-key public key PEM,
-%% emitting an `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' event at seq 0 of the
-%% runtime event log.
-%%
-%% This is the producer side of the paper's P5 property: a verifier
-%% replaying the event log observes the AK pub hash land in PCR 15
-%% BEFORE any node-message extends, so every subsequent AK-signed
-%% quote cryptographically proves the AK pub was bound into this
-%% specific measured-boot session's PCR 15 trajectory.
-%%
-%% Digest is `sha256(AKPem)' -- the same byte-for-byte text that the
-%% envelope later ships as `ak-pub-pem', so the verifier
-%% (`chk_ak_pubkey_binding/1') can recompute and compare without
-%% format-conversion surprises.
-%%
-%% Returns `ok' on success; on failure returns the NIF error (which
-%% `init_chain/1' in turn bubbles up so the node refuses to start).
-extend_with_ak_pubkey(AKPem) when is_binary(AKPem) ->
-    Digest = crypto:hash(sha256, AKPem),
-    case nif_pcr_extend(?NODE_IDENTITY_PCR, Digest) of
-        ok ->
-            _ = append_event(?NODE_IDENTITY_PCR,
-                #{
-                    <<"event-type">> =>
-                        <<"EV_HYPERBEAM_KEY_PUBKEY_EXTEND">>,
-                    <<"description">> =>
-                        <<"TPM2 attestation-key public-key PEM "
-                          "extend (paper ephemeral-node-key-binding "
-                          "P5: binds AK pub into this measured-boot "
-                          "session's PCR 15 trajectory).">>,
-                    <<"digest">> => hb_util:encode(Digest),
-                    <<"subject">> => hb_util:encode(AKPem),
-                    <<"subject-is-message">> => false
-                }),
-            ok;
-        {error, _} = E -> E
-    end.
+pcr_extend_allowed(?NODE_IDENTITY_PCR) ->
+    case persistent_term:get({dev_tpm2, initial_pcr15_extended}, false) of
+        true ->
+            {error, <<"PCR 15 is already sealed into the AK policy">>};
+        false -> ok
+    end;
+pcr_extend_allowed(_Pcr) ->
+    ok.
 
 %% @doc Extend PCR 15 with sha256(TCG event log) and record an
-%% `EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT' runtime event -- paper P5-ext
-%% "AO-Core hashpath continuity".
+%% `EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT' runtime event.
 %%
 %% The paper's section AO-Core Continuity says:
-%%
-%%   "HyperBEAM seeds its AO-Core chain with a commitment to the
-%%    TPM event log tip immediately after key-pubkey-extend;
-%%    thereafter every device first-load and every message extends
-%%    the chain. The two logs are not analogous mechanisms; they
-%%    are the same cryptographic primitive composed end-to-end."
 %%
 %% Mechanism: read `/sys/kernel/security/tpm0/binary_bios_measurements'
 %% (the firmware-side TCG log), hash it with SHA-256, extend PCR 15
 %% with that digest, and record a runtime event describing the
-%% extension. Every subsequent AO-Core computation whose hashpath
-%% traces back to PCR 15 now carries a commitment to the FULL
-%% firmware-to-OS measurement chain, binding the TPM world and the
-%% AO-Core world cryptographically into one continuous merkle chain
-%% (Figure 2 in the paper).
-%%
-%% Ordering note: fires AFTER `extend_with_ak_pubkey/1' so the AK
-%% pub lands in PCR 15 first (P5), then the TCG log tip lands on
-%% top (P5-ext). A verifier replaying the runtime event log
-%% observes the AK pub binding, THEN the log-tip binding, THEN the
-%% first node-message extension. PCR 15 trajectory:
-%%
-%%   0 -> sha256(0 || sha256(ak_pub_pem))
-%%     -> sha256(prev || sha256(tcg_event_log))
-%%     -> sha256(prev || sha256(hb_message:id(node_message)))
-%%     -> ...
-%%
-%% The runtime-event-log entry carries the same digest so the
-%% verifier can recompute sha256(envelope.tcg-event-log) and
-%% confirm byte-for-byte match.
+%% extension. This runs before AK creation when the log is available, so
+%% the AK authPolicy can bind the same PCR 15 trajectory the verifier
+%% later replays. The runtime-event-log entry carries the same digest so
+%% the verifier can recompute sha256(envelope.tcg-event-log) and confirm
+%% byte-for-byte match.
 %%
 %% If the log is not available from /sys (e.g. QEMU TCG without
 %% vTPM event-log passthrough), the extension is SKIPPED cleanly:
@@ -491,10 +448,6 @@ verify(Base, Req, Opts) ->
                    <<"core">>),
         safely_run(fun() -> chk_event_log_replay(Envelope) end,
                    <<"Runtime event log replay of PCR 15 matches quoted value">>,
-                   <<"core">>),
-        safely_run(fun() -> chk_ak_pubkey_binding(Envelope) end,
-                   <<"PCR 15 extension commits to AK pub PEM "
-                     "(paper P5 key-pubkey-extend)">>,
                    <<"core">>),
         safely_run(fun() -> chk_binding(Envelope) end,
                    <<"PCR 15 extension commits to node_message_id">>,
@@ -1318,64 +1271,7 @@ chk_event_log_replay(Envelope) ->
 int_pcr(V) when is_integer(V) -> V;
 int_pcr(V) when is_binary(V)  -> binary_to_integer(V).
 
-%%---- check 4a: PCR 15 event commits to AK pub PEM ---------------------
-%%
-%% Paper ephemeral-node-key-binding P5 requires that the AK pub is
-%% extended into PCR 15 at init_chain time, so every subsequent
-%% AK-signed quote cryptographically proves the AK pub was bound
-%% into this measured-boot session's PCR 15 trajectory.
-%%
-%% Verifier: find an event in the runtime event log with
-%% event-type = `EV_HYPERBEAM_KEY_PUBKEY_EXTEND' whose decoded digest
-%% equals `sha256(envelope.ak-pub-pem)'. Position-agnostic: the
-%% producer emits this from `extend_with_ak_pubkey/1' inside
-%% `init_chain/1', and any later log entries (boot-subject extend,
-%% TCG log tip commitment, manual `extend/3' calls) do not displace
-%% the binding.
-%%
-%% Absent = paper property violated. An envelope without this event
-%% has no cryptographic proof that the AK pub is tied to the
-%% measured-boot session it claims to be from -- an attacker
-%% presenting a freshly-generated AK pub + a quote over a TPM they
-%% control is not refuted.
-chk_ak_pubkey_binding(Envelope) ->
-    AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
-    Events = [E || E <- hb_maps:get(<<"runtime-event-log">>, Envelope, [],
-                                    #{}),
-                   int_pcr(hb_maps:get(<<"pcr">>, E, 0, #{})) =:=
-                       ?NODE_IDENTITY_PCR,
-                   hb_maps:get(<<"event-type">>, E, <<>>, #{}) =:=
-                       <<"EV_HYPERBEAM_KEY_PUBKEY_EXTEND">>],
-    case {AkPem, Events} of
-        {<<>>, _} ->
-            {error, <<"no ak_pub_pem in envelope">>};
-        {_, []} ->
-            {error, <<"no EV_HYPERBEAM_KEY_PUBKEY_EXTEND event in "
-                      "runtime_event_log -- paper ephemeral-node-"
-                      "key-binding P5 violated">>};
-        {Pem, _} ->
-            Expected = crypto:hash(sha256, Pem),
-            Match = [E || E <- Events,
-                          hb_util:decode(
-                            hb_maps:get(<<"digest">>, E, <<>>, #{}))
-                              =:= Expected],
-            case Match of
-                [] ->
-                    {error, iolist_to_binary(io_lib:format(
-                        "EV_HYPERBEAM_KEY_PUBKEY_EXTEND event(s) "
-                        "present but none carry "
-                        "sha256(ak_pub_pem)=~s",
-                        [binary:part(
-                            hb_util:encode(Expected), 0, 16)]))};
-                [E|_] ->
-                    Seq = hb_maps:get(<<"seq">>, E, <<>>, #{}),
-                    {ok, iolist_to_binary(io_lib:format(
-                        "AK pub PEM bound into PCR 15 at seq=~p",
-                        [Seq]))}
-            end
-    end.
-
-%%---- check 4b: PCR 15 event commits to node_message_id ----------------
+%%---- check 4: PCR 15 event commits to node_message_id -----------------
 chk_binding(Envelope) ->
     ExpectedId =
         hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
@@ -2370,16 +2266,8 @@ safe_decode(_) ->
 generate_boot_attestation(Opts) ->
     with_ok(
         fun() ->
-            System = resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts)),
-            Node0 = resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts)),
-            Node = ensure_committed(Node0, Opts),
-            Subject = #{
-                <<"system">> => System,
-                <<"node">> => Node
-            },
-            SubjectID = hb_message:id(Subject, all, Opts),
-            SubjectDigest = hb_util:native_id(SubjectID),
-            Tpm = boot_tpm_evidence(SubjectID, SubjectDigest, Opts),
+            {Subject, SubjectID, SubjectDigest} = boot_subject(Opts),
+            Tpm = boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts),
             hb_message:commit(
                 Subject#{
                     <<"version">> => <<"1.0">>,
@@ -2419,12 +2307,35 @@ ensure_committed(Msg, Opts) when is_map(Msg) ->
 ensure_committed(Msg, _Opts) ->
     Msg.
 
-boot_tpm_evidence(SubjectID, SubjectDigest, Opts) ->
+boot_subject(Opts) ->
+    case persistent_term:get({dev_tpm2, attested_boot_subject}, undefined) of
+        Subject when is_map(Subject) ->
+            SubjectID = persistent_term:get(
+                {dev_tpm2, attested_boot_subject_id},
+                hb_message:id(Subject, all, Opts)),
+            SubjectDigest = persistent_term:get(
+                {dev_tpm2, attested_boot_subject_digest},
+                hb_util:native_id(SubjectID)),
+            {Subject, SubjectID, SubjectDigest};
+        undefined ->
+            System =
+                resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts)),
+            Node0 =
+                resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts)),
+            Node = ensure_committed(Node0, Opts),
+            Subject = #{
+                <<"system">> => System,
+                <<"node">> => Node
+            },
+            SubjectID = hb_message:id(Subject, all, Opts),
+            {Subject, SubjectID, hb_util:native_id(SubjectID)}
+    end.
+
+boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts) ->
     Pcrs = ?DEFAULT_QUOTE_PCRS,
     Nonce = crypto:strong_rand_bytes(32),
-    case ensure_ak(Opts) of
+    case ensure_ak(Subject, SubjectID, SubjectDigest, Opts) of
         {ok, AkTr} ->
-            ok = extend_boot_subject(SubjectID, SubjectDigest),
             case nif_quote(AkTr, Pcrs, Nonce) of
                 {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
                     {TcgLogBin, TcgLogSource} =
@@ -2814,15 +2725,24 @@ subject_from_boot_attestation(_Boot, _Opts) ->
     undefined.
 
 legacy_attested_subject(Opts) ->
-    case get_node_msg(Opts) of
+    case persistent_term:get({dev_tpm2, attested_boot_subject}, undefined) of
+        Subject when is_map(Subject) ->
+            SubjectID = persistent_term:get(
+                {dev_tpm2, attested_boot_subject_id},
+                hb_message:id(Subject, all, Opts)),
+            {Subject, SubjectID};
         undefined ->
-            {null, null};
-        Msg ->
-            {
-                Msg,
-                hb_util:human_id(
-                    hb_util:native_id(hb_message:id(Msg, all, Opts)))
-            }
+            case get_node_msg(Opts) of
+                undefined ->
+                    {null, null};
+                Msg ->
+                    {
+                        Msg,
+                        hb_util:human_id(
+                            hb_util:native_id(
+                                hb_message:id(Msg, all, Opts)))
+                    }
+            end
     end.
 
 %%%============================================================================
@@ -2847,6 +2767,9 @@ legacy_attested_subject(Opts) ->
 %% init_chain even if N callers arrived before any of them
 %% finished.
 ensure_ak(Opts) ->
+    ensure_ak(undefined, undefined, undefined, Opts).
+
+ensure_ak(Subject, SubjectID, SubjectDigest, Opts) ->
     case persistent_term:get({dev_tpm2, ak_tr}, undefined) of
         undefined ->
             global:trans(
@@ -2855,7 +2778,8 @@ ensure_ak(Opts) ->
                     case persistent_term:get({dev_tpm2, ak_tr},
                                               undefined) of
                         undefined ->
-                            case init_chain(Opts) of
+                            case init_chain(
+                                   Subject, SubjectID, SubjectDigest, Opts) of
                                 ok ->
                                     {ok, persistent_term:get(
                                            {dev_tpm2, ak_tr})};
@@ -2865,10 +2789,17 @@ ensure_ak(Opts) ->
                     end
                 end,
                 [node()]);
-        Tr -> {ok, Tr}
+        Tr ->
+            case same_boot_subject(SubjectID, SubjectDigest) of
+                ok -> {ok, Tr};
+                {error, _} = E -> E
+            end
     end.
 
-init_chain(Opts) ->
+init_chain(undefined, undefined, undefined, Opts) ->
+    {Subject, SubjectID, SubjectDigest} = boot_subject(Opts),
+    init_chain(Subject, SubjectID, SubjectDigest, Opts);
+init_chain(Subject, SubjectID, SubjectDigest, Opts) ->
     case nif_startup() of
         ok ->
             %% Snapshot TPM-reported identity via TPM2_GetCapability.
@@ -2898,33 +2829,18 @@ init_chain(Opts) ->
                     %% evidence on the claim, not a condition to paper
                     %% over. See fetch_ek_cert_from_nv/1.
                     fetch_ek_cert_from_nv(Opts),
-                    case nif_create_signing_key(EKTr) of
-                        {ok, #{esys_tr := AKTr, public_pem := AKPem} = AKInfo} ->
-                            persistent_term:put({dev_tpm2, ak_tr}, AKTr),
-                            persistent_term:put({dev_tpm2, ak_pub_pem}, AKPem),
-                            cache_tpm_public_terms(ak, AKInfo),
-                            %% Paper ephemeral-node-key-binding P5:
-                            %% "as the last step before attestation,
-                            %% HyperBEAM extends PCR 15 with the public
-                            %% half [of the AK]". Fires once per
-                            %% init_chain; every subsequent quote
-                            %% cryptographically covers
-                            %% sha256(ak_pub_pem) via PCR 15. See
-                            %% extend_with_ak_pubkey/1 header for
-                            %% the sequencing caveat.
-                            case extend_with_ak_pubkey(AKPem) of
-                                ok ->
-                                    %% Paper P5-ext AO-Core hashpath
-                                    %% continuity: after AK pub lands
-                                    %% in PCR 15, commit the firmware-
-                                    %% side TCG event log tip into
-                                    %% PCR 15 so every subsequent AO-
-                                    %% Core computation's hashpath
-                                    %% carries a binding to the full
-                                    %% boot measurement chain. See
-                                    %% extend_with_tcg_event_log_tip/0
-                                    %% header.
-                                    extend_with_tcg_event_log_tip();
+                    case extend_initial_pcr15(
+                            Subject, SubjectID, SubjectDigest) of
+                        ok ->
+                            case nif_create_signing_key(EKTr) of
+                                {ok, #{esys_tr := AKTr,
+                                       public_pem := AKPem} = AKInfo} ->
+                                    persistent_term:put({dev_tpm2, ak_tr},
+                                                        AKTr),
+                                    persistent_term:put(
+                                        {dev_tpm2, ak_pub_pem}, AKPem),
+                                    cache_tpm_public_terms(ak, AKInfo),
+                                    ok;
                                 {error, _} = E -> E
                             end;
                         {error, _} = E -> E
@@ -2932,6 +2848,80 @@ init_chain(Opts) ->
                 {error, _} = E -> E
             end;
         {error, _} = E -> E
+    end.
+
+extend_initial_pcr15(Subject, SubjectID, SubjectDigest) ->
+    case same_boot_subject(SubjectID, SubjectDigest) of
+        ok ->
+            record_boot_subject(Subject, SubjectID, SubjectDigest),
+            case maybe_extend_boot_subject(SubjectID, SubjectDigest) of
+                ok ->
+                    case maybe_extend_tcg_event_log_tip() of
+                        ok ->
+                            persistent_term:put(
+                                {dev_tpm2, initial_pcr15_extended}, true),
+                            ok;
+                        {error, _} = E -> E
+                    end;
+                {error, _} = E -> E
+            end;
+        {error, _} = E ->
+            E
+    end.
+
+maybe_extend_boot_subject(SubjectID, SubjectDigest) ->
+    case persistent_term:get({dev_tpm2, boot_subject_pcr_extended}, false) of
+        true ->
+            ok;
+        false ->
+            case extend_boot_subject(SubjectID, SubjectDigest) of
+                ok ->
+                    persistent_term:put(
+                        {dev_tpm2, boot_subject_pcr_extended}, true),
+                    ok;
+                {error, _} = E -> E
+            end
+    end.
+
+maybe_extend_tcg_event_log_tip() ->
+    case persistent_term:get({dev_tpm2, tcg_tip_pcr_extended}, false) of
+        true ->
+            ok;
+        false ->
+            case extend_with_tcg_event_log_tip() of
+                ok ->
+                    persistent_term:put(
+                        {dev_tpm2, tcg_tip_pcr_extended}, true),
+                    ok;
+                {error, _} = E -> E
+            end
+    end.
+
+record_boot_subject(Subject, SubjectID, SubjectDigest) ->
+    persistent_term:put({dev_tpm2, attested_boot_subject}, Subject),
+    persistent_term:put({dev_tpm2, attested_boot_subject_id}, SubjectID),
+    persistent_term:put({dev_tpm2, attested_boot_subject_digest},
+                        SubjectDigest),
+    case Subject of
+        #{<<"node">> := Node} when is_map(Node) ->
+            persistent_term:put({dev_tpm2, attested_node_msg}, Node);
+        _ -> ok
+    end.
+
+same_boot_subject(undefined, undefined) ->
+    ok;
+same_boot_subject(SubjectID, SubjectDigest) ->
+    case persistent_term:get({dev_tpm2, attested_boot_subject_id}, undefined) of
+        undefined ->
+            ok;
+        SubjectID ->
+            case persistent_term:get(
+                   {dev_tpm2, attested_boot_subject_digest}, undefined) of
+                SubjectDigest -> ok;
+                _ -> {error, <<"AK already bound to different PCR15 digest">>}
+            end;
+        _ ->
+            {error, <<"AK already bound to different boot subject">>}
     end.
 
 cache_tpm_public_terms(Prefix, Info) ->
@@ -4047,6 +4037,7 @@ ensure_ak_public_matches_subject_test() ->
             Subject#{<<"ak-name">> => hb_util:encode(<<"wrong-name">>)})).
 
 ak_policy_bound_test() ->
+    ?assert(lists:member(?NODE_IDENTITY_PCR, ?AK_POLICY_PCRS)),
     ModulusBin = <<1:2048>>,
     PcrMap =
         maps:from_list(
@@ -4340,63 +4331,6 @@ chk_event_log_replay_rejects_empty_events_test() ->
         }
     },
     ?assertMatch({error, _}, chk_event_log_replay(Envelope)).
-
-%% v1.2 batch 9 / paper-to-code pass P5: `chk_ak_pubkey_binding' must
-%% verify that the envelope carries an EV_HYPERBEAM_KEY_PUBKEY_EXTEND
-%% event whose decoded digest matches sha256(ak-pub-pem). Missing AK
-%% pub, missing event, event with wrong type, and event with wrong
-%% digest all reject; a correctly-shaped event accepts.
-chk_ak_pubkey_binding_enforces_p5_test() ->
-    %% Dummy AK PEM text -- chk_ak_pubkey_binding does not decode
-    %% the PEM, it only hashes the bytes to match against the event
-    %% digest.
-    AkPem = <<"-----BEGIN PUBLIC KEY-----\nMOCK\n-----END PUBLIC KEY-----\n">>,
-    Digest = crypto:hash(sha256, AkPem),
-    DigestB64 = hb_util:encode(Digest),
-    GoodEvent = #{<<"pcr">> => 15,
-                  <<"event-type">> =>
-                      <<"EV_HYPERBEAM_KEY_PUBKEY_EXTEND">>,
-                  <<"digest">> => DigestB64,
-                  <<"seq">> => 0},
-    %% (1) Missing ak-pub-pem -> error.
-    ?assertMatch({error, _},
-                 chk_ak_pubkey_binding(#{<<"runtime-event-log">> =>
-                                             [GoodEvent]})),
-    %% (2) AK pub present but no EV_HYPERBEAM_KEY_PUBKEY_EXTEND
-    %% event in the log -> error (paper P5 violated).
-    ?assertMatch({error, _},
-                 chk_ak_pubkey_binding(#{<<"ak-pub-pem">> => AkPem,
-                                         <<"runtime-event-log">> => []})),
-    %% (3) Event present but wrong event-type -> error.
-    WrongTypeEvent =
-        GoodEvent#{<<"event-type">> =>
-                       <<"EV_HYPERBEAM_NODE_IDENTITY_EXTEND">>},
-    ?assertMatch({error, _},
-                 chk_ak_pubkey_binding(#{<<"ak-pub-pem">> => AkPem,
-                                         <<"runtime-event-log">> =>
-                                             [WrongTypeEvent]})),
-    %% (4) Event present with correct type but wrong digest -> error.
-    WrongDigestEvent =
-        GoodEvent#{<<"digest">> =>
-                       hb_util:encode(
-                           crypto:hash(sha256, <<"forged">>))},
-    ?assertMatch({error, _},
-                 chk_ak_pubkey_binding(#{<<"ak-pub-pem">> => AkPem,
-                                         <<"runtime-event-log">> =>
-                                             [WrongDigestEvent]})),
-    %% (5) Correct event -> ok.
-    ?assertMatch({ok, _},
-                 chk_ak_pubkey_binding(#{<<"ak-pub-pem">> => AkPem,
-                                         <<"runtime-event-log">> =>
-                                             [GoodEvent]})),
-    %% (6) Event in wrong PCR (not 15) -> error (paper P5 is
-    %% specifically about PCR 15).
-    WrongPcrEvent = GoodEvent#{<<"pcr">> => 11},
-    ?assertMatch({error, _},
-                 chk_ak_pubkey_binding(#{<<"ak-pub-pem">> => AkPem,
-                                         <<"runtime-event-log">> =>
-                                             [WrongPcrEvent]})),
-    ok.
 
 %% Regression test: `chk_binding' must refuse to treat an empty /
 %% malformed node_message_id as matching an empty event digest

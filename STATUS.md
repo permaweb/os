@@ -2,7 +2,7 @@
 
 ## Current State
 
-Branch: `feat/ak-ek-trust`.
+Branch: `main`.
 
 LapEE now has an end-to-end QEMU green-zone flow: four nodes boot from the
 same no-TME image, three nodes matching the green-zone template join and sign
@@ -12,9 +12,13 @@ sign.
 The critical AK/PCR policy bug described in `AK_PCR_POLICY_ISSUE.md` is fixed.
 Native AKs are created with an auth policy rather than user auth, quote and
 ActivateCredential run through PCR policy sessions, and verification recomputes
-the AK policy from the quoted PCRs before accepting the attestation. PCR15 is
-excluded from AK creation policy because LapEE extends PCR15 later with runtime
-state.
+the AK policy from the quoted PCRs before accepting the attestation.
+
+Follow-up fix: PCR15 is now part of the AK policy. LapEE gathers the boot
+subject (`~system@1.0/all` plus `~meta@1.0/info`), extends PCR15 with that
+subject before AK creation, optionally extends the TCG event-log tip, and only
+then creates the AK. Runtime/public PCR15 extension is blocked after that point
+so AK use remains gated by the node config that booted.
 
 ## Latest Validation
 
@@ -23,14 +27,47 @@ Overlay staged into `build/hyperbeam/src-edge`.
 Focused eunit passed for `dev_tpm2`, `dev_green_zone`, `dev_system`,
 `lapee_http_json`, and `dev_tpm_interpret`.
 
-`make buildroot JOBS=18` completed.
+`JOBS=18 make DOCKER_PLATFORM='--dns=1.1.1.1' buildroot` completed.
+The Docker DNS override was needed on this machine because Docker Desktop's
+default resolver intermittently failed to resolve GitHub/crates.io during
+dependency fetches; it does not change the resulting image.
 
 No-TME image:
 
 ```text
 path: build/images/lapee-usb-no-tme.img
 size: 247463936 bytes
-sha256: e85b49f34ca8e5e37a33b4693afa26533d92390652d1870502b2c42fd3ffa2b4
+sha256: 66b94254f2c8f0b8741901f621242014ec361ff89fd691f93c1718aaab8939a8
+```
+
+Fresh AK/PCR15 no-TME smoke test:
+
+```text
+OUTDIR=build/qemu-ak-policy-final \
+LOGFILE=build/qemu-ak-policy-final/serial.log \
+  ./scripts/boot-usb-image.sh \
+    --img build/images/lapee-usb-no-tme.img \
+    --timeout 420
+
+result: PASSED
+captures:
+  build/qemu-ak-policy-final/boot-attestation.json
+  build/qemu-ak-policy-final/system.json
+```
+
+Secondary verifier against the QEMU capture:
+
+```text
+python3 secondary-external-verifier/verifier_hb.py \
+  build/qemu-ak-policy-final/boot-attestation.json
+
+expected final verdict: ATTESTATION REJECTED
+reason: QEMU/swtpm EK does not chain to a bundled manufacturer root.
+critical passes:
+  TPM2_Quote signature + pcrDigest + nonce all valid
+  AK authPolicy covers PCRs [0, 1, 7, 10, 11, 14, 15]
+  PCR15 replay matches quoted value
+  PCR15 boot-subject event matches node-message-id
 ```
 
 QEMU ring test (now exercises the multi-hop join path: node 3 joins
@@ -44,7 +81,7 @@ TIMEOUT=600 ./scripts/qemu-green-zone-cluster.sh \
   --timeout 600
 
 result: PASSED
-ring-address: 6rVd4xW24iuihKQKRHfB8YISFXf_r-HXiL-NOZo-tKg
+ring-address: JWfbKiiYxxNgup7Ac0QleOoqth_3BaCx8g1PAGi3VwY
 ```
 
 Standard TME image:
@@ -52,13 +89,13 @@ Standard TME image:
 ```text
 path: build/images/lapee-usb.img
 size: 247463936 bytes
-sha256: 53292d9785b504ed99b810210a95e7845a24e4f754b885a2ab562d276d46ae6b
+sha256: 24a4c15e3b64b59f210b239a9dceafe80a3611275349cfa09767fe6f1b420f66
 ```
 
-Single-node `~tpm@2.0a/attestation` envelope re-validated end-to-end with
-`secondary-external-verifier/verifier_hb.py` after the seq-pinning fix
-(check 6 matches by digest, check 7 matches `EV_HYPERBEAM_KEY_PUBKEY_EXTEND`
-+ digest): all eight checks PASS.
+Single-node `~tpm@2.0a/attestation` envelope re-validation path now checks AK
+`authPolicy` over `[0, 1, 7, 10, 11, 14, 15]`, PCR15 replay, and the
+boot-subject digest binding. The old AK-public-key PCR15 event requirement was
+removed because it cannot coexist with PCR15-gated AK policy.
 
 No QEMU or swtpm processes owned by this validation run remain. The only
 matching process was the pre-existing `work/qemu-hyperbuddy-test` swtpm, which
@@ -93,14 +130,10 @@ fixed in-place:
   script now stages sockets under a short `mktemp -d /tmp/lapee-gz.*`
   directory and cleans it up on exit; state, logs, and certs continue
   to live under OUTDIR.
-* `secondary-external-verifier/verifier_hb.py` pinned PCR-15 binding
-  checks to seq=0 (`EV_HYPERBEAM_NODE_IDENTITY_EXTEND`) and seq=1
-  (`EV_HYPERBEAM_KEY_PUBKEY_EXTEND`). Production now drives PCR 15
-  from the `on.start` -> `boot-attestation` path, so seq 0 carries
-  `EV_HYPERBEAM_KEY_PUBKEY_EXTEND` and the node-identity binding is
-  `EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT` at seq 2. The fix matches
-  the Erlang-side `chk_binding` / `chk_ak_pubkey_binding` semantics:
-  search by event-type + digest, not by seq position.
+* `secondary-external-verifier/verifier_hb.py` now treats the AK `authPolicy`
+  as the key binding check. It recomputes the same PCR policy as the TPM NIF,
+  including PCR15, then separately verifies PCR15 replay and the boot-subject
+  digest event.
 
 ## Cross-vendor green-zone hardening
 

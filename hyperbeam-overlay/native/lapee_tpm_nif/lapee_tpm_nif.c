@@ -22,7 +22,7 @@
 /* Shared HMAC session with AES-CFB parameter encryption for TPM2B-valued
  * sensitive operations. Commands fail closed if this session cannot start. */
 static ESYS_TR g_auth_session = ESYS_TR_NONE;
-static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14};
+static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14, 15};
 #define LAPEE_AK_POLICY_PCR_COUNT \
     (sizeof(g_ak_policy_pcrs) / sizeof(g_ak_policy_pcrs[0]))
 

@@ -140,8 +140,8 @@ It checks:
   the quoted AK/TPM; accepting those PCRs still requires verifier policy
   and known-good baselines.
 - Firmware TCG event log replay where firmware exposes the log.
-- Runtime PCR-15 events emitted by the LapEE HyperBEAM start hook,
-  tying the HyperBEAM node identity to the boot.
+- AK `authPolicy` over the quoted boot PCRs, including PCR 15, plus
+  runtime PCR-15 replay tying the HyperBEAM boot subject to the AK.
 - Secure Boot state, kernel lockdown, IOMMU/TME hints, CPU/DMI/TPM
   identity, and measured kernel command line.
 
