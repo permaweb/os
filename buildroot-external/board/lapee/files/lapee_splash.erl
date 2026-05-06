@@ -719,20 +719,35 @@ render_provision_grid(W, H, Yaw, Lid, Footer) ->
     draw_provision_panel(Grid2, W, H, 6, 15, LeftW - 4, Footer).
 
 draw_provision_panel(Grid, W, H, X, Y, ColW, Footer) ->
-    PanelW = min(64, max(36, ColW)),
+    PanelW = (min(64, max(36, ColW)) div 2) * 2,
     PanelH = max(12, min(H - Y - 2, 30)),
-    TextW = PanelW - 4,
-    Grid1 = draw_box(fill_rect(Grid, W, H, X + 1, Y + 1,
-                               PanelW - 2, PanelH - 2),
-                     W, H, X, Y, PanelW, PanelH),
-    WarningLines = provision_warning_lines(TextW, PanelH - 8),
-    Grid2 = overlay_lines(Grid1, W, H, X + 2, Y + 2, WarningLines),
+    TextX = X + 4,
+    TextW = PanelW - 8,
+    Grid1 = draw_tile_box(fill_rect(Grid, W, H, X + 2, Y + 1,
+                                    PanelW - 4, PanelH - 2),
+                          W, H, X, Y, PanelW div 2, PanelH),
+    WarningLines = provision_warning_lines(TextW, PanelH - 9),
+    Grid2 = overlay_centered_lines(Grid1, W, H, TextX, Y + 2,
+                                   TextW, WarningLines),
+    Prompt = "Type I UNDERSTAND. to continue:",
     Input = "> " ++ read_provision_input() ++ "_",
     InputLines = wrap_status_lines(Input, TextW, 3),
-    InputY = Y + PanelH - 5,
-    Grid3 = overlay_lines(Grid2, W, H, X + 2, InputY, InputLines),
-    overlay_text(Grid3, W, H, X + 2, Y + PanelH - 2,
-                 fit_text(Footer, TextW)).
+    PromptY = Y + PanelH - 5,
+    InputY = Y + PanelH - 3,
+    Grid3 = overlay_text(Grid2, W, H, TextX, PromptY, Prompt),
+    Grid4 = overlay_lines(Grid3, W, H, TextX, InputY, InputLines),
+    case provision_footer_visible(Footer) of
+        false -> Grid4;
+        true  -> overlay_text(Grid4, W, H, TextX, Y + PanelH - 2,
+                              fit_text(Footer, TextW))
+    end.
+
+provision_footer_visible("Type I UNDERSTAND. to continue.") ->
+    false;
+provision_footer_visible("Type I UNDERSTAND. to continue:") ->
+    false;
+provision_footer_visible(_) ->
+    true.
 
 provision_warning_lines(Width, MaxLines) ->
     Paragraphs = [
@@ -740,11 +755,18 @@ provision_warning_lines(Width, MaxLines) ->
         "Performing this operation is irreversible and will render your machine unable to boot other operating systems.",
         "There is a very real possibility that it will cause harm to the viability of the attached hardware.",
         "Nobody will help you, and nobody can save your machine.",
-        "Type 'I UNDERSTAND.' to perform LapEE enrolment anyway and grow the decentralized supercomputer. You have been warned."
+        "You have been warned."
     ],
-    Lines0 = lists:append([wrap_words(string:tokens(P, " \t\r\n"), Width)
-                           || P <- Paragraphs]),
+    Lines0 = provision_spaced_lines(Paragraphs, Width),
     lists:sublist(Lines0, MaxLines).
+
+provision_spaced_lines([], _Width) ->
+    [];
+provision_spaced_lines([P], Width) ->
+    wrap_words(string:tokens(P, " \t\r\n"), Width);
+provision_spaced_lines([P | Rest], Width) ->
+    wrap_words(string:tokens(P, " \t\r\n"), Width) ++
+        [""] ++ provision_spaced_lines(Rest, Width).
 
 read_provision_input() ->
     case file:read_file(provision_input_path()) of
@@ -1122,6 +1144,23 @@ draw_qr_placeholder(Grid, W, H, X, Y, ModsW, ModsH, Footer) ->
       G1,
       lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
 
+draw_tile_box(Grid, W, H, X, Y, ModsW, ModsH) ->
+    lists:foldl(
+      fun(R, G0) ->
+          lists:foldl(
+            fun(C, G) ->
+                case R =:= 0 orelse R =:= ModsH - 1 orelse
+                     C =:= 0 orelse C =:= ModsW - 1 of
+                    true  -> draw_qr_tile(G, W, H, X + C * 2, Y + R);
+                    false -> G
+                end
+            end,
+            G0,
+            lists:seq(0, ModsW - 1))
+      end,
+      Grid,
+      lists:seq(0, ModsH - 1)).
+
 wrap_status_lines(Text0, Width, MaxLines) ->
     Words = string:tokens(string:trim(Text0), " \t\r\n"),
     Lines0 = case wrap_words(Words, Width) of
@@ -1426,6 +1465,15 @@ overlay_text(Grid, W, H, X, Y, Text) ->
 overlay_lines(Grid, W, H, X, Y, Lines) ->
     lists:foldl(
       fun({I, Line}, G) -> overlay_text(G, W, H, X, Y + I, Line) end,
+      Grid,
+      lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
+
+overlay_centered_lines(Grid, W, H, X, Y, Width, Lines) ->
+    lists:foldl(
+      fun({I, Line}, G) ->
+          Pad = max(0, (Width - length(Line)) div 2),
+          overlay_text(G, W, H, X + Pad, Y + I, Line)
+      end,
       Grid,
       lists:zip(lists:seq(0, length(Lines) - 1), Lines)).
 
