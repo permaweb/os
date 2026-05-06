@@ -43,9 +43,14 @@
 %%% 5. The peer returns a `green-zone-admission'. The top-level HTTP/JSON
 %%%    envelope may acquire transport commitments, so the durable ring
 %%%    signature is over the nested `authorization' message. That authorization
-%%%    binds the scalar admission fields and stable IDs of the nested payloads:
-%%%    validity, ring-reference, green-zone definition, template,
-%%%    peer-attestation, credential, and encrypted-wallet.
+%%%    binds the scalar admission fields and locally recomputed stable IDs of
+%%%    the nested payloads: validity, ring-reference, green-zone definition,
+%%%    template, peer-attestation, credential, and encrypted-wallet. Nested
+%%%    transport commitments are ignored for this ID calculation so an attacker
+%%%    cannot smuggle a signed ID into a modified payload. JSON type metadata is
+%%%    ignored for locally generated payloads, but preserved for the
+%%%    `peer-attestation' because that assertion is produced from JSON-restored
+%%%    peer evidence.
 %%% 6. The joiner verifies the ring-signed authorization, checks every payload
 %%%    ID, activates the TPM credential locally, decrypts the wallet, confirms
 %%%    the wallet address equals the expected ring address, and installs the
@@ -280,9 +285,12 @@ admission_authorization(Admission, Wallet, Opts) ->
              || Field <- authorization_scalar_fields()
             ] ++
             [
-                {AuthKey, stable_message_id(
-                    hb_maps:get(AdmissionKey, Admission, #{}, Opts), Opts)}
-             || {AuthKey, AdmissionKey} <- authorization_id_fields()
+                {AuthKey, stable_authorization_payload_id(
+                    hb_maps:get(AdmissionKey, Admission, #{}, Opts),
+                    Opts,
+                    MetadataMode)}
+             || {AuthKey, AdmissionKey, MetadataMode} <-
+                    authorization_id_fields()
             ])),
         #{<<"priv-wallet">> => Wallet}
     ).
@@ -298,23 +306,50 @@ authorization_scalar_fields() ->
 
 authorization_id_fields() ->
     [
-        {<<"validity-id">>, <<"validity">>},
-        {<<"ring-reference-id">>, <<"ring-reference">>},
-        {<<"green-zone-id">>, <<"green-zone">>},
-        {<<"template-id">>, <<"template">>},
-        {<<"peer-attestation-id">>, <<"peer-attestation">>},
-        {<<"credential-id">>, <<"credential">>},
-        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
+        {<<"validity-id">>, <<"validity">>, strip_json_metadata},
+        {<<"ring-reference-id">>, <<"ring-reference">>, strip_json_metadata},
+        {<<"green-zone-id">>, <<"green-zone">>, strip_json_metadata},
+        {<<"template-id">>, <<"template">>, strip_json_metadata},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>, keep_json_metadata},
+        {<<"credential-id">>, <<"credential">>, strip_json_metadata},
+        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>, strip_json_metadata}
     ].
 
-stable_message_id(Msg, Opts) when is_map(Msg) ->
-    Body = response_body(Msg, Opts),
-    case lists:sort(unsigned_commitment_ids(Body, Opts)) of
-        [ID | _] -> ID;
-        [] -> stable_uncommitted_id(Body)
-    end;
-stable_message_id(Value, _Opts) ->
+stable_authorization_payload_id(Msg, Opts) when is_map(Msg) ->
+    stable_authorization_payload_id(Msg, Opts, strip_json_metadata);
+stable_authorization_payload_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
+
+stable_authorization_payload_id(Msg, Opts, MetadataMode) when is_map(Msg) ->
+    stable_uncommitted_id(
+        canonical_authorization_payload(
+            response_body(Msg, Opts), Opts, MetadataMode));
+stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
+
+canonical_authorization_payload(Value, Opts) ->
+    canonical_authorization_payload(Value, Opts, strip_json_metadata).
+
+canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
+    canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
+canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
+    maps:from_list(
+        [
+            {Key, canonical_authorization_payload(Value, Opts, MetadataMode)}
+         || {Key, Value} <- hb_maps:to_list(Msg, Opts),
+            not authorization_meta_key(Key, MetadataMode)
+        ]);
+canonical_authorization_payload(List, Opts, MetadataMode) when is_list(List) ->
+    [
+        canonical_authorization_payload(Value, Opts, MetadataMode)
+     || Value <- List
+    ];
+canonical_authorization_payload(Value, _Opts, _MetadataMode) ->
+    Value.
+
+authorization_meta_key(<<"commitments">>, _MetadataMode) -> true;
+authorization_meta_key(<<"ao-types">>, strip_json_metadata) -> true;
+authorization_meta_key(_Key, _MetadataMode) -> false.
 
 stable_uncommitted_id(Msg) ->
     hb_message:id(
@@ -322,19 +357,6 @@ stable_uncommitted_id(Msg) ->
         uncommitted,
         #{}
     ).
-
-unsigned_commitment_ids(Msg, Opts) when is_map(Msg) ->
-    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
-    [
-        ID
-     || {ID, Commitment} <- hb_maps:to_list(Commitments, Opts),
-        hb_maps:get(<<"type">>, Commitment, undefined, Opts) =:=
-            <<"hmac-sha256">>,
-        hb_maps:get(<<"committer">>, Commitment, undefined, Opts) =:=
-            undefined
-    ];
-unsigned_commitment_ids(_Msg, _Opts) ->
-    [].
 
 reject_supplied_secret_material(Req, Opts) ->
     case first_defined([
@@ -891,26 +913,16 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
 
 assert_authorization_ids(Authorization, Admission, Opts) ->
     lists:foreach(
-        fun({AuthKey, AdmissionKey}) ->
+        fun({AuthKey, AdmissionKey, MetadataMode}) ->
             Payload = hb_maps:get(AdmissionKey, Admission, undefined, Opts),
+            Expected =
+                stable_authorization_payload_id(Payload, Opts, MetadataMode),
             case hb_maps:get(AuthKey, Authorization, undefined, Opts) of
-                ID when is_binary(ID) ->
-                    case lists:member(ID, acceptable_payload_ids(Payload, Opts)) of
-                        true -> ok;
-                        false ->
-                            bad_admission(<<"authorization.", AuthKey/binary>>)
-                    end;
-                _ ->
-                    bad_admission(<<"authorization.", AuthKey/binary>>)
+                Expected -> ok;
+                _ -> bad_admission(<<"authorization.", AuthKey/binary>>)
             end
         end,
         authorization_id_fields()).
-
-acceptable_payload_ids(Payload, Opts) when is_map(Payload) ->
-    Body = response_body(Payload, Opts),
-    [stable_uncommitted_id(Body) | unsigned_commitment_ids(Body, Opts)];
-acceptable_payload_ids(Payload, _Opts) ->
-    [hb_util:encode(crypto:hash(sha256, term_to_binary(Payload)))].
 
 assert_admission_validity(Admission, Opts) ->
     Now = erlang:system_time(second),
@@ -1240,6 +1252,55 @@ admission_body_accepts_expected_ring_test() ->
                 <<"expected-ring-address">> => RingAddress
             },
             #{})).
+
+admission_rejects_payload_commitment_id_substitution_test() ->
+    Wallet = ar_wallet:new(),
+    Admission0 = test_admission(Wallet),
+    Authorization = maps:get(<<"authorization">>, Admission0),
+    OriginalTemplateID = maps:get(<<"template-id">>, Authorization),
+    TamperedTemplate = #{
+        <<"system">> => #{<<"kernel">> => <<"weakened">>},
+        <<"commitments">> => #{
+            OriginalTemplateID => #{<<"type">> => <<"hmac-sha256">>}
+        }
+    },
+    Admission = Admission0#{<<"template">> => TamperedTemplate},
+    ?assertThrow(
+        {green_zone_error, #{<<"error">> := <<"admission-invalid">>}},
+        assert_admission_body(
+            Admission,
+            <<"http://self.example">>,
+            <<"nonce">>,
+            #{
+                <<"name">> => test_name(),
+                <<"expected-ring-address">> => wallet_address(Wallet)
+            },
+            #{})).
+
+authorization_payload_id_is_transport_stable_test() ->
+    Wallet = ar_wallet:new(),
+    Opts = #{
+        <<"priv-wallet">> => Wallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Definition = commit_unsigned_tree(
+        zone_definition(
+            test_name(),
+            #{<<"system">> => #{<<"kernel">> => <<"same">>}},
+            Wallet,
+            #{},
+            Opts),
+        Opts),
+    Decoded = hb_json:decode(hb_json:encode(
+        canonical_authorization_payload(Definition, Opts))),
+    ?assertEqual(
+        stable_authorization_payload_id(Definition, Opts),
+        stable_authorization_payload_id(Decoded, Opts)),
+    ?assertEqual(
+        stable_authorization_payload_id(Definition, Opts),
+        stable_authorization_payload_id(
+            Decoded#{<<"ao-types">> => <<"transport=\"atom\"">>},
+            Opts)).
 
 ring_wallet_address_mismatch_rejected_test() ->
     Wallet = ar_wallet:new(),
