@@ -117,7 +117,13 @@ printf 'Starting LapEE.\n' > "$STATUS_FILE" 2>/dev/null || true
 export LAPEE_STATUS="$STATUS_FILE"
 PROVISION_INPUT_FILE=/run/lapee/sb-provision-input
 : > "$PROVISION_INPUT_FILE" 2>/dev/null || true
+PROVISION_MODE_FILE=/run/lapee/sb-provision-mode
+PROVISION_REPORT_FILE=/run/lapee/sb-provision-report
+printf 'warning\n' > "$PROVISION_MODE_FILE" 2>/dev/null || true
+: > "$PROVISION_REPORT_FILE" 2>/dev/null || true
 export LAPEE_PROVISION_INPUT="$PROVISION_INPUT_FILE"
+export LAPEE_PROVISION_MODE="$PROVISION_MODE_FILE"
+export LAPEE_PROVISION_REPORT="$PROVISION_REPORT_FILE"
 SPLASH_LAYOUT=$(cmdline_value lapee.splash || true)
 if [ "$LAPEE_MODE" = "sb-provision" ]; then
     SPLASH_LAYOUT=provision
@@ -198,6 +204,9 @@ sbp_log() {
     if [ -w /dev/ttyS0 ]; then
         printf '%s\n' "$*" > /dev/ttyS0 2>/dev/null || true
     fi
+    if [ "$(cat "$PROVISION_MODE_FILE" 2>/dev/null || true)" = "report" ]; then
+        printf '%s\n' "$*" >> "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    fi
 }
 
 sbp_mount_efivars_rw() {
@@ -212,6 +221,11 @@ sbp_mount_efivars_rw() {
 
 sbp_set_input() {
     printf '%s' "$*" > "$PROVISION_INPUT_FILE" 2>/dev/null || true
+}
+
+sbp_show_report() {
+    : > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    printf 'report\n' > "$PROVISION_MODE_FILE" 2>/dev/null || true
 }
 
 sbp_char_hex() {
@@ -232,6 +246,7 @@ sbp_confirm_enrolment() {
                 if [ "$_sbp_answer" = "I UNDERSTAND." ]; then
                     [ -n "$_sbp_stty" ] && \
                         stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
+                    sbp_show_report
                     sbp_log "Proceeding with LapEE Secure Boot enrolment."
                     return 0
                 fi
@@ -296,12 +311,18 @@ run_secure_boot_provisioner() {
     sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
     if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
             > /run/lapee/sb-provisioner.log 2>&1; then
+        while IFS= read -r _sbp_line; do
+            sbp_log "$_sbp_line"
+        done < /run/lapee/sb-provisioner.log
         sync 2>/dev/null || true
         sbp_log ""
         sbp_log "Secure Boot enrolment completed."
         sbp_log "Power off, enable Secure Boot, then boot the signed LapEE image."
     else
         _rc=$?
+        while IFS= read -r _sbp_line; do
+            sbp_log "$_sbp_line"
+        done < /run/lapee/sb-provisioner.log
         sbp_log ""
         sbp_log "ERROR: Secure Boot provisioning failed with status $_rc."
         sbp_log "The provisioning USB contains only public enrolment artifacts."
@@ -662,7 +683,7 @@ mkdir -p /run/lapee /etc/lapee
 #   - No NUL bytes anywhere.
 #   - Exactly two non-empty lines (the third \n is allowed).
 #   - SSID: 1-32 bytes, IEEE 802.11 max. Strict safe-char set:
-#     [a-zA-Z0-9 _.-]. Avoids shell / wpa_supplicant.conf
+#     [a-zA-Z0-9 _.'-]. Avoids shell / wpa_supplicant.conf
 #     escape games.
 #   - PSK: 8-63 bytes. WPA2-PSK length. Safe-char set: printable
 #     ASCII excluding `\`, `"`, `$`, backtick, and control chars.
@@ -747,13 +768,11 @@ parse_wifi_conf() {
         trace "wifi: wifi.conf rejected: SSID len=${#_ssid} > 32"
         return 1
     fi
-    case "$_ssid" in
-        *[!a-zA-Z0-9_\ .-]*)
-            status "Wi-Fi settings were rejected: SSID has unsupported characters."
-            trace "wifi: wifi.conf rejected: SSID has chars outside [a-zA-Z0-9_ .-]"
-            return 1
-            ;;
-    esac
+    if printf '%s' "$_ssid" | LC_ALL=C grep -q "[^a-zA-Z0-9_ .'-]"; then
+        status "Wi-Fi settings were rejected: SSID has unsupported characters."
+        trace "wifi: wifi.conf rejected: SSID has chars outside [a-zA-Z0-9_ .'-]"
+        return 1
+    fi
 
     # PSK length + safe-char validation.
     if [ ${#_psk} -lt 8 ] || [ ${#_psk} -gt 63 ]; then

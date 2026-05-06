@@ -1843,9 +1843,24 @@ strip_trailing_slash(B) ->
     B.
 
 resolve_subject_body(Msg, Opts) when is_map(Msg) ->
-    case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
-        Body when is_map(Body) -> Body;
-        _ -> Msg
+    case {
+        hb_maps:get(<<"status">>, Msg, undefined, Opts),
+        hb_maps:get(<<"body">>, Msg, undefined, Opts)
+    } of
+        {Status, Body} when is_integer(Status), is_map(Body) ->
+            resolve_subject_body(Body, Opts);
+        {undefined, Body} when is_map(Body) ->
+            case {
+                hb_maps:get(<<"type">>, Msg, undefined, Opts),
+                hb_maps:get(<<"type">>, Body, undefined, Opts)
+            } of
+                {undefined, Type} when is_binary(Type) ->
+                    resolve_subject_body(Body, Opts);
+                _ ->
+                    Msg
+            end;
+        _ ->
+            Msg
     end;
 resolve_subject_body(Other, _Opts) ->
     Other.
@@ -1964,6 +1979,7 @@ ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
     end.
 
 ensure_activation_envelope(Activation, Subject, Opts) ->
+    ok = ensure_no_activation_error(Activation, Opts),
     Checks = [
         {eq, <<"type">>, <<"lapee-tpm-credential-activation">>},
         {eq, <<"version">>, <<"1.0">>},
@@ -2001,6 +2017,21 @@ ensure_activation_envelope(Activation, Subject, Opts) ->
                 _ -> bad_activation(<<"ak-name">>)
             end
     end.
+
+ensure_no_activation_error(Activation, Opts) when is_map(Activation) ->
+    case first_defined([
+        hb_maps:get(<<"activate-credential">>, Activation, undefined, Opts),
+        hb_maps:get(<<"error">>, Activation, undefined, Opts),
+        hb_maps:get(<<"reason">>, Activation, undefined, Opts)
+    ]) of
+        undefined -> ok;
+        Reason ->
+            throw({boot_attestation_error,
+                   #{<<"credential-activation">> =>
+                        reason_to_text(Reason)}})
+    end;
+ensure_no_activation_error(_, _Opts) ->
+    ok.
 
 bad_activation(Key) ->
     throw({boot_attestation_error,
@@ -4197,6 +4228,17 @@ resolve_subject_test() ->
         resolve_subject(<<"base">>, #{<<"body">> => <<"body">>}, #{})),
     ?assertEqual(<<"base">>,
         resolve_subject(<<"base">>, #{}, #{})).
+
+resolve_subject_body_test() ->
+    Body = #{<<"type">> => <<"lapee-tpm-credential-activation">>},
+    ?assertEqual(
+        Body,
+        resolve_subject_body(#{<<"status">> => 200,
+                               <<"body">> => Body}, #{})),
+    ?assertEqual(
+        Body,
+        resolve_subject_body(#{<<"commitments">> => #{},
+                               <<"body">> => Body}, #{})).
 
 resolve_pcr_default_test() ->
     ?assertEqual(15, resolve_pcr(#{}, 15, #{})),

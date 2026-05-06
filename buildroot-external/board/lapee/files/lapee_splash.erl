@@ -61,6 +61,10 @@ log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 status_path()      -> os:getenv("LAPEE_STATUS",      "/run/lapee/status").
 provision_input_path() ->
     os:getenv("LAPEE_PROVISION_INPUT", "/run/lapee/sb-provision-input").
+provision_mode_path() ->
+    os:getenv("LAPEE_PROVISION_MODE", "/run/lapee/sb-provision-mode").
+provision_report_path() ->
+    os:getenv("LAPEE_PROVISION_REPORT", "/run/lapee/sb-provision-report").
 
 splash_layout() ->
     case os:getenv("LAPEE_SPLASH_LAYOUT") of
@@ -713,34 +717,48 @@ render_provision_grid(W, H, Yaw, Lid, Footer) ->
     Grid1 = draw_laptop(Grid0, W, H, Yaw, Lid,
                         RightX + RightW * 0.58 - 5, H * 0.69, Scale),
     Grid2 = overlay_lines(Grid1, W, H, 6, 3,
-        ["LapEE Secure Boot Enrolment.", "",
-         "This image writes operator",
-         "Secure Boot keys to firmware."]),
+                          blue_left_top_lines(LeftW)),
     draw_provision_panel(Grid2, W, H, 6, 15, LeftW - 4, Footer).
 
 draw_provision_panel(Grid, W, H, X, Y, ColW, Footer) ->
     PanelW = (min(64, max(36, ColW)) div 2) * 2,
     PanelH = max(12, min(H - Y - 2, 30)),
-    TextX = X + 4,
-    TextW = PanelW - 8,
+    TextX = X + 3,
+    TextW = PanelW - 6,
     Grid1 = draw_tile_box(fill_rect(Grid, W, H, X + 2, Y + 1,
                                     PanelW - 4, PanelH - 2),
                           W, H, X, Y, PanelW div 2, PanelH),
+    case provision_mode() of
+        report ->
+            draw_provision_report(Grid1, W, H, TextX, Y + 2,
+                                  TextW, PanelH - 4);
+        warning ->
+            draw_provision_warning(Grid1, W, H, TextX, Y, TextW,
+                                   PanelH, Footer)
+    end.
+
+draw_provision_warning(Grid, W, H, TextX, Y, TextW, PanelH, Footer) ->
     WarningLines = provision_warning_lines(TextW, PanelH - 9),
-    Grid2 = overlay_centered_lines(Grid1, W, H, TextX, Y + 2,
+    Grid1 = overlay_centered_lines(Grid, W, H, TextX, Y + 2,
                                    TextW, WarningLines),
     Prompt = "Type I UNDERSTAND. to continue:",
     Input = "> " ++ read_provision_input() ++ "_",
     InputLines = wrap_status_lines(Input, TextW, 3),
     PromptY = Y + PanelH - 5,
     InputY = Y + PanelH - 3,
-    Grid3 = overlay_text(Grid2, W, H, TextX, PromptY, Prompt),
-    Grid4 = overlay_lines(Grid3, W, H, TextX, InputY, InputLines),
+    Grid2 = overlay_text(Grid1, W, H, TextX, PromptY, Prompt),
+    Grid3 = overlay_lines(Grid2, W, H, TextX, InputY, InputLines),
     case provision_footer_visible(Footer) of
-        false -> Grid4;
-        true  -> overlay_text(Grid4, W, H, TextX, Y + PanelH - 2,
+        false -> Grid3;
+        true  -> overlay_text(Grid3, W, H, TextX, Y + PanelH - 2,
                               fit_text(Footer, TextW))
     end.
+
+draw_provision_report(Grid, W, H, TextX, Y, TextW, MaxLines) ->
+    Header = "!!! POST-PROVISIONING REPORT !!!",
+    Grid1 = overlay_centered_lines(Grid, W, H, TextX, Y, TextW, [Header]),
+    Lines = provision_report_lines(TextW, max(1, MaxLines - 2)),
+    overlay_lines(Grid1, W, H, TextX, Y + 2, Lines).
 
 provision_footer_visible("Type I UNDERSTAND. to continue.") ->
     false;
@@ -751,7 +769,7 @@ provision_footer_visible(_) ->
 
 provision_warning_lines(Width, MaxLines) ->
     Paragraphs = [
-        "!!! CAUTION !!!",
+        "!!! CAUTION: SECURE BOOT KEY PROVISIONER",
         "Performing this operation is irreversible and will render your machine unable to boot other operating systems.",
         "There is a very real possibility that it will cause harm to the viability of the attached hardware.",
         "Nobody will help you, and nobody can save your machine.",
@@ -759,6 +777,45 @@ provision_warning_lines(Width, MaxLines) ->
     ],
     Lines0 = provision_spaced_lines(Paragraphs, Width),
     lists:sublist(Lines0, MaxLines).
+
+provision_mode() ->
+    case file:read_file(provision_mode_path()) of
+        {ok, Bin} ->
+            case string:trim(binary_to_list(Bin)) of
+                "report" -> report;
+                _ -> warning
+            end;
+        _ ->
+            warning
+    end.
+
+provision_report_lines(Width, MaxLines) ->
+    Lines0 =
+        case file:read_file(provision_report_path()) of
+            {ok, Bin} ->
+                provision_report_lines_from_bin(Bin, Width);
+            _ ->
+                ["Provisioning report is pending."]
+        end,
+    lists:sublist(Lines0, MaxLines).
+
+provision_report_lines_from_bin(Bin, Width) ->
+    Lines =
+        string:split(binary_to_list(Bin), "\n", all),
+    Wrapped =
+        lists:flatmap(
+          fun(Line) ->
+              case wrap_words(string:tokens(string:trim(Line), " \t\r\n"),
+                              Width) of
+                  [] -> [""];
+                  Ls -> Ls
+              end
+          end,
+          Lines),
+    case Wrapped of
+        [] -> ["Provisioning report is pending."];
+        _ -> Wrapped
+    end.
 
 provision_spaced_lines([], _Width) ->
     [];

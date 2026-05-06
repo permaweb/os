@@ -65,6 +65,48 @@ lapee_enc_session(ESYS_TR *out_session)
     return rc;
 }
 
+static void
+lapee_flush_auth_session(void)
+{
+    if (g_auth_session != ESYS_TR_NONE) {
+        Esys_FlushContext(g_esys_ctx, g_auth_session);
+        g_auth_session = ESYS_TR_NONE;
+    }
+}
+
+static TSS2_RC
+lapee_start_salted_enc_session(ESYS_TR salt_key, ESYS_TR *out_session)
+{
+    TPMT_SYM_DEF symmetric = {
+        .algorithm = TPM2_ALG_AES,
+        .keyBits = { .aes = 128 },
+        .mode = { .aes = TPM2_ALG_CFB },
+    };
+    ESYS_TR session = ESYS_TR_NONE;
+    TSS2_RC rc = Esys_StartAuthSession(
+        g_esys_ctx,
+        salt_key,
+        ESYS_TR_NONE,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        NULL,
+        TPM2_SE_HMAC,
+        &symmetric,
+        TPM2_ALG_SHA256,
+        &session);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+
+    TPMA_SESSION attrs = TPMA_SESSION_ENCRYPT |
+                         TPMA_SESSION_DECRYPT |
+                         TPMA_SESSION_CONTINUESESSION;
+    rc = Esys_TRSess_SetAttributes(g_esys_ctx, session, attrs, 0xFF);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, session);
+        return rc;
+    }
+    *out_session = session;
+    return TSS2_RC_SUCCESS;
+}
+
 static TSS2_RC
 lapee_policy_secret_endorsement_session(ESYS_TR *out_session)
 {
@@ -957,11 +999,13 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     }
 
     ESYS_TR enc_session = ESYS_TR_NONE;
-    rc = lapee_enc_session(&enc_session);
+    lapee_flush_auth_session();
+    rc = lapee_start_salted_enc_session((ESYS_TR)ek_tr, &enc_session);
     if (rc != TSS2_RC_SUCCESS) {
         Esys_FlushContext(g_esys_ctx, ak_policy_session);
         Esys_FlushContext(g_esys_ctx, ek_policy_session);
-        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+        return lapee_make_tss_error(
+            env, "Esys_StartAuthSession(salted HMAC)", rc);
     }
 
     TPM2B_DIGEST *cert_info = NULL;
@@ -977,6 +1021,7 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         &cert_info);
     Esys_FlushContext(g_esys_ctx, ak_policy_session);
     Esys_FlushContext(g_esys_ctx, ek_policy_session);
+    Esys_FlushContext(g_esys_ctx, enc_session);
     if (rc != TSS2_RC_SUCCESS) {
         return lapee_make_tss_error(env, "Esys_ActivateCredential", rc);
     }
