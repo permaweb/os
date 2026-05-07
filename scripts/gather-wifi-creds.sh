@@ -7,7 +7,7 @@
 #   WPA2-PSK
 #
 # The PSK is never echoed. On macOS, when stdin is not a terminal, this
-# falls back to GUI prompts so `make hb-usb-write' can still gather the
+# falls back to GUI prompts so `make runtime-write' can still gather the
 # secret without putting it in chat, shell history, or Make arguments.
 
 set -euo pipefail

@@ -546,7 +546,7 @@ check_tme_sme() {
     fi
     # Developer bypass: QEMU / KVM / Xen / VMware / VirtualBox
     # guests can't expose TME/SME to Rosetta-emulated amd64, so
-    # make hb-usb-qemu smoke-boot would otherwise halt at this
+    # make qemu smoke-boot would otherwise halt at this
     # gate. Auto-detect via DMI sys_vendor and skip enforcement
     # WITH a clear trace so the bypass is visible in logs + any
     # attestation captured from that guest shows the virt-vendor

@@ -8,85 +8,37 @@
 # prebuilt where no source release exists.
 #
 # ============================================================
-# Three execution paths:
+# Release artifacts:
 #
-#   make build              — default. Per-step Docker containers
-#                             at host arch (linux/arm64 on Apple
-#                             Silicon, linux/amd64 on x86_64
-#                             hosts). Fast on every host. Bytes
-#                             not guaranteed reproducible across
-#                             host architectures.
+#   make runtime-image      - build a signed runtime disk image.
+#                             TME=0 allows no-TME test hardware.
+#                             DEBUG=1 enables the measured debug console.
+#                             REFERENCE=1 forces the publishable
+#                             linux/amd64 Docker path.
+#   make runtime-write DEV= - build and write the signed runtime image.
+#   make provisioner-image  - build the Secure Boot provisioner image.
+#   make provisioner-write DEV=
+#                           - build and write the provisioner image.
 #
-#   make build REFERENCE=1  — reference / publishable build.
-#                             Forces linux/amd64 in every Docker
-#                             invocation regardless of host. On
-#                             Apple Silicon this means Rosetta —
-#                             slower but bit-identical output on
-#                             every host. CI / publishing uses
-#                             this path; the SHA-256 hashes
-#                             documented in README.md are produced
-#                             by it.
+# Operator helpers:
 #
-#   make native-build       — Linux only. Skips Docker entirely.
-#                             Buildroot bootstrap + build runs
-#                             directly on the host. Errors clearly
-#                             on macOS (Buildroot doesn't run on
-#                             non-Linux hosts).
+#   make signing-keys       - generate operator Secure Boot keys and
+#                             enrolment payloads under secureboot/.
+#   make write-image DEV= IMAGE=
+#                           - write an existing disk image to a device.
+#   make wifi-creds         - prompt locally for wifi.conf.
+#   make operator-config-apply
+#                           - inject wifi.conf and/or config.json into
+#                             the selected image without re-signing.
+#   make clean              - remove generated build/ files only.
 #
-# Other targets:
+# QEMU tests:
 #
-#   make help               — print this list.
-#   make toolchain          — pull the pinned upstream Debian base
-#                             + build the lapee-build image for
-#                             the selected mode.
-#   make hb-usb-write DEV=  — flash build/images/lapee-usb.img to a USB.
-#   make hb-image-write DEV=
-#                           — flash an existing build/images/lapee-usb.img
-#                             without rebuilding it first.
-#   make hb-usb-debug-write DEV=
-#                           — flash a measured debug-console image
-#                             with lapee.debug=1 on the cmdline.
-#   make hb-usb-no-tme-write DEV=
-#                           — flash a production image with
-#                             LAPEE_NO_TME=1 on the cmdline.
-#   make hb-usb-no-tme-debug-write DEV=
-#                           — flash a debug-console image with
-#                             LAPEE_NO_TME=1 on the cmdline.
-#   make hb-usb-no-tme-signed-write DEV=
-#                           — flash a no-TME image signed by the
-#                             operator Secure Boot db key.
-#   make hb-sb-provisioner-write DEV=
-#                           — flash a one-shot Setup Mode key
-#                             enrollment image for firmware with no
-#                             Secure Boot enrollment UI.
-#   make hb-usb-no-tme-verify DEV=
-#                           — byte-compare the no-TME image against
-#                             the beginning of the USB device.
-#   make gather-wifi-creds  — prompt locally for wifi.conf.
-#   make hb-usb-qemu        — boot build/images/lapee-usb.img under
-#                             QEMU+OVMF+swtpm and fetch attestation
-#                             over the forwarded network port.
-#   make hb-usb-qemu-gui    — same with a Cocoa window so the
-#                             operator can watch the splash.
-#   make qemu-green-zone-cluster
-#                           — boot four QEMU+swtpm nodes, admit three
-#                             into a green-zone, and prove the fourth is
-#                             rejected and has no ring identity.
-#   make qemu-operator-config-green-zone
-#                           — boot two QEMU+swtpm nodes, one with USB
-#                             config.json and one without, then prove the
-#                             config is in /info, boot attestation, and
-#                             green-zone template matching.
-#   make hb-fetch           — populate build/hyperbeam/src-edge
-#                             with the pinned verifier source.
-#   make hb-wifi-apply      — inject host-side wifi.conf and optional
-#                             config.json into the ESP without re-signing.
-#   make hb-sb-apply        — inject Secure Boot enrolment bundle.
-#   make paper              — build the paper PDF.
-#   make buildroot-shell    — drop into the Buildroot volume in a
-#                             shell, for debugging.
-#   make buildroot-clean    — wipe the Buildroot volume entirely.
-#   make clean              — remove generated build/ files only.
+#   make qemu               - boot the selected image under QEMU+OVMF+swtpm.
+#   make qemu-gui           - boot the selected image with a QEMU window.
+#   make qemu-green-zone    - run the four-node green-zone acceptance test.
+#   make qemu-operator-config
+#                           - run the operator-config attestation test.
 #
 # ============================================================
 
@@ -127,20 +79,10 @@ OUT       ?= $(BUILD_DIR)/images/lapee-usb.img
 WIFI      ?= 1
 SPLASH    ?= blue
 DEBUG     ?= 0
+TME       ?= 1
 BUILDROOT_VOLUME ?= lapee-buildroot
 KERNEL_EXTRA_FRAGMENT ?=
 DEFCONFIG_EXTRA_SNIPPET ?=
-LENOVO_INTEL_BUILD_DIR ?= build/intel-gfx
-LENOVO_INTEL_OUT = build/images/lapee-usb-lenovo-intel-debug.img
-LENOVO_INTEL_KERNEL = $(LENOVO_INTEL_BUILD_DIR)/kernel/vmlinuz-lapee
-LENOVO_INTEL_INITRAMFS = $(LENOVO_INTEL_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
-LENOVO_INTEL_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1 i915.force_probe=*
-NO_TME_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme.img
-NO_TME_CMDLINE = $(PROD_CMDLINE) LAPEE_NO_TME=1
-NO_TME_DEBUG_OUT = $(BUILD_DIR)/images/lapee-usb-wifi-debug-no-tme.img
-NO_TME_DEBUG_CMDLINE = $(DEBUG_CMDLINE) LAPEE_NO_TME=1
-NO_TME_SIGNED_OUT = $(BUILD_DIR)/images/lapee-usb-no-tme-signed.img
-NO_TME_SIGNED_UKI = $(BUILD_DIR)/images/lapee-no-tme.signed.efi
 SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
 SB_PROVISION_BUILDROOT_VOLUME = lapee-buildroot-sb-provisioner
 SB_PROVISION_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner.img
@@ -163,24 +105,136 @@ DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
                 lapee.splash=$(SPLASH)
 
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
+RUNTIME_TME_TAG = $(if $(filter 0,$(TME)),no-tme,tme)
+RUNTIME_DEBUG_TAG = $(if $(filter 1,$(DEBUG)),-debug,)
+RUNTIME_CMDLINE = $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))$(if $(filter 0,$(TME)), LAPEE_NO_TME=1)
+RUNTIME_UNSIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).img
+RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)-signed.img
+RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).signed.efi
+IMAGE ?= $(RUNTIME_SIGNED_OUT)
+WRITE_IMAGE = $(if $(filter file,$(origin OUT)),$(IMAGE),$(OUT))
 export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 
-.PHONY: help all build native-build toolchain \
+.PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
+        signing-keys write-image wifi-creds operator-config-apply \
+        qemu qemu-gui qemu-green-zone qemu-operator-config \
+        _check-runtime-flags _check-signing-keys _check-provisioner-keys \
+        _runtime-signed-image _usb-image _image-write _signing-keys \
+        _provisioner-image _provisioner-write _wifi-creds \
+        _operator-config-apply _qemu-green-zone-cluster \
+        _qemu-operator-config-green-zone \
+        all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
-        hb-usb-image hb-usb-write hb-image-write hb-usb-debug-image hb-usb-debug-write \
-        hb-usb-no-tme-image hb-usb-no-tme-write hb-usb-no-tme-verify \
-        hb-usb-no-tme-debug-image hb-usb-no-tme-debug-write hb-usb-no-tme-debug-verify \
-        hb-usb-no-tme-signed-image hb-usb-no-tme-signed-write \
-        hb-sb-keys hb-sb-provisioner-image hb-sb-provisioner-write \
-        hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
-        hb-usb-qemu hb-usb-qemu-gui qemu-green-zone-cluster \
-        qemu-operator-config-green-zone hb-fetch \
-        gather-wifi-creds hb-wifi-apply hb-sb-apply \
-        paper clean
+        hb-fetch paper clean
 
 help:
 	@awk '/^# =+$$/{flag=!flag;if(!flag)exit;next} \
 	      flag{sub(/^# ?/,"");print}' $(firstword $(MAKEFILE_LIST))
+
+# ------------------------------------------------------------
+# Public release surface.
+# ------------------------------------------------------------
+
+runtime-image:
+	$(MAKE) _check-runtime-flags
+	$(MAKE) _check-signing-keys
+	$(MAKE) toolchain
+	$(MAKE) kernel
+	$(MAKE) _runtime-signed-image
+	@echo ">> signed runtime image: $(RUNTIME_SIGNED_OUT)"
+
+runtime-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make runtime-write DEV=/dev/diskN [TME=0] [DEBUG=1]"; exit 1; }
+	@if [ "$(WIFI)" != "0" ]; then \
+	    ./scripts/gather-wifi-creds.sh --if-missing; \
+	else \
+	    echo ">> skipping wifi credential gather (WIFI=0)"; \
+	fi
+	$(MAKE) runtime-image
+	$(MAKE) write-image DEV="$(DEV)" IMAGE="$(RUNTIME_SIGNED_OUT)"
+
+provisioner-image:
+	$(MAKE) _check-provisioner-keys
+	$(MAKE) _provisioner-image
+
+provisioner-write:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make provisioner-write DEV=/dev/diskN"; exit 1; }
+	$(MAKE) _check-provisioner-keys
+	$(MAKE) _provisioner-write DEV="$(DEV)"
+
+signing-keys:
+	$(MAKE) _signing-keys
+
+write-image:
+	@test -n "$(DEV)" || { \
+	    echo "usage: make write-image DEV=/dev/diskN IMAGE=$(IMAGE)"; exit 1; }
+	@test -f "$(WRITE_IMAGE)" || { \
+	    echo "$(WRITE_IMAGE) missing. Set IMAGE=... or run: make runtime-image"; \
+	    exit 1; }
+	$(MAKE) _image-write OUT="$(WRITE_IMAGE)" DEV="$(DEV)"
+
+wifi-creds:
+	$(MAKE) _wifi-creds
+
+operator-config-apply:
+	@[ -f wifi.conf ] || [ -f config.json ] || { \
+	    echo "nothing to apply: create wifi.conf and/or config.json"; \
+	    exit 1; }
+	$(MAKE) _operator-config-apply OUT="$(WRITE_IMAGE)"
+
+qemu:
+	@test -f "$(WRITE_IMAGE)" || { \
+	    echo "$(WRITE_IMAGE) missing. Run: make runtime-image or set IMAGE=..."; \
+	    exit 1; }
+	./scripts/boot-usb-image.sh --img "$(WRITE_IMAGE)"
+
+qemu-gui:
+	@test -f "$(WRITE_IMAGE)" || { \
+	    echo "$(WRITE_IMAGE) missing. Run: make runtime-image or set IMAGE=..."; \
+	    exit 1; }
+	./scripts/boot-usb-image.sh --img "$(WRITE_IMAGE)" --gui
+
+qemu-green-zone:
+	$(MAKE) _qemu-green-zone-cluster
+
+qemu-operator-config:
+	$(MAKE) _qemu-operator-config-green-zone
+
+_check-runtime-flags:
+	@case "$(TME)" in 0|1) ;; \
+	    *) echo "TME must be 0 or 1"; exit 1;; \
+	esac
+	@case "$(DEBUG)" in 0|1) ;; \
+	    *) echo "DEBUG must be 0 or 1"; exit 1;; \
+	esac
+
+_check-signing-keys:
+	@test -f secureboot/db.key || { \
+	    echo "secureboot/db.key missing. Run: make signing-keys"; exit 1; }
+	@test -f secureboot/enrol/db.esl || { \
+	    echo "secureboot/enrol/db.esl missing. Run: make signing-keys"; exit 1; }
+
+_check-provisioner-keys:
+	@test -f secureboot/enrol/db.auth || { \
+	    echo "secureboot/enrol/db.auth missing. Run: make signing-keys"; exit 1; }
+	@test -f secureboot/enrol/KEK.auth || { \
+	    echo "secureboot/enrol/KEK.auth missing. Run: make signing-keys"; exit 1; }
+	@test -f secureboot/enrol/PK.auth || { \
+	    echo "secureboot/enrol/PK.auth missing. Run: make signing-keys"; exit 1; }
+
+_runtime-signed-image:
+	$(MAKE) _check-runtime-flags
+	$(MAKE) _check-signing-keys
+	$(MAKE) _usb-image \
+	    CMDLINE='$(RUNTIME_CMDLINE)' \
+	    OUT="$(RUNTIME_UNSIGNED_OUT)"
+	BUILD_UKI="$(LAPEE_BUILD_DIR)/usb-build/lapee.efi" \
+	SIGNED_UKI="$(abspath $(RUNTIME_SIGNED_UKI))" \
+	USB_IMAGE="$(abspath $(RUNTIME_SIGNED_OUT))" \
+	WIFI="$(WIFI)" \
+	    ./scripts/sb-setup.sh sign
 
 # ------------------------------------------------------------
 # Top-level build orchestration.
@@ -191,13 +245,9 @@ help:
 # hood; Buildroot owns the entire userspace including HyperBEAM.
 # ------------------------------------------------------------
 
-build: toolchain
-	@echo ">> $(BUILD_MODE) build (host=$(HOST_ARCH); REFERENCE=$(if $(filter 1,$(REFERENCE)),1,0))"
-	$(MAKE) kernel
-	$(MAKE) hb-usb-image
-	@echo ">> done. $(OUT) is the bootable artefact."
+build: runtime-image
 
-all: build
+all: runtime-image
 
 paper:
 	$(MAKE) -C paper
@@ -205,12 +255,12 @@ paper:
 native-build:
 	@if [ "$(HOST_OS)" != "Linux" ]; then \
 	    echo "native-build requires a Linux host (Buildroot doesn't run on $(HOST_OS))." >&2; \
-	    echo "Use 'make build' instead." >&2; \
+	    echo "Use 'make runtime-image' instead." >&2; \
 	    exit 1; \
 	fi
 	@$(MAKE) _check-native-deps
 	NATIVE_BUILD=1 $(MAKE) kernel
-	NATIVE_BUILD=1 $(MAKE) hb-usb-image
+	NATIVE_BUILD=1 $(MAKE) _usb-image
 	@echo ">> done. $(OUT) is the bootable artefact."
 
 # Precondition check for native-build: required host packages
@@ -261,7 +311,7 @@ buildroot-clean:
 # UKI + USB image assembly.
 # ------------------------------------------------------------
 
-hb-usb-image:
+_usb-image:
 	WIFI="$(WIFI)" ./scripts/build-usb-image.sh \
 	    --kernel    "$(KERNEL)" \
 	    --initramfs "$(INITRAMFS)" \
@@ -269,26 +319,11 @@ hb-usb-image:
 	    --size      "$(SIZE_MIB)" \
 	    --image     "$(OUT)"
 
-hb-usb-write:
+_image-write:
 	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-write DEV=/dev/diskN"; exit 1; }
-	@if [ "$(WIFI)" != "0" ]; then \
-	    ./scripts/gather-wifi-creds.sh --if-missing; \
-	else \
-	    echo ">> skipping wifi credential gather (WIFI=0)"; \
-	fi
-	WIFI="$(WIFI)" ./scripts/build-usb-image.sh \
-	    --kernel    "$(KERNEL)" \
-	    --initramfs "$(INITRAMFS)" \
-	    --cmdline   "$(CMDLINE)" \
-	    --size      "$(SIZE_MIB)" \
-	    --device    "$(DEV)"
-
-hb-image-write:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-image-write DEV=/dev/diskN"; exit 1; }
+	    echo "usage: make write-image DEV=/dev/diskN IMAGE=$(OUT)"; exit 1; }
 	@test -f "$(OUT)" || { \
-	    echo "$(OUT) missing. Put a pre-built image there or run: make build"; \
+	    echo "$(OUT) missing. Put a pre-built image there or run: make runtime-image"; \
 	    exit 1; }
 	@if [ "$(HOST_OS)" = "Darwin" ]; then \
 	    case "$(DEV)" in /dev/disk*|/dev/rdisk*) ;; \
@@ -315,133 +350,17 @@ hb-image-write:
 	    sync; \
 	fi
 
-hb-usb-debug-image:
-	$(MAKE) hb-usb-image DEBUG=1 \
-	    OUT="$(BUILD_DIR)/images/lapee-usb-debug.img"
-
-hb-usb-debug-write:
-	$(MAKE) hb-usb-write DEBUG=1 \
-	    OUT="$(BUILD_DIR)/images/lapee-usb-debug.img" DEV="$(DEV)"
-
-hb-usb-no-tme-image:
-	$(MAKE) hb-usb-image \
-	    CMDLINE='$(NO_TME_CMDLINE)' \
-	    OUT="$(NO_TME_OUT)"
-
-hb-usb-no-tme-write:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-no-tme-write DEV=/dev/diskN"; exit 1; }
-	@if [ "$(WIFI)" != "0" ]; then \
-	    ./scripts/gather-wifi-creds.sh --if-missing; \
-	else \
-	    echo ">> skipping wifi credential gather (WIFI=0)"; \
-	fi
-	$(MAKE) hb-usb-no-tme-image WIFI="$(WIFI)"
-	@if [ "$(HOST_OS)" = "Darwin" ]; then \
-	    case "$(DEV)" in /dev/disk*|/dev/rdisk*) ;; \
-	        *) echo "macOS device must be /dev/diskN or /dev/rdiskN" >&2; exit 1;; \
-	    esac; \
-	    DISKID=$$(basename "$(DEV)" | sed 's/^r//'); \
-	    RAW="/dev/r$$DISKID"; \
-	    echo ">> target : $(DEV) -> $$RAW"; \
-	    diskutil info "/dev/$$DISKID" | \
-	        grep -E '(Device.*(Identifier|Node)|Media Name|Disk Size)' | \
-	        sed 's/^/     /'; \
-	    printf "Write $(NO_TME_OUT) to $$RAW? [type YES] "; \
-	    read CONFIRM; [ "$$CONFIRM" = "YES" ] || { echo "aborted"; exit 1; }; \
-	    BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
-	    diskutil unmountDisk "/dev/$$DISKID"; \
-	    sudo dd if="$(NO_TME_OUT)" of="$$RAW" bs=4m; \
-	    sync; \
-	    echo ">> verifying first $$BYTES bytes"; \
-	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$$RAW"; \
-	    echo ">> no-TME image bytes verified on $(DEV)"; \
-	    diskutil eject "/dev/$$DISKID"; \
-	else \
-	    [ -b "$(DEV)" ] || { echo "not a block device: $(DEV)" >&2; exit 1; }; \
-	    echo ">> target : $(DEV)"; \
-	    lsblk -o NAME,SIZE,MODEL "$(DEV)" 2>/dev/null | sed 's/^/     /' || true; \
-	    printf "Write $(NO_TME_OUT) to $(DEV)? [type YES] "; \
-	    read CONFIRM; [ "$$CONFIRM" = "YES" ] || { echo "aborted"; exit 1; }; \
-	    BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
-	    sudo dd if="$(NO_TME_OUT)" of="$(DEV)" bs=4M status=progress conv=fsync; \
-	    sync; \
-	    echo ">> verifying first $$BYTES bytes"; \
-	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$(DEV)"; \
-	    echo ">> no-TME image bytes verified on $(DEV)"; \
-	fi
-
-hb-usb-no-tme-verify:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-no-tme-verify DEV=/dev/diskN"; exit 1; }
-	@test -f "$(NO_TME_OUT)" || { \
-	    echo "$(NO_TME_OUT) missing. Run: make hb-usb-no-tme-image"; \
-	    exit 1; }
-	@set -e; \
-	BYTES=$$(stat -f %z "$(NO_TME_OUT)" 2>/dev/null || stat -c %s "$(NO_TME_OUT)"); \
-	if [ "$(HOST_OS)" = "Darwin" ]; then \
-	    DISKID=$$(basename "$(DEV)" | sed 's/^r//'); \
-	    RAW="/dev/r$$DISKID"; \
-	    echo ">> comparing first $$BYTES bytes of $(NO_TME_OUT) against $$RAW"; \
-	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$$RAW"; \
-	else \
-	    echo ">> comparing first $$BYTES bytes of $(NO_TME_OUT) against $(DEV)"; \
-	    sudo cmp -n "$$BYTES" "$(NO_TME_OUT)" "$(DEV)"; \
-	fi; \
-	echo ">> no-TME image bytes match $(DEV)"
-
-hb-usb-no-tme-debug-image:
-	$(MAKE) hb-usb-no-tme-image \
-	    NO_TME_CMDLINE='$(NO_TME_DEBUG_CMDLINE)' \
-	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
-
-hb-usb-no-tme-debug-write:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-no-tme-debug-write DEV=/dev/diskN"; exit 1; }
-	$(MAKE) hb-usb-no-tme-write DEV="$(DEV)" WIFI="$(WIFI)" \
-	    NO_TME_CMDLINE='$(NO_TME_DEBUG_CMDLINE)' \
-	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
-
-hb-usb-no-tme-debug-verify:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-no-tme-debug-verify DEV=/dev/diskN"; exit 1; }
-	$(MAKE) hb-usb-no-tme-verify DEV="$(DEV)" \
-	    NO_TME_OUT="$(NO_TME_DEBUG_OUT)"
-
-hb-sb-keys:
+_signing-keys:
 	./scripts/sb-setup.sh keys
 	./scripts/sb-setup.sh enrol
 
-hb-usb-no-tme-signed-image:
-	@test -f secureboot/db.key || { \
-	    echo "secureboot/db.key missing. Run: make hb-sb-keys"; exit 1; }
-	@test -f secureboot/enrol/db.esl || { \
-	    echo "secureboot/enrol/db.esl missing. Run: make hb-sb-keys"; exit 1; }
-	$(MAKE) hb-usb-no-tme-image
-	BUILD_UKI="$(LAPEE_BUILD_DIR)/usb-build/lapee.efi" \
-	SIGNED_UKI="$(abspath $(NO_TME_SIGNED_UKI))" \
-	USB_IMAGE="$(abspath $(NO_TME_SIGNED_OUT))" \
-	WIFI="$(WIFI)" \
-	    ./scripts/sb-setup.sh sign
-
-hb-usb-no-tme-signed-write:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-no-tme-signed-write DEV=/dev/diskN"; exit 1; }
-	@if [ "$(WIFI)" != "0" ]; then \
-	    ./scripts/gather-wifi-creds.sh --if-missing; \
-	else \
-	    echo ">> skipping wifi credential gather (WIFI=0)"; \
-	fi
-	$(MAKE) hb-usb-no-tme-signed-image WIFI="$(WIFI)"
-	$(MAKE) hb-image-write OUT="$(NO_TME_SIGNED_OUT)" DEV="$(DEV)"
-
-hb-sb-provisioner-image: toolchain
+_provisioner-image: toolchain
 	@test -f secureboot/enrol/db.auth || { \
-	    echo "secureboot/enrol/db.auth missing. Run: make hb-sb-keys"; exit 1; }
+	    echo "secureboot/enrol/db.auth missing. Run: make signing-keys"; exit 1; }
 	@test -f secureboot/enrol/KEK.auth || { \
-	    echo "secureboot/enrol/KEK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	    echo "secureboot/enrol/KEK.auth missing. Run: make signing-keys"; exit 1; }
 	@test -f secureboot/enrol/PK.auth || { \
-	    echo "secureboot/enrol/PK.auth missing. Run: make hb-sb-keys"; exit 1; }
+	    echo "secureboot/enrol/PK.auth missing. Run: make signing-keys"; exit 1; }
 	@if docker volume inspect $(SB_PROVISION_BUILDROOT_VOLUME) >/dev/null 2>&1; then \
 	    docker run --rm $(DOCKER_PLATFORM) \
 	        -v $(SB_PROVISION_BUILDROOT_VOLUME):/build \
@@ -452,57 +371,23 @@ hb-sb-provisioner-image: toolchain
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-sb-provisioner-fragment.config" \
 	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-sb-provisioner.extra"
-	$(MAKE) hb-usb-image WIFI=0 \
+	$(MAKE) _usb-image WIFI=0 \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL="$(SB_PROVISION_KERNEL)" \
 	    INITRAMFS="$(SB_PROVISION_INITRAMFS)" \
 	    CMDLINE='$(SB_PROVISION_CMDLINE)' \
 	    OUT="$(SB_PROVISION_OUT)"
 
-hb-sb-provisioner-write:
+_provisioner-write:
 	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-sb-provisioner-write DEV=/dev/diskN"; exit 1; }
-	$(MAKE) hb-sb-provisioner-image
-	$(MAKE) hb-image-write OUT="$(SB_PROVISION_OUT)" DEV="$(DEV)"
+	    echo "usage: make provisioner-write DEV=/dev/diskN"; exit 1; }
+	$(MAKE) _provisioner-image
+	$(MAKE) _image-write OUT="$(SB_PROVISION_OUT)" DEV="$(DEV)"
 
-hb-usb-lenovo-intel-debug-image:
-	$(MAKE) buildroot \
-	    BUILDROOT_VOLUME=lapee-buildroot-intel-gfx \
-	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
-	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-intel-gfx-fragment.config" \
-	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-intel-gfx.extra"
-	$(MAKE) hb-usb-image DEBUG=1 \
-	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
-	    KERNEL="$(LENOVO_INTEL_KERNEL)" \
-	    INITRAMFS="$(LENOVO_INTEL_INITRAMFS)" \
-	    CMDLINE='$(LENOVO_INTEL_CMDLINE)' \
-	    OUT="$(LENOVO_INTEL_OUT)"
-
-hb-usb-lenovo-intel-debug-write:
-	@test -n "$(DEV)" || { \
-	    echo "usage: make hb-usb-lenovo-intel-debug-write DEV=/dev/diskN"; exit 1; }
-	$(MAKE) buildroot \
-	    BUILDROOT_VOLUME=lapee-buildroot-intel-gfx \
-	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
-	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-intel-gfx-fragment.config" \
-	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-intel-gfx.extra"
-	$(MAKE) hb-usb-write DEBUG=1 DEV="$(DEV)" \
-	    LAPEE_BUILD_DIR="$(abspath $(LENOVO_INTEL_BUILD_DIR))" \
-	    KERNEL="$(LENOVO_INTEL_KERNEL)" \
-	    INITRAMFS="$(LENOVO_INTEL_INITRAMFS)" \
-	    CMDLINE='$(LENOVO_INTEL_CMDLINE)' \
-	    OUT="$(LENOVO_INTEL_OUT)"
-
-hb-usb-qemu:
-	./scripts/boot-usb-image.sh
-
-hb-usb-qemu-gui:
-	./scripts/boot-usb-image.sh --gui
-
-qemu-green-zone-cluster: toolchain
+_qemu-green-zone-cluster: toolchain
 	./scripts/qemu-green-zone-cluster.sh
 
-qemu-operator-config-green-zone: toolchain
+_qemu-operator-config-green-zone: toolchain
 	./scripts/qemu-operator-config-green-zone.sh
 
 hb-fetch:
@@ -539,16 +424,15 @@ hb-fetch:
 # ESP injection helpers (operator-side, no UKI re-sign).
 # ------------------------------------------------------------
 
-gather-wifi-creds:
+_wifi-creds:
 	./scripts/gather-wifi-creds.sh --force
 
-hb-wifi-apply: toolchain
-	@test -f wifi.conf || { \
-	    echo "wifi.conf missing. Create it with EXACTLY two lines:"; \
-	    echo "  <SSID>"; echo "  <PSK>"; \
-	    echo "(and nothing else). See README.md."; exit 1; }
+_operator-config-apply: toolchain
+	@[ -f wifi.conf ] || [ -f config.json ] || { \
+	    echo "nothing to apply: create wifi.conf and/or config.json"; \
+	    exit 1; }
 	@test -f "$(OUT)" || { \
-	    echo "$(OUT) missing. Run: make build"; \
+	    echo "$(OUT) missing. Run: make runtime-image or set OUT=..."; \
 	    exit 1; }
 	docker run --rm $(DOCKER_PLATFORM) \
 	    -v $(LAPEE_ROOT):/w -w /w $(BUILD_IMAGE) \
@@ -560,40 +444,16 @@ hb-wifi-apply: toolchain
 	        dd if=/w/$(OUT) of=/tmp/esp.img \
 	            bs=512 skip=$$START count=$$SECT status=none; \
 	        mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true; \
-	        mcopy -i /tmp/esp.img -o /w/wifi.conf ::/EFI/boot/wifi.conf; \
+	        if [[ -f /w/wifi.conf ]]; then \
+	            mcopy -i /tmp/esp.img -o /w/wifi.conf ::/EFI/boot/wifi.conf; \
+	        fi; \
 	        if [[ -f /w/config.json ]]; then \
 	            mcopy -i /tmp/esp.img -o /w/config.json ::/EFI/boot/config.json; \
 	        fi; \
 	        dd if=/tmp/esp.img of=/w/$(OUT) \
 	            bs=512 seek=$$START count=$$SECT \
 	            conv=notrunc status=none'
-	@echo ">> wifi.conf$(if $(wildcard config.json), and config.json,) applied to $(OUT)"
-
-hb-sb-apply: toolchain
-	@test -d secureboot/enrol || { \
-	    echo "secureboot/enrol/ missing. Run: ./scripts/sb-setup.sh enrol"; \
-	    exit 1; }
-	@test -f "$(OUT)" || { \
-	    echo "$(OUT) missing. Run: make build"; \
-	    exit 1; }
-	docker run --rm $(DOCKER_PLATFORM) \
-	    -v $(LAPEE_ROOT):/w -w /w $(BUILD_IMAGE) \
-	    bash -euo pipefail -c '\
-	        START=$$(parted --script --machine /w/$(OUT) \
-	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$2); print \$$2}"); \
-	        SECT=$$(parted --script --machine /w/$(OUT) \
-	            unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$$4); print \$$4}"); \
-	        dd if=/w/$(OUT) of=/tmp/esp.img \
-	            bs=512 skip=$$START count=$$SECT status=none; \
-	        for f in PK.cer KEK.cer db.cer PK.auth KEK.auth db.auth PK.esl KEK.esl db.esl; do \
-	            if [[ -f /w/secureboot/enrol/$$f ]]; then \
-	                mcopy -i /tmp/esp.img -o /w/secureboot/enrol/$$f ::/$$f; \
-	            fi; \
-	        done; \
-	        dd if=/tmp/esp.img of=/w/$(OUT) \
-	            bs=512 seek=$$START count=$$SECT \
-	            conv=notrunc status=none'
-	@echo ">> SB enrolment bundle applied to $(OUT)"
+	@echo ">> operator files applied to $(OUT)"
 
 # ------------------------------------------------------------
 # Cleanup.

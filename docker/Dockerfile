@@ -11,18 +11,19 @@
 #
 # The image is built two ways:
 #
-#   `make build'              — Docker chooses the platform that
+#   `make runtime-image'      — Docker chooses the platform that
 #                               matches the host arch (linux/arm64
 #                               on Apple Silicon, linux/amd64 on
 #                               x86_64 hosts). Fast — no Rosetta
 #                               on M-series. Output bytes may differ
 #                               across host architectures.
 #
-#   `make build REFERENCE=1'  — Docker forces linux/amd64 regardless
+#   `make runtime-image REFERENCE=1'
+#                             — Docker forces linux/amd64 regardless
 #                               of host. On Apple Silicon this means
-#                               Rosetta. Output bytes are bit-
-#                               identical on every host. Use for
-#                               publishing / CI / known-good hashes.
+#                               Rosetta. Output bytes are bit-identical
+#                               on every host. Use for publishing / CI /
+#                               known-good hashes.
 #
 # The Dockerfile itself is identical for both — only the host arch
 # of the resulting image differs.

@@ -577,7 +577,7 @@ one signed UKI ($\sim$73 MB) on a UEFI-bootable USB image. The
 quote, sign, PCR-extend, NV ops, and event-log-read, with HMAC +
 AES-128-CFB parameter-encrypted sessions on every TPM operation that
 touches sensitive state. Operator bring-up is three commands: enroll
-PK/KEK/db via \texttt{sbctl}; \texttt{make hb-usb-write}; boot the
+PK/KEK/db; \texttt{make runtime-write}; boot the
 target. The boot splash decides its own phase machine
 (\texttt{boot}~$\rightarrow$~\texttt{net-up}~$\rightarrow$~\texttt{hb-wait}~$\rightarrow$~\texttt{ready}),
 prints the URL when HyperBEAM answers \texttt{/info}, and stays

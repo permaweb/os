@@ -34,25 +34,25 @@ key is speaking for it?"
 
 ## Quick Start
 
-Most operators should start from a pre-built image supplied by a release
-or by someone they trust for the current test. Building from source is
-supported, but it is not the first thing a new hardware tester needs to
-do. Run these commands from the repository root.
+Most operators should start from a signed runtime image supplied by a
+release or by someone they trust for the current test. Building from
+source is supported, but it is not the first thing a new hardware tester
+needs to do. Run these commands from the repository root.
 
-1. Download or receive a LapEE USB image, usually named
-   `lapee-usb.img`.
-2. Put it at the default repo path:
+1. Download or receive a LapEE runtime USB image, usually named
+   `lapee-usb.img`, plus its signed release note or hash.
+2. Verify the supplied SHA-256 hash against the signed release note or a
+   coordinator-provided hash obtained separately:
+
+   ```sh
+   printf '<expected-sha256>  /path/to/lapee-usb.img\n' | shasum -a 256 -c -
+   ```
+
+3. Put the image at the default repo path:
 
    ```sh
    mkdir -p build/images
    cp /path/to/lapee-usb.img build/images/lapee-usb.img
-   ```
-
-3. Verify the supplied SHA-256 hash against a signed release note or a
-   coordinator-provided hash obtained separately:
-
-   ```sh
-   printf '<expected-sha256>  build/images/lapee-usb.img\n' | shasum -a 256 -c -
    ```
 
 4. Add WiFi credentials if they were not already baked into the image.
@@ -61,27 +61,16 @@ do. Run these commands from the repository root.
    not rebuild LapEE itself:
 
    ```sh
-   make gather-wifi-creds
-   make hb-wifi-apply
+   make wifi-creds
+   make operator-config-apply IMAGE=build/images/lapee-usb.img
    ```
 
    `wifi.conf` is plaintext and is copied into the image. After this
    step, both `wifi.conf` and `build/images/lapee-usb.img` contain the WiFi
    password; do not share them. Adding `wifi.conf` changes the disk
-   image hash, but not the UKI hash used by Secure Boot hash enrollment.
-
-   Optional: put a JSON object at `config.json` before running
-   `make hb-wifi-apply` or building an image. LapEE copies it from the
-   ESP into `/tmp/config.json` during boot and starts HyperBEAM with:
-
-   ```text
-   HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
-   ```
-
-   The measured LapEE config is last, so the enforced TPM devices and
-   boot-attestation hook remain part of the node. Do not put secrets in
-   `config.json`; treat it as public operator configuration that remote
-   verifiers may inspect through the boot attestation.
+   image hash, but not the signed UKI on the ESP. If you also want
+   public operator config, create `config.json` before running
+   `make operator-config-apply`; see the next section.
 
 5. Write the image to a USB stick. This destroys the selected disk. Use
    the removable whole disk from `diskutil list`, not `/dev/disk0` and
@@ -89,20 +78,53 @@ do. Run these commands from the repository root.
 
    ```sh
    diskutil list
-   make hb-image-write DEV=/dev/diskN
+   make write-image DEV=/dev/diskN IMAGE=build/images/lapee-usb.img
    ```
 
-6. If Secure Boot is enabled, disable it or follow the Secure Boot
-   section before booting. Then boot the laptop from the USB stick.
-   When the blue splash reaches
+6. If the firmware does not already trust the runtime image, disable
+   Secure Boot or follow the Secure Boot section before booting. Then
+   boot the laptop from the USB stick. When the blue splash reaches
    `Running at http://...`, scan the QR code or open the shown URL.
 
 Framework 13 is the primary tested laptop. Other UEFI + TPM 2.0 laptops
 may work, especially if their network hardware is supported by the
-kernel and firmware set in this image. Physical production boots
-currently require CPU TME/SME capability; unsupported physical machines
-halt early. TME/SME activation state is reported for verifier policy
-rather than treated as an unconditional guarantee.
+kernel and firmware set in this image. Runtime images normally require
+CPU TME/SME capability. Test images can be built with the measured
+`LAPEE_NO_TME=1` flag for hardware that lacks it; verifiers see that
+flag in node evidence and can decide whether to accept the node.
+
+## Operator Config
+
+`config.json` is optional public HyperBEAM configuration for this node.
+LapEE reads it once from the boot USB ESP, copies it into tmpfs as
+`/tmp/config.json`, unmounts and detaches the USB, then starts HyperBEAM
+with:
+
+```text
+HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
+```
+
+The measured LapEE config is last, so enforced TPM devices and the
+boot-attestation hook remain part of the node. Do not put secrets in
+`config.json`: it is operator policy, and the resulting node message is
+included in boot-attestation evidence.
+
+A small example:
+
+```json
+{
+  "load_remote_devices": false,
+  "trusted_device_signers": [
+    "WjnS-s03HWsDSdMnyTdzB1eHZB2QheUWP_FVRVYxkXk"
+  ]
+}
+```
+
+HyperBEAM normalizes JSON config keys into AO message keys, so
+`trusted_device_signers` becomes `trusted-device-signers` in
+`/~meta@1.0/info` and in the attested node evidence. Signer values are
+AO/Arweave-style base64url addresses. If you do not intend to load
+remote devices, keep `load_remote_devices` false.
 
 ## Verify A Running Node
 
@@ -207,41 +229,29 @@ depends on policy and baselines rather than on "TPM present" alone.
 
 ## Secure Boot
 
-The default image is an unsigned UKI at the UEFI fallback path
-`\EFI\Boot\BootX64.efi`.
+The runtime image boots a UEFI Unified Kernel Image at
+`\EFI\Boot\BootX64.efi`. A signed release image is intended to be used
+with Secure Boot once the firmware trusts either the signing key or the
+exact UKI hash.
 
-For testing, the simplest path is usually:
+Secure Boot admission is byte-for-byte specific to the UKI. Locally
+adding `wifi.conf` or `config.json` changes the disk image hash, but it
+does not change `\EFI\Boot\BootX64.efi` and therefore does not change
+the UKI signature or enrolled hash. Prefer the firmware's "Enroll EFI
+image/hash" UI by browsing to `BootX64.efi`; do not assume a plain
+`shasum -a 256` file hash is the exact format every firmware UI expects.
 
-- Disable Secure Boot, or
-- Use firmware support to trust/enroll the exact UKI hash.
-
-Hash enrollment is byte-for-byte specific to the UKI. Rebuilding the
-image changes the UKI and requires enrolling the new image hash.
-Locally adding `wifi.conf` changes the disk image hash, but it does not
-change `\EFI\Boot\BootX64.efi` and therefore does not change the UKI
-hash. Prefer the firmware's "Enroll EFI image/hash" UI by browsing to
-`BootX64.efi`; do not assume a plain `shasum -a 256` file hash is the
-exact format every firmware UI expects.
-
-For an operator-owned Secure Boot chain on an image you build locally,
-start from a completed source build:
+For an operator-owned Secure Boot chain, create local keys and keep the
+private half private:
 
 ```sh
-JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
-  make build
-./scripts/sb-setup.sh keys
-./scripts/sb-setup.sh enrol
-./scripts/sb-setup.sh sign
-make hb-sb-apply
-make hb-image-write DEV=/dev/diskN
+make signing-keys
 ```
 
-For the no-TME test/runtime image, use the signed no-TME wrapper target:
-
-```sh
-make hb-sb-keys
-make hb-usb-no-tme-signed-write DEV=/dev/diskN
-```
+If the firmware has a usable enrollment UI, enroll the public `db`,
+`KEK`, and `PK` artifacts from `secureboot/enrol/`, or enroll the exact
+runtime UKI hash. The signed runtime image and any no-TME test variant
+must be admitted separately, because their measured UKI bytes differ.
 
 On Framework firmware, Secure Boot controls usually require setting a
 supervisor/admin password. Enroll `db`, then `KEK`, then `PK`; enrolling
@@ -258,27 +268,21 @@ flow by itself, but entering firmware Setup Mode is still a firmware-owner
 operation and usually has to be done from the firmware setup UI:
 
 ```sh
-make hb-sb-keys
-make hb-sb-provisioner-write DEV=/dev/diskN
+make provisioner-write DEV=/dev/diskN
 ```
 
 Boot that USB once with firmware in Secure Boot Setup Mode. It should print
 the enrollment progress and then stop. Some firmware still reports
 `SetupMode=1` until the next power cycle even after accepting `PK`. Power
 off, enable Secure Boot if the firmware did not do so automatically, then
-flash and boot the signed runtime image:
+flash and boot a signed runtime image:
 
 ```sh
-make hb-usb-no-tme-signed-write DEV=/dev/diskN
+make runtime-write DEV=/dev/diskN
 ```
 
 Keep `secureboot/*.key` private. They are operator keys and are ignored by
 git. The files under `secureboot/enrol/` are public enrollment artifacts.
-
-A downloaded `.img` alone is not enough for the `sb-setup.sh sign`
-workflow unless the release also provides the UKI or a signed-image
-workflow. For a pre-built unsigned test image, hash enrollment or Secure
-Boot-off is the simpler path.
 
 Secure Boot controls firmware admission of the UKI. It is related to,
 but separate from, the runtime TPM quote served by the node.
@@ -287,7 +291,11 @@ but separate from, the runtime TPM quote served by the node.
 
 The default developer build uses Docker and the host architecture. On
 Apple Silicon, that means a native `linux/arm64` build container that
-cross-compiles the x86_64 laptop target.
+cross-compiles the x86_64 laptop target. The operator-facing Makefile
+surface is intentionally small: build or write a signed runtime image,
+optionally build the runtime with the measured no-TME flag for test
+hardware, build the Secure Boot provisioner, apply WiFi/operator config,
+and run QEMU acceptance tests.
 
 Requirements by task on macOS:
 
@@ -296,21 +304,28 @@ brew install qemu swtpm erlang rebar3 python@3
 ```
 
 Docker Desktop must be running for the default source-build path and
-for ESP-edit helpers such as `hb-wifi-apply`. QEMU and swtpm are needed
-for `make hb-usb-qemu` and the four-node green-zone acceptance harness;
-Erlang/rebar3/Python are needed by the attestation dashboard wrapper.
+for ESP-edit helpers such as `operator-config-apply`. QEMU and swtpm are needed
+for the acceptance harnesses. Erlang/rebar3/Python are needed by the
+attestation dashboard wrapper.
 
-Build with all useful local cores:
+Generate signing keys once, then build with all useful local cores:
 
 ```sh
+make signing-keys
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
-  make build
+  make runtime-image
 ```
 
 The build produces:
 
 ```text
-build/images/lapee-usb.img
+build/images/lapee-runtime-tme-signed.img
+```
+
+With `TME=0`, the signed output is:
+
+```text
+build/images/lapee-runtime-no-tme-signed.img
 ```
 
 By default the USB image is auto-sized from the generated UKI and the
@@ -319,16 +334,37 @@ includes GPT, FAT32 metadata, and a little compatibility margin around
 the payload, so it will be larger than `BootX64.efi` itself. Override
 with `SIZE_MIB=...` only when you deliberately want a larger image.
 
-Smoke-test the image in QEMU:
+For release hashes and reproducibility checks, force the reference
+builder:
 
 ```sh
-make hb-usb-qemu
+JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
+  make runtime-image REFERENCE=1
 ```
 
-Run the TPM-backed green-zone acceptance gate:
+`REFERENCE=1` forces `linux/amd64` Docker for every step. On Apple
+Silicon this uses Rosetta.
+
+For hardware that cannot satisfy TME/SME policy, build a signed no-TME
+test image:
 
 ```sh
-make qemu-green-zone-cluster
+make runtime-image TME=0
+```
+
+The measured `LAPEE_NO_TME=1` flag is part of that image's node
+evidence.
+
+Smoke-test the runtime image in QEMU:
+
+```sh
+make qemu TME=0
+```
+
+Run the TPM-backed multi-node acceptance gate:
+
+```sh
+make qemu-green-zone
 ```
 
 That boots four QEMU+swtpm nodes from the same image. Node 1 initializes
@@ -340,63 +376,22 @@ a different boot-attested DMI product and must fail admission with
 Run the operator `config.json` attestation gate:
 
 ```sh
-make qemu-operator-config-green-zone
+make qemu-operator-config
 ```
 
-That boots two QEMU+swtpm nodes from the same signed image. One image has
-USB `config.json` setting `trusted_device_signers`; the other has no
-operator config. The harness checks `/~meta@1.0/info`, boot-attestation
-node evidence, PCR15 replay, and green-zone templates that distinguish
-the non-empty signer list from the default empty list.
+That boots QEMU+swtpm nodes from signed runtime images and checks that
+operator config appears in `/~meta@1.0/info`, boot-attestation node
+evidence, and PCR15 replay.
 
 Write a freshly built image directly to USB:
 
 ```sh
-make hb-usb-write DEV=/dev/diskN
+make runtime-write DEV=/dev/diskN
 ```
 
-`hb-usb-write` rebuilds/wraps the current kernel and initramfs before
-writing. To write an existing pre-built image without rebuilding, use
-`make hb-image-write DEV=/dev/diskN`.
-
-Reference build:
-
-```sh
-JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
-  make build REFERENCE=1
-```
-
-`REFERENCE=1` forces `linux/amd64` Docker for every step. On Apple
-Silicon this uses Rosetta. Use it for publishable hashes and
-reproducibility checks.
-
-Linux native build:
-
-```sh
-make native-build
-```
-
-That path runs Buildroot directly on a Linux host without Docker.
-
-Useful incremental targets:
-
-```sh
-make toolchain
-make kernel
-make hb-usb-image
-make hb-usb-qemu
-make hb-usb-qemu-gui
-make qemu-green-zone-cluster
-make qemu-operator-config-green-zone
-make gather-wifi-creds
-make hb-wifi-apply
-make hb-usb-debug-write DEV=/dev/diskN
-```
-
-Debug mode adds `lapee.debug=1` to the measured kernel command line,
-disables the splash, and prints hardware, WiFi, DHCP, and HyperBEAM
-startup stages on the laptop display. It intentionally keeps more local
-diagnostic surface than production.
+`runtime-write` rebuilds and signs the runtime image before writing. To
+write an existing pre-built image without rebuilding, use
+`make write-image DEV=/dev/diskN IMAGE=build/images/lapee-usb.img`.
 
 ## What Gets Built
 
@@ -425,10 +420,11 @@ are built from source.
 
 ## Troubleshooting
 
-- QEMU passes but laptop WiFi does not: if you built from source or have
-  release debug artefacts, write a debug image with
-  `make hb-usb-debug-write DEV=/dev/diskN` and inspect the visible
-  `wlan0`, `wpa_supplicant`, and `udhcpc` stages.
+- QEMU passes but laptop WiFi does not: recreate `wifi.conf` with
+  `make wifi-creds`, re-apply it with
+  `make operator-config-apply IMAGE=build/images/lapee-usb.img`, and
+  confirm the laptop's wireless hardware is covered by the release
+  firmware set.
 - `/attestation` fails but `/pcr-read&pcr=0` works: the TPM is alive;
   the failure is likely in quote/key policy, EK material, or verifier
   policy, not basic TPM discovery.

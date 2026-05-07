@@ -159,10 +159,21 @@ headers(Lines) ->
     ).
 
 maybe_decode_chunked(Headers, Body) ->
-    case maps:get("transfer-encoding", Headers, "") of
-        "chunked" -> decode_chunks(Body, []);
-        _ -> Body
+    case has_chunked_transfer_encoding(
+        maps:get("transfer-encoding", Headers, "")
+    ) of
+        true -> decode_chunks(Body, []);
+        false -> Body
     end.
+
+has_chunked_transfer_encoding(Value) when is_list(Value) ->
+    lists:member(
+        "chunked",
+        [string:trim(Encoding) ||
+            Encoding <- string:split(string:lowercase(Value), ",", all)]
+    );
+has_chunked_transfer_encoding(_) ->
+    false.
 
 decode_chunks(Body, Acc) ->
     [SizeLine, Rest0] = binary:split(Body, <<"\r\n">>),
@@ -259,6 +270,18 @@ decode_chunked_response_test() ->
         <<
             "HTTP/1.1 200 OK\r\n",
             "Transfer-Encoding: chunked\r\n\r\n",
+            "7\r\n{\"ok\":1\r\n",
+            "1\r\n}\r\n",
+            "0\r\n\r\n"
+        >>
+    ),
+    ?assertEqual(#{<<"ok">> => 1}, Msg).
+
+decode_chunked_response_case_insensitive_test() ->
+    Msg = parse_response(
+        <<
+            "HTTP/1.1 200 OK\r\n",
+            "Transfer-Encoding: Chunked\r\n\r\n",
             "7\r\n{\"ok\":1\r\n",
             "1\r\n}\r\n",
             "0\r\n\r\n"

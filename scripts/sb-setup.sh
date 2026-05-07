@@ -6,7 +6,7 @@
 #   1. Runs `sb-setup.sh keys' ONCE to generate a fresh PK/KEK/db set
 #      per their machine. Keys live under `secureboot/', which is
 #      .gitignored -- keys never leave the operator's host.
-#   2. Runs `sb-setup.sh sign' after every `make hb-usb-image' to
+#   2. Runs `sb-setup.sh sign' after wrapping a runtime image to
 #      sign the produced UKI with db.key.
 #   3. Runs `sb-setup.sh enrol' once per Framework to produce the
 #      .auth files that go on a separate FAT-formatted USB stick the
@@ -183,7 +183,7 @@ if [ "$cmd" = "check" ]; then
     done
     # After `sign' runs, $BUILD_UKI is itself a signed PE (the
     # signed UKI is copied back there by build-usb-image.sh --uki
-    # so that `make hb-usb-image' re-wraps the signed version
+    # so that the runtime image path re-wraps the signed version
     # into the USB image). Label accordingly when we can tell.
     printf "  UKI in usb-build:   "
     if [ -f "$BUILD_UKI" ]; then
@@ -202,7 +202,7 @@ if [ "$cmd" = "check" ]; then
         fi
         echo "$BUILD_UKI ($(stat -f %z "$BUILD_UKI") bytes)$_sig"
     else
-        echo "MISSING (run: make hb-usb-image)"
+        echo "MISSING (run: make runtime-image)"
     fi
     printf "  signed UKI (stash): "
     [ -f "$SIGNED_UKI" ] \
@@ -251,7 +251,7 @@ if [ "$cmd" = "sign" ]; then
     [ -f "$SB_DIR/db.key" ] || { echo "[fail] run $0 keys first"; exit 2; }
     [ -f "$BUILD_UKI" ] || {
         echo "[fail] UKI not found at $BUILD_UKI"
-        echo "       Run: make hb-usb-image"; exit 2;
+        echo "       Run: make runtime-image"; exit 2;
     }
     echo "=== signing UKI with db.key ==="
     mkdir -p "$(dirname "$SIGNED_UKI")"
@@ -276,7 +276,7 @@ if [ "$cmd" = "sign" ]; then
     echo "Signed USB image ready: $USB_IMAGE"
     echo ""
     echo "Next: flash it with"
-    echo "    make hb-image-write DEV=/dev/diskN"
+    echo "    make write-image DEV=/dev/diskN IMAGE=$USB_IMAGE"
     exit 0
 fi
 
@@ -336,8 +336,9 @@ Enrolment procedure on the Framework 13:
      `enrol' picks up the newly-produced files; running `sign'
      before `enrol' is also fine -- rerun `sign' once `enrol'
      lands them.)
-  2. Flash with `make hb-image-write DEV=/dev/diskN' and plug the
-     stick into the Framework.
+  2. Flash with:
+       make write-image DEV=/dev/diskN IMAGE=build/images/lapee-usb.img
+     Then plug the stick into the Framework.
   3. Power on, F2 to enter BIOS.
   4. Security -> Secure Boot -> Enter Setup Mode (clears factory
      Microsoft keys; takes the machine out of a trust-chain rooted

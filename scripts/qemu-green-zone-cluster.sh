@@ -23,14 +23,13 @@ cd "$(dirname "$0")/.."
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
-IMG=${IMG:-$BUILD_DIR/images/lapee-usb-no-tme.img}
+IMG=${IMG:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone}
 BASE_PORT=${BASE_PORT:-19080}
 TIMEOUT=${TIMEOUT:-480}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
 SWTPM_LOCALCA_OPTIONS=${SWTPM_LOCALCA_OPTIONS:-/opt/homebrew/etc/swtpm-localca.options}
 GUEST_HOST=${GUEST_HOST:-$(ipconfig getifaddr en0 2>/dev/null || echo 10.0.2.2)}
-GOOD_CMDLINE=${GOOD_CMDLINE:-"console=tty0 quiet loglevel=0 vt.global_cursor_default=0 rdinit=/init lapee.mode=prod lapee.wifi=enabled lapee.splash=blue LAPEE_NO_TME=1"}
 NODE1_MEMORY_MIB=${NODE1_MEMORY_MIB:-2048}
 NODE2_MEMORY_MIB=${NODE2_MEMORY_MIB:-2304}
 NODE3_MEMORY_MIB=${NODE3_MEMORY_MIB:-2560}
@@ -88,13 +87,8 @@ OVMF_VARS_TEMPLATE=${OVMF_VARS_TEMPLATE:-$(find_ovmf \
     echo "missing OVMF_VARS_TEMPLATE: $OVMF_VARS_TEMPLATE" >&2; exit 1; }
 
 if [[ ! -f "$IMG" ]]; then
-    echo ">> building admissible no-TME image: $IMG"
-    WIFI=0 ./scripts/build-usb-image.sh \
-        --kernel "$BUILD_DIR/kernel/vmlinuz-lapee" \
-        --initramfs "$BUILD_DIR/initramfs/initramfs-lapee.cpio.zst" \
-        --cmdline "$GOOD_CMDLINE" \
-        --size auto \
-        --image "$IMG"
+    echo ">> building signed no-TME image: $IMG"
+    make runtime-image TME=0 WIFI=0 RUNTIME_SIGNED_OUT="$IMG"
 fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}

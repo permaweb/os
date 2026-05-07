@@ -38,7 +38,7 @@ while (($# > 0)); do
     esac
 done
 
-[[ -f "$IMG" ]] || { echo "no $IMG (run: make hb-usb-image)" >&2; exit 1; }
+[[ -f "$IMG" ]] || { echo "no $IMG (run: make runtime-image)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "missing curl" >&2; exit 1; }
 
 # OVMF firmware is shipped by the host's QEMU package. The path

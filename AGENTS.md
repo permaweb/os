@@ -23,7 +23,9 @@ LapEE-specific HyperBEAM devices staged through `hyperbeam-overlay/`.
 
 - Production LapEE should boot, attest, serve HyperBEAM, and otherwise be
   locally inert. Avoid adding keyboard, mouse, shell, writeback, debug, or
-  USB/runtime surfaces to production paths.
+  USB/runtime surfaces to production paths. Diagnostic, provisioning, and
+  QEMU-only surfaces are acceptable only behind explicit measured modes that
+  cannot leak into production mode.
 - The boot USB is an input medium. Read only the intended boot-time inputs,
   then detach it before HyperBEAM starts.
 - The node message, boot attestation, AK/EK proof, PCR replay, and loaded
@@ -54,9 +56,10 @@ LapEE-specific HyperBEAM devices staged through `hyperbeam-overlay/`.
   JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" make ...
   ```
 
-- The public Makefile surface should stay small: signed runtime image,
-  optional no-TME/debug flags, Secure Boot provisioner, USB write helpers,
-  WiFi/SB helper setup, clean, and QEMU acceptance tests.
+- The public Makefile surface should stay operator/release oriented. Put
+  mechanics in scripts or private/internal targets, and add public targets only
+  for durable build, flash, provision, config, cleanup, or verification
+  workflows.
 - Done means maintainable and externally verified, not merely "the first
   happy path worked." For image/security changes, prefer QEMU+swtpm tests and
   real hardware validation when hardware is available.

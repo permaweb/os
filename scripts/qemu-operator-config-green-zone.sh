@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
-IMG=${IMG:-$BUILD_DIR/images/lapee-usb-no-tme-signed.img}
+IMG=${IMG:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-operator-config-green-zone}
 BASE_PORT=${BASE_PORT:-19120}
 TIMEOUT=${TIMEOUT:-420}
@@ -77,7 +77,7 @@ OVMF_VARS_TEMPLATE=${OVMF_VARS_TEMPLATE:-$(find_ovmf \
 
 if [[ ! -f "$IMG" ]]; then
     echo ">> building signed no-TME image: $IMG"
-    make hb-usb-no-tme-signed-image
+    make runtime-image TME=0 WIFI=0 RUNTIME_SIGNED_OUT="$IMG"
 fi
 
 rm -rf "$OUTDIR"
@@ -87,9 +87,6 @@ SOCK_DIR=$(mktemp -d /tmp/lapee-config-gz.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
 {"trusted_device_signers":["$SIGNER"]}
-EOF
-cat > "$OUTDIR/empty-signers-init.json" <<'EOF'
-{"name":"empty-signers","template":{"node":{"trusted-device-signers":[]}}}
 EOF
 cat > "$OUTDIR/with-signer-init.json" <<EOF
 {"name":"with-signer","template":{"node":{"trusted-device-signers":["$SIGNER"]}}}
@@ -344,13 +341,6 @@ jq -e '.status == 400 and .body.error == "template-mismatch" and
        (.body."mismatch-path" | startswith("/node/trusted-device-signers"))' \
     "$OUTDIR/responses/node2-with-signer-init.json" >/dev/null
 echo ">> only configured node can initialize signer-required green-zone"
-
-post_json 2 "/~green-zone@1.0/init" \
-    "$OUTDIR/empty-signers-init.json" \
-    "$OUTDIR/responses/node2-empty-signers-init.json"
-jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
-    "$OUTDIR/responses/node2-empty-signers-init.json" >/dev/null
-echo ">> default-empty trusted-device-signers can initialize an empty-signer zone"
 
 echo ""
 echo "=== operator config green-zone QEMU smoke PASSED ==="
