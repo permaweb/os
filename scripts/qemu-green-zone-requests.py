@@ -60,16 +60,6 @@ def main() -> int:
         "trusted-ca": trusted_ca,
     }))
 
-    for n in (1, 2, 3, 4):
-        (out / f"requests/sign{n}.json").write_text(json.dumps({
-            "name": "book-shelf",
-            "body": {
-                "type": "green-zone-acceptance-signature",
-                "node": n,
-                "message": "LapEE green-zone acceptance",
-            }
-        }))
-
     return 0
 
 

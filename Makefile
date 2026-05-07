@@ -71,11 +71,11 @@
 #   make qemu-green-zone-cluster
 #                           — boot four QEMU+swtpm nodes, admit three
 #                             into a green-zone, and prove the fourth is
-#                             rejected and cannot sign as the ring.
+#                             rejected and has no ring identity.
 #   make hb-fetch           — populate build/hyperbeam/src-edge
 #                             with the pinned verifier source.
-#   make hb-wifi-apply      — inject host-side wifi.conf into the
-#                             ESP without re-signing.
+#   make hb-wifi-apply      — inject host-side wifi.conf and optional
+#                             config.json into the ESP without re-signing.
 #   make hb-sb-apply        — inject Secure Boot enrolment bundle.
 #   make paper              — build the paper PDF.
 #   make buildroot-shell    — drop into the Buildroot volume in a
@@ -493,7 +493,7 @@ hb-usb-qemu:
 hb-usb-qemu-gui:
 	./scripts/boot-usb-image.sh --gui
 
-qemu-green-zone-cluster:
+qemu-green-zone-cluster: toolchain
 	./scripts/qemu-green-zone-cluster.sh
 
 hb-fetch:
@@ -552,10 +552,13 @@ hb-wifi-apply: toolchain
 	            bs=512 skip=$$START count=$$SECT status=none; \
 	        mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true; \
 	        mcopy -i /tmp/esp.img -o /w/wifi.conf ::/EFI/boot/wifi.conf; \
+	        if [[ -f /w/config.json ]]; then \
+	            mcopy -i /tmp/esp.img -o /w/config.json ::/EFI/boot/config.json; \
+	        fi; \
 	        dd if=/tmp/esp.img of=/w/$(OUT) \
 	            bs=512 seek=$$START count=$$SECT \
 	            conv=notrunc status=none'
-	@echo ">> wifi.conf applied to $(OUT)"
+	@echo ">> wifi.conf$(if $(wildcard config.json), and config.json,) applied to $(OUT)"
 
 hb-sb-apply: toolchain
 	@test -d secureboot/enrol || { \

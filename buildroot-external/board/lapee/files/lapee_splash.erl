@@ -743,11 +743,10 @@ draw_provision_warning(Grid, W, H, TextX, Y, TextW, PanelH, Footer) ->
                                    TextW, WarningLines),
     Prompt = "Type I UNDERSTAND. to continue:",
     Input = "> " ++ read_provision_input() ++ "_",
-    InputLines = wrap_status_lines(Input, TextW, 3),
     PromptY = Y + PanelH - 5,
     InputY = Y + PanelH - 3,
     Grid2 = overlay_text(Grid1, W, H, TextX, PromptY, Prompt),
-    Grid3 = overlay_lines(Grid2, W, H, TextX, InputY, InputLines),
+    Grid3 = overlay_text(Grid2, W, H, TextX, InputY, fit_text(Input, TextW)),
     case provision_footer_visible(Footer) of
         false -> Grid3;
         true  -> overlay_text(Grid3, W, H, TextX, Y + PanelH - 2,

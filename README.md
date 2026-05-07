@@ -70,6 +70,19 @@ do. Run these commands from the repository root.
    password; do not share them. Adding `wifi.conf` changes the disk
    image hash, but not the UKI hash used by Secure Boot hash enrollment.
 
+   Optional: put a JSON object at `config.json` before running
+   `make hb-wifi-apply` or building an image. LapEE copies it from the
+   ESP into `/tmp/config.json` during boot and starts HyperBEAM with:
+
+   ```text
+   HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
+   ```
+
+   The measured LapEE config is last, so the enforced TPM devices and
+   boot-attestation hook remain part of the node. Do not put secrets in
+   `config.json`; treat it as public operator configuration that remote
+   verifiers may inspect through the boot attestation.
+
 5. Write the image to a USB stick. This destroys the selected disk. Use
    the removable whole disk from `diskutil list`, not `/dev/disk0` and
    not a partition like `diskNs1`:
@@ -163,8 +176,8 @@ In production:
   are disabled in the production kernel profile.
 - The boot USB is treated as an input medium, not a writable runtime
   store. Init mounts the ESP read-only just long enough to read optional
-  `wifi.conf`, unmounts it, marks/detaches the parent block device, and
-  then starts network and HyperBEAM.
+  `wifi.conf` and `config.json`, unmounts it, marks/detaches the parent
+  block device, and then starts network and HyperBEAM.
 - HyperBEAM runs with stdin/stdout/stderr on `/dev/null`; the splash is
   the only intended local output.
 - Verification happens over the network attestation endpoint, not by
@@ -320,9 +333,9 @@ make qemu-green-zone-cluster
 
 That boots four QEMU+swtpm nodes from the same image. Node 1 initializes
 a named green-zone from its measured system report. Nodes 2 and 3 join
-that named zone and sign with the same ring wallet; node 4 carries a
-different boot-attested DMI product and must fail admission with
-`template-mismatch` and fail to sign as the ring.
+that named zone and install the same green-zone identity; node 4 carries
+a different boot-attested DMI product and must fail admission with
+`template-mismatch` and remain outside the zone.
 
 Write a freshly built image directly to USB:
 
@@ -432,7 +445,8 @@ are built from source.
   reviewers and CI-style checks.
 - `paper/` - research paper and design notes.
 
-`build/`, `wifi.conf`, and `secureboot/` are local/operator artefacts
-and are intentionally ignored by git. `build/` contains generated
-images, initramfses, QEMU scratch state, splash captures, the local
-HyperBEAM verifier checkout, and attestation dashboards.
+`build/`, `wifi.conf`, `config.json`, and `secureboot/` are
+local/operator artefacts and are intentionally ignored by git. `build/`
+contains generated images, initramfses, QEMU scratch state, splash
+captures, the local HyperBEAM verifier checkout, and attestation
+dashboards.

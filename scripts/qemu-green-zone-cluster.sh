@@ -14,13 +14,15 @@
 #   * node 1 initializes a named green-zone template from its system report
 #   * nodes 2 and 3 join through node 1 and receive the shared ring wallet
 #   * node 4 has a different DMI product and is rejected by the same template
-#   * nodes 1-3 can sign with the same green-zone wallet address
-#   * node 4 cannot sign with that green-zone wallet address
+#   * nodes 1-3 install the same green-zone identity
+#   * node 4 never receives that identity
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
+BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
+DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMG=${IMG:-$BUILD_DIR/images/lapee-usb-no-tme.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone}
 BASE_PORT=${BASE_PORT:-19080}
@@ -58,6 +60,7 @@ command -v swtpm_setup >/dev/null 2>&1 || {
     echo "missing swtpm_setup" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "missing curl" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "missing jq" >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "missing docker" >&2; exit 1; }
 
 find_ovmf() {
     for p in "$@"; do
@@ -96,6 +99,36 @@ fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
+
+prepare_qemu_image() {
+    local src="${1:?source image required}"
+    local dst="$OUTDIR/qemu-green-zone-disk.img"
+    local cfg="$OUTDIR/qemu-config.json"
+    cp "$src" "$dst"
+    cat > "$cfg" <<'EOF'
+{"lapee_allow_request_trusted_ca":true}
+EOF
+    docker run --rm $DOCKER_PLATFORM \
+        -v "$OUTDIR":/work \
+        -w /work \
+        "$BUILD_IMAGE" \
+        bash -euo pipefail -c '
+            START=$(parted --script --machine /work/qemu-green-zone-disk.img \
+                unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$2); print \$2}")
+            SECT=$(parted --script --machine /work/qemu-green-zone-disk.img \
+                unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$4); print \$4}")
+            dd if=/work/qemu-green-zone-disk.img of=/tmp/esp.img \
+                bs=512 skip=$START count=$SECT status=none
+            mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true
+            mcopy -i /tmp/esp.img -o /work/qemu-config.json \
+                ::/EFI/boot/config.json
+            dd if=/tmp/esp.img of=/work/qemu-green-zone-disk.img \
+                bs=512 seek=$START count=$SECT conv=notrunc status=none
+        '
+    echo "$dst"
+}
+
+IMG=$(prepare_qemu_image "$IMG")
 # AF_UNIX sun_path is 104 bytes on macOS / 108 on Linux. Worktree-rooted
 # OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
 # opaquely with "Path for UnioIO socket is too long". Stage the sockets
@@ -110,6 +143,7 @@ echo "swtpm: $(swtpm --version | head -n 1)"
 echo "guest-host: $GUEST_HOST"
 echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
+echo "qemu image: $IMG"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
 cat > "$OUTDIR/localca.conf" <<EOF
@@ -364,7 +398,7 @@ echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
 python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
-for req in init verify2 admit2 admit3 admit4 join2 join3 join4 sign1 sign2 sign3 sign4; do
+for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
     require_request "$req"
 done
 
@@ -443,34 +477,7 @@ jq -e \
     '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
      (.body."green-zones" | has("book-shelf") | not)' \
     "$OUTDIR/responses/node4-status.json" >/dev/null
-echo ">> node 4 status has no green-zone wallet"
-
-post_json 4 "/~green-zone@1.0/sign" \
-    "$OUTDIR/requests/sign4.json" \
-    "$OUTDIR/responses/node4-sign.json"
-jq -e '.status == 400 and .body.error == "green-zone-not-initialized"' \
-    "$OUTDIR/responses/node4-sign.json" >/dev/null
-if jq -e --arg addr "$ring_addr" \
-        '.status == 200 and
-         any([(.body.commitments? // {}), (.body.body.commitments? // {})][] |
-             to_entries[]?; .value.committer == $addr)' \
-        "$OUTDIR/responses/node4-sign.json" >/dev/null; then
-    echo "!! node 4 signed with green-zone wallet but should not have access" >&2
-    exit 1
-fi
-echo ">> node 4 cannot sign as green-zone"
-
-for n in 1 2 3; do
-    post_json "$n" "/~green-zone@1.0/sign" \
-        "$OUTDIR/requests/sign$n.json" \
-        "$OUTDIR/responses/node$n-sign.json"
-    jq -e --arg addr "$ring_addr" \
-        '.status == 200 and
-         any([(.body.commitments? // {}), (.body.body.commitments? // {})][] |
-             to_entries[]?; .value.committer == $addr)' \
-        "$OUTDIR/responses/node$n-sign.json" >/dev/null
-    echo ">> node $n signed as green-zone $ring_addr"
-done
+echo ">> node 4 status has no green-zone identity"
 
 # Multi-hop members propagation. Node 3 joined via node 2, so node 2
 # (the admitter) and node 3 (the joiner) must both see all three
@@ -490,6 +497,11 @@ expected_member_count() {
 for n in 1 2 3; do
     get_json "$n" "/~green-zone@1.0/status?name=book-shelf" \
         "$OUTDIR/responses/node$n-status.json"
+    jq -e --arg addr "$ring_addr" \
+        '.status == 200 and
+         .body.identity == "green-zone/book-shelf" and
+         .body."green-zone"."ring-address" == $addr' \
+        "$OUTDIR/responses/node$n-status.json" >/dev/null
     member_count=$(jq -r '.body."green-zone".members
                           | with_entries(select(.key != "commitments"))
                           | keys | length' \

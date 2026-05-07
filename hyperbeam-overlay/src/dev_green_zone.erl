@@ -16,7 +16,10 @@
 %%%   envelope, unwraps the AES key through `~tpm@2.0a/activate-credential',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
 %%%   it as a local green-zone identity.
-%%% * `sign' signs an arbitrary message with a named shared ring wallet.
+%%% The ring wallet is installed as an additional HyperBEAM identity
+%%% (`green-zone/<name>'). Signing with that identity is deliberately
+%%% handled by HyperBEAM's identity system, not by a green-zone-specific
+%%% arbitrary signing endpoint.
 %%%
 %%% Ring templates are normal HyperBEAM message match templates: AO metadata
 %%% keys are ignored, template keys must be present in the candidate, non-map
@@ -56,7 +59,7 @@
 %%%    the wallet address equals the expected ring address, and installs the
 %%%    identity as `green-zone/<name>'.
 -module(dev_green_zone).
--export([info/1, info/3, init/3, status/3, admit/3, join/3, sign/3,
+-export([info/1, info/3, init/3, status/3, admit/3, join/3,
          match/3]).
 
 -include("include/hb.hrl").
@@ -73,7 +76,6 @@ info(_) ->
             <<"status">>,
             <<"admit">>,
             <<"join">>,
-            <<"sign">>,
             <<"match">>
         ]
     }.
@@ -223,13 +225,6 @@ join(_Base, Req, Opts) ->
         NewOpts = install_ring(Name, Template, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
-    end, Opts).
-
-sign(_Base, Req, Opts) ->
-    with_result(fun() ->
-        Name = required_name(Req, Opts),
-        Payload = sign_payload(Req, Opts),
-        hb_message:commit(Payload, green_zone_signing_opts(Name, Opts))
     end, Opts).
 
 with_result(Fun, Opts) ->
@@ -1030,17 +1025,6 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
             }})
     end.
 
-green_zone_signing_opts(Name, Opts) ->
-    {_AES, Wallet, _Zone} = require_ring(Name, Opts),
-    #{<<"priv-wallet">> => Wallet}.
-
-sign_payload(Req, Opts) ->
-    case hb_maps:get(<<"body">>, Req, undefined, Opts) of
-        undefined ->
-            maps:without([<<"path">>, <<"device">>, <<"method">>], Req);
-        Body -> Body
-    end.
-
 wallet_address(Wallet) ->
     hb_util:human_id(ar_wallet:to_address(Wallet)).
 
@@ -1310,11 +1294,6 @@ ring_wallet_address_mismatch_rejected_test() ->
             <<"error">> := <<"ring-wallet-address-mismatch">>
         }},
         assert_wallet_matches_admission(Wallet, Admission, #{})).
-
-sign_without_ring_is_policy_error_test() ->
-    ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"green-zone-not-initialized">>}},
-        green_zone_signing_opts(test_name(), #{})).
 
 metadata_keys_are_stripped_recursively_test() ->
     Template = clean_template(#{

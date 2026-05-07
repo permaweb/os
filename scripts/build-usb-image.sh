@@ -188,6 +188,16 @@ elif [[ "${WIFI:-1}" == "0" ]]; then
     echo ">> not staging wifi.conf (WIFI=0)"
 fi
 
+# Optional operator HyperBEAM config. Init copies this off the ESP
+# into tmpfs as /tmp/config.json, then starts HB with the measured
+# LapEE config last in HB_CONFIG so enforced devices/hooks win.
+if [[ -f "${LAPEE_ROOT}/config.json" ]]; then
+    cp "${LAPEE_ROOT}/config.json" "$BUILD_DIR/config.json"
+    config_bytes=$(wc -c <"${LAPEE_ROOT}/config.json" | tr -d ' ')
+    STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + config_bytes))
+    echo ">> staging config.json (${config_bytes} bytes)"
+fi
+
 # A disk image cannot be exactly the UKI byte length: firmware wants
 # a GPT disk with an EFI System Partition, and FAT32 needs metadata
 # and slack. Auto-size from staged payload bytes, then add enough room
@@ -264,6 +274,11 @@ docker run --rm $DOCKER_PLATFORM \
         if [[ -f /work/usb-build/wifi.conf ]]; then
             mcopy -i /work/usb-build/esp.img \\
                 /work/usb-build/wifi.conf ::/EFI/boot/wifi.conf
+        fi
+
+        if [[ -f /work/usb-build/config.json ]]; then
+            mcopy -i /work/usb-build/esp.img \\
+                /work/usb-build/config.json ::/EFI/boot/config.json
         fi
 
         dd if=/work/usb-build/esp.img of=/work/${IMG_IN_WORK} \\

@@ -3636,10 +3636,9 @@ fresh_boot_classify(R, RC)
 %% per attestation). Counter-based cross-envelope replay defense
 %% is a secondary defence that requires safe=true to be reliable;
 %% when safe=false we acknowledge it's weaker but the primary
-%% defense still holds. The paper amendment (STATUS.md paper-
-%% amend section) updates to note that LapEE's power-cycle
-%% posture makes safe=false the default, not an anomaly -- the
-%% verdict therefore grades this as WARN, not CRITICAL.
+%% defense still holds. LapEE's appliance power-cycle posture
+%% makes safe=false the default, not an anomaly -- the verdict
+%% therefore grades this as WARN, not CRITICAL.
 fresh_boot_classify(_, _) ->
     safe_false_stale_counters.
 

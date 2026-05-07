@@ -246,11 +246,13 @@ sbp_confirm_enrolment() {
                 if [ "$_sbp_answer" = "I UNDERSTAND." ]; then
                     [ -n "$_sbp_stty" ] && \
                         stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
+                    sbp_set_input ""
                     sbp_show_report
                     sbp_log "Proceeding with LapEE Secure Boot enrolment."
                     return 0
                 fi
                 _sbp_answer=""
+                sbp_set_input "$_sbp_answer"
                 sbp_log "Input did not match. Type exactly: I UNDERSTAND."
                 ;;
             08|7f)
@@ -699,6 +701,14 @@ mkdir -p /run/lapee /etc/lapee
 WIFI_SSID=""
 WIFI_PSK=""
 BOOT_ESP_DEV=""
+OPERATOR_CONFIG_JSON=/tmp/config.json
+
+write_empty_operator_config_json() {
+    printf '{}\n' > "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
+    chmod 600 "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
+}
+
+write_empty_operator_config_json
 
 # Gate (1): capability flag on kernel cmdline. Default OFF.
 # Only when `lapee.wifi=enabled' is explicitly present do we even
@@ -809,6 +819,63 @@ parse_wifi_conf() {
     return 0
 }
 
+copy_operator_config_json() {
+    _f="$1"
+    [ -f "$_f" ] || return 1
+    status "Reading operator HyperBEAM config from the boot USB."
+
+    _sz=$(wc -c < "$_f" 2>/dev/null | tr -d ' ')
+    case "$_sz" in
+        ''|*[!0-9]*)
+            write_empty_operator_config_json
+            status "Operator HyperBEAM config was rejected: could not read it."
+            trace "config: wc -c failed"; return 1 ;;
+    esac
+    if [ "$_sz" -lt 2 ] || [ "$_sz" -gt 65536 ]; then
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: file size is wrong."
+        trace "config: config.json rejected: size=$_sz (want 2..65536)"
+        return 1
+    fi
+
+    _nulcount=$(LC_ALL=C tr -d -c '\000' < "$_f" | wc -c | tr -d ' ')
+    case "$_nulcount" in
+        ''|*[!0-9]*)
+            write_empty_operator_config_json
+            status "Operator HyperBEAM config was rejected: could not validate it."
+            trace "config: NUL count failed"; return 1 ;;
+    esac
+    if [ "$_nulcount" -ne 0 ]; then
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: invalid bytes."
+        trace "config: config.json rejected: contains NUL"
+        return 1
+    fi
+
+    _compact=$(LC_ALL=C tr -d '[:space:]' < "$_f" 2>/dev/null || true)
+    _first=$(printf '%s' "$_compact" | head -c 1)
+    _last=$(printf '%s' "$_compact" | tail -c 1)
+    if [ "$_first" != "{" ] || [ "$_last" != "}" ]; then
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: expected a JSON object."
+        trace "config: config.json rejected: not a JSON object"
+        return 1
+    fi
+
+    if ! cp "$_f" "$OPERATOR_CONFIG_JSON.tmp" 2>/dev/null || \
+       ! mv "$OPERATOR_CONFIG_JSON.tmp" "$OPERATOR_CONFIG_JSON" 2>/dev/null; then
+        rm -f "$OPERATOR_CONFIG_JSON.tmp" 2>/dev/null || true
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: could not copy it."
+        trace "config: config.json rejected: copy to tmpfs failed"
+        return 1
+    fi
+    chmod 600 "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
+    status "Operator HyperBEAM config loaded."
+    trace "config: config.json accepted (${_sz} bytes)"
+    return 0
+}
+
 ensure_unmounted() {
     _mp="$1"
     _label="$2"
@@ -865,6 +932,15 @@ read_boot_media_config() {
                         fi
                     else
                         status "Boot USB found."
+                    fi
+                    if [ -f /mnt/esp/EFI/boot/config.json ]; then
+                        copy_operator_config_json /mnt/esp/EFI/boot/config.json \
+                            || true
+                    elif [ -f /mnt/esp/EFI/Boot/config.json ]; then
+                        copy_operator_config_json /mnt/esp/EFI/Boot/config.json \
+                            || true
+                    else
+                        trace "config: no /EFI/boot/config.json on ESP"
                     fi
                     umount /mnt/esp 2>/dev/null || true
                     ensure_unmounted /mnt/esp boot-media \
@@ -1216,13 +1292,14 @@ fi
 # for HB readiness, transitioning boot -> net-up -> hb-wait -> ready
 # on its own. Nothing in init pushes state to the splash.
 
-# Default config file shipped with the image. HyperBEAM edge reads one
-# HB_CONFIG file, so this JSON carries both the upstream preloaded devices
-# plus LapEE's TPM devices and the enforced on/start PCR-15 hook.
+# Config files for HyperBEAM. The operator file is copied out of the
+# read-only ESP into tmpfs and defaults to `{}`. The measured LapEE
+# file is last so it keeps the enforced devices and on/start PCR-15
+# boot-attestation hook.
 LAPEE_JSON=/etc/lapee/lapee.json
 
 status "Preparing HyperBEAM configuration."
-HB_CONFIG="$LAPEE_JSON"
+HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
 
