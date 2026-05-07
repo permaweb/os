@@ -211,11 +211,15 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	    fi; \
 	done
 	chmod +x $(TARGET_DIR)/usr/lib/hyperbeam/bin/hb
-	# Slim: drop verifier-side data + Erlang sources
-	# (compiled .beam is the runtime artefact; .erl sources are
-	# debug-only weight). Keep priv/html and priv/static so the
-	# HyperBuddy UI is served by the appliance.
-	rm -rf $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/tpm-interpret
+	# Slim: drop verifier catalogues + Erlang sources while keeping
+	# TPM EK root CAs. The root-cas bundle is runtime trust data:
+	# LapEE nodes use it to verify peers without accepting caller-
+	# supplied root certificates.
+	for d in $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/tpm-interpret; do \
+	    [ -d "$$d" ] || continue; \
+	    find "$$d" -mindepth 1 -maxdepth 1 ! -name root-cas \
+	        -exec rm -rf {} +; \
+	done
 	find $(TARGET_DIR)/usr/lib/hyperbeam/lib -type d -name src \
 		-exec rm -rf {} + 2>/dev/null || true
 	for d in $(TARGET_DIR)/usr/lib/hyperbeam/lib/*; do \

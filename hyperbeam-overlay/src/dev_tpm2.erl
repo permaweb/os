@@ -424,8 +424,12 @@ pcr_read(_Base, Req, Opts) ->
 %%
 %% `Base' is the attestation envelope (same shape emitted by
 %% `attestation/3'). Options in `Req':
-%%   trusted-ca : base64url PEM bytes of the TPM vendor root CA to trust.
-%%                Defaults to `lapee_tpm_ca_cert' in `Opts' (a file path).
+%%   trusted-ca : base64url PEM bytes of TPM vendor root CAs to trust.
+%%                Ignored unless `lapee_allow_request_trusted_ca' is
+%%                explicitly enabled in node config. Production LapEE
+%%                nodes default to the measured-in
+%%                `priv/tpm-interpret/root-cas/' bundle, or to
+%%                `lapee_tpm_ca_cert' in `Opts' if configured.
 %%
 %% Return shape (always 200 -- the `verified' bool is the real verdict):
 %%   verified : boolean
@@ -434,8 +438,7 @@ pcr_read(_Base, Req, Opts) ->
 %%   Each check: #{ name, ok, detail }
 verify(Base, Req, Opts) ->
     Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
-    TrustedCaPem = resolve_trusted_ca(Req, Opts),
-    CaSource = trust_anchor_source(Req, TrustedCaPem),
+    {TrustedCaPem, CaSource} = resolve_trusted_ca_with_source(Req, Opts),
     Checks = [
         safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem, Opts) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
@@ -483,10 +486,9 @@ verify(Base, Req, Opts) ->
             <<"verdict">> => Verdict,
             <<"checks">> => Checks,
             %% Tells callers which trust anchor was actually used.
-            %% Helpful when debugging "I passed a CA and it was
-            %% ignored": `request' means the inline anchor won,
-            %% `node_config' means we fell through to the node's
-            %% configured file.
+            %% Helpful when debugging trust-anchor provenance.
+            %% Production nodes should normally report
+            %% `internal-bundle'.
             <<"trust-anchor-source">> => CaSource
         }
     }}.
@@ -538,18 +540,6 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
                     end
             };
         _ -> Envelope
-    end.
-
-%% Classify which source produced the trust anchor actually used
-%% by `resolve_trusted_ca/2'. Returns a binary: "request", "node_config",
-%% or "none" (when no anchor was found anywhere -- the chain check
-%% will then fail with a targeted "missing or unparseable" message).
-trust_anchor_source(Req, Pem) ->
-    case {hb_maps:get(<<"trusted-ca">>, Req, undefined, #{}), Pem} of
-        {undefined, <<>>} -> <<"none">>;
-        {_Value, <<>>} -> <<"request_but_empty">>;
-        {B, _} when is_binary(B), byte_size(B) > 0 -> <<"request">>;
-        _ -> <<"node_config">>
     end.
 
 %% Wrap any check in a try/catch so one malformed field doesn't take
@@ -610,23 +600,88 @@ is_envelope(_) ->
     false.
 
 resolve_trusted_ca(Req, Opts) ->
-    case hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts) of
-        B when is_binary(B), byte_size(B) > 0 ->
+    {Pem, _Source} = resolve_trusted_ca_with_source(Req, Opts),
+    Pem.
+
+resolve_trusted_ca_with_source(Req, Opts) ->
+    case {allow_request_trusted_ca(Opts),
+          hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts)} of
+        {false, B} when is_binary(B), byte_size(B) > 0 ->
+            resolve_trusted_ca_from_config(Opts);
+        {true, B} when is_binary(B), byte_size(B) > 0 ->
             try hb_util:decode(B) of
                 Decoded when is_binary(Decoded), byte_size(Decoded) > 0 ->
-                    Decoded;
-                _ -> <<>>
-            catch _:_ -> <<>>
+                    {Decoded, <<"request">>};
+                _ -> {<<>>, <<"request-bad">>}
+            catch _:_ -> {<<>>, <<"request-bad">>}
             end;
         _ -> resolve_trusted_ca_from_config(Opts)
     end.
 
+allow_request_trusted_ca(Opts) ->
+    truthy(first_defined([
+        opt_value(lapee_allow_request_trusted_ca, Opts),
+        opt_value(<<"lapee-allow-request-trusted-ca">>, Opts),
+        opt_value(<<"lapee_allow_request_trusted_ca">>, Opts)
+    ])).
+
+truthy(true) -> true;
+truthy(1) -> true;
+truthy(<<"true">>) -> true;
+truthy(<<"1">>) -> true;
+truthy("true") -> true;
+truthy("1") -> true;
+truthy(_) -> false.
+
 resolve_trusted_ca_from_config(Opts) ->
-    Path = hb_opts:get(lapee_tpm_ca_cert,
-                       <<"/etc/lapee/tpm-ca.crt">>, Opts),
-    case file:read_file(binary_to_list(Path)) of
-        {ok, Pem}  -> Pem;
-        {error, _} -> <<>>
+    case configured_trusted_ca_path(Opts) of
+        undefined ->
+            resolve_trusted_ca_from_internal_bundle(Opts);
+        Path ->
+            case file:read_file(path_to_list(Path)) of
+                {ok, Pem}  -> {Pem, <<"node-config">>};
+                {error, _} -> {<<>>, <<"node-config-missing">>}
+            end
+    end.
+
+configured_trusted_ca_path(Opts) ->
+    first_defined([
+        opt_value(lapee_tpm_ca_cert, Opts),
+        opt_value(<<"lapee-tpm-ca-cert">>, Opts),
+        opt_value(<<"lapee_tpm_ca_cert">>, Opts)
+    ]).
+
+opt_value(Key, Opts) ->
+    case hb_opts:get(Key, undefined, Opts) of
+        undefined -> raw_opt_value(Key, Opts);
+        V -> V
+    end.
+
+raw_opt_value(Key, Opts) when is_map(Opts) ->
+    maps:get(Key, Opts, undefined);
+raw_opt_value(_Key, _Opts) ->
+    undefined.
+
+resolve_trusted_ca_from_internal_bundle(Opts) ->
+    Roots = hb_maps:get(<<"cert-roots">>, hb_db_tpm:load(Opts), [], #{}),
+    Pem = iolist_to_binary(
+        [pem_with_trailing_newline(RootPem)
+         || Root <- Roots,
+            RootPem <- [hb_maps:get(<<"pem">>, Root, <<>>, #{})],
+            is_binary(RootPem),
+            byte_size(RootPem) > 0]),
+    case Pem of
+        <<>> -> {<<>>, <<"none">>};
+        _ -> {Pem, <<"internal-bundle">>}
+    end.
+
+path_to_list(Path) when is_binary(Path) -> binary_to_list(Path);
+path_to_list(Path) when is_list(Path) -> Path.
+
+pem_with_trailing_newline(Pem) ->
+    case binary:last(Pem) of
+        $\n -> Pem;
+        _ -> <<Pem/binary, "\n">>
     end.
 
 %%---- check 1: EK cert chain --------------------------------------------
@@ -654,10 +709,11 @@ chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
                 end,
             validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts);
         {_, {error, _}} ->
-            {error, <<"trusted CA missing or unparseable; set "
-                      "`lapee_tpm_ca_cert' in node config or pass "
-                      "`trusted-ca' (base64url PEM bytes) in the "
-                      "request">>};
+            {error, <<"trusted CA missing or unparseable; ship "
+                      "`priv/tpm-interpret/root-cas/' in the measured image, "
+                      "set `lapee_tpm_ca_cert' in node config, or pass "
+                      "`trusted-ca' with "
+                      "`lapee_allow_request_trusted_ca' enabled">>};
         {{error, Why}, _} ->
             {error, iolist_to_binary(io_lib:format("ek_cert_pem invalid: ~p",
                                                     [Why]))}
@@ -836,8 +892,8 @@ validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
                 iolist_to_binary(io_lib:format(
                     "trusted CA bundle contains a structurally PEM-shaped "
                     "entry that is not a valid DER certificate (~p:~p); "
-                    "likely corrupted over the wire. Use `trusted-ca' with "
-                    "base64url-encoded PEM bytes for unambiguous transport.",
+                    "refresh the measured-in root-cas bundle or configured "
+                    "`lapee_tpm_ca_cert'.",
                     [Class, Reason]))}
     end.
 
@@ -4345,20 +4401,50 @@ chk_tcg_event_log_replay_rejects_tampered_fixture_test() ->
     ?assertMatch({error, _}, chk_tcg_event_log_replay(Envelope)).
 
 resolve_trusted_ca_priority_test() ->
-    B64uPem = <<"-----BEGIN CERTIFICATE-----\nbase64url-pem\n"
+    RequestPem = <<"-----BEGIN CERTIFICATE-----\nbase64url-pem\n"
                 "-----END CERTIFICATE-----">>,
-    B64u = hb_util:encode(B64uPem),
-    ?assertEqual(B64uPem,
-                 resolve_trusted_ca(#{<<"trusted-ca">> => B64u}, #{})),
-    ?assertEqual(<<>>,
-                 resolve_trusted_ca(
-                    #{<<"trusted-ca">> => <<"%%%not-base64url%%%">>},
-                    #{lapee_tpm_ca_cert => <<"/nonexistent/ca.pem">>})),
-    ?assertEqual(<<>>,
-                 resolve_trusted_ca(#{},
-                                    #{lapee_tpm_ca_cert =>
-                                          <<"/nonexistent/ca.pem">>})),
-    ok.
+    ConfigPem = <<"-----BEGIN CERTIFICATE-----\nconfig-pem\n"
+                  "-----END CERTIFICATE-----">>,
+    TmpDir = case os:getenv("TMPDIR") of false -> "/tmp"; D -> D end,
+    Path = filename:join(
+        TmpDir,
+        "lapee-tpm-ca-" ++ integer_to_list(
+            erlang:unique_integer([positive])) ++ ".pem"),
+    ok = file:write_file(Path, ConfigPem),
+    try
+        {Bundle, <<"internal-bundle">>} =
+            resolve_trusted_ca_with_source(#{}, #{}),
+        ?assert(byte_size(Bundle) > byte_size(RequestPem)),
+        ?assertNotEqual(
+            nomatch,
+            binary:match(Bundle, <<"-----BEGIN CERTIFICATE-----">>)),
+        ?assertEqual(
+            {Bundle, <<"internal-bundle">>},
+            resolve_trusted_ca_with_source(
+                #{<<"trusted-ca">> => hb_util:encode(RequestPem)}, #{})),
+        ?assertEqual(
+            {RequestPem, <<"request">>},
+            resolve_trusted_ca_with_source(
+                #{<<"trusted-ca">> => hb_util:encode(RequestPem)},
+                #{lapee_allow_request_trusted_ca => true})),
+        ?assertEqual(
+            {<<>>, <<"request-bad">>},
+            resolve_trusted_ca_with_source(
+                #{<<"trusted-ca">> => <<"%%%not-base64url%%%">>},
+                #{lapee_allow_request_trusted_ca => true,
+                  lapee_tpm_ca_cert => list_to_binary(Path)})),
+        ?assertEqual(
+            {<<>>, <<"node-config-missing">>},
+            resolve_trusted_ca_with_source(
+                #{}, #{lapee_tpm_ca_cert => <<"/nonexistent/ca.pem">>})),
+        ?assertEqual(
+            {ConfigPem, <<"node-config">>},
+            resolve_trusted_ca_with_source(
+                #{}, #{lapee_tpm_ca_cert => list_to_binary(Path)})),
+        ?assertEqual(Bundle, resolve_trusted_ca(#{}, #{}))
+    after
+        file:delete(Path)
+    end.
 
 %% Regression test: `chk_event_log_replay' must refuse to
 %% "replay" zero events into a zero PCR and call it valid. Even

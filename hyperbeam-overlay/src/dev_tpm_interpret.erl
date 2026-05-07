@@ -115,7 +115,10 @@ info(_Base, _Req, _Opts) ->
                         <<"trusted-ca">> =>
                             <<"Optional. base64url-encoded PEM of the "
                               "TPM vendor root CA to trust for this "
-                              "request. Overrides node config.">>
+                              "request. Honored only when the verifier "
+                              "node explicitly enables "
+                              "`lapee_allow_request_trusted_ca'; production "
+                              "nodes use their measured-in root-cas bundle.">>
                     },
                     <<"response">> =>
                         <<"{peer, verified, verdict, checks, summary, "
@@ -576,10 +579,10 @@ verify_peer(_Base, Req, Opts) ->
                 }
             }};
         PeerUrl when is_binary(PeerUrl) ->
-            %% Optional inline trust anchor. If absent, we fall back
-            %% to this verifier's configured `lapee_tpm_ca_cert' via
-            %% dev_tpm2's `resolve_trusted_ca/2'. Inline trust anchors
-            %% use HyperBEAM's base64url wire convention.
+            %% Optional inline trust anchor for test/verifier tooling.
+            %% dev_tpm2 ignores it unless this node explicitly enables
+            %% `lapee_allow_request_trusted_ca'; production nodes use
+            %% their measured-in root-cas bundle.
             InlineCa = resolve_inline_ca(Req, Opts),
             fetch_and_verify_peer(PeerUrl, InlineCa, Opts);
         Other ->

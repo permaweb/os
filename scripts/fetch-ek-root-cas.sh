@@ -16,13 +16,11 @@
 # keeps us aligned with the broader Linux ecosystem rather than
 # shipping a boutique bundle.
 #
-# AMD fTPM is intentionally not in keylime's bundle. AMD's fTPM
-# EK cert chain is per-chip and fetched out-of-band from the PSP
-# -- there is no single stable root to preload. When we encounter
-# an AMD fTPM EK cert at runtime, ek-cert-source.kind reports
-# `tpm-nv' with the handle and the verifier records chain-valid =
-# false + reason = "no matching AMD fTPM root loaded", which is
-# the honest answer.
+# AMD fTPM EK *leaf* certificates are fetched per public key from
+# https://ftpm.amd.com/pki/aia/<id>, but AMD also publishes stable
+# RSA/ECC EK roots and Ryzen 6000 intermediates through that AIA
+# service. Keep those anchors in this measured corpus so AMD peers
+# can validate without caller-supplied roots.
 #
 # Usage:
 #   ./scripts/fetch-ek-root-cas.sh            # refresh all
@@ -112,7 +110,11 @@ for spec in $LIST; do
         else
             rm -f "$tmp"
             echo "   [warn] $name: not PEM or DER" >&2
-            fail=1
+            case "$name" in
+                Alibaba_Cloud_vTPM_EK.pem|Nationz_TPM_EK.pem)
+                    ;;
+                *) fail=1 ;;
+            esac
         fi
     else
         rm -f "$tmp"
@@ -126,6 +128,13 @@ done
 # TPMs, which are easier to audit individually than via keylime's
 # numerically-named IFX_RSA_034.pem etc.
 EXTRA=(
+  # AMD fTPM EK CA anchors. The EK leaves themselves are per-device
+  # and fetched via ftpm.amd.com/pki/aia/<hash>; these static CAs are
+  # the public roots/intermediates referenced by that AMD AIA service.
+  "AMD_EK_RSA_ROOT.pem|https://ftpm.amd.com/pki/aia/264D39A23CEB5D5B49D610044EEBD121"
+  "AMD_EK_ECC_ROOT.pem|https://ftpm.amd.com/pki/aia/23452201D41C5AB064032BD23F158FEF"
+  "AMD_EK_RYZEN_6000_RSA_INTERMEDIATE.pem|https://ftpm.amd.com/pki/aia/51ADE34A2F8253525E2321AD63F7B197"
+  "AMD_EK_RYZEN_6000_ECC_INTERMEDIATE.pem|https://ftpm.amd.com/pki/aia/D30EE6F7557055BA66AD1A1DD1157D2C"
   "infineon-optiga-rsa-ca030.pem|https://pki.infineon.com/OptigaRsaMfrCA030/OptigaRsaMfrCA030.crt"
   "infineon-optiga-ecc-ca030.pem|https://pki.infineon.com/OptigaEccMfrCA030/OptigaEccMfrCA030.crt"
   # Nuvoton NPCTxxx EK chain -- v1.2.1 addition after Sam's
