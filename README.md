@@ -337,6 +337,18 @@ that named zone and install the same green-zone identity; node 4 carries
 a different boot-attested DMI product and must fail admission with
 `template-mismatch` and remain outside the zone.
 
+Run the operator `config.json` attestation gate:
+
+```sh
+make qemu-operator-config-green-zone
+```
+
+That boots two QEMU+swtpm nodes from the same signed image. One image has
+USB `config.json` setting `trusted_device_signers`; the other has no
+operator config. The harness checks `/~meta@1.0/info`, boot-attestation
+node evidence, PCR15 replay, and green-zone templates that distinguish
+the non-empty signer list from the default empty list.
+
 Write a freshly built image directly to USB:
 
 ```sh
@@ -375,6 +387,7 @@ make hb-usb-image
 make hb-usb-qemu
 make hb-usb-qemu-gui
 make qemu-green-zone-cluster
+make qemu-operator-config-green-zone
 make gather-wifi-creds
 make hb-wifi-apply
 make hb-usb-debug-write DEV=/dev/diskN

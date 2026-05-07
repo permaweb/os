@@ -72,6 +72,11 @@
 #                           — boot four QEMU+swtpm nodes, admit three
 #                             into a green-zone, and prove the fourth is
 #                             rejected and has no ring identity.
+#   make qemu-operator-config-green-zone
+#                           — boot two QEMU+swtpm nodes, one with USB
+#                             config.json and one without, then prove the
+#                             config is in /info, boot attestation, and
+#                             green-zone template matching.
 #   make hb-fetch           — populate build/hyperbeam/src-edge
 #                             with the pinned verifier source.
 #   make hb-wifi-apply      — inject host-side wifi.conf and optional
@@ -168,7 +173,8 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         hb-usb-no-tme-signed-image hb-usb-no-tme-signed-write \
         hb-sb-keys hb-sb-provisioner-image hb-sb-provisioner-write \
         hb-usb-lenovo-intel-debug-image hb-usb-lenovo-intel-debug-write \
-        hb-usb-qemu hb-usb-qemu-gui qemu-green-zone-cluster hb-fetch \
+        hb-usb-qemu hb-usb-qemu-gui qemu-green-zone-cluster \
+        qemu-operator-config-green-zone hb-fetch \
         gather-wifi-creds hb-wifi-apply hb-sb-apply \
         paper clean
 
@@ -495,6 +501,9 @@ hb-usb-qemu-gui:
 
 qemu-green-zone-cluster: toolchain
 	./scripts/qemu-green-zone-cluster.sh
+
+qemu-operator-config-green-zone: toolchain
+	./scripts/qemu-operator-config-green-zone.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \
