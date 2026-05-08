@@ -803,7 +803,7 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     },
     try
         admission_response_body(
-            lapee_http_json:post(
+            lapee_peer_http:post(
                 PeerURL,
                 <<"/~green-zone@1.0/admit">>,
                 AdmitReq,

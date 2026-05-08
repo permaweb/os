@@ -361,6 +361,13 @@ Smoke-test the runtime image in QEMU:
 make qemu TME=0
 ```
 
+Smoke-test outbound HTTPS relay/oracle behavior, including the target CA
+bundle and the node signature on the returned response:
+
+```sh
+make qemu-oracle TME=0
+```
+
 Run the TPM-backed multi-node acceptance gate:
 
 ```sh

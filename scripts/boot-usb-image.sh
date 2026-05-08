@@ -14,6 +14,7 @@
 #   ./scripts/boot-usb-image.sh
 #   ./scripts/boot-usb-image.sh --img build/images/lapee-usb.img
 #   ./scripts/boot-usb-image.sh --timeout 600   (seconds)
+#   ./scripts/boot-usb-image.sh --oracle-url https://example.com/
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,6 +24,7 @@ IMG=${IMG:-$BUILD_DIR/images/lapee-usb.img}
 TIMEOUT=${TIMEOUT:-420}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-network-test}
 LOGFILE=${LOGFILE:-$OUTDIR/serial.log}
+ORACLE_URL=${ORACLE_URL:-}
 # `--gui' opens a QEMU window so the operator can see the framebuffer
 # console -- splash daemon, kernel banners, init traces. Default stays
 # headless (`-nographic') for non-interactive attestation testing.
@@ -33,6 +35,7 @@ while (($# > 0)); do
         --img)     IMG=$2; shift 2;;
         --timeout) TIMEOUT=$2; shift 2;;
         --log)     LOGFILE=$2; shift 2;;
+        --oracle-url) ORACLE_URL=$2; shift 2;;
         --gui)     GUI=1; shift;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
@@ -40,6 +43,9 @@ done
 
 [[ -f "$IMG" ]] || { echo "no $IMG (run: make runtime-image)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "missing curl" >&2; exit 1; }
+if [[ -n "$ORACLE_URL" ]]; then
+    command -v python3 >/dev/null 2>&1 || { echo "missing python3" >&2; exit 1; }
+fi
 
 # OVMF firmware is shipped by the host's QEMU package. The path
 # varies across distros + Homebrew prefixes; search the usual
@@ -157,7 +163,9 @@ BASE_URL=http://127.0.0.1:18734
 INFO_OUT="$OUTDIR/info.json"
 ATT_OUT="$OUTDIR/boot-attestation.json"
 PROBE_OUT="$OUTDIR/system.json"
-rm -f "$INFO_OUT" "$ATT_OUT" "$PROBE_OUT"
+ORACLE_OUT="$OUTDIR/oracle-response.body"
+ORACLE_HEADERS="$OUTDIR/oracle.headers"
+rm -f "$INFO_OUT" "$ATT_OUT" "$PROBE_OUT" "$ORACLE_OUT" "$ORACLE_HEADERS"
 
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
@@ -216,6 +224,67 @@ if [[ ! -s "$PROBE_OUT" ]]; then
     exit 1
 fi
 
+if [[ -n "$ORACLE_URL" ]]; then
+    echo ">> fetching signed oracle response via relay: $ORACLE_URL"
+    ORACLE_QUERY=$(
+        python3 - "$ORACLE_URL" <<'PY'
+import sys
+import urllib.parse
+
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+    )
+    if ! curl -fsSL \
+            -H "accept-bundle: true" \
+            -D "$ORACLE_HEADERS" \
+            "$BASE_URL/~relay@1.0/call?method=GET&accept-bundle=true&relay-path=$ORACLE_QUERY" \
+            -o "$ORACLE_OUT"; then
+        echo "!! oracle relay failed from $BASE_URL" >&2
+        echo "!! last 80 lines of serial log:" >&2
+        tail -80 "$LOGFILE" >&2
+        exit 1
+    fi
+    python3 - "$INFO_OUT" "$ORACLE_HEADERS" "$ORACLE_OUT" <<'PY'
+import json
+import re
+import sys
+
+info_path, headers_path, oracle_path = sys.argv[1:4]
+
+def load(path):
+    with open(path, "rb") as f:
+        return json.load(f)
+
+def rsa_keyids(msg):
+    commitments = msg.get("commitments") or {}
+    return {
+        c.get("keyid")
+        for c in commitments.values()
+        if c.get("type") == "rsa-pss-sha512" and c.get("keyid")
+    }
+
+info = load(info_path)
+headers = open(headers_path, "rb").read().decode("iso-8859-1")
+body = open(oracle_path, "rb").read()
+node_keyids = rsa_keyids(info)
+oracle_keyids = set(re.findall(r'keyid="([^"]+)"', headers, re.I))
+if not node_keyids:
+    raise SystemExit("info response had no node RSA keyid")
+if "signature:" not in headers.lower():
+    raise SystemExit("oracle response had no HTTP signature header")
+if "signature-input:" not in headers.lower():
+    raise SystemExit("oracle response had no HTTP signature-input header")
+if not (node_keyids & oracle_keyids):
+    raise SystemExit(
+        "oracle response was not signed by the same node "
+        f"(node={sorted(node_keyids)}, oracle={sorted(oracle_keyids)})"
+    )
+if not body:
+    raise SystemExit("oracle response body was empty")
+print(">> oracle response signed by node key:", sorted(node_keyids & oracle_keyids)[0])
+PY
+fi
+
 kill $QEMUPID 2>/dev/null || true
 wait $QEMUPID 2>/dev/null || true
 kill "$(cat "$TPM_WORK/swtpm.pid" 2>/dev/null)" 2>/dev/null || true
@@ -227,6 +296,10 @@ echo ""
 echo "Saved boot attestation and system report:"
 echo "  $ATT_OUT"
 echo "  $PROBE_OUT"
+if [[ -n "$ORACLE_URL" ]]; then
+    echo "  $ORACLE_HEADERS"
+    echo "  $ORACLE_OUT"
+fi
 echo ""
 echo "For physical hardware, prefer the live network path:"
 echo "  ./scripts/interpret-local-capture.sh --url http://NODE-IP:8734 --label LABEL"

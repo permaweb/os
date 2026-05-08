@@ -1796,15 +1796,15 @@ verify_peer(_Base, Req, Opts) ->
 verify_peer_url(Url, Req, Opts) ->
     with_ok(
         fun() ->
-            Boot0 = lapee_http_json:get(
+            Boot0 = lapee_peer_http:get(
                 Url, <<"/~tpm@2.0a/boot-attestation">>, Opts),
             Boot = resolve_subject_body(Boot0, Opts),
             Subject0 =
-                lapee_http_json:get(
+                lapee_peer_http:get(
                     Url, <<"/~tpm@2.0a/credential-subject">>, Opts),
             Subject = resolve_subject_body(Subject0, Opts),
             FreshNonce = crypto:strong_rand_bytes(32),
-            Fresh0 = lapee_http_json:get(
+            Fresh0 = lapee_peer_http:get(
                 Url, fresh_attestation_path(FreshNonce), Opts),
             Fresh = resolve_subject_body(Fresh0, Opts),
             BootEnv = normalise_attestation(Boot, Opts),
@@ -1945,7 +1945,7 @@ activate_peer_credential(Url, Credential, Opts) ->
             hb_maps:get(<<"secret">>, Credential, <<>>, #{})
     },
     resolve_subject_body(
-        lapee_http_json:post(
+        lapee_peer_http:post(
             Url,
             <<"/~tpm@2.0a/activate-credential">>,
             Req,

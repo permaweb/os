@@ -35,6 +35,7 @@
 # QEMU tests:
 #
 #   make qemu               - boot the selected image under QEMU+OVMF+swtpm.
+#   make qemu-oracle        - boot one node and verify a signed HTTPS relay.
 #   make qemu-gui           - boot the selected image with a QEMU window.
 #   make qemu-green-zone    - run the four-node green-zone acceptance test.
 #   make qemu-operator-config
@@ -117,7 +118,7 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 
 .PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
-        qemu qemu-gui qemu-green-zone qemu-operator-config \
+        qemu qemu-oracle qemu-gui qemu-green-zone qemu-operator-config \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
@@ -189,6 +190,13 @@ qemu:
 	    echo "$(WRITE_IMAGE) missing. Run: make runtime-image or set IMAGE=..."; \
 	    exit 1; }
 	./scripts/boot-usb-image.sh --img "$(WRITE_IMAGE)"
+
+ORACLE_URL ?= https://example.com/
+qemu-oracle:
+	@test -f "$(WRITE_IMAGE)" || { \
+	    echo "$(WRITE_IMAGE) missing. Run: make runtime-image or set IMAGE=..."; \
+	    exit 1; }
+	./scripts/boot-usb-image.sh --img "$(WRITE_IMAGE)" --oracle-url "$(ORACLE_URL)"
 
 qemu-gui:
 	@test -f "$(WRITE_IMAGE)" || { \

@@ -80,6 +80,10 @@ BR2_PACKAGE_ERLANG=y
 # auth-session encryption also uses libcrypto.
 BR2_PACKAGE_OPENSSL=y
 
+# System CA roots: outbound HTTPS from HyperBEAM relay/oracle paths must
+# validate normal public certificates inside the appliance.
+BR2_PACKAGE_CA_CERTIFICATES=y
+
 # tpm2-tss: the user-space TPM 2.0 stack. Provides
 # libtss2-esys.so.0 (Esys API), libtss2-mu.so.0 (TPMS_*
 # marshalling), libtss2-tctildr (TCTI loader), and friends.
