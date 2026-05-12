@@ -473,6 +473,12 @@ jq -e \
     "$OUTDIR/responses/node4-status.json" >/dev/null
 echo ">> node 4 status has no green-zone identity"
 
+get_json 4 "/~green-zone@1.0/member?zone=book-shelf" \
+    "$OUTDIR/responses/node4-member.json"
+jq -e '.status == 400 and .body.error == "green-zone-not-initialized"' \
+    "$OUTDIR/responses/node4-member.json" >/dev/null
+echo ">> node 4 cannot produce a green-zone membership proof"
+
 # Multi-hop members propagation. Node 3 joined via node 2, so node 2
 # (the admitter) and node 3 (the joiner) must both see all three
 # wallets in their `/status'. Node 1 was not involved in node 3's
@@ -508,6 +514,33 @@ for n in 1 2 3; do
         exit 1
     fi
     echo ">> node $n status shows $expected ring member(s) (as expected)"
+done
+
+for n in 1 2 3; do
+    member_addr=$(jq -r '.body.node.address' \
+        "$OUTDIR/responses/node$n-boot-attestation.json")
+    get_json "$n" \
+        "/~green-zone@1.0/member?zone=book-shelf&membership-codec-device=ans104@1.0" \
+        "$OUTDIR/responses/node$n-member.json"
+    jq -e --arg zone "book-shelf" \
+          --arg identity "green-zone/book-shelf" \
+          --arg ring "$ring_addr" \
+          --arg addr "$member_addr" '
+        .status == 200 and
+        .body.type == "green-zone-membership-proof" and
+        .body.address == $addr and
+        .body."member-of" == $zone and
+        .body.identity == $identity and
+        .body."ring-address" == $ring and
+        (.body.commitments // {}
+            | to_entries
+            | any(.value.committer == $ring and
+                  .value."commitment-device" == "ans104@1.0" and
+                  ((.value.committed // []) | index("address")) and
+                  ((.value.committed // []) | index("member-of")) and
+                  ((.value.committed // []) | index("ring-address"))))' \
+        "$OUTDIR/responses/node$n-member.json" >/dev/null
+    echo ">> node $n produced ring-signed membership proof"
 done
 
 echo ""

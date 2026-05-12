@@ -16,6 +16,12 @@
 %%%   envelope, unwraps the AES key through `~tpm@2.0a/activate-credential',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
 %%%   it as a local green-zone identity.
+%%% * `member' returns a narrow membership proof signed by the installed
+%%%   green-zone identity. It proves that this node address is present in the
+%%%   local zone member set without exposing an arbitrary signing endpoint.
+%%%   A request can set `membership-codec-device' to choose the commitment
+%%%   codec used for that proof; otherwise the node's normal commitment
+%%%   device is used.
 %%% The ring wallet is installed as an additional HyperBEAM identity
 %%% (`green-zone/<name>'). Signing with that identity is deliberately
 %%% handled by HyperBEAM's identity system, not by a green-zone-specific
@@ -58,9 +64,12 @@
 %%%    ID, activates the TPM credential locally, decrypts the wallet, confirms
 %%%    the wallet address equals the expected ring address, and installs the
 %%%    identity as `green-zone/<name>'.
+%%% 7. A member can call `member' to receive a signed, fixed-shape statement
+%%%    that its node address is a member of the named zone. The only signer is
+%%%    the ring identity; callers cannot choose the signed payload.
 -module(dev_green_zone).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3,
-         match/3]).
+         member/3, match/3]).
 
 -include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -76,6 +85,7 @@ info(_) ->
             <<"status">>,
             <<"admit">>,
             <<"join">>,
+            <<"member">>,
             <<"match">>
         ]
     }.
@@ -225,6 +235,34 @@ join(_Base, Req, Opts) ->
         NewOpts = install_ring(Name, Template, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
+    end, Opts).
+
+member(_Base, Req, Opts) ->
+    with_result(fun() ->
+        Name = required_zone(Req, Opts),
+        {_AES, Wallet, Zone} = require_ring(Name, Opts),
+        Address = node_address(Opts),
+        Member = require_local_member(Name, Zone, Address, Opts),
+        Identity = zone_identity(Name),
+        Proof = #{
+            <<"type">> => <<"green-zone-membership-proof">>,
+            <<"version">> => <<"1.0">>,
+            <<"address">> => Address,
+            <<"member-of">> => Name,
+            <<"identity">> => Identity,
+            <<"ring-address">> => wallet_address(Wallet),
+            <<"issued-at-unix">> => erlang:system_time(second),
+            <<"member">> => Member
+        },
+        case hb_opts:as(Identity, Opts) of
+            {ok, ZoneOpts} ->
+                hb_message:commit(
+                    Proof,
+                    ZoneOpts,
+                    membership_codec_device(Req, ZoneOpts)
+                );
+            {error, not_found} -> green_zone_not_initialized(Name)
+        end
     end, Opts).
 
 with_result(Fun, Opts) ->
@@ -399,6 +437,45 @@ require_ring(Name, Opts) ->
         _ -> green_zone_not_initialized(Name)
     end.
 
+node_address(Opts) ->
+    case hb_opts:get(priv_wallet, no_viable_wallet, Opts) of
+        no_viable_wallet ->
+            case hb_opts:get(<<"address">>, undefined, Opts) of
+                B when is_binary(B), byte_size(B) > 0 -> B;
+                _ ->
+                    throw({green_zone_error, #{
+                        <<"error">> => <<"node-address-unavailable">>
+                    }})
+            end;
+        Wallet -> wallet_address(Wallet)
+    end.
+
+require_local_member(Name, Zone, Address, Opts) ->
+    Members = response_body(
+        hb_maps:get(<<"members">>, Zone, #{}, Opts),
+        Opts),
+    case hb_maps:get(Address, Members, undefined, Opts) of
+        Member when is_map(Member) ->
+            Member;
+        _ ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"green-zone-not-member">>,
+                <<"name">> => Name,
+                <<"address">> => Address
+            }})
+    end.
+
+membership_codec_device(Req, Opts) ->
+    case hb_maps:get(<<"membership-codec-device">>, Req, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> B;
+        _ ->
+            hb_opts:get(
+                commitment_device,
+                no_viable_commitment_device,
+                Opts
+            )
+    end.
+
 green_zone_not_initialized(Name) ->
     throw({green_zone_error, #{
         <<"error">> => <<"green-zone-not-initialized">>,
@@ -517,6 +594,19 @@ optional_name(Req, Opts) ->
     ]) of
         B when is_binary(B), byte_size(B) > 0 -> B;
         _ -> undefined
+    end.
+
+required_zone(Req, Opts) ->
+    case first_defined([
+        hb_maps:get(<<"zone">>, Req, undefined, Opts),
+        hb_maps:get(<<"name">>, Req, undefined, Opts),
+        hb_opts:get(<<"green-zone-name">>, undefined, Opts)
+    ]) of
+        B when is_binary(B), byte_size(B) > 0 -> B;
+        _ ->
+            throw({green_zone_error, #{
+                <<"error">> => <<"missing-zone">>
+            }})
     end.
 
 zone_identity(Name) ->
@@ -1367,6 +1457,93 @@ member_survives_admission_commit_tree_test() ->
     Keys = lists:sort(maps:keys(Resolved)),
     ?assert(lists:member(<<"existing">>, Keys)),
     ?assert(lists:member(<<"joiner-addr">>, Keys)).
+
+member_proof_is_signed_by_ring_identity_test() ->
+    Name = test_name(),
+    NodeWallet = ar_wallet:new(),
+    RingWallet = ar_wallet:new(),
+    Address = wallet_address(NodeWallet),
+    RingAddress = wallet_address(RingWallet),
+    Opts0 = #{
+        <<"priv-wallet">> => NodeWallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Opts = install_ring(
+        Name,
+        #{<<"node">> => #{<<"address">> => <<"_">>}},
+        crypto:strong_rand_bytes(32),
+        RingWallet,
+        #{Address => #{
+            <<"address">> => Address,
+            <<"url">> => <<"http://self.example">>,
+            <<"role">> => <<"member">>,
+            <<"last-seen-unix">> => erlang:system_time(second)
+        }},
+        Opts0),
+    {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
+        member(#{}, #{<<"zone">> => Name}, Opts),
+    ?assertEqual(<<"green-zone-membership-proof">>, maps:get(<<"type">>, Proof)),
+    ?assertEqual(Address, maps:get(<<"address">>, Proof)),
+    ?assertEqual(Name, maps:get(<<"member-of">>, Proof)),
+    ?assertEqual(zone_identity(Name), maps:get(<<"identity">>, Proof)),
+    ?assertEqual(RingAddress, maps:get(<<"ring-address">>, Proof)),
+    ?assertEqual([RingAddress], hb_message:signers(Proof, Opts)),
+    ?assert(hb_message:verify(Proof, [RingAddress], Opts)).
+
+member_proof_requires_local_member_entry_test() ->
+    Name = test_name(),
+    NodeWallet = ar_wallet:new(),
+    Opts0 = #{
+        <<"priv-wallet">> => NodeWallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Opts = install_ring(
+        Name,
+        #{<<"node">> => #{<<"address">> => <<"_">>}},
+        crypto:strong_rand_bytes(32),
+        ar_wallet:new(),
+        #{},
+        Opts0),
+    {ok, #{<<"status">> := 400, <<"body">> := Body}} =
+        member(#{}, #{<<"zone">> => Name}, Opts),
+    ?assertEqual(<<"green-zone-not-member">>, maps:get(<<"error">>, Body)).
+
+member_proof_uses_membership_codec_device_test() ->
+    Name = test_name(),
+    NodeWallet = ar_wallet:new(),
+    RingWallet = ar_wallet:new(),
+    Address = wallet_address(NodeWallet),
+    Opts0 = #{
+        <<"priv-wallet">> => NodeWallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Opts = install_ring(
+        Name,
+        #{<<"node">> => #{<<"address">> => <<"_">>}},
+        crypto:strong_rand_bytes(32),
+        RingWallet,
+        #{Address => #{
+            <<"address">> => Address,
+            <<"url">> => <<"http://self.example">>,
+            <<"role">> => <<"member">>,
+            <<"last-seen-unix">> => erlang:system_time(second)
+        }},
+        Opts0),
+    {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
+        member(
+            #{},
+            #{
+                <<"zone">> => Name,
+                <<"membership-codec-device">> => <<"ans104@1.0">>
+            },
+            Opts
+        ),
+    ?assert(lists:member(
+        <<"ans104@1.0">>,
+        hb_message:commitment_devices(Proof, Opts)
+    )),
+    ?assertEqual([wallet_address(RingWallet)], hb_message:signers(Proof, Opts)),
+    ?assert(hb_message:verify(Proof, [wallet_address(RingWallet)], Opts)).
 
 test_admission(Wallet) ->
     RingReference = test_ring_reference(Wallet),
