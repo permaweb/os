@@ -59,6 +59,7 @@ BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/linux-m1-fragment.config"
 BR2_LINUX_KERNEL_BZIMAGE=y
 BR2_LINUX_KERNEL_INSTALL_TARGET=y
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_LAPEE_PATH)/board/lapee/patches"
 
 # ----- filesystem -------------------------------------------
 # cpio.zst is smaller and faster to load; CONFIG_RD_ZSTD=y

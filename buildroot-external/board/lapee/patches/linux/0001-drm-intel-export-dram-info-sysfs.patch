@@ -1,0 +1,296 @@
+drm/intel: export decoded DRAM information through device sysfs
+
+LapEE needs a narrow, read-only way to report memory topology without
+reimplementing Intel memory-controller PCODE/MMIO decode logic in
+userspace. The i915 and xe display code already performs this decode for
+display bandwidth decisions and stores it in struct dram_info.
+
+Expose the decoded values as read-only PCI device sysfs attributes:
+
+  dram_type
+  dram_lpddr_class
+  dram_num_channels
+  dram_num_qgv_points
+  dram_num_psf_gv_points
+  dram_mem_freq_khz
+  dram_fsb_freq_khz
+
+The xe portion is compiled only when CONFIG_DRM_XE_DISPLAY is enabled.
+
+diff -ruN orig/drivers/gpu/drm/i915/i915_sysfs.c new/drivers/gpu/drm/i915/i915_sysfs.c
+--- orig/drivers/gpu/drm/i915/i915_sysfs.c	2026-05-12 15:51:15
++++ new/drivers/gpu/drm/i915/i915_sysfs.c	2026-05-12 15:52:05
+@@ -27,6 +27,7 @@
+ 
+ #include <linux/device.h>
+ #include <linux/module.h>
++#include <linux/pci.h>
+ #include <linux/stat.h>
+ #include <linux/sysfs.h>
+ 
+@@ -39,6 +40,7 @@
+ 
+ #include "i915_drv.h"
+ #include "i915_sysfs.h"
++#include "soc/intel_dram.h"
+ 
+ struct drm_i915_private *kdev_minor_to_i915(struct device *kdev)
+ {
+@@ -157,11 +159,115 @@
+ 	.private = (void *)1
+ };
+ 
++static const struct dram_info *i915_pci_dram_info(struct device *dev)
++{
++	struct drm_i915_private *i915 = pdev_to_i915(to_pci_dev(dev));
++
++	if (!i915)
++		return NULL;
++
++	return intel_dram_info(&i915->drm);
++}
++
++static bool intel_dram_type_is_lpddr(enum intel_dram_type type)
++{
++	return type == INTEL_DRAM_LPDDR3 ||
++	       type == INTEL_DRAM_LPDDR4 ||
++	       type == INTEL_DRAM_LPDDR5;
++}
++
++static ssize_t dram_type_show(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	if (!info)
++		return sysfs_emit(buf, "UNKNOWN\n");
++
++	return sysfs_emit(buf, "%s\n", intel_dram_type_str(info->type));
++}
++static DEVICE_ATTR_RO(dram_type);
++
++static ssize_t dram_lpddr_class_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n",
++			  info && intel_dram_type_is_lpddr(info->type));
++}
++static DEVICE_ATTR_RO(dram_lpddr_class);
++
++static ssize_t dram_num_channels_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_channels : 0);
++}
++static DEVICE_ATTR_RO(dram_num_channels);
++
++static ssize_t dram_num_qgv_points_show(struct device *dev,
++					struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_qgv_points : 0);
++}
++static DEVICE_ATTR_RO(dram_num_qgv_points);
++
++static ssize_t dram_num_psf_gv_points_show(struct device *dev,
++					   struct device_attribute *attr,
++					   char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_psf_gv_points : 0);
++}
++static DEVICE_ATTR_RO(dram_num_psf_gv_points);
++
++static ssize_t dram_mem_freq_khz_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->mem_freq : 0);
++}
++static DEVICE_ATTR_RO(dram_mem_freq_khz);
++
++static ssize_t dram_fsb_freq_khz_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = i915_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->fsb_freq : 0);
++}
++static DEVICE_ATTR_RO(dram_fsb_freq_khz);
++
++static struct attribute *intel_dram_attrs[] = {
++	&dev_attr_dram_type.attr,
++	&dev_attr_dram_lpddr_class.attr,
++	&dev_attr_dram_num_channels.attr,
++	&dev_attr_dram_num_qgv_points.attr,
++	&dev_attr_dram_num_psf_gv_points.attr,
++	&dev_attr_dram_mem_freq_khz.attr,
++	&dev_attr_dram_fsb_freq_khz.attr,
++	NULL
++};
++
++static const struct attribute_group intel_dram_attr_group = {
++	.attrs = intel_dram_attrs,
++};
++
+ void i915_setup_sysfs(struct drm_i915_private *dev_priv)
+ {
+ 	struct device *kdev = dev_priv->drm.primary->kdev;
+ 	int ret;
+ 
++	ret = sysfs_create_group(&dev_priv->drm.dev->kobj, &intel_dram_attr_group);
++	if (ret)
++		drm_warn(&dev_priv->drm, "DRAM info sysfs setup failed: %d\n", ret);
++
+ 	if (HAS_L3_DPF(dev_priv)) {
+ 		ret = device_create_bin_file(kdev, &dpf_attrs);
+ 		if (ret)
+@@ -190,6 +296,9 @@
+ void i915_teardown_sysfs(struct drm_i915_private *dev_priv)
+ {
+ 	struct device *kdev = dev_priv->drm.primary->kdev;
++
++	if (dev_priv->drm.dev)
++		sysfs_remove_group(&dev_priv->drm.dev->kobj, &intel_dram_attr_group);
+ 
+ 	i915_gpu_error_sysfs_teardown(dev_priv);
+ 
+diff -ruN orig/drivers/gpu/drm/xe/xe_device_sysfs.c new/drivers/gpu/drm/xe/xe_device_sysfs.c
+--- orig/drivers/gpu/drm/xe/xe_device_sysfs.c	2026-05-12 15:51:15
++++ new/drivers/gpu/drm/xe/xe_device_sysfs.c	2026-05-12 15:52:48
+@@ -14,6 +14,9 @@
+ #include "xe_pcode_api.h"
+ #include "xe_pcode.h"
+ #include "xe_pm.h"
++#if IS_ENABLED(CONFIG_DRM_XE_DISPLAY)
++#include "soc/intel_dram.h"
++#endif
+ 
+ /**
+  * DOC: Xe device sysfs
+@@ -271,10 +274,118 @@
+ 	.attrs = auto_link_downgrade_attrs,
+ };
+ 
++#if IS_ENABLED(CONFIG_DRM_XE_DISPLAY)
++static const struct dram_info *xe_pci_dram_info(struct device *dev)
++{
++	struct xe_device *xe = pdev_to_xe_device(to_pci_dev(dev));
++
++	if (!xe)
++		return NULL;
++
++	return xe->dram_info;
++}
++
++static bool intel_dram_type_is_lpddr(enum intel_dram_type type)
++{
++	return type == INTEL_DRAM_LPDDR3 ||
++	       type == INTEL_DRAM_LPDDR4 ||
++	       type == INTEL_DRAM_LPDDR5;
++}
++
++static ssize_t dram_type_show(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	if (!info)
++		return sysfs_emit(buf, "UNKNOWN\n");
++
++	return sysfs_emit(buf, "%s\n", intel_dram_type_str(info->type));
++}
++static DEVICE_ATTR_RO(dram_type);
++
++static ssize_t dram_lpddr_class_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n",
++			  info && intel_dram_type_is_lpddr(info->type));
++}
++static DEVICE_ATTR_RO(dram_lpddr_class);
++
++static ssize_t dram_num_channels_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_channels : 0);
++}
++static DEVICE_ATTR_RO(dram_num_channels);
++
++static ssize_t dram_num_qgv_points_show(struct device *dev,
++					struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_qgv_points : 0);
++}
++static DEVICE_ATTR_RO(dram_num_qgv_points);
++
++static ssize_t dram_num_psf_gv_points_show(struct device *dev,
++					   struct device_attribute *attr,
++					   char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->num_psf_gv_points : 0);
++}
++static DEVICE_ATTR_RO(dram_num_psf_gv_points);
++
++static ssize_t dram_mem_freq_khz_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->mem_freq : 0);
++}
++static DEVICE_ATTR_RO(dram_mem_freq_khz);
++
++static ssize_t dram_fsb_freq_khz_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	const struct dram_info *info = xe_pci_dram_info(dev);
++
++	return sysfs_emit(buf, "%u\n", info ? info->fsb_freq : 0);
++}
++static DEVICE_ATTR_RO(dram_fsb_freq_khz);
++
++static struct attribute *intel_dram_attrs[] = {
++	&dev_attr_dram_type.attr,
++	&dev_attr_dram_lpddr_class.attr,
++	&dev_attr_dram_num_channels.attr,
++	&dev_attr_dram_num_qgv_points.attr,
++	&dev_attr_dram_num_psf_gv_points.attr,
++	&dev_attr_dram_mem_freq_khz.attr,
++	&dev_attr_dram_fsb_freq_khz.attr,
++	NULL
++};
++
++static const struct attribute_group intel_dram_attr_group = {
++	.attrs = intel_dram_attrs,
++};
++#endif
++
+ int xe_device_sysfs_init(struct xe_device *xe)
+ {
+ 	struct device *dev = xe->drm.dev;
+ 	int ret;
++
++#if IS_ENABLED(CONFIG_DRM_XE_DISPLAY)
++	ret = devm_device_add_group(dev, &intel_dram_attr_group);
++	if (ret)
++		drm_warn(&xe->drm, "DRAM info sysfs setup failed: %d\n", ret);
++#endif
+ 
+ 	if (xe->d3cold.capable) {
+ 		ret = devm_device_add_group(dev, &vram_attr_group);

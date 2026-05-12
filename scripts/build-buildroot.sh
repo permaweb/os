@@ -198,6 +198,14 @@ DEFCONFIG_SHA=$(
 KERNEL_FRAGMENT_SHA=$(
     {
         shasum -a 256 buildroot-external/board/lapee/linux-*.config
+        if [[ -d buildroot-external/board/lapee/patches ]]; then
+            while IFS= read -r patch; do
+                shasum -a 256 "$patch"
+            done < <(
+                find buildroot-external/board/lapee/patches -type f \
+                    | LC_ALL=C sort
+            )
+        fi
         if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
             shasum -a 256 "$KERNEL_EXTRA_FRAGMENT"
         fi

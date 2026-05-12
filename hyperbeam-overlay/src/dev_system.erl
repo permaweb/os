@@ -84,6 +84,7 @@ evidence_model() ->
         <<"probe-families">> => [
             <<"cpu/cpuid-device">>,
             <<"firmware/boot-guard/msr">>,
+            <<"memory-controller/intel-drm-kernel-dram-info/sysfs">>,
             <<"memory-controller/intel-mtl-mem-ss-info-global/resource0-read">>,
             <<"memory-controller/sysfs-edac">>,
             <<"generic-proc-sysfs">>
@@ -451,10 +452,12 @@ memory_controller_probe_report(Root, Edac) ->
         <<"intel-drm-controller">> => IntelDrm,
         <<"generic-edac">> => edac_memory_probe(Edac),
         <<"notes">> =>
-            <<"The Intel DRM probe reads a display-controller memory-subsystem "
-              "register when it can do so with a read-only file operation. "
-              "It never drives PCODE/MCU mailbox commands from userspace. "
-              "Generic EDAC is included as additional parsed evidence.">>
+            <<"The Intel DRM probe prefers the kernel's DRAM decode export. "
+              "That export is populated by the same controller-backed driver "
+              "logic used for display bandwidth decisions. If the kernel "
+              "export is absent, the report may include the older read-only "
+              "Meteor Lake MMIO fallback. Generic EDAC is included as "
+              "additional parsed evidence.">>
     }.
 
 intel_drm_memory_probe(Root) ->
@@ -465,10 +468,10 @@ intel_drm_memory_probe(Root) ->
         <<"cards">> => Cards,
         <<"lpddr-class-observed">> => any_lpddr_card(Cards),
         <<"notes">> =>
-            <<"Meteor Lake/XeLPDP exposes MTL_MEM_SS_INFO_GLOBAL as a "
-              "read-only MMIO register. Older Intel client platforms use "
-              "PCODE mailbox reads in i915; this probe intentionally refuses "
-              "to emulate those mailbox transactions from userspace.">>
+            <<"The preferred path consumes read-only sysfs files exported by "
+              "the active Intel DRM driver. That gives controller-decoded "
+              "DRAM evidence without reproducing PCODE/MCU transactions in "
+              "userspace.">>
     }.
 
 intel_drm_memory_cards(Root) ->
@@ -484,7 +487,6 @@ intel_drm_intel_card(Root, Base, Card) ->
 
 intel_drm_memory_card_probe(Root, Base, Card) ->
     DevicePath = filename:join([Base, Card, "device"]),
-    Resource0 = filename:join(DevicePath, "resource0"),
     Common = #{
         <<"card">> => to_bin(Card),
         <<"driver">> => read_link_basename(Root, filename:join(DevicePath, "driver")),
@@ -492,7 +494,69 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
             Root,
             DevicePath,
             ["vendor", "device", "class", "subsystem_vendor",
-             "subsystem_device", "revision"]),
+             "subsystem_device", "revision"])
+    },
+    case intel_drm_kernel_dram_card_probe(Root, DevicePath, Common) of
+        {ok, Report} -> Report;
+        unavailable -> intel_mtl_resource0_memory_card_probe(Root, DevicePath, Common)
+    end.
+
+intel_drm_kernel_dram_card_probe(Root, DevicePath, Common) ->
+    Raw = intel_drm_kernel_dram_raw(Root, DevicePath),
+    case maps:get(<<"dram-type">>, Raw, null) of
+        null ->
+            unavailable;
+        _ ->
+            Decoded = intel_drm_kernel_dram_decode(Raw),
+            {ok, Common#{
+                <<"available">> => true,
+                <<"status">> => intel_drm_kernel_dram_status(Decoded),
+                <<"source">> => <<"drm-device-sysfs">>,
+                <<"method">> => <<"intel-drm-kernel-dram-info">>,
+                <<"raw">> => Raw,
+                <<"decoded">> => Decoded
+            }}
+    end.
+
+intel_drm_kernel_dram_raw(Root, DevicePath) ->
+    read_attr_map(
+        Root,
+        DevicePath,
+        ["dram_type", "dram_lpddr_class", "dram_num_channels",
+         "dram_num_qgv_points", "dram_num_psf_gv_points",
+         "dram_mem_freq_khz", "dram_fsb_freq_khz"]).
+
+intel_drm_kernel_dram_decode(Raw) ->
+    Type = normalise_dram_type(maps:get(<<"dram-type">>, Raw, <<"unknown">>)),
+    #{
+        <<"dram-type">> => Type,
+        <<"lpddr-class">> => intel_drm_kernel_lpddr_value(Raw, Type),
+        <<"populated-channels">> =>
+            parse_int(maps:get(<<"dram-num-channels">>, Raw, null)),
+        <<"enabled-qgv-points">> =>
+            parse_int(maps:get(<<"dram-num-qgv-points">>, Raw, null)),
+        <<"enabled-psf-gv-points">> =>
+            parse_int(maps:get(<<"dram-num-psf-gv-points">>, Raw, null)),
+        <<"memory-frequency-khz">> =>
+            parse_int(maps:get(<<"dram-mem-freq-khz">>, Raw, null)),
+        <<"fsb-frequency-khz">> =>
+            parse_int(maps:get(<<"dram-fsb-freq-khz">>, Raw, null))
+    }.
+
+intel_drm_kernel_dram_status(#{<<"dram-type">> := <<"unknown">>}) ->
+    <<"unknown">>;
+intel_drm_kernel_dram_status(_) ->
+    <<"observed">>.
+
+intel_drm_kernel_lpddr_value(_Raw, <<"unknown">>) ->
+    null;
+intel_drm_kernel_lpddr_value(Raw, Type) ->
+    parse_bool_01(maps:get(<<"dram-lpddr-class">>, Raw, null),
+                  lpddr_type(Type)).
+
+intel_mtl_resource0_memory_card_probe(Root, DevicePath, Common) ->
+    Resource0 = filename:join(DevicePath, "resource0"),
+    Resource0Info = #{
         <<"method">> => <<"intel-mtl-mem-ss-info-global">>,
         <<"register">> => #{
             <<"name">> => <<"MTL_MEM_SS_INFO_GLOBAL">>,
@@ -502,7 +566,7 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
     case read_uint_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL, 4) of
         {ok, Raw} ->
             Status = intel_mtl_dram_status(Raw),
-            Common#{
+            (maps:merge(Common, Resource0Info))#{
                 <<"available">> => true,
                 <<"status">> => Status,
                 <<"source">> => <<"resource0-read">>,
@@ -510,7 +574,7 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
                 <<"decoded">> => intel_mtl_dram_decode(Raw)
             };
         {error, Reason} ->
-            Common#{
+            (maps:merge(Common, Resource0Info))#{
                 <<"available">> => false,
                 <<"status">> => <<"unavailable">>,
                 <<"source">> => <<"resource0-read">>,
@@ -549,20 +613,38 @@ intel_dram_type_from_mtl_code(8) -> <<"GDDR">>;
 intel_dram_type_from_mtl_code(9) -> <<"GDDR-ECC">>;
 intel_dram_type_from_mtl_code(_) -> <<"unknown">>.
 
-lpddr_type(<<"LPDDR3">>) -> true;
-lpddr_type(<<"LPDDR4">>) -> true;
-lpddr_type(<<"LPDDR5">>) -> true;
-lpddr_type(_) -> false.
+normalise_dram_type(Type) when is_binary(Type) ->
+    case string:uppercase(trim(Type)) of
+        <<"UNKNOWN">> -> <<"unknown">>;
+        Upper -> binary:replace(Upper, <<"_">>, <<"-">>, [global])
+    end;
+normalise_dram_type(_) ->
+    <<"unknown">>.
+
+lpddr_type(Type) when is_binary(Type) ->
+    lists:member(normalise_dram_type(Type),
+                 [<<"LPDDR3">>, <<"LPDDR4">>, <<"LPDDR5">>]);
+lpddr_type(_) ->
+    false.
 
 any_lpddr_card([]) ->
     null;
 any_lpddr_card(Cards) ->
-    lists:any(
-        fun(Card) ->
-            Decoded = maps:get(<<"decoded">>, Card, #{}),
-            maps:get(<<"lpddr-class">>, Decoded, false)
-        end,
-        Cards).
+    case [Value || Card <- Cards,
+                   Value <- [card_lpddr_value(Card)],
+                   Value =/= null] of
+        [] -> null;
+        Values -> lists:member(true, Values)
+    end.
+
+card_lpddr_value(Card) ->
+    Decoded = maps:get(<<"decoded">>, Card, #{}),
+    case {maps:get(<<"status">>, Card, <<"unavailable">>),
+          maps:get(<<"lpddr-class">>, Decoded, null)} of
+        {<<"observed">>, true} -> true;
+        {<<"observed">>, false} -> false;
+        _ -> null
+    end.
 
 edac_memory_probe(Edac) ->
     Types = edac_memory_types(Edac),
@@ -1163,6 +1245,10 @@ parse_int(Bin) when is_binary(Bin) ->
     catch _:_ -> null
     end.
 
+parse_bool_01(<<"1">>, _Default) -> true;
+parse_bool_01(<<"0">>, _Default) -> false;
+parse_bool_01(_, Default) -> Default.
+
 sectors_to_bytes(N) when is_integer(N) ->
     N * 512;
 sectors_to_bytes(_) ->
@@ -1217,6 +1303,73 @@ report_empty_root_test() ->
         rm_rf(Root)
     end.
 
+intel_drm_unknown_kernel_dram_is_indeterminate_test() ->
+    Root = make_tmp_root("intel-drm-unknown"),
+    try
+        make_dir_p(Root, "/sys/class/drm/card0/device"),
+        write_fixture(Root, "/sys/class/drm/card0/device/vendor",
+            <<"0x8086\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_type",
+            <<"UNKNOWN\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_lpddr_class",
+            <<"0\n">>),
+        IntelDram = intel_drm_memory_probe(Root),
+        ?assertEqual(null,
+                     maps:get(<<"lpddr-class-observed">>, IntelDram)),
+        [Card] = maps:get(<<"cards">>, IntelDram),
+        ?assertEqual(<<"unknown">>, maps:get(<<"status">>, Card)),
+        Decoded = maps:get(<<"decoded">>, Card),
+        ?assertEqual(<<"unknown">>, maps:get(<<"dram-type">>, Decoded)),
+        ?assertEqual(null, maps:get(<<"lpddr-class">>, Decoded))
+    after
+        rm_rf(Root)
+    end.
+
+intel_drm_ddr_kernel_dram_is_non_lpddr_test() ->
+    Root = make_tmp_root("intel-drm-ddr"),
+    try
+        make_dir_p(Root, "/sys/class/drm/card0/device"),
+        write_fixture(Root, "/sys/class/drm/card0/device/vendor",
+            <<"0x8086\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_type",
+            <<"DDR5\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_lpddr_class",
+            <<"0\n">>),
+        IntelDram = intel_drm_memory_probe(Root),
+        ?assertEqual(false,
+                     maps:get(<<"lpddr-class-observed">>, IntelDram)),
+        [Card] = maps:get(<<"cards">>, IntelDram),
+        ?assertEqual(<<"observed">>, maps:get(<<"status">>, Card)),
+        Decoded = maps:get(<<"decoded">>, Card),
+        ?assertEqual(<<"DDR5">>, maps:get(<<"dram-type">>, Decoded)),
+        ?assertEqual(false, maps:get(<<"lpddr-class">>, Decoded))
+    after
+        rm_rf(Root)
+    end.
+
+intel_drm_resource0_fallback_test() ->
+    Root = make_tmp_root("intel-drm-resource0"),
+    try
+        make_dir_p(Root, "/sys/class/drm/card0/device"),
+        write_fixture(Root, "/sys/class/drm/card0/device/vendor",
+            <<"0x8086\n">>),
+        write_uint_fixture(
+            Root,
+            "/sys/class/drm/card0/device/resource0",
+            ?MTL_MEM_SS_INFO_GLOBAL,
+            2 bor (8 bsl 4) bor (3 bsl 8),
+            32),
+        IntelDram = intel_drm_memory_probe(Root),
+        ?assertEqual(true,
+                     maps:get(<<"lpddr-class-observed">>, IntelDram)),
+        [Card] = maps:get(<<"cards">>, IntelDram),
+        ?assertEqual(<<"intel-mtl-mem-ss-info-global">>,
+                     maps:get(<<"method">>, Card)),
+        ?assertEqual(<<"observed">>, maps:get(<<"status">>, Card))
+    after
+        rm_rf(Root)
+    end.
+
 report_fixture_root_test() ->
     Root = make_tmp_root("fixture"),
     try
@@ -1253,6 +1406,17 @@ report_fixture_root_test() ->
             <<"0x8086\n">>),
         write_fixture(Root, "/sys/class/drm/card0/device/device",
             <<"0x7d45\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_type",
+            <<"LPDDR5\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_lpddr_class",
+            <<"1\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_num_channels",
+            <<"8\n">>),
+        write_fixture(Root, "/sys/class/drm/card0/device/dram_num_qgv_points",
+            <<"3\n">>),
+        write_fixture(Root,
+            "/sys/class/drm/card0/device/dram_num_psf_gv_points",
+            <<"2\n">>),
         write_uint_fixture(
             Root,
             "/sys/class/drm/card0/device/resource0",
@@ -1312,15 +1476,20 @@ report_fixture_root_test() ->
                      maps:get(<<"lpddr-class-observed">>, IntelDram)),
         [IntelCard] = maps:get(<<"cards">>, IntelDram),
         ?assertEqual(<<"observed">>, maps:get(<<"status">>, IntelCard)),
+        ?assertEqual(<<"intel-drm-kernel-dram-info">>,
+                     maps:get(<<"method">>, IntelCard)),
+        ?assertEqual(<<"drm-device-sysfs">>,
+                     maps:get(<<"source">>, IntelCard)),
         ?assertEqual(false, maps:is_key(<<"policy-usable">>, IntelCard)),
-        ?assertEqual(<<"0x00045700">>,
-                     maps:get(<<"offset">>,
-                              maps:get(<<"register">>, IntelCard))),
         IntelDecoded = maps:get(<<"decoded">>, IntelCard),
         ?assertEqual(<<"LPDDR5">>,
                      maps:get(<<"dram-type">>, IntelDecoded)),
         ?assertEqual(8,
                      maps:get(<<"populated-channels">>, IntelDecoded)),
+        ?assertEqual(3,
+                     maps:get(<<"enabled-qgv-points">>, IntelDecoded)),
+        ?assertEqual(2,
+                     maps:get(<<"enabled-psf-gv-points">>, IntelDecoded)),
         Devices = maps:get(<<"devices">>, Report),
         [Card0] = maps:get(<<"cards">>, maps:get(<<"drm">>, Devices)),
         ?assertEqual(<<"226:0">>, maps:get(<<"dev">>, Card0)),
