@@ -277,7 +277,9 @@ To prepare one for encrypted green-zone storage, type `DESTROY N` for the
 listed disk number; to leave persistent storage unconfigured, type `SKIP`.
 `DESTROY N` erases that whole disk and creates a GPT partition named
 `LAPEE_NONVOLATILE`. The runtime image will only consider partitions with
-that exact name.
+that exact name. The provisioner excludes the boot USB from the list, then
+rechecks the selected disk immediately before modifying it so a changed device
+map cannot silently redirect the destructive operation.
 
 The provisioner should then print the enrollment progress and stop. Some
 firmware still reports `SetupMode=1` until the next power cycle even after
@@ -398,6 +400,18 @@ That adds a second virtio disk per node, pre-provisioned with the
 the disk using the green-zone secret, mount it as their primary HyperBEAM
 store, copy the boot LMDB into it, then reboot one node to prove the existing
 encrypted volume is reused rather than reformatted.
+
+Run the provisioner storage-selection smoke test:
+
+```sh
+make qemu-provisioner-nonvolatile
+```
+
+That boots the provisioner image with a sacrificial disk, types the real
+`I UNDERSTAND.` and `DESTROY 1` prompts through QEMU, and verifies that the
+extra disk receives a GPT partition named `LAPEE_NONVOLATILE`. The OVMF
+firmware in this test is not expected to complete Secure Boot enrollment; the
+test is only asserting the non-volatile disk preparation path.
 
 Run the operator `config.json` attestation gate:
 

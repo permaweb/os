@@ -275,29 +275,47 @@ sbp_disk_model() {
     printf '%s' "$_txt" | tr -s ' '
 }
 
+sbp_disk_is_nonvolatile_candidate() {
+    _boot_esp="$1"
+    _dev="$2"
+    _expected_sectors="${3:-}"
+    _name=$(basename "$_dev")
+    _boot_disk=$(parent_block_for_part "$_boot_esp")
+    case "$_name" in
+        loop*|ram*|dm-*|zram*|sr*) return 1 ;;
+    esac
+    [ "$_name" != "$_boot_disk" ] || return 1
+    [ -b "/dev/$_name" ] || return 1
+    [ -d "/sys/block/$_name" ] || return 1
+    _ro=$(cat "/sys/block/$_name/ro" 2>/dev/null || echo 1)
+    [ "$_ro" = "0" ] || return 1
+    _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
+    case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_sectors" -gt 0 ] || return 1
+    if [ -n "$_expected_sectors" ] && \
+       [ "$_sectors" != "$_expected_sectors" ]; then
+        return 1
+    fi
+    return 0
+}
+
 sbp_collect_nonvolatile_disks() {
     _boot_esp="$1"
-    _boot_disk=$(parent_block_for_part "$_boot_esp")
     _candidates=/run/lapee/nonvolatile-candidates
     : > "$_candidates"
     _idx=1
     for _b in /sys/block/*; do
         [ -e "$_b" ] || continue
         _name=$(basename "$_b")
-        case "$_name" in
-            loop*|ram*|dm-*|zram*|sr*) continue ;;
-        esac
-        [ "$_name" = "$_boot_disk" ] && continue
-        [ -b "/dev/$_name" ] || continue
-        _ro=$(cat "$_b/ro" 2>/dev/null || echo 1)
-        [ "$_ro" = "0" ] || continue
         _sectors=$(cat "$_b/size" 2>/dev/null || echo 0)
         case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
-        [ "$_sectors" -gt 0 ] || continue
+        sbp_disk_is_nonvolatile_candidate \
+            "$_boot_esp" "/dev/$_name" "$_sectors" || continue
         _size=$(sbp_size_label "$_sectors")
         _model=$(sbp_disk_model "$_name")
-        printf '%s|/dev/%s|%s|%s\n' \
-            "$_idx" "$_name" "$_size" "$_model" >> "$_candidates"
+        printf '%s|/dev/%s|%s|%s|%s\n' \
+            "$_idx" "$_name" "$_size" "$_model" "$_sectors" \
+            >> "$_candidates"
         _idx=$(( _idx + 1 ))
     done
 }
@@ -327,11 +345,32 @@ sbp_partition_suffix() {
     esac
 }
 
+sbp_wait_nonvolatile_partition() {
+    _part="$1"
+    _base=$(basename "$_part")
+    for _try in 1 2 3 4 5 6 7 8 9 10; do
+        if [ -b "$_part" ] && \
+           grep -q '^PARTNAME=LAPEE_NONVOLATILE$' \
+                "/sys/class/block/$_base/uevent" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 sbp_format_nonvolatile_disk() {
     _dev="$1"
+    _boot_esp="$2"
+    _expected_sectors="$3"
     [ -b "$_dev" ] || return 1
     if ! command -v parted >/dev/null 2>&1; then
         sbp_log "ERROR: parted is not available in this provisioning image."
+        return 1
+    fi
+    if ! sbp_disk_is_nonvolatile_candidate \
+            "$_boot_esp" "$_dev" "$_expected_sectors"; then
+        sbp_log "ERROR: selected disk is no longer a writable non-boot disk."
         return 1
     fi
     if grep -q "^$_dev" /proc/mounts 2>/dev/null; then
@@ -351,6 +390,10 @@ sbp_format_nonvolatile_disk() {
     blockdev --rereadpt "$_dev" 2>/dev/null || true
     sync 2>/dev/null || true
     _part="${_dev}$(sbp_partition_suffix "$_dev")"
+    if ! sbp_wait_nonvolatile_partition "$_part"; then
+        sbp_log "ERROR: $_part did not appear with the LAPEE_NONVOLATILE name."
+        return 1
+    fi
     sbp_log "Prepared $_part as LAPEE_NONVOLATILE."
     return 0
 }
@@ -360,6 +403,7 @@ sbp_prompt_nonvolatile_disk() {
     sbp_collect_nonvolatile_disks "$_boot_esp"
     sbp_show_prompt "Type DESTROY [NUMBER] to format, or SKIP:"
     sbp_disk_prompt_lines > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    sbp_log "Non-volatile storage selection is ready."
     _sbp_answer=""
     sbp_set_input "$_sbp_answer"
     _sbp_stty=$(stty -F /dev/console -g 2>/dev/null || true)
@@ -380,15 +424,18 @@ sbp_prompt_nonvolatile_disk() {
                 case "$_sbp_answer" in
                     DESTROY\ [0-9]*)
                         _num=${_sbp_answer#DESTROY }
-                        _target=$(awk -F'|' -v n="$_num" \
-                            '$1 == n { print $2; exit }' \
+                        _selected=$(awk -F'|' -v n="$_num" \
+                            '$1 == n { print $2 "|" $5; exit }' \
                             /run/lapee/nonvolatile-candidates 2>/dev/null || true)
-                        if [ -n "$_target" ]; then
+                        if [ -n "$_selected" ]; then
+                            _target=${_selected%%|*}
+                            _sectors=${_selected#*|}
                             [ -n "$_sbp_stty" ] && \
                                 stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
                             sbp_set_input ""
                             sbp_show_report
-                            sbp_format_nonvolatile_disk "$_target" || true
+                            sbp_format_nonvolatile_disk \
+                                "$_target" "$_boot_esp" "$_sectors" || true
                             return 0
                         fi
                         ;;

@@ -14,7 +14,7 @@
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
--define(KEY_DIR, "/run/lapee").
+-define(KEY_DIR, "/run/lapee/nonvolatile-keys").
 
 activate(Name, AES, Opts) when is_binary(Name), is_binary(AES) ->
     case hb_opts:get(<<"lapee-nonvolatile">>, true, Opts) of
@@ -175,11 +175,11 @@ uevent_value(Key, UEvent) ->
         [] -> undefined
     end.
 
-ensure_luks(Partition, _KeyFile, _AllowFormat) ->
+ensure_luks(Partition, KeyFile, AllowFormat) ->
     case run(<<"cryptsetup">>, [<<"isLuks">>, Partition]) of
         {ok, _} ->
             {ok, false};
-        {error, _} when _AllowFormat =:= false ->
+        {error, _} when AllowFormat =:= false ->
             {error, <<"not-luks">>};
         {error, _} ->
             case run(
@@ -192,7 +192,7 @@ ensure_luks(Partition, _KeyFile, _AllowFormat) ->
                     <<"--cipher">>, <<"aes-xts-plain64">>,
                     <<"--key-size">>, <<"256">>,
                     <<"--hash">>, <<"sha256">>,
-                    <<"--key-file">>, _KeyFile,
+                    <<"--key-file">>, KeyFile,
                     Partition
                 ]
             ) of
@@ -359,7 +359,7 @@ set_status(Opts, Status) ->
     Opts#{<<"lapee-nonvolatile-status">> => Status}.
 
 with_key_file(Key, Fun) ->
-    ok = filelib:ensure_dir(filename:join(?KEY_DIR, "nonvolatile-key")),
+    ok = ensure_private_key_dir(),
     Path = filename:join(
         ?KEY_DIR,
         "nonvolatile-key-" ++ integer_to_list(erlang:unique_integer([positive]))
@@ -371,6 +371,10 @@ with_key_file(Key, Fun) ->
     after
         _ = file:delete(Path)
     end.
+
+ensure_private_key_dir() ->
+    ok = filelib:ensure_dir(filename:join(?KEY_DIR, ".keep")),
+    ok = file:change_mode(?KEY_DIR, 8#700).
 
 sync_storage() ->
     case executable(<<"sync">>) of
