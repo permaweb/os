@@ -280,10 +280,9 @@ partition named `LAPEE_NONVOLATILE` with a LapEE provisioning marker at the
 start of the partition. It is not a secure erase; the runtime will overwrite
 the selected partition with LUKS2 before use. The runtime image will only
 first-format a non-LUKS partition when both the GPT partition name and the
-LapEE marker are present. The provisioner excludes the boot USB and other
-removable/USB disks from the list, then rechecks the selected disk immediately
-before modifying it so a changed device map cannot silently redirect the
-destructive operation.
+LapEE marker are present. The provisioner excludes the boot disk and obvious
+pseudo block devices, then rechecks that the selected disk is still a writable
+non-boot block device immediately before modifying it.
 
 The provisioner should then print the enrollment progress and stop. Some
 firmware still reports `SetupMode=1` until the next power cycle even after

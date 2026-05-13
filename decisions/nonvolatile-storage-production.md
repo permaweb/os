@@ -8,12 +8,11 @@ provisioning/runtime/reboot flows.
 
 ## Current Shape
 
-The provisioner repartitions exactly one operator-selected non-removable disk,
+The provisioner repartitions exactly one operator-selected non-boot disk,
 creates a GPT partition named `LAPEE_NONVOLATILE`, and writes a LapEE marker at
-the partition start. It is deliberately not a secure erase. The runtime ignores
-every other disk surface. After a
-green-zone key exists, LapEE derives a disk key from the zone name and AES
-secret, initializes or opens the labeled partition as LUKS2, mounts ext4 with
+the partition start. It is deliberately not a secure erase. After a green-zone
+key exists, LapEE derives a disk key from the zone name and AES secret,
+initializes or opens the labeled partition as LUKS2, mounts ext4 with
 `nodev,nosuid,noexec`, prepends that LMDB store, and copies the boot LMDB into
 it.
 
@@ -31,10 +30,9 @@ it.
 
 ## What Needed Tightening
 
-- The initial implementation trusted a candidate list captured before operator
-  input. The disk is now revalidated by device, boot-disk exclusion,
-  removability, path, writability, disk sequence, and size immediately before
-  destructive writes run.
+- The selected disk is rechecked immediately before destructive writes run. The
+  check is intentionally narrow: still a block device, still writable, still
+  non-empty, still not the boot disk, and not an obvious pseudo device.
 - The initial provisioner QEMU validation was manual. It is now captured in
   `scripts/qemu-provisioner-nonvolatile.sh`.
 - Upstream `hb_volume` remains too broad for this path: it shells via `sudo`,

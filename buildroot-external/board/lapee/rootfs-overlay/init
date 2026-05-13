@@ -275,28 +275,9 @@ sbp_disk_model() {
     printf '%s' "$_txt" | tr '|\r\n' '   ' | tr -s ' '
 }
 
-sbp_diskseq() {
-    _name="$1"
-    cat "/sys/block/$_name/diskseq" 2>/dev/null | tr -d '\r\n' || true
-}
-
-sbp_removable() {
-    _name="$1"
-    cat "/sys/block/$_name/removable" 2>/dev/null | tr -d '\r\n' || echo 1
-}
-
-sbp_device_path() {
-    _name="$1"
-    readlink -f "/sys/block/$_name/device" 2>/dev/null | tr '|\r\n' '   ' || true
-}
-
 sbp_disk_is_nonvolatile_candidate() {
     _boot_esp="$1"
     _dev="$2"
-    _expected_sectors="${3:-}"
-    _expected_diskseq="${4:-}"
-    _expected_removable="${5:-}"
-    _expected_path="${6:-}"
     _name=$(basename "$_dev")
     _boot_disk=$(parent_block_for_part "$_boot_esp")
     case "$_name" in
@@ -307,32 +288,9 @@ sbp_disk_is_nonvolatile_candidate() {
     [ -d "/sys/block/$_name" ] || return 1
     _ro=$(cat "/sys/block/$_name/ro" 2>/dev/null || echo 1)
     [ "$_ro" = "0" ] || return 1
-    _removable=$(sbp_removable "$_name")
-    [ "$_removable" = "0" ] || return 1
-    _path=$(sbp_device_path "$_name")
-    case "$_path" in
-        *"/usb"*) return 1 ;;
-    esac
     _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
     case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_sectors" -gt 0 ] || return 1
-    if [ -n "$_expected_sectors" ] && \
-       [ "$_sectors" != "$_expected_sectors" ]; then
-        return 1
-    fi
-    _diskseq=$(sbp_diskseq "$_name")
-    if [ -n "$_expected_diskseq" ] && \
-       [ "$_diskseq" != "$_expected_diskseq" ]; then
-        return 1
-    fi
-    if [ -n "$_expected_removable" ] && \
-       [ "$_removable" != "$_expected_removable" ]; then
-        return 1
-    fi
-    if [ -n "$_expected_path" ] && \
-       [ "$_path" != "$_expected_path" ]; then
-        return 1
-    fi
     return 0
 }
 
@@ -346,16 +304,11 @@ sbp_collect_nonvolatile_disks() {
         _name=$(basename "$_b")
         _sectors=$(cat "$_b/size" 2>/dev/null || echo 0)
         case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
-        sbp_disk_is_nonvolatile_candidate \
-            "$_boot_esp" "/dev/$_name" "$_sectors" || continue
+        sbp_disk_is_nonvolatile_candidate "$_boot_esp" "/dev/$_name" || continue
         _size=$(sbp_size_label "$_sectors")
         _model=$(sbp_disk_model "$_name")
-        _diskseq=$(sbp_diskseq "$_name")
-        _removable=$(sbp_removable "$_name")
-        _path=$(sbp_device_path "$_name")
-        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s\n' \
-            "$_idx" "$_name" "$_size" "$_model" "$_sectors" \
-            "$_diskseq" "$_removable" "$_path" >> "$_candidates"
+        printf '%s|/dev/%s|%s|%s\n' \
+            "$_idx" "$_name" "$_size" "$_model" >> "$_candidates"
         _idx=$(( _idx + 1 ))
     done
 }
@@ -370,8 +323,7 @@ sbp_disk_prompt_lines() {
         return 0
     fi
     printf '%s\n' "Available disks:"
-    while IFS='|' read -r _idx _dev _size _model _sectors _diskseq \
-        _removable _path; do
+    while IFS='|' read -r _idx _dev _size _model; do
         [ -n "$_idx" ] || continue
         printf '%s\n' "$_idx. $_dev  $_size  $_model"
     done < "$_candidates"
@@ -421,19 +373,12 @@ sbp_write_nonvolatile_marker() {
 sbp_format_nonvolatile_disk() {
     _dev="$1"
     _boot_esp="$2"
-    _expected_sectors="$3"
-    _expected_diskseq="${4:-}"
-    _expected_removable="${5:-}"
-    _expected_path="${6:-}"
     [ -b "$_dev" ] || return 1
     if ! command -v parted >/dev/null 2>&1; then
         sbp_log "ERROR: parted is not available in this provisioning image."
         return 1
     fi
-    if ! sbp_disk_is_nonvolatile_candidate \
-            "$_boot_esp" "$_dev" "$_expected_sectors" \
-            "$_expected_diskseq" "$_expected_removable" \
-            "$_expected_path"; then
+    if ! sbp_disk_is_nonvolatile_candidate "$_boot_esp" "$_dev"; then
         sbp_log "ERROR: selected disk is no longer a writable non-boot disk."
         return 1
     fi
@@ -501,21 +446,11 @@ sbp_prompt_nonvolatile_disk() {
                         if [ -n "$_selected" ]; then
                             _target=$(printf '%s\n' "$_selected" \
                                 | awk -F'|' '{ print $2 }')
-                            _sectors=$(printf '%s\n' "$_selected" \
-                                | awk -F'|' '{ print $5 }')
-                            _diskseq=$(printf '%s\n' "$_selected" \
-                                | awk -F'|' '{ print $6 }')
-                            _removable=$(printf '%s\n' "$_selected" \
-                                | awk -F'|' '{ print $7 }')
-                            _path=$(printf '%s\n' "$_selected" \
-                                | awk -F'|' '{ print $8 }')
                             [ -n "$_sbp_stty" ] && \
                                 stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
                             sbp_set_input ""
                             sbp_show_report
-                            sbp_format_nonvolatile_disk \
-                                "$_target" "$_boot_esp" "$_sectors" \
-                                "$_diskseq" "$_removable" "$_path"
+                            sbp_format_nonvolatile_disk "$_target" "$_boot_esp"
                             return $?
                         fi
                         ;;

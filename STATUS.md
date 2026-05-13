@@ -13,16 +13,14 @@ Production hardening for encrypted non-volatile storage on
 - Prepended the mounted LMDB as primary store and merged the boot LMDB.
 - Added QEMU green-zone non-volatile reboot acceptance test.
 - Added provisioner QEMU smoke test for the destructive partition-label flow.
-- Added peer-audited hardening for idempotent activation, stale status, and
-  first-format safety.
+- Added peer-audited hardening for idempotent activation and first-format
+  safety.
 - Hardened provisioner selection by revalidating the selected disk immediately
-  before destructive writes and checking the written GPT partition name from
-  disk contents.
-- Hardened first-format authorization: the provisioner rejects removable/USB
-  candidates, writes a LapEE partition marker, and runtime refuses to
-  first-format a non-LUKS partition without that marker.
-- Hardened runtime selection: removable, USB, loop, ram, dm, zram, and optical
-  parents are ignored before any LUKS action.
+  before destructive writes as a writable non-boot block device and checking
+  the written GPT partition name from disk contents.
+- Hardened first-format authorization: the provisioner writes a LapEE
+  partition marker, and runtime refuses to first-format a non-LUKS partition
+  without that marker.
 - Hardened existing-volume behavior: existing LUKS volumes are mounted before
   any format decision, so weak filesystem probes cannot wipe a real store.
 - Removed full-disk zeroing from provisioning. The provisioner repartitions and

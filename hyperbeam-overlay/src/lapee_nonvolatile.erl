@@ -33,7 +33,7 @@ activate_enabled(Name, AES, Opts) ->
     ).
 
 activate_enabled_locked(Name, AES, Opts) ->
-    case mapper_mounted_at_default() of
+    case mounted(Opts) orelse mapper_mounted_at_default() of
         true ->
             Store = persistent_store(?DEFAULT_MOUNT, Opts),
             Migration = migrate_primary_lmdb(Store, Opts),
@@ -56,6 +56,12 @@ activate_enabled_locked(Name, AES, Opts) ->
                 {error, Status} ->
                     {ok, set_status(Opts, Status)}
             end
+    end.
+
+mounted(Opts) ->
+    case status(Opts) of
+        #{ <<"mounted">> := true } -> true;
+        _ -> false
     end.
 
 do_activate(Name, AES, Opts) ->
@@ -149,8 +155,8 @@ labeled_partitions(Label) ->
         {ok, Names} ->
             lists:filtermap(
                 fun(Name) ->
-                    case {partition_label(Name), runtime_partition_ok(Name)} of
-                        {Label, true} -> {true, "/dev/" ++ Name};
+                    case partition_label(Name) of
+                        Label -> {true, "/dev/" ++ Name};
                         _ -> false
                     end
                 end,
@@ -158,50 +164,6 @@ labeled_partitions(Label) ->
             );
         _ ->
             []
-    end.
-
-runtime_partition_ok(Name) ->
-    case parent_block(Name) of
-        undefined ->
-            false;
-        Parent ->
-            not excluded_block(Parent) andalso
-                sysfs_value(["/sys/block/", Parent, "/ro"], <<"1">>) =:= <<"0">> andalso
-                sysfs_value(["/sys/block/", Parent, "/removable"], <<"1">>) =:= <<"0">> andalso
-                not usb_block(Parent)
-    end.
-
-parent_block(Name) ->
-    case file:read_file(filename:join(["/sys/class/block", Name, "partition"])) of
-        {ok, _} ->
-            parent_block_name(unicode:characters_to_binary(Name));
-        _ ->
-            undefined
-    end.
-
-parent_block_name(Name) ->
-    case re:replace(Name, <<"p?[0-9]+$">>, <<>>, [{return, binary}]) of
-        Name -> undefined;
-        Parent -> binary_to_list(Parent)
-    end.
-
-excluded_block("loop" ++ _) -> true;
-excluded_block("ram" ++ _) -> true;
-excluded_block("dm-" ++ _) -> true;
-excluded_block("zram" ++ _) -> true;
-excluded_block("sr" ++ _) -> true;
-excluded_block(_) -> false.
-
-sysfs_value(Path, Default) ->
-    case file:read_file(iolist_to_binary(Path)) of
-        {ok, Bin} -> string:trim(Bin);
-        _ -> Default
-    end.
-
-usb_block(Parent) ->
-    case file:read_link_all(filename:join(["/sys/block", Parent, "device"])) of
-        {ok, Path} -> binary:match(unicode:characters_to_binary(Path), <<"usb">>) =/= nomatch;
-        _ -> false
     end.
 
 partition_label(Name) ->
