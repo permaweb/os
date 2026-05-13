@@ -272,13 +272,31 @@ sbp_disk_model() {
     _txt="${_vendor:-}${_vendor:+ }${_model:-}${_serial:+ }${_serial:-}"
     [ -n "$_txt" ] || _txt=$(cat "/sys/block/$_name/device/name" 2>/dev/null | tr -d '\r\n' || true)
     [ -n "$_txt" ] || _txt="unknown model"
-    printf '%s' "$_txt" | tr -s ' '
+    printf '%s' "$_txt" | tr '|\r\n' '   ' | tr -s ' '
+}
+
+sbp_diskseq() {
+    _name="$1"
+    cat "/sys/block/$_name/diskseq" 2>/dev/null | tr -d '\r\n' || true
+}
+
+sbp_removable() {
+    _name="$1"
+    cat "/sys/block/$_name/removable" 2>/dev/null | tr -d '\r\n' || echo 1
+}
+
+sbp_device_path() {
+    _name="$1"
+    readlink -f "/sys/block/$_name/device" 2>/dev/null | tr '|\r\n' '   ' || true
 }
 
 sbp_disk_is_nonvolatile_candidate() {
     _boot_esp="$1"
     _dev="$2"
     _expected_sectors="${3:-}"
+    _expected_diskseq="${4:-}"
+    _expected_removable="${5:-}"
+    _expected_path="${6:-}"
     _name=$(basename "$_dev")
     _boot_disk=$(parent_block_for_part "$_boot_esp")
     case "$_name" in
@@ -289,11 +307,30 @@ sbp_disk_is_nonvolatile_candidate() {
     [ -d "/sys/block/$_name" ] || return 1
     _ro=$(cat "/sys/block/$_name/ro" 2>/dev/null || echo 1)
     [ "$_ro" = "0" ] || return 1
+    _removable=$(sbp_removable "$_name")
+    [ "$_removable" = "0" ] || return 1
+    _path=$(sbp_device_path "$_name")
+    case "$_path" in
+        *"/usb"*) return 1 ;;
+    esac
     _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
     case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_sectors" -gt 0 ] || return 1
     if [ -n "$_expected_sectors" ] && \
        [ "$_sectors" != "$_expected_sectors" ]; then
+        return 1
+    fi
+    _diskseq=$(sbp_diskseq "$_name")
+    if [ -n "$_expected_diskseq" ] && \
+       [ "$_diskseq" != "$_expected_diskseq" ]; then
+        return 1
+    fi
+    if [ -n "$_expected_removable" ] && \
+       [ "$_removable" != "$_expected_removable" ]; then
+        return 1
+    fi
+    if [ -n "$_expected_path" ] && \
+       [ "$_path" != "$_expected_path" ]; then
         return 1
     fi
     return 0
@@ -313,8 +350,12 @@ sbp_collect_nonvolatile_disks() {
             "$_boot_esp" "/dev/$_name" "$_sectors" || continue
         _size=$(sbp_size_label "$_sectors")
         _model=$(sbp_disk_model "$_name")
-        printf '%s|/dev/%s|%s|%s|%s\n' \
+        _diskseq=$(sbp_diskseq "$_name")
+        _removable=$(sbp_removable "$_name")
+        _path=$(sbp_device_path "$_name")
+        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s\n' \
             "$_idx" "$_name" "$_size" "$_model" "$_sectors" \
+            "$_diskseq" "$_removable" "$_path" \
             >> "$_candidates"
         _idx=$(( _idx + 1 ))
     done
@@ -330,7 +371,8 @@ sbp_disk_prompt_lines() {
         return 0
     fi
     printf '%s\n' "Available disks:"
-    while IFS='|' read -r _idx _dev _size _model; do
+    while IFS='|' read -r _idx _dev _size _model _sectors _diskseq \
+        _removable _path; do
         [ -n "$_idx" ] || continue
         printf '%s\n' "$_idx. $_dev  $_size  $_model"
     done < "$_candidates"
@@ -363,22 +405,78 @@ sbp_wait_nonvolatile_partition_node() {
     return 1
 }
 
+sbp_zero_block_device() {
+    _dev="$1"
+    _name=$(basename "$_dev")
+    _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
+    case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_sectors" -gt 0 ] || return 1
+
+    sbp_log "Erasing all previous contents on $_dev. This can take a long time."
+    _chunk_sectors=32768
+    _chunks=$(( _sectors / _chunk_sectors ))
+    _tail=$(( _sectors % _chunk_sectors ))
+    if [ "$_chunks" -gt 0 ]; then
+        if ! dd if=/dev/zero of="$_dev" bs=16M count="$_chunks" \
+                > /run/lapee/nonvolatile-wipe.log 2>&1; then
+            while IFS= read -r _line; do sbp_log "$_line"; done \
+                < /run/lapee/nonvolatile-wipe.log
+            sbp_log "ERROR: failed while erasing $_dev."
+            return 1
+        fi
+    fi
+    if [ "$_tail" -gt 0 ]; then
+        if ! dd if=/dev/zero of="$_dev" bs=512 \
+                seek="$(( _chunks * _chunk_sectors ))" count="$_tail" \
+                > /run/lapee/nonvolatile-wipe-tail.log 2>&1; then
+            while IFS= read -r _line; do sbp_log "$_line"; done \
+                < /run/lapee/nonvolatile-wipe-tail.log
+            sbp_log "ERROR: failed while erasing the end of $_dev."
+            return 1
+        fi
+    fi
+    sync 2>/dev/null || true
+    return 0
+}
+
+sbp_write_nonvolatile_marker() {
+    _part="$1"
+    if ! printf 'LapEE nonvolatile provisioning marker v1\n' | \
+            dd of="$_part" bs=512 count=1 conv=notrunc \
+            > /run/lapee/nonvolatile-marker.log 2>&1; then
+        while IFS= read -r _line; do sbp_log "$_line"; done \
+            < /run/lapee/nonvolatile-marker.log
+        sbp_log "ERROR: failed to write the LapEE non-volatile marker."
+        return 1
+    fi
+    sync 2>/dev/null || true
+    return 0
+}
+
 sbp_format_nonvolatile_disk() {
     _dev="$1"
     _boot_esp="$2"
     _expected_sectors="$3"
+    _expected_diskseq="${4:-}"
+    _expected_removable="${5:-}"
+    _expected_path="${6:-}"
     [ -b "$_dev" ] || return 1
     if ! command -v parted >/dev/null 2>&1; then
         sbp_log "ERROR: parted is not available in this provisioning image."
         return 1
     fi
     if ! sbp_disk_is_nonvolatile_candidate \
-            "$_boot_esp" "$_dev" "$_expected_sectors"; then
+            "$_boot_esp" "$_dev" "$_expected_sectors" \
+            "$_expected_diskseq" "$_expected_removable" \
+            "$_expected_path"; then
         sbp_log "ERROR: selected disk is no longer a writable non-boot disk."
         return 1
     fi
     if grep -q "^$_dev" /proc/mounts 2>/dev/null; then
         sbp_log "ERROR: $_dev or one of its partitions is mounted."
+        return 1
+    fi
+    if ! sbp_zero_block_device "$_dev"; then
         return 1
     fi
     sbp_log "Destroying partition table on $_dev."
@@ -398,7 +496,13 @@ sbp_format_nonvolatile_disk() {
         sbp_log "ERROR: $_dev does not contain a LAPEE_NONVOLATILE partition."
         return 1
     fi
-    sbp_wait_nonvolatile_partition_node "$_part" || true
+    if ! sbp_wait_nonvolatile_partition_node "$_part"; then
+        sbp_log "ERROR: $_part did not appear after partitioning."
+        return 1
+    fi
+    if ! sbp_write_nonvolatile_marker "$_part"; then
+        return 1
+    fi
     sbp_log "Prepared $_part as LAPEE_NONVOLATILE."
     return 0
 }
@@ -430,18 +534,27 @@ sbp_prompt_nonvolatile_disk() {
                     DESTROY\ [0-9]*)
                         _num=${_sbp_answer#DESTROY }
                         _selected=$(awk -F'|' -v n="$_num" \
-                            '$1 == n { print $2 "|" $5; exit }' \
+                            '$1 == n { print; exit }' \
                             /run/lapee/nonvolatile-candidates 2>/dev/null || true)
                         if [ -n "$_selected" ]; then
-                            _target=${_selected%%|*}
-                            _sectors=${_selected#*|}
+                            _target=$(printf '%s\n' "$_selected" \
+                                | awk -F'|' '{ print $2 }')
+                            _sectors=$(printf '%s\n' "$_selected" \
+                                | awk -F'|' '{ print $5 }')
+                            _diskseq=$(printf '%s\n' "$_selected" \
+                                | awk -F'|' '{ print $6 }')
+                            _removable=$(printf '%s\n' "$_selected" \
+                                | awk -F'|' '{ print $7 }')
+                            _path=$(printf '%s\n' "$_selected" \
+                                | awk -F'|' '{ print $8 }')
                             [ -n "$_sbp_stty" ] && \
                                 stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
                             sbp_set_input ""
                             sbp_show_report
                             sbp_format_nonvolatile_disk \
-                                "$_target" "$_boot_esp" "$_sectors" || true
-                            return 0
+                                "$_target" "$_boot_esp" "$_sectors" \
+                                "$_diskseq" "$_removable" "$_path"
+                            return $?
                         fi
                         ;;
                 esac
@@ -540,7 +653,13 @@ run_secure_boot_provisioner() {
 
     sbp_log "Found provisioning bundle on $_esp_found."
     sbp_confirm_enrolment
-    sbp_prompt_nonvolatile_disk "$_esp_found"
+    if ! sbp_prompt_nonvolatile_disk "$_esp_found"; then
+        sbp_log ""
+        sbp_log "ERROR: non-volatile storage provisioning failed."
+        sbp_log "Secure Boot enrolment was not attempted."
+        umount /mnt/esp 2>/dev/null || true
+        exec sh -c 'while :; do sleep 3600; done'
+    fi
     sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
     if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
             > /run/lapee/sb-provisioner.log 2>&1; then

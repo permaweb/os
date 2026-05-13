@@ -276,10 +276,13 @@ Boot that USB once with firmware in Secure Boot Setup Mode. After the
 To prepare one for encrypted green-zone storage, type `DESTROY N` for the
 listed disk number; to leave persistent storage unconfigured, type `SKIP`.
 `DESTROY N` erases that whole disk and creates a GPT partition named
-`LAPEE_NONVOLATILE`. The runtime image will only consider partitions with
-that exact name. The provisioner excludes the boot USB from the list, then
-rechecks the selected disk immediately before modifying it so a changed device
-map cannot silently redirect the destructive operation.
+`LAPEE_NONVOLATILE` with a LapEE provisioning marker at the start of the
+partition. The full-disk erase can take a long time on large disks. The
+runtime image will only first-format a non-LUKS partition when both the GPT
+partition name and the LapEE marker are present. The provisioner excludes the
+boot USB and other removable/USB disks from the list, then rechecks the
+selected disk immediately before modifying it so a changed device map cannot
+silently redirect the destructive operation.
 
 The provisioner should then print the enrollment progress and stop. Some
 firmware still reports `SetupMode=1` until the next power cycle even after
@@ -399,7 +402,7 @@ That adds a second virtio disk per node, pre-provisioned with the
 `LAPEE_NONVOLATILE` GPT partition name. Admitted nodes initialize or open
 the disk using the green-zone secret, mount it as their primary HyperBEAM
 store, copy the boot LMDB into it, then reboot one node to prove the existing
-encrypted volume is reused rather than reformatted.
+encrypted volume is reopened rather than reformatted.
 
 Run the provisioner storage-selection smoke test:
 
@@ -409,7 +412,8 @@ make qemu-provisioner-nonvolatile
 
 That boots the provisioner image with a sacrificial disk, types the real
 `I UNDERSTAND.` and `DESTROY 1` prompts through QEMU, and verifies that the
-extra disk receives a GPT partition named `LAPEE_NONVOLATILE`. The OVMF
+extra disk is actually erased, receives a GPT partition named
+`LAPEE_NONVOLATILE`, and contains the LapEE provisioning marker. The OVMF
 firmware in this test is not expected to complete Secure Boot enrollment; the
 test is only asserting the non-volatile disk preparation path.
 
@@ -451,9 +455,12 @@ The image contains:
 
 If a disk was provisioned with a `LAPEE_NONVOLATILE` partition, the runtime
 mounts it only after a green-zone key is available. Fresh partitions are
-formatted as LUKS2 plus ext4 with a key derived from the zone secret. Existing
-encrypted volumes are opened and mounted; normal runtime activation never
-reformats an existing LUKS volume.
+formatted as LUKS2 plus ext4 with a key derived from the zone secret, and the
+fresh-format path requires the LapEE provisioning marker written by the
+provisioner. Existing encrypted volumes are opened and mounted; normal runtime
+activation never reformats an existing LUKS volume. Because the disk key is
+derived from the green-zone secret, a rebooted node must be able to rejoin a
+live holder of that same zone secret before it can reopen the store.
 
 The build uses a Buildroot-built target toolchain
 (`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,

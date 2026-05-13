@@ -14,7 +14,7 @@ BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 IMG=${IMG:-$BUILD_DIR/images/lapee-sb-provisioner.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-provisioner-nonvolatile}
 TIMEOUT=${TIMEOUT:-240}
-DISK_SIZE_MIB=${DISK_SIZE_MIB:-128}
+DISK_SIZE_MIB=${DISK_SIZE_MIB:-64}
 
 while (($# > 0)); do
     case "$1" in
@@ -64,6 +64,17 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 cp "$IMG" "$OUTDIR/provisioner.img"
 cp "$OVMF_VARS_TEMPLATE" "$OUTDIR/vars.fd"
 truncate -s "${DISK_SIZE_MIB}M" "$OUTDIR/nonvolatile.img"
+python3 - "$OUTDIR/nonvolatile.img" <<'PY'
+import os, sys
+
+sentinel = b"LAPEE_OLD_PLAINTEXT_SENTINEL_DO_NOT_SURVIVE"
+path = sys.argv[1]
+size = os.path.getsize(path)
+with open(path, "r+b") as f:
+    for off in range(2 * 1024 * 1024, size, 1024 * 1024):
+        f.seek(off)
+        f.write(sentinel)
+PY
 
 QMP="$OUTDIR/qmp.sock"
 SERIAL="$OUTDIR/serial.log"
@@ -151,6 +162,9 @@ wait_log "Prepared /dev/vdb1 as LAPEE_NONVOLATILE"
 python3 - "$OUTDIR/nonvolatile.img" <<'PY'
 import struct, sys
 
+sentinel = b"LAPEE_OLD_PLAINTEXT_SENTINEL_DO_NOT_SURVIVE"
+marker = b"LapEE nonvolatile provisioning marker v1\n"
+
 with open(sys.argv[1], "rb") as f:
     f.seek(512)
     header = f.read(512)
@@ -166,6 +180,13 @@ with open(sys.argv[1], "rb") as f:
             continue
         name = entry[56:128].decode("utf-16le").rstrip("\0")
         if name == "LAPEE_NONVOLATILE":
+            first_lba = struct.unpack_from("<Q", entry, 32)[0]
+            f.seek(first_lba * 512)
+            if f.read(len(marker)) != marker:
+                raise SystemExit("missing LapEE nonvolatile marker")
+            f.seek(0)
+            if sentinel in f.read():
+                raise SystemExit("old plaintext sentinel survived provisioning")
             print("found LAPEE_NONVOLATILE partition")
             raise SystemExit(0)
 raise SystemExit("LAPEE_NONVOLATILE partition not found")

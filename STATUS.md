@@ -16,6 +16,9 @@ Production hardening for encrypted non-volatile storage on
 - Hardened provisioner selection by revalidating the selected disk immediately
   before destructive writes and checking the written GPT partition name from
   disk contents.
+- Hardened first-format authorization: the provisioner rejects removable/USB
+  candidates, zero-erases the selected disk, writes a LapEE partition marker,
+  and runtime refuses to first-format a non-LUKS partition without that marker.
 - Rebuilt fresh signed no-TME runtime and Secure Boot provisioner images.
 
 ## Active Checks
@@ -32,6 +35,7 @@ Production hardening for encrypted non-volatile storage on
 - `make runtime-image TME=0 WIFI=0`
 - `make qemu-provisioner-nonvolatile`
   - `found LAPEE_NONVOLATILE partition`
+  - sentinel plaintext scan passed after full-disk erase
   - `=== provisioner non-volatile QEMU smoke PASSED ===`
 - `make qemu-green-zone-nonvolatile`
   - `node 4 rejected as expected`
@@ -47,3 +51,6 @@ Production hardening for encrypted non-volatile storage on
   Current decision: no, first mounted store wins.
 - Whether optional storage failure should prevent joining a green zone.
   Current decision: no, report status and keep the node live.
+- Full-cluster cold restart requires at least one live peer or a future
+  TPM-sealed recovery design, because v1 derives the disk key from the
+  green-zone secret rather than operator material.

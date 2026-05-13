@@ -15,6 +15,7 @@
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
 -define(KEY_DIR, "/run/lapee/nonvolatile-keys").
+-define(FORMAT_MARKER, <<"LapEE nonvolatile provisioning marker v1\n">>).
 
 activate(Name, AES, Opts) when is_binary(Name), is_binary(AES) ->
     case hb_opts:get(<<"lapee-nonvolatile">>, true, Opts) of
@@ -182,54 +183,122 @@ ensure_luks(Partition, KeyFile, AllowFormat) ->
         {error, _} when AllowFormat =:= false ->
             {error, <<"not-luks">>};
         {error, _} ->
-            case run(
-                <<"cryptsetup">>,
-                [
-                    <<"luksFormat">>,
-                    <<"--batch-mode">>,
-                    <<"--type">>, <<"luks2">>,
-                    <<"--label">>, ?DEFAULT_LABEL,
-                    <<"--cipher">>, <<"aes-xts-plain64">>,
-                    <<"--key-size">>, <<"256">>,
-                    <<"--hash">>, <<"sha256">>,
-                    <<"--key-file">>, KeyFile,
-                    Partition
-                ]
-            ) of
-                {ok, _} ->
-                    sync_storage(),
-                    {ok, true};
-                Error -> Error
+            case has_format_marker(Partition) of
+                true ->
+                    case run(
+                        <<"cryptsetup">>,
+                        [
+                            <<"luksFormat">>,
+                            <<"--batch-mode">>,
+                            <<"--type">>, <<"luks2">>,
+                            <<"--label">>, ?DEFAULT_LABEL,
+                            <<"--cipher">>, <<"aes-xts-plain64">>,
+                            <<"--key-size">>, <<"256">>,
+                            <<"--hash">>, <<"sha256">>,
+                            <<"--key-file">>, KeyFile,
+                            Partition
+                        ]
+                    ) of
+                        {ok, _} ->
+                            sync_storage(),
+                            {ok, true};
+                        Error -> Error
+                    end;
+                false ->
+                    {error, <<"missing-provisioning-marker">>}
             end
+    end.
+
+has_format_marker(Partition) ->
+    case file:open(Partition, [read, raw, binary]) of
+        {ok, FD} ->
+            try
+                case file:pread(FD, 0, byte_size(?FORMAT_MARKER)) of
+                    {ok, ?FORMAT_MARKER} -> true;
+                    _ -> false
+                end
+            after
+                file:close(FD)
+            end;
+        _ ->
+            false
     end.
 
 ensure_open(Partition, Mapper, KeyFile) ->
     case file:read_file_info(binary_to_list(<<"/dev/mapper/", Mapper/binary>>)) of
         {ok, _} ->
-            ok;
+            run(<<"cryptsetup">>, [<<"close">>, Mapper]),
+            open_luks(Partition, Mapper, KeyFile);
         _ ->
-            case run(
-                <<"cryptsetup">>,
-                [
-                    <<"open">>,
-                    <<"--key-file">>, KeyFile,
-                    Partition,
-                    Mapper
-                ]
-            ) of
-                {ok, _} -> ok;
-                Error -> Error
-            end
+            open_luks(Partition, Mapper, KeyFile)
+    end.
+
+open_luks(Partition, Mapper, KeyFile) ->
+    case run(
+        <<"cryptsetup">>,
+        [
+            <<"open">>,
+            <<"--key-file">>, KeyFile,
+            Partition,
+            Mapper
+        ]
+    ) of
+        {ok, _} -> ok;
+        Error -> Error
     end.
 
 ensure_filesystem(MapperDev, FreshLuks, AllowFormat) ->
-    case {FreshLuks, AllowFormat} of
-        {true, true} ->
+    case filesystem_type(MapperDev) of
+        {ok, <<"ext4">>} ->
+            {ok, false};
+        {ok, Other} ->
+            {error, #{<<"unexpected-filesystem">> => Other}};
+        unknown when FreshLuks =:= true, AllowFormat =:= true ->
             make_ext4(MapperDev);
-        {true, false} ->
+        unknown when FreshLuks =:= true ->
             {error, <<"missing-filesystem">>};
-        {false, _} ->
+        unknown ->
             {ok, false}
+    end.
+
+filesystem_type(MapperDev) ->
+    case run(
+        <<"blkid">>,
+        [<<"-o">>, <<"value">>, <<"-s">>, <<"TYPE">>, MapperDev]
+    ) of
+        {ok, Type0} ->
+            parse_blkid_type(Type0);
+        {error, _} ->
+            unknown
+    end.
+
+parse_blkid_type(Output) ->
+    Type = clean_blkid_type(Output),
+    case Type of
+        <<>> -> unknown;
+        _ -> {ok, Type}
+    end.
+
+clean_blkid_type(Output) ->
+    Clean = string:trim(binary:replace(Output, <<"\n">>, <<" ">>, [global])),
+    case binary:split(Clean, <<"TYPE=\"">>) of
+        [_Before, Rest] ->
+            hd(binary:split(Rest, <<"\"">>));
+        [_] ->
+            case binary:match(Clean, <<"TYPE=">>) of
+                {Start, _} ->
+                    Value0 = binary:part(
+                        Clean,
+                        Start + byte_size(<<"TYPE=">>),
+                        byte_size(Clean) - Start - byte_size(<<"TYPE=">>)
+                    ),
+                    hd(binary:split(Value0, <<" ">>));
+                nomatch ->
+                    case binary:match(Clean, <<": ">>) of
+                        nomatch -> Clean;
+                        _ -> <<>>
+                    end
+            end
     end.
 
 make_ext4(MapperDev) ->

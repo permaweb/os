@@ -257,6 +257,30 @@ prepare_nonvolatile_disk() {
             parted -s /work/nonvolatile.img mklabel gpt \
                 mkpart LAPEE_NONVOLATILE 1MiB 100%
         '
+    python3 - "$disk" <<'PY'
+import struct, sys
+
+marker = b"LapEE nonvolatile provisioning marker v1\n"
+with open(sys.argv[1], "r+b") as f:
+    f.seek(512)
+    header = f.read(512)
+    if header[:8] != b"EFI PART":
+        raise SystemExit("missing GPT header")
+    entries_lba = struct.unpack_from("<Q", header, 72)[0]
+    entries = struct.unpack_from("<I", header, 80)[0]
+    entry_size = struct.unpack_from("<I", header, 84)[0]
+    f.seek(entries_lba * 512)
+    for _ in range(entries):
+        entry = f.read(entry_size)
+        if entry[:16] == b"\0" * 16:
+            continue
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "LAPEE_NONVOLATILE":
+            first_lba = struct.unpack_from("<Q", entry, 32)[0]
+            f.seek(first_lba * 512)
+            f.write(marker)
+            raise SystemExit(0)
+raise SystemExit("LAPEE_NONVOLATILE partition not found")
+PY
 }
 
 start_node() {
