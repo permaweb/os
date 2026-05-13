@@ -4,8 +4,9 @@
 %%% green-zone key exists, scans first for a zone-specific GPT partition label
 %%% and then for `GREENZONE_PRIMARY', and uses the zone AES secret to open or
 %%% initialize an encrypted ext4 volume. On success the mounted LMDB becomes
-%%% the first local HyperBEAM store; missing keys from the temporary boot LMDB
-%%% are copied across so early boot cache entries survive the transition.
+%%% the first local HyperBEAM store. Missing keys from the temporary boot LMDB
+%%% are copied across, then current-boot pseudo-paths are refreshed into the
+%%% persistent store before it can affect HyperBEAM cache reads.
 -module(lapee_nonvolatile).
 
 -export([activate/4, status/1]).
@@ -16,6 +17,7 @@
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
+-define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
 -define(KEY_DIR, "/run/lapee/nonvolatile-keys").
 -define(FORMAT_MARKER, <<"LapEE nonvolatile provisioning marker v1\n">>).
 -define(VOLUME_ID_FILE, ".lapee-volume-id").
@@ -43,17 +45,28 @@ activate_enabled_locked(Name, RingAddress, AES, Opts) ->
             case mapper_mounted_at_default() of
                 true ->
                     Store = persistent_store(?DEFAULT_MOUNT, Opts),
-                    Migration = migrate_primary_lmdb(Store, Opts),
-                    Status = mounted_status(
-                        Name,
-                        RingAddress,
-                        mapper_source_partition(),
-                        Store,
-                        false,
-                        false,
-                        Migration
-                    ),
-                    {ok, set_status(install_store(Store, Opts), Status)};
+                    case prepare_persistent_store(Store, Opts) of
+                        {ok, Migration} ->
+                            Status = mounted_status(
+                                Name,
+                                RingAddress,
+                                mapper_source_partition(),
+                                Store,
+                                false,
+                                false,
+                                Migration
+                            ),
+                            {ok, set_status(install_store(Store, Opts), Status)};
+                        {error, Reason} ->
+                            Status = refresh_error_status(
+                                Name,
+                                RingAddress,
+                                mapper_source_partition(),
+                                Store,
+                                Reason
+                            ),
+                            {ok, set_status(Opts, Status)}
+                    end;
                 false ->
                     activate_unmounted(Name, RingAddress, AES, Opts)
             end
@@ -114,17 +127,23 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
                             MapperDev, ?DEFAULT_MOUNT, LuksFormatted) of
                             {ok, FsFormatted} ->
                                 Store = persistent_store(?DEFAULT_MOUNT, Opts),
-                                Migration = migrate_primary_lmdb(Store, Opts),
-                                {ok, Store, mounted_status(
-                                    Name,
-                                    RingAddress,
-                                    Label,
-                                    unicode:characters_to_binary(Partition),
-                                    Store,
-                                    LuksFormatted,
-                                    FsFormatted,
-                                    Migration
-                                )};
+                                case prepare_persistent_store(Store, Opts) of
+                                    {ok, Migration} ->
+                                        {ok, Store, mounted_status(
+                                            Name,
+                                            RingAddress,
+                                            Label,
+                                            unicode:characters_to_binary(Partition),
+                                            Store,
+                                            LuksFormatted,
+                                            FsFormatted,
+                                            Migration
+                                        )};
+                                    {error, Reason} ->
+                                        activation_error(
+                                            <<"current-boot-refresh-failed">>,
+                                            Reason)
+                                end;
                             {error, Reason} ->
                                 activation_error(<<"filesystem-failed">>, Reason)
                         end;
@@ -179,6 +198,26 @@ activation_error(Code, Reason) ->
         <<"error">> => Code,
         <<"detail">> => command_reason(Reason)
     }}.
+
+refresh_error_status(Name, RingAddress, Partition, Store, Reason) ->
+    Status0 = #{
+        <<"enabled">> => true,
+        <<"mounted">> => false,
+        <<"zone">> => Name,
+        <<"ring-address">> => RingAddress,
+        <<"partition-label">> => partition_label_from_path(Partition),
+        <<"zone-partition-label">> => zone_partition_label(RingAddress),
+        <<"primary-partition-label">> => ?PRIMARY_LABEL,
+        <<"mapper">> => ?DEFAULT_MAPPER,
+        <<"mount-point">> => ?DEFAULT_MOUNT,
+        <<"store">> => hb_maps:get(<<"name">>, Store, undefined, #{}),
+        <<"error">> => <<"current-boot-refresh-failed">>,
+        <<"detail">> => command_reason(Reason)
+    },
+    case Partition of
+        undefined -> Status0;
+        _ -> Status0#{<<"partition">> => Partition}
+    end.
 
 disk_key(Name, RingAddress, AES) ->
     crypto:hash(
@@ -578,6 +617,61 @@ migrate_lmdb_dir(SourceStore, _SourceName, DestName) ->
             #{<<"status">> => <<"failed">>,
               <<"reason">> => unicode:characters_to_binary(
                   io_lib:format("~p", [Reason]))}
+    end.
+
+prepare_persistent_store(Store, Opts) ->
+    Migration = migrate_primary_lmdb(Store, Opts),
+    case refresh_current_boot_paths(Store, Opts) of
+        {ok, Refresh} ->
+            {ok, Migration#{<<"current-boot">> => Refresh}};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+refresh_current_boot_paths(Store, Opts) ->
+    try
+        refresh_current_boot_paths_unchecked(Store, Opts)
+    catch
+        Class:Reason ->
+            {error, #{
+                <<"class">> => hb_util:bin(Class),
+                <<"reason">> =>
+                    unicode:characters_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end.
+
+refresh_current_boot_paths_unchecked(Store, Opts) ->
+    PersistentOpts = Opts#{
+        <<"store">> => [Store],
+        <<"match-index">> => [Store]
+    },
+    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
+        {ok, Boot0} ->
+            Boot = hb_cache:ensure_all_loaded(Boot0, Opts),
+            SignedID = hb_message:id(Boot, signed, Opts),
+            {ok, _UnsignedID} = hb_cache:write(Boot, PersistentOpts),
+            ok = hb_cache:link(
+                SignedID,
+                ?BOOT_ATTESTATION_PATH,
+                PersistentOpts
+            ),
+            sync_storage(),
+            {ok, #{
+                <<"status">> => <<"refreshed">>,
+                <<"boot-attestation-id">> => SignedID,
+                <<"paths">> => [?BOOT_ATTESTATION_PATH]
+            }};
+        {error, Reason} ->
+            {error, #{
+                <<"path">> => ?BOOT_ATTESTATION_PATH,
+                <<"reason">> => command_reason(Reason)
+            }};
+        Other ->
+            {error, #{
+                <<"path">> => ?BOOT_ATTESTATION_PATH,
+                <<"reason">> =>
+                    unicode:characters_to_binary(io_lib:format("~p", [Other]))
+            }}
     end.
 
 install_store(Store, Opts) ->

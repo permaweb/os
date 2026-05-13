@@ -407,8 +407,10 @@ make qemu-green-zone-nonvolatile
 That adds a second virtio disk per node, pre-provisioned with the
 `GREENZONE_PRIMARY` GPT partition name. Admitted nodes initialize or open
 the disk using the green-zone secret, mount it as their primary HyperBEAM
-store, copy the boot LMDB into it, then reboot one node to prove the existing
-encrypted volume is reopened rather than reformatted.
+store, copy the boot LMDB into it, refresh current-boot pseudo-paths such as
+`~tpm@2.0a/boot-attestation`, then reboot one node with changed boot evidence
+to prove the existing encrypted volume is reopened rather than reformatted and
+cannot shadow the current boot's attestation.
 
 Run the provisioner storage-selection smoke test:
 
@@ -469,6 +471,12 @@ volumes are opened and mounted; normal runtime activation never reformats an
 existing LUKS volume. Because the disk key is derived from the green-zone
 secret, a rebooted node must be able to rejoin a live holder of that same zone
 secret before it can reopen the store.
+
+Before an opened non-volatile LMDB becomes the first HyperBEAM store, LapEE
+rewrites current-boot pseudo-paths such as `~tpm@2.0a/boot-attestation` into
+that store from the fresh volatile cache. Activation fails closed if those
+links cannot be refreshed, so stale persistent boot evidence cannot shadow the
+current boot after a zone is joined.
 
 The build uses a Buildroot-built target toolchain
 (`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,

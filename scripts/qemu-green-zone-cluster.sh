@@ -368,26 +368,31 @@ start_node() {
         return 1
     fi
     tpm_pids+=("$(cat "$node_dir/tpm/swtpm.pid")")
-    local nonvolatile_drive=()
+    local qemu_args=(
+        qemu-system-x86_64
+        -machine q35,accel=tcg
+        -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx
+        -m "$memory_mib" -smp 4
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
+        -drive "if=pflash,format=raw,file=$node_dir/vars.fd"
+        -drive "file=$node_dir/disk.img,format=raw,if=virtio"
+    )
     if [[ "$NONVOLATILE" = "1" ]]; then
-        nonvolatile_drive=(-drive "file=$node_dir/nonvolatile.img,format=raw,if=virtio,cache=writethrough")
+        qemu_args+=(
+            -drive "file=$node_dir/nonvolatile.img,format=raw,if=virtio,cache=writethrough"
+        )
     fi
-    qemu-system-x86_64 \
-        -machine q35,accel=tcg \
-        -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx \
-        -m "$memory_mib" -smp 4 \
-        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
-        -drive "if=pflash,format=raw,file=$node_dir/vars.fd" \
-        -drive "file=$node_dir/disk.img,format=raw,if=virtio" \
-        "${nonvolatile_drive[@]}" \
-        -smbios "type=1,product=$dmi_product" \
-        -chardev "$qemu_chardev" \
-        -tpmdev emulator,id=tpm0,chardev=chrtpm \
-        -device tpm-tis,tpmdev=tpm0 \
-        -monitor "unix:$monitor,server,nowait" \
-        -netdev "user,id=net0,hostfwd=tcp::${port}-:8734" \
-        -device virtio-net-pci,netdev=net0 \
-        -nographic \
+    qemu_args+=(
+        -smbios "type=1,product=$dmi_product"
+        -chardev "$qemu_chardev"
+        -tpmdev emulator,id=tpm0,chardev=chrtpm
+        -device tpm-tis,tpmdev=tpm0
+        -monitor "unix:$monitor,server,nowait"
+        -netdev "user,id=net0,hostfwd=tcp::${port}-:8734"
+        -device virtio-net-pci,netdev=net0
+        -nographic
+    )
+    "${qemu_args[@]}" \
         > "$node_dir/serial.log" 2>&1 &
     pids+=("$!")
     echo "$!" > "$node_dir/qemu.pid"
@@ -498,6 +503,37 @@ assert_nonvolatile_reused() {
         jq '.body."nonvolatile-storage"' "$file" >&2
         exit 1
     }
+}
+
+boot_memtotal_kb() {
+    jq -r '.body.system.memory.meminfo.memtotal.value' "$1"
+}
+
+assert_current_boot_attestation_after_join() {
+    local before_reboot=$1
+    local reboot_before_join=$2
+    local reboot_after_join=$3
+    local first_mem reboot_mem post_join_mem
+    first_mem=$(boot_memtotal_kb "$before_reboot")
+    reboot_mem=$(boot_memtotal_kb "$reboot_before_join")
+    post_join_mem=$(boot_memtotal_kb "$reboot_after_join")
+    if [[ -z "$first_mem" || -z "$reboot_mem" || -z "$post_join_mem" ||
+          "$first_mem" = "null" || "$reboot_mem" = "null" ||
+          "$post_join_mem" = "null" ]]; then
+        echo "!! could not read boot-attestation memory evidence" >&2
+        exit 1
+    fi
+    if [[ "$first_mem" = "$reboot_mem" ]]; then
+        echo "!! reboot did not change boot-attested memory evidence" >&2
+        exit 1
+    fi
+    if [[ "$post_join_mem" != "$reboot_mem" ]]; then
+        echo "!! persistent store shadowed current boot-attestation after join" >&2
+        echo "first boot memtotal:       $first_mem" >&2
+        echo "reboot pre-join memtotal:  $reboot_mem" >&2
+        echo "reboot post-join memtotal: $post_join_mem" >&2
+        exit 1
+    fi
 }
 
 assert_nonvolatile_disk_unformatted() {
@@ -719,10 +755,15 @@ if [[ "$NONVOLATILE" = "1" ]]; then
         "$OUTDIR/responses/node2-status.json")
     assert_nonvolatile_disk_unformatted 4
     echo ">> rejected node 4 left its non-volatile disk unformatted"
-    echo ">> rebooting node 2 to verify non-volatile store reuse"
+    cp "$OUTDIR/responses/node2-boot-attestation.json" \
+        "$OUTDIR/responses/node2-first-boot-attestation.json"
+    echo ">> rebooting node 2 with changed boot evidence to verify non-volatile store reuse"
     stop_node 2
+    NODE2_MEMORY_MIB=$((NODE2_MEMORY_MIB + 512))
     start_node 2 "$IMG" 0
     wait_node 2
+    cp "$OUTDIR/responses/node2-boot-attestation.json" \
+        "$OUTDIR/responses/node2-reboot-prejoin-boot-attestation.json"
     get_json 2 "/~tpm@2.0a/credential-subject" \
         "$OUTDIR/responses/node2-reboot-credential-subject.json"
     python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
@@ -741,6 +782,13 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json" \
         "$node2_volume_id"
     echo ">> node 2 reopened the same encrypted non-volatile volume after reboot"
+    get_json 2 "/~tpm@2.0a/boot-attestation" \
+        "$OUTDIR/responses/node2-reboot-postjoin-boot-attestation.json"
+    assert_current_boot_attestation_after_join \
+        "$OUTDIR/responses/node2-first-boot-attestation.json" \
+        "$OUTDIR/responses/node2-reboot-prejoin-boot-attestation.json" \
+        "$OUTDIR/responses/node2-reboot-postjoin-boot-attestation.json"
+    echo ">> node 2 boot-attestation stayed current after non-volatile activation"
 fi
 
 for n in 1 2 3; do
