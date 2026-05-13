@@ -13,6 +13,9 @@ Production hardening for encrypted non-volatile storage on
 - Prepended the mounted LMDB as primary store and merged the boot LMDB.
 - Added QEMU green-zone non-volatile reboot acceptance test.
 - Added provisioner QEMU smoke test for the destructive partition-label flow.
+- Added `GREENZONE_PRIMARY` and `GREENZONE_<ring-address-prefix>` partition
+  labels so a disk can either bind to the first joined zone or to a named zone
+  prefix.
 - Added peer-audited hardening for idempotent activation and first-format
   safety.
 - Hardened provisioner selection by revalidating the selected disk immediately
@@ -37,14 +40,14 @@ Production hardening for encrypted non-volatile storage on
 - `sh -n buildroot-external/board/lapee/rootfs-overlay/init`
 - `bash -n scripts/qemu-provisioner-nonvolatile.sh`
 - `bash -n scripts/qemu-green-zone-cluster.sh`
-- `erlc -I build/hyperbeam/src-edge/src -o /tmp hyperbeam-overlay/src/lapee_nonvolatile.erl`
-- `git diff --check -- README.md STATUS.md decisions/nonvolatile-storage-production.md buildroot-external/board/lapee/rootfs-overlay/init hyperbeam-overlay/src/lapee_nonvolatile.erl scripts/qemu-provisioner-nonvolatile.sh`
+- `erlc -I build/hyperbeam/src-edge/src -o /tmp hyperbeam-overlay/src/lapee_nonvolatile.erl hyperbeam-overlay/src/dev_green_zone.erl`
+- `git diff --check -- README.md STATUS.md decisions/nonvolatile-storage-production.md buildroot-external/board/lapee/rootfs-overlay/init hyperbeam-overlay/src/dev_green_zone.erl hyperbeam-overlay/src/lapee_nonvolatile.erl scripts/qemu-green-zone-cluster.sh scripts/qemu-provisioner-nonvolatile.sh`
 - `make provisioner-image`
 - `make runtime-image TME=0 WIFI=0`
   - `Signature verification OK`
   - signed image: `build/images/lapee-runtime-no-tme-signed.img`
 - `make qemu-provisioner-nonvolatile`
-  - `found LAPEE_NONVOLATILE partition`
+  - `found GREENZONE_test-zone partition`
   - `=== provisioner non-volatile QEMU smoke PASSED ===`
 - `make qemu-green-zone-nonvolatile`
   - `node 4 rejected as expected`

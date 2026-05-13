@@ -275,14 +275,20 @@ Boot that USB once with firmware in Secure Boot Setup Mode. After the
 `I UNDERSTAND.` confirmation, the provisioner lists writable non-boot disks.
 To prepare one for encrypted green-zone storage, type `DESTROY N` for the
 listed disk number; to leave persistent storage unconfigured, type `SKIP`.
-`DESTROY N` destroys the selected disk's partition table and creates a GPT
-partition named `LAPEE_NONVOLATILE` with a LapEE provisioning marker at the
-start of the partition. It is not a secure erase; the runtime will overwrite
-the selected partition with LUKS2 before use. The runtime image will only
-first-format a non-LUKS partition when both the GPT partition name and the
-LapEE marker are present. The provisioner excludes the boot disk and obvious
-pseudo block devices, then rechecks that the selected disk is still a writable
-non-boot block device immediately before modifying it.
+`DESTROY N` creates a `GREENZONE_PRIMARY` GPT partition, which binds to the
+first green-zone the node successfully joins. To pre-bind the disk to a
+specific zone, type `DESTROY N -> PREFIX`, where `PREFIX` is the first
+characters of that zone's ring address; the partition will be named
+`GREENZONE_PREFIX`, truncated to fit GPT's partition-name limit.
+
+Either form destroys the selected disk's partition table and writes a LapEE
+provisioning marker at the start of the new partition. It is not a secure
+erase; the runtime will overwrite the selected partition with LUKS2 before
+use. The runtime image will only first-format a non-LUKS partition when both
+the expected GPT partition name and the LapEE marker are present. The
+provisioner excludes the boot disk and obvious pseudo block devices, then
+rechecks that the selected disk is still a writable non-boot block device
+immediately before modifying it.
 
 The provisioner should then print the enrollment progress and stop. Some
 firmware still reports `SetupMode=1` until the next power cycle even after
@@ -399,7 +405,7 @@ make qemu-green-zone-nonvolatile
 ```
 
 That adds a second virtio disk per node, pre-provisioned with the
-`LAPEE_NONVOLATILE` GPT partition name. Admitted nodes initialize or open
+`GREENZONE_PRIMARY` GPT partition name. Admitted nodes initialize or open
 the disk using the green-zone secret, mount it as their primary HyperBEAM
 store, copy the boot LMDB into it, then reboot one node to prove the existing
 encrypted volume is reopened rather than reformatted.
@@ -411,11 +417,11 @@ make qemu-provisioner-nonvolatile
 ```
 
 That boots the provisioner image with a sacrificial disk, types the real
-`I UNDERSTAND.` and `DESTROY 1` prompts through QEMU, and verifies that the
-extra disk receives a GPT partition named `LAPEE_NONVOLATILE` and contains
-the LapEE provisioning marker. The OVMF firmware in this test is not expected
-to complete Secure Boot enrollment; the test is only asserting the
-non-volatile disk preparation path.
+`I UNDERSTAND.` and `DESTROY 1 -> test-zone` prompts through QEMU, and
+verifies that the extra disk receives a GPT partition named
+`GREENZONE_test-zone` and contains the LapEE provisioning marker. The OVMF
+firmware in this test is not expected to complete Secure Boot enrollment; the
+test is only asserting the non-volatile disk preparation path.
 
 Run the operator `config.json` attestation gate:
 
@@ -453,14 +459,16 @@ The image contains:
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
 
-If a disk was provisioned with a `LAPEE_NONVOLATILE` partition, the runtime
-mounts it only after a green-zone key is available. Fresh partitions are
-formatted as LUKS2 plus ext4 with a key derived from the zone secret, and the
-fresh-format path requires the LapEE provisioning marker written by the
-provisioner. Existing encrypted volumes are opened and mounted; normal runtime
-activation never reformats an existing LUKS volume. Because the disk key is
-derived from the green-zone secret, a rebooted node must be able to rejoin a
-live holder of that same zone secret before it can reopen the store.
+If a disk was provisioned with a `GREENZONE_<ring-address-prefix>` partition,
+the runtime tries that partition first after joining the matching green-zone.
+If no zone-specific partition exists, it falls back to `GREENZONE_PRIMARY`.
+Fresh partitions are formatted as LUKS2 plus ext4 with a key derived from the
+zone name, ring address, and zone secret, and the fresh-format path requires
+the LapEE provisioning marker written by the provisioner. Existing encrypted
+volumes are opened and mounted; normal runtime activation never reformats an
+existing LUKS volume. Because the disk key is derived from the green-zone
+secret, a rebooted node must be able to rejoin a live holder of that same zone
+secret before it can reopen the store.
 
 The build uses a Buildroot-built target toolchain
 (`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,

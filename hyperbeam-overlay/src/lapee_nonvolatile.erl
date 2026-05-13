@@ -1,16 +1,18 @@
 %%% @doc LapEE non-volatile store activation.
 %%%
 %%% This module is deliberately not an HTTP device. It is called only after a
-%%% green-zone key exists, scans for a partition explicitly provisioned as
-%%% `LAPEE_NONVOLATILE', and uses the zone AES secret to open or initialize an
-%%% encrypted ext4 volume. On success the mounted LMDB becomes the first local
-%%% HyperBEAM store; missing keys from the temporary boot LMDB are copied across
-%%% so early boot cache entries survive the transition.
+%%% green-zone key exists, scans first for a zone-specific GPT partition label
+%%% and then for `GREENZONE_PRIMARY', and uses the zone AES secret to open or
+%%% initialize an encrypted ext4 volume. On success the mounted LMDB becomes
+%%% the first local HyperBEAM store; missing keys from the temporary boot LMDB
+%%% are copied across so early boot cache entries survive the transition.
 -module(lapee_nonvolatile).
 
--export([activate/3, status/1]).
+-export([activate/4, status/1]).
 
--define(DEFAULT_LABEL, <<"LAPEE_NONVOLATILE">>).
+-define(PRIMARY_LABEL, <<"GREENZONE_PRIMARY">>).
+-define(ZONE_LABEL_PREFIX, <<"GREENZONE_">>).
+-define(MAX_ZONE_LABEL_PREFIX_BYTES, 26).
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
@@ -19,43 +21,53 @@
 -define(VOLUME_ID_FILE, ".lapee-volume-id").
 -define(FORMAT_TIMEOUT_MS, 1800000).
 
-activate(Name, AES, Opts) when is_binary(Name), is_binary(AES) ->
-    activate_enabled(Name, AES, Opts).
+activate(Name, RingAddress, AES, Opts)
+        when is_binary(Name), is_binary(RingAddress), is_binary(AES) ->
+    activate_enabled(Name, RingAddress, AES, Opts).
 
 status(Opts) ->
     hb_opts:get(<<"lapee-nonvolatile-status">>, #{}, Opts).
 
-activate_enabled(Name, AES, Opts) ->
+activate_enabled(Name, RingAddress, AES, Opts) ->
     global:trans(
         {?MODULE, activation},
-        fun() -> activate_enabled_locked(Name, AES, Opts) end,
+        fun() -> activate_enabled_locked(Name, RingAddress, AES, Opts) end,
         [node()]
     ).
 
-activate_enabled_locked(Name, AES, Opts) ->
-    case mounted(Opts) orelse mapper_mounted_at_default() of
+activate_enabled_locked(Name, RingAddress, AES, Opts) ->
+    case mounted(Opts) of
         true ->
-            Store = persistent_store(?DEFAULT_MOUNT, Opts),
-            Migration = migrate_primary_lmdb(Store, Opts),
-            Status = mounted_status(
-                Name,
-                mapper_source_partition(),
-                Store,
-                false,
-                false,
-                Migration
-            ),
-            {ok, set_status(install_store(Store, Opts), Status)};
+            {ok, Opts};
         false ->
-            case do_activate(Name, AES, Opts) of
-                {ok, Store, Status} ->
-                    Opts1 = install_store(Store, Opts),
-                    {ok, set_status(Opts1, Status)};
-                {skip, Status} ->
-                    {ok, set_status(Opts, Status)};
-                {error, Status} ->
-                    {ok, set_status(Opts, Status)}
+            case mapper_mounted_at_default() of
+                true ->
+                    Store = persistent_store(?DEFAULT_MOUNT, Opts),
+                    Migration = migrate_primary_lmdb(Store, Opts),
+                    Status = mounted_status(
+                        Name,
+                        RingAddress,
+                        mapper_source_partition(),
+                        Store,
+                        false,
+                        false,
+                        Migration
+                    ),
+                    {ok, set_status(install_store(Store, Opts), Status)};
+                false ->
+                    activate_unmounted(Name, RingAddress, AES, Opts)
             end
+    end.
+
+activate_unmounted(Name, RingAddress, AES, Opts) ->
+    case do_activate(Name, RingAddress, AES, Opts) of
+        {ok, Store, Status} ->
+            Opts1 = install_store(Store, Opts),
+            {ok, set_status(Opts1, Status)};
+        {skip, Status} ->
+            {ok, set_status(Opts, Status)};
+        {error, Status} ->
+            {ok, set_status(Opts, Status)}
     end.
 
 mounted(Opts) ->
@@ -64,29 +76,34 @@ mounted(Opts) ->
         _ -> false
     end.
 
-do_activate(Name, AES, Opts) ->
-    case labeled_partitions(?DEFAULT_LABEL) of
-        [] ->
+do_activate(Name, RingAddress, AES, Opts) ->
+    case select_partition(RingAddress) of
+        not_found ->
             {skip, #{
                 <<"enabled">> => true,
                 <<"mounted">> => false,
-                <<"partition-label">> => ?DEFAULT_LABEL,
+                <<"zone">> => Name,
+                <<"ring-address">> => RingAddress,
+                <<"zone-partition-label">> => zone_partition_label(RingAddress),
+                <<"primary-partition-label">> => ?PRIMARY_LABEL,
                 <<"reason">> => <<"not-provisioned">>
             }};
-        [Partition] ->
-            activate_partition(Name, AES, Partition, Opts);
-        Parts ->
+        {ok, Label, Partition} ->
+            activate_partition(Name, RingAddress, AES, Label, Partition, Opts);
+        {multiple, Label, Parts} ->
             {error, #{
                 <<"enabled">> => true,
                 <<"mounted">> => false,
-                <<"partition-label">> => ?DEFAULT_LABEL,
+                <<"zone">> => Name,
+                <<"ring-address">> => RingAddress,
+                <<"partition-label">> => Label,
                 <<"error">> => <<"multiple-nonvolatile-partitions">>,
                 <<"partitions">> => [unicode:characters_to_binary(P) || P <- Parts]
             }}
     end.
 
-activate_partition(Name, AES, Partition, Opts) ->
-    Key = disk_key(Name, AES),
+activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
+    Key = disk_key(Name, RingAddress, AES),
     with_key_file(Key, fun(KeyFile) ->
         case ensure_luks(Partition, KeyFile) of
             {ok, LuksFormatted} ->
@@ -100,6 +117,8 @@ activate_partition(Name, AES, Partition, Opts) ->
                                 Migration = migrate_primary_lmdb(Store, Opts),
                                 {ok, Store, mounted_status(
                                     Name,
+                                    RingAddress,
+                                    Label,
                                     unicode:characters_to_binary(Partition),
                                     Store,
                                     LuksFormatted,
@@ -117,12 +136,29 @@ activate_partition(Name, AES, Partition, Opts) ->
         end
     end).
 
-mounted_status(Name, Partition, Store, LuksFormatted, FsFormatted, Migration) ->
+mounted_status(Name, RingAddress, Partition, Store,
+        LuksFormatted, FsFormatted, Migration) ->
+    mounted_status(
+        Name,
+        RingAddress,
+        partition_label_from_path(Partition),
+        Partition,
+        Store,
+        LuksFormatted,
+        FsFormatted,
+        Migration
+    ).
+
+mounted_status(Name, RingAddress, Label, Partition, Store,
+        LuksFormatted, FsFormatted, Migration) ->
     Status0 = #{
         <<"enabled">> => true,
         <<"mounted">> => true,
         <<"zone">> => Name,
-        <<"partition-label">> => ?DEFAULT_LABEL,
+        <<"ring-address">> => RingAddress,
+        <<"partition-label">> => Label,
+        <<"zone-partition-label">> => zone_partition_label(RingAddress),
+        <<"primary-partition-label">> => ?PRIMARY_LABEL,
         <<"mapper">> => ?DEFAULT_MAPPER,
         <<"mount-point">> => ?DEFAULT_MOUNT,
         <<"store">> => hb_maps:get(<<"name">>, Store, undefined, #{}),
@@ -144,11 +180,41 @@ activation_error(Code, Reason) ->
         <<"detail">> => command_reason(Reason)
     }}.
 
-disk_key(Name, AES) ->
+disk_key(Name, RingAddress, AES) ->
     crypto:hash(
         sha256,
-        [<<"LapEE nonvolatile storage v1">>, 0, Name, 0, AES]
+        [
+            <<"LapEE green-zone nonvolatile storage v1">>,
+            0,
+            Name,
+            0,
+            RingAddress,
+            0,
+            AES
+        ]
     ).
+
+select_partition(RingAddress) ->
+    select_partition_for_labels(
+        [zone_partition_label(RingAddress), ?PRIMARY_LABEL]).
+
+select_partition_for_labels([]) ->
+    not_found;
+select_partition_for_labels([Label | Rest]) ->
+    case labeled_partitions(Label) of
+        [] -> select_partition_for_labels(Rest);
+        [Partition] -> {ok, Label, Partition};
+        Parts -> {multiple, Label, Parts}
+    end.
+
+zone_partition_label(RingAddress) ->
+    <<(?ZONE_LABEL_PREFIX)/binary, (zone_label_prefix(RingAddress))/binary>>.
+
+zone_label_prefix(RingAddress)
+        when byte_size(RingAddress) =< ?MAX_ZONE_LABEL_PREFIX_BYTES ->
+    RingAddress;
+zone_label_prefix(RingAddress) ->
+    binary:part(RingAddress, 0, ?MAX_ZONE_LABEL_PREFIX_BYTES).
 
 labeled_partitions(Label) ->
     case file:list_dir("/sys/class/block") of
@@ -191,6 +257,13 @@ uevent_value(Key, UEvent) ->
         [] -> undefined
     end.
 
+partition_label_from_path(undefined) ->
+    undefined;
+partition_label_from_path(Partition) when is_binary(Partition) ->
+    partition_label_from_path(binary_to_list(Partition));
+partition_label_from_path(Partition) ->
+    partition_label(filename:basename(Partition)).
+
 ensure_luks(Partition, KeyFile) ->
     case run(<<"cryptsetup">>, [<<"isLuks">>, Partition]) of
         {ok, _} ->
@@ -204,7 +277,7 @@ ensure_luks(Partition, KeyFile) ->
                             <<"luksFormat">>,
                             <<"--batch-mode">>,
                             <<"--type">>, <<"luks2">>,
-                            <<"--label">>, ?DEFAULT_LABEL,
+                            <<"--label">>, <<"lapee-nonvolatile">>,
                             <<"--cipher">>, <<"aes-xts-plain64">>,
                             <<"--key-size">>, <<"256">>,
                             <<"--hash">>, <<"sha256">>,
@@ -350,7 +423,7 @@ make_ext4(MapperDev) ->
         [
             <<"-t">>, <<"ext4">>,
             <<"-F">>,
-            <<"-L">>, ?DEFAULT_LABEL,
+            <<"-L">>, <<"lapee-nonvolatile">>,
             MapperDev
         ],
         ?FORMAT_TIMEOUT_MS

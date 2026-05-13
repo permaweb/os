@@ -435,7 +435,7 @@ install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
 
 install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts) ->
     Opts1 = install_ring(Name, Template, AES, Wallet, Members, Opts),
-    case lapee_nonvolatile:activate(Name, AES, Opts1) of
+    case lapee_nonvolatile:activate(Name, wallet_address(Wallet), AES, Opts1) of
         {ok, Opts2} -> Opts2;
         _ -> Opts1
     end.

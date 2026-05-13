@@ -9,10 +9,11 @@ provisioning/runtime/reboot flows.
 ## Current Shape
 
 The provisioner repartitions exactly one operator-selected non-boot disk,
-creates a GPT partition named `LAPEE_NONVOLATILE`, and writes a LapEE marker at
-the partition start. It is deliberately not a secure erase. After a green-zone
-key exists, LapEE derives a disk key from the zone name and AES secret,
-initializes or opens the labeled partition as LUKS2, mounts ext4 with
+creates a GPT partition named either `GREENZONE_PRIMARY` or
+`GREENZONE_<ring-address-prefix>`, and writes a LapEE marker at the partition
+start. It is deliberately not a secure erase. After a green-zone key exists,
+LapEE derives a disk key from the zone name, ring address, and AES secret,
+initializes or opens the best matching labeled partition as LUKS2, mounts ext4 with
 `nodev,nosuid,noexec`, prepends that LMDB store, and copies the boot LMDB into
 it.
 
@@ -22,6 +23,9 @@ it.
 - The runtime does not partition arbitrary disks; it only first-formats a
   partition that has both the expected GPT name and the marker created by the
   provisioner.
+- Runtime prefers a zone-specific `GREENZONE_<ring-address-prefix>` partition
+  and only falls back to `GREENZONE_PRIMARY` when no zone-specific partition is
+  present.
 - The encryption key is not operator supplied and is derived only after the
   node has joined a verified green zone.
 - Existing LUKS volumes are not reformatted on later boots.
@@ -47,6 +51,10 @@ it.
   written only by the explicit provisioner flow after operator confirmation.
   Existing LUKS volumes are never reformatted.
 - Multiple marker partitions are an error. There is no heuristic selection.
+- `GREENZONE_PRIMARY` is intentionally an open binding: the first successful
+  zone join formats it, and later joins must possess that same zone secret to
+  reopen it. Zone-specific labels let operators avoid even attempting a store
+  with the wrong zone.
 - Missing storage is a skip, not a node failure. This keeps green-zone admission
   independent from optional persistence.
 - Storage activation is tied to the first mounted non-volatile store. Multi-zone

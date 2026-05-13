@@ -18,8 +18,8 @@
 #   * node 4 never receives that identity
 #
 # With NONVOLATILE=1, each node also receives a second virtio disk containing
-# a single GPT partition named LAPEE_NONVOLATILE. Nodes 1-3 must format/open it
-# with the green-zone key, mount it as the primary HB store, and node 2 is
+# a single GPT partition named GREENZONE_PRIMARY. Nodes 1-3 must format/open
+# it with the green-zone key, mount it as the primary HB store, and node 2 is
 # rebooted and rejoined to prove the existing encrypted volume is reused.
 
 set -euo pipefail
@@ -293,7 +293,7 @@ prepare_nonvolatile_disk() {
         "$BUILD_IMAGE" \
         bash -euo pipefail -c '
             parted -s /work/nonvolatile.img mklabel gpt \
-                mkpart LAPEE_NONVOLATILE 1MiB 100%
+                mkpart GREENZONE_PRIMARY 1MiB 100%
         '
     python3 - "$disk" <<'PY'
 import struct, sys
@@ -312,12 +312,12 @@ with open(sys.argv[1], "r+b") as f:
         entry = f.read(entry_size)
         if entry[:16] == b"\0" * 16:
             continue
-        if entry[56:128].decode("utf-16le").rstrip("\0") == "LAPEE_NONVOLATILE":
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "GREENZONE_PRIMARY":
             first_lba = struct.unpack_from("<Q", entry, 32)[0]
             f.seek(first_lba * 512)
             f.write(marker)
             raise SystemExit(0)
-raise SystemExit("LAPEE_NONVOLATILE partition not found")
+raise SystemExit("GREENZONE_PRIMARY partition not found")
 PY
 }
 
@@ -462,6 +462,9 @@ assert_nonvolatile_status() {
         (.body."nonvolatile-storage".mounted == true or
          .body."nonvolatile-storage".mounted == "true") and
         (.body."nonvolatile-storage".partition | test("/dev/")) and
+        .body."nonvolatile-storage"."partition-label" == "GREENZONE_PRIMARY" and
+        .body."nonvolatile-storage"."primary-partition-label" == "GREENZONE_PRIMARY" and
+        (.body."nonvolatile-storage"."zone-partition-label" | startswith("GREENZONE_")) and
         .body."nonvolatile-storage".mapper == "lapee-nonvolatile" and
         .body."nonvolatile-storage"."mount-point" == "/var/lib/lapee/nonvolatile" and
         .body."nonvolatile-storage".store == "/var/lib/lapee/nonvolatile/store/cache-mainnet/lmdb" and
@@ -518,7 +521,7 @@ with open(disk, "rb") as f:
         entry = f.read(entry_size)
         if entry[:16] == b"\0" * 16:
             continue
-        if entry[56:128].decode("utf-16le").rstrip("\0") == "LAPEE_NONVOLATILE":
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "GREENZONE_PRIMARY":
             first_lba = struct.unpack_from("<Q", entry, 32)[0]
             f.seek(first_lba * 512)
             first = f.read(max(len(marker), 6))
@@ -527,7 +530,7 @@ with open(disk, "rb") as f:
             if not first.startswith(marker):
                 raise SystemExit("missing provisioning marker")
             raise SystemExit(0)
-raise SystemExit("LAPEE_NONVOLATILE partition not found")
+raise SystemExit("GREENZONE_PRIMARY partition not found")
 PY
 }
 

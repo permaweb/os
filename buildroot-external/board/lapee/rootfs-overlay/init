@@ -316,7 +316,8 @@ sbp_collect_nonvolatile_disks() {
 sbp_disk_prompt_lines() {
     _candidates=/run/lapee/nonvolatile-candidates
     printf '%s\n' "LapEE can prepare one disk for encrypted green-zone storage."
-    printf '%s\n' "The selected disk will be repartitioned with one partition named LAPEE_NONVOLATILE."
+    printf '%s\n' "The selected disk will be repartitioned for one green-zone store."
+    printf '%s\n' "Use DESTROY N for the first zone joined, or DESTROY N -> PREFIX for a specific zone."
     printf '%s\n' ""
     if [ ! -s "$_candidates" ]; then
         printf '%s\n' "No writable non-boot disks were found."
@@ -331,6 +332,65 @@ sbp_disk_prompt_lines() {
     printf '%s\n' "Type SKIP to leave non-volatile storage unconfigured."
 }
 
+sbp_nonvolatile_label() {
+    _prefix="$1"
+    if [ -z "$_prefix" ]; then
+        printf '%s' "GREENZONE_PRIMARY"
+        return 0
+    fi
+    case "$_prefix" in
+        *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+            return 1
+            ;;
+    esac
+    _prefix=$(printf '%.26s' "$_prefix")
+    [ -n "$_prefix" ] || return 1
+    printf 'GREENZONE_%s' "$_prefix"
+}
+
+sbp_valid_nonvolatile_label() {
+    _label="$1"
+    [ ${#_label} -le 36 ] || return 1
+    case "$_label" in
+        GREENZONE_PRIMARY) return 0 ;;
+        GREENZONE_*)
+            _prefix=${_label#GREENZONE_}
+            [ -n "$_prefix" ] || return 1
+            case "$_prefix" in
+                *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+                    return 1
+                    ;;
+            esac
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+sbp_parse_nonvolatile_destroy() {
+    _answer=${1%.}
+    case "$_answer" in
+        DESTROY\ *) ;;
+        *) return 1 ;;
+    esac
+    _rest=${_answer#DESTROY }
+    case "$_rest" in
+        *" -> "*)
+            _num=${_rest%% -> *}
+            _prefix=${_rest#* -> }
+            ;;
+        *)
+            _num=$_rest
+            _prefix=""
+            ;;
+    esac
+    case "$_num" in
+        ''|*[!0123456789]*) return 1 ;;
+    esac
+    _label=$(sbp_nonvolatile_label "$_prefix") || return 1
+    printf '%s|%s\n' "$_num" "$_label"
+}
+
 sbp_partition_suffix() {
     case "$1" in
         *[0-9]) printf 'p1' ;;
@@ -340,8 +400,9 @@ sbp_partition_suffix() {
 
 sbp_has_nonvolatile_partition_name() {
     _dev="$1"
+    _label="$2"
     parted -m "$_dev" unit s print 2>/dev/null | \
-        awk -F: '$1 == "1" && $6 == "LAPEE_NONVOLATILE" { found = 1 }
+        awk -F: -v label="$_label" '$1 == "1" && $6 == label { found = 1 }
                  END { exit(found ? 0 : 1) }'
 }
 
@@ -373,7 +434,12 @@ sbp_write_nonvolatile_marker() {
 sbp_format_nonvolatile_disk() {
     _dev="$1"
     _boot_esp="$2"
+    _label="$3"
     [ -b "$_dev" ] || return 1
+    if ! sbp_valid_nonvolatile_label "$_label"; then
+        sbp_log "ERROR: invalid green-zone partition label."
+        return 1
+    fi
     if ! command -v parted >/dev/null 2>&1; then
         sbp_log "ERROR: parted is not available in this provisioning image."
         return 1
@@ -388,19 +454,19 @@ sbp_format_nonvolatile_disk() {
     fi
     sbp_log "Destroying partition table on $_dev."
     if ! parted -s "$_dev" mklabel gpt \
-            mkpart LAPEE_NONVOLATILE 1MiB 100% \
+            mkpart "$_label" 1MiB 100% \
             > /run/lapee/nonvolatile-parted.log 2>&1; then
         while IFS= read -r _line; do sbp_log "$_line"; done \
             < /run/lapee/nonvolatile-parted.log
-        sbp_log "ERROR: failed to create LAPEE_NONVOLATILE partition."
+        sbp_log "ERROR: failed to create $_label partition."
         return 1
     fi
     partprobe "$_dev" 2>/dev/null || true
     blockdev --rereadpt "$_dev" 2>/dev/null || true
     sync 2>/dev/null || true
     _part="${_dev}$(sbp_partition_suffix "$_dev")"
-    if ! sbp_has_nonvolatile_partition_name "$_dev"; then
-        sbp_log "ERROR: $_dev does not contain a LAPEE_NONVOLATILE partition."
+    if ! sbp_has_nonvolatile_partition_name "$_dev" "$_label"; then
+        sbp_log "ERROR: $_dev does not contain a $_label partition."
         return 1
     fi
     if ! sbp_wait_nonvolatile_partition_node "$_part"; then
@@ -410,14 +476,14 @@ sbp_format_nonvolatile_disk() {
     if ! sbp_write_nonvolatile_marker "$_part"; then
         return 1
     fi
-    sbp_log "Prepared $_part as LAPEE_NONVOLATILE."
+    sbp_log "Prepared $_part as $_label."
     return 0
 }
 
 sbp_prompt_nonvolatile_disk() {
     _boot_esp="$1"
     sbp_collect_nonvolatile_disks "$_boot_esp"
-    sbp_show_prompt "Type DESTROY [NUMBER] to format, or SKIP:"
+    sbp_show_prompt "Type DESTROY [NUMBER], DESTROY [NUMBER] -> PREFIX, or SKIP:"
     sbp_disk_prompt_lines > "$PROVISION_REPORT_FILE" 2>/dev/null || true
     sbp_log "Non-volatile storage selection is ready."
     _sbp_answer=""
@@ -437,9 +503,10 @@ sbp_prompt_nonvolatile_disk() {
                     sbp_log "Non-volatile storage provisioning skipped."
                     return 0
                 fi
-                case "$_sbp_answer" in
-                    DESTROY\ [0-9]*)
-                        _num=${_sbp_answer#DESTROY }
+                _parsed=$(sbp_parse_nonvolatile_destroy "$_sbp_answer" || true)
+                if [ -n "$_parsed" ]; then
+                    _num=${_parsed%%|*}
+                    _label=${_parsed#*|}
                         _selected=$(awk -F'|' -v n="$_num" \
                             '$1 == n { print; exit }' \
                             /run/lapee/nonvolatile-candidates 2>/dev/null || true)
@@ -450,14 +517,14 @@ sbp_prompt_nonvolatile_disk() {
                                 stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
                             sbp_set_input ""
                             sbp_show_report
-                            sbp_format_nonvolatile_disk "$_target" "$_boot_esp"
+                            sbp_format_nonvolatile_disk \
+                                "$_target" "$_boot_esp" "$_label"
                             return $?
                         fi
-                        ;;
-                esac
+                fi
                 _sbp_answer=""
                 sbp_set_input "$_sbp_answer"
-                sbp_log "Input did not match. Type DESTROY [NUMBER] or SKIP."
+                sbp_log "Input did not match. Type DESTROY [NUMBER], DESTROY [NUMBER] -> PREFIX, or SKIP."
                 ;;
             08|7f)
                 _sbp_answer=${_sbp_answer%?}
