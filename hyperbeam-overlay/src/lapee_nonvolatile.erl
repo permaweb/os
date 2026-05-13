@@ -4,8 +4,8 @@
 %%% green-zone key exists, scans for a partition explicitly provisioned as
 %%% `LAPEE_NONVOLATILE', and uses the zone AES secret to open or initialize an
 %%% encrypted ext4 volume. On success the mounted LMDB becomes the first local
-%%% HyperBEAM store; the temporary boot LMDB is copied across once so early boot
-%%% cache entries survive the transition.
+%%% HyperBEAM store; missing keys from the temporary boot LMDB are copied across
+%%% so early boot cache entries survive the transition.
 -module(lapee_nonvolatile).
 
 -export([activate/3, status/1]).
@@ -16,25 +16,36 @@
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
 -define(KEY_DIR, "/run/lapee/nonvolatile-keys").
 -define(FORMAT_MARKER, <<"LapEE nonvolatile provisioning marker v1\n">>).
+-define(VOLUME_ID_FILE, ".lapee-volume-id").
+-define(FORMAT_TIMEOUT_MS, 1800000).
 
 activate(Name, AES, Opts) when is_binary(Name), is_binary(AES) ->
-    case hb_opts:get(<<"lapee-nonvolatile">>, true, Opts) of
-        false ->
-            {ok, set_status(Opts, #{
-                <<"enabled">> => false,
-                <<"mounted">> => false
-            })};
-        _ ->
-            activate_enabled(Name, AES, Opts)
-    end.
+    activate_enabled(Name, AES, Opts).
 
 status(Opts) ->
     hb_opts:get(<<"lapee-nonvolatile-status">>, #{}, Opts).
 
 activate_enabled(Name, AES, Opts) ->
-    case mounted(Opts) of
+    global:trans(
+        {?MODULE, activation},
+        fun() -> activate_enabled_locked(Name, AES, Opts) end,
+        [node()]
+    ).
+
+activate_enabled_locked(Name, AES, Opts) ->
+    case mounted(Opts) orelse mapper_mounted_at_default() of
         true ->
-            {ok, Opts};
+            Store = persistent_store(?DEFAULT_MOUNT, Opts),
+            Migration = migrate_primary_lmdb(Store, Opts),
+            Status = mounted_status(
+                Name,
+                mapper_source_partition(),
+                Store,
+                false,
+                false,
+                Migration
+            ),
+            {ok, set_status(install_store(Store, Opts), Status)};
         false ->
             case do_activate(Name, AES, Opts) of
                 {ok, Store, Status} ->
@@ -54,13 +65,12 @@ mounted(Opts) ->
     end.
 
 do_activate(Name, AES, Opts) ->
-    Label = hb_opts:get(<<"lapee-nonvolatile-label">>, ?DEFAULT_LABEL, Opts),
-    case labeled_partitions(Label) of
+    case labeled_partitions(?DEFAULT_LABEL) of
         [] ->
             {skip, #{
                 <<"enabled">> => true,
                 <<"mounted">> => false,
-                <<"partition-label">> => Label,
+                <<"partition-label">> => ?DEFAULT_LABEL,
                 <<"reason">> => <<"not-provisioned">>
             }};
         [Partition] ->
@@ -69,47 +79,33 @@ do_activate(Name, AES, Opts) ->
             {error, #{
                 <<"enabled">> => true,
                 <<"mounted">> => false,
-                <<"partition-label">> => Label,
+                <<"partition-label">> => ?DEFAULT_LABEL,
                 <<"error">> => <<"multiple-nonvolatile-partitions">>,
                 <<"partitions">> => [unicode:characters_to_binary(P) || P <- Parts]
             }}
     end.
 
 activate_partition(Name, AES, Partition, Opts) ->
-    Mapper = hb_opts:get(<<"lapee-nonvolatile-mapper">>, ?DEFAULT_MAPPER, Opts),
-    Mount = hb_opts:get(<<"lapee-nonvolatile-mount-point">>, ?DEFAULT_MOUNT, Opts),
-    AllowFormat =
-        hb_opts:get(<<"lapee-nonvolatile-allow-format">>, true, Opts),
     Key = disk_key(Name, AES),
     with_key_file(Key, fun(KeyFile) ->
-        case ensure_luks(Partition, KeyFile, AllowFormat) of
+        case ensure_luks(Partition, KeyFile) of
             {ok, LuksFormatted} ->
-                case ensure_open(Partition, Mapper, KeyFile) of
+                case ensure_open(Partition, KeyFile) of
                     ok ->
-                        MapperDev = <<"/dev/mapper/", Mapper/binary>>,
-                        case ensure_filesystem(MapperDev, LuksFormatted, AllowFormat) of
+                        MapperDev = <<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>,
+                        case ensure_mounted_filesystem(
+                            MapperDev, ?DEFAULT_MOUNT, LuksFormatted) of
                             {ok, FsFormatted} ->
-                                case ensure_mount(MapperDev, Mount) of
-                                    ok ->
-                                        Store = persistent_store(Mount, Opts),
-                                        Migration = migrate_primary_lmdb(Store, Opts),
-                                        {ok, Store, #{
-                                            <<"enabled">> => true,
-                                            <<"mounted">> => true,
-                                            <<"zone">> => Name,
-                                            <<"partition">> =>
-                                                unicode:characters_to_binary(Partition),
-                                            <<"mapper">> => Mapper,
-                                            <<"mount-point">> => Mount,
-                                            <<"store">> =>
-                                                hb_maps:get(<<"name">>, Store, undefined, #{}),
-                                            <<"formatted-luks">> => LuksFormatted,
-                                            <<"formatted-filesystem">> => FsFormatted,
-                                            <<"migration">> => Migration
-                                        }};
-                                    {error, Reason} ->
-                                        activation_error(<<"mount-failed">>, Reason)
-                                end;
+                                Store = persistent_store(?DEFAULT_MOUNT, Opts),
+                                Migration = migrate_primary_lmdb(Store, Opts),
+                                {ok, Store, mounted_status(
+                                    Name,
+                                    unicode:characters_to_binary(Partition),
+                                    Store,
+                                    LuksFormatted,
+                                    FsFormatted,
+                                    Migration
+                                )};
                             {error, Reason} ->
                                 activation_error(<<"filesystem-failed">>, Reason)
                         end;
@@ -120,6 +116,25 @@ activate_partition(Name, AES, Partition, Opts) ->
                 activation_error(<<"luks-failed">>, Reason)
         end
     end).
+
+mounted_status(Name, Partition, Store, LuksFormatted, FsFormatted, Migration) ->
+    Status0 = #{
+        <<"enabled">> => true,
+        <<"mounted">> => true,
+        <<"zone">> => Name,
+        <<"partition-label">> => ?DEFAULT_LABEL,
+        <<"mapper">> => ?DEFAULT_MAPPER,
+        <<"mount-point">> => ?DEFAULT_MOUNT,
+        <<"store">> => hb_maps:get(<<"name">>, Store, undefined, #{}),
+        <<"volume-id">> => ensure_volume_id(?DEFAULT_MOUNT),
+        <<"formatted-luks">> => LuksFormatted,
+        <<"formatted-filesystem">> => FsFormatted,
+        <<"migration">> => Migration
+    },
+    case Partition of
+        undefined -> Status0;
+        _ -> Status0#{<<"partition">> => Partition}
+    end.
 
 activation_error(Code, Reason) ->
     {error, #{
@@ -140,8 +155,8 @@ labeled_partitions(Label) ->
         {ok, Names} ->
             lists:filtermap(
                 fun(Name) ->
-                    case partition_label(Name) of
-                        Label -> {true, "/dev/" ++ Name};
+                    case {partition_label(Name), runtime_partition_ok(Name)} of
+                        {Label, true} -> {true, "/dev/" ++ Name};
                         _ -> false
                     end
                 end,
@@ -149,6 +164,50 @@ labeled_partitions(Label) ->
             );
         _ ->
             []
+    end.
+
+runtime_partition_ok(Name) ->
+    case parent_block(Name) of
+        undefined ->
+            false;
+        Parent ->
+            not excluded_block(Parent) andalso
+                sysfs_value(["/sys/block/", Parent, "/ro"], <<"1">>) =:= <<"0">> andalso
+                sysfs_value(["/sys/block/", Parent, "/removable"], <<"1">>) =:= <<"0">> andalso
+                not usb_block(Parent)
+    end.
+
+parent_block(Name) ->
+    case file:read_file(filename:join(["/sys/class/block", Name, "partition"])) of
+        {ok, _} ->
+            parent_block_name(unicode:characters_to_binary(Name));
+        _ ->
+            undefined
+    end.
+
+parent_block_name(Name) ->
+    case re:replace(Name, <<"p?[0-9]+$">>, <<>>, [{return, binary}]) of
+        Name -> undefined;
+        Parent -> binary_to_list(Parent)
+    end.
+
+excluded_block("loop" ++ _) -> true;
+excluded_block("ram" ++ _) -> true;
+excluded_block("dm-" ++ _) -> true;
+excluded_block("zram" ++ _) -> true;
+excluded_block("sr" ++ _) -> true;
+excluded_block(_) -> false.
+
+sysfs_value(Path, Default) ->
+    case file:read_file(iolist_to_binary(Path)) of
+        {ok, Bin} -> string:trim(Bin);
+        _ -> Default
+    end.
+
+usb_block(Parent) ->
+    case file:read_link_all(filename:join(["/sys/block", Parent, "device"])) of
+        {ok, Path} -> binary:match(unicode:characters_to_binary(Path), <<"usb">>) =/= nomatch;
+        _ -> false
     end.
 
 partition_label(Name) ->
@@ -176,12 +235,10 @@ uevent_value(Key, UEvent) ->
         [] -> undefined
     end.
 
-ensure_luks(Partition, KeyFile, AllowFormat) ->
+ensure_luks(Partition, KeyFile) ->
     case run(<<"cryptsetup">>, [<<"isLuks">>, Partition]) of
         {ok, _} ->
             {ok, false};
-        {error, _} when AllowFormat =:= false ->
-            {error, <<"not-luks">>};
         {error, _} ->
             case has_format_marker(Partition) of
                 true ->
@@ -197,7 +254,8 @@ ensure_luks(Partition, KeyFile, AllowFormat) ->
                             <<"--hash">>, <<"sha256">>,
                             <<"--key-file">>, KeyFile,
                             Partition
-                        ]
+                        ],
+                        ?FORMAT_TIMEOUT_MS
                     ) of
                         {ok, _} ->
                             sync_storage(),
@@ -224,41 +282,65 @@ has_format_marker(Partition) ->
             false
     end.
 
-ensure_open(Partition, Mapper, KeyFile) ->
-    case file:read_file_info(binary_to_list(<<"/dev/mapper/", Mapper/binary>>)) of
+ensure_open(Partition, KeyFile) ->
+    MapperDev = <<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>,
+    case file:read_file_info(binary_to_list(MapperDev)) of
         {ok, _} ->
-            run(<<"cryptsetup">>, [<<"close">>, Mapper]),
-            open_luks(Partition, Mapper, KeyFile);
+            case mounted_device(MapperDev) of
+                expected -> ok;
+                elsewhere -> {error, <<"mapper-mounted-elsewhere">>};
+                false ->
+                    case run(<<"cryptsetup">>, [<<"close">>, ?DEFAULT_MAPPER]) of
+                        {ok, _} -> open_luks(Partition, KeyFile);
+                        Error -> Error
+                    end
+            end;
         _ ->
-            open_luks(Partition, Mapper, KeyFile)
+            open_luks(Partition, KeyFile)
     end.
 
-open_luks(Partition, Mapper, KeyFile) ->
+open_luks(Partition, KeyFile) ->
     case run(
         <<"cryptsetup">>,
         [
             <<"open">>,
             <<"--key-file">>, KeyFile,
             Partition,
-            Mapper
+            ?DEFAULT_MAPPER
         ]
     ) of
         {ok, _} -> ok;
         Error -> Error
     end.
 
-ensure_filesystem(MapperDev, FreshLuks, AllowFormat) ->
+ensure_mounted_filesystem(MapperDev, Mount, LuksFormatted) ->
     case filesystem_type(MapperDev) of
         {ok, <<"ext4">>} ->
-            {ok, false};
+            mount_with_status(MapperDev, Mount, false);
         {ok, Other} ->
             {error, #{<<"unexpected-filesystem">> => Other}};
-        unknown when FreshLuks =:= true, AllowFormat =:= true ->
-            make_ext4(MapperDev);
-        unknown when FreshLuks =:= true ->
-            {error, <<"missing-filesystem">>};
+        unknown when LuksFormatted ->
+            case make_ext4(MapperDev) of
+                {ok, true} -> mount_with_status(MapperDev, Mount, true);
+                Error -> Error
+            end;
         unknown ->
-            {ok, false}
+            case ensure_mount(MapperDev, Mount) of
+                ok -> {ok, false};
+                {error, Reason} ->
+                    {error, #{
+                        <<"existing-luks-mount-failed">> =>
+                            command_reason(Reason)
+                    }}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+mount_with_status(MapperDev, Mount, FsFormatted) ->
+    case ensure_mount(MapperDev, Mount) of
+        ok -> {ok, FsFormatted};
+        {error, Reason} -> {error, Reason}
     end.
 
 filesystem_type(MapperDev) ->
@@ -268,8 +350,13 @@ filesystem_type(MapperDev) ->
     ) of
         {ok, Type0} ->
             parse_blkid_type(Type0);
-        {error, _} ->
-            unknown
+        {error, #{<<"exit-status">> := 2, <<"output">> := Output}} ->
+            case parse_blkid_type(Output) of
+                unknown -> unknown;
+                Type -> Type
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 parse_blkid_type(Output) ->
@@ -309,7 +396,8 @@ make_ext4(MapperDev) ->
             <<"-F">>,
             <<"-L">>, ?DEFAULT_LABEL,
             MapperDev
-        ]
+        ],
+        ?FORMAT_TIMEOUT_MS
     ) of
         {ok, _} ->
             sync_storage(),
@@ -320,9 +408,11 @@ make_ext4(MapperDev) ->
 ensure_mount(MapperDev, Mount) ->
     MountList = binary_to_list(Mount),
     ok = filelib:ensure_dir(filename:join(MountList, "store/.keep")),
-    case mounted_at(MountList) of
-        true ->
+    case mounted_device(MapperDev) of
+        expected ->
             ok;
+        elsewhere ->
+            {error, <<"mapper-mounted-elsewhere">>};
         false ->
             case run(
                 <<"mount">>,
@@ -338,19 +428,64 @@ ensure_mount(MapperDev, Mount) ->
             end
     end.
 
-mounted_at(Mount) ->
+mounted_device(MapperDev) ->
     case file:read_file("/proc/mounts") of
         {ok, Mounts} ->
-            Needle = unicode:characters_to_binary([" ", Mount, " "]),
-            binary:match(Mounts, Needle) =/= nomatch;
+            Lines = binary:split(Mounts, <<"\n">>, [global]),
+            Mount = ?DEFAULT_MOUNT,
+            case [mount_fields(Line) || Line <- Lines,
+                                      starts_with(Line, <<MapperDev/binary, " ">>)] of
+                [] -> false;
+                [[MapperDev, Mount | _] | _] -> expected;
+                [_ | _] -> elsewhere
+            end;
         _ ->
             false
     end.
+
+mapper_mounted_at_default() ->
+    mounted_device(<<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>) =:= expected.
+
+mapper_source_partition() ->
+    case run(<<"cryptsetup">>, [<<"status">>, ?DEFAULT_MAPPER]) of
+        {ok, Output} -> parse_mapper_source(Output);
+        _ -> undefined
+    end.
+
+parse_mapper_source(Output) ->
+    Lines = binary:split(Output, <<"\n">>, [global]),
+    case [string:trim(Rest)
+          || Line <- Lines,
+             [Key, Rest] <- [binary:split(Line, <<":">>)],
+             string:trim(Key) =:= <<"device">>] of
+        [Device | _] when byte_size(Device) > 0 -> Device;
+        _ -> undefined
+    end.
+
+starts_with(Line, Prefix) ->
+    byte_size(Line) >= byte_size(Prefix) andalso
+        binary:part(Line, 0, byte_size(Prefix)) =:= Prefix.
+
+mount_fields(Line) ->
+    binary:split(Line, <<" ">>, [global]).
 
 persistent_store(Mount, Opts) ->
     Source = primary_lmdb_store(Opts),
     Name = filename:join(Mount, ?DEFAULT_STORE),
     Source#{<<"name">> => Name}.
+
+ensure_volume_id(Mount) ->
+    Path = filename:join(binary_to_list(Mount), ?VOLUME_ID_FILE),
+    case file:read_file(Path) of
+        {ok, ID} ->
+            string:trim(ID);
+        _ ->
+            ID = hb_util:encode(crypto:strong_rand_bytes(32)),
+            ok = file:write_file(Path, <<ID/binary, "\n">>),
+            ok = file:change_mode(Path, 8#600),
+            sync_storage(),
+            ID
+    end.
 
 primary_lmdb_store(Opts) ->
     Stores = hb_opts:get(store, [], Opts),
@@ -389,8 +524,16 @@ migrate_lmdb_dir(SourceStore, _SourceName, DestName) ->
             case elmdb:fold(
                 SourceDB,
                 fun(Key, Value, Acc) ->
-                    ok = elmdb:put(DestDB, Key, Value),
-                    Acc + 1
+                    case elmdb:get(DestDB, Key) of
+                        {ok, _} ->
+                            Acc;
+                        not_found ->
+                            ok = elmdb:put(DestDB, Key, Value),
+                            Acc + 1;
+                        {error, not_found} ->
+                            ok = elmdb:put(DestDB, Key, Value),
+                            Acc + 1
+                    end
                 end,
                 0
             ) of
@@ -452,13 +595,16 @@ sync_storage() ->
                 {spawn_executable, Path},
                 [binary, exit_status, stderr_to_stdout, use_stdio]
             ),
-            _ = collect(Port, []),
+            _ = collect(Port, [], ?FORMAT_TIMEOUT_MS),
             ok;
         {error, _} ->
             ok
     end.
 
 run(Program, Args) ->
+    run(Program, Args, 120000).
+
+run(Program, Args, Timeout) ->
     case executable(Program) of
         {ok, Path} ->
             Port = open_port(
@@ -471,21 +617,21 @@ run(Program, Args) ->
                     {args, [arg(A) || A <- Args]}
                 ]
             ),
-            collect(Port, []);
+            collect(Port, [], Timeout);
         {error, _} = Error ->
             Error
     end.
 
-collect(Port, Acc) ->
+collect(Port, Acc, Timeout) ->
     receive
         {Port, {data, Data}} ->
-            collect(Port, [Acc, Data]);
+            collect(Port, [Acc, Data], Timeout);
         {Port, {exit_status, 0}} ->
             {ok, iolist_to_binary(Acc)};
         {Port, {exit_status, Status}} ->
             {error, #{<<"exit-status">> => Status,
                       <<"output">> => iolist_to_binary(Acc)}}
-    after 120000 ->
+    after Timeout ->
         port_close(Port),
         {error, <<"timeout">>}
     end.

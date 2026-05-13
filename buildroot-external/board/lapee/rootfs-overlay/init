@@ -280,6 +280,11 @@ sbp_diskseq() {
     cat "/sys/block/$_name/diskseq" 2>/dev/null | tr -d '\r\n' || true
 }
 
+sbp_disk_wwid() {
+    _name="$1"
+    cat "/sys/block/$_name/wwid" 2>/dev/null | tr '|\r\n' '   ' || true
+}
+
 sbp_removable() {
     _name="$1"
     cat "/sys/block/$_name/removable" 2>/dev/null | tr -d '\r\n' || echo 1
@@ -351,11 +356,12 @@ sbp_collect_nonvolatile_disks() {
         _size=$(sbp_size_label "$_sectors")
         _model=$(sbp_disk_model "$_name")
         _diskseq=$(sbp_diskseq "$_name")
+        _wwid=$(sbp_disk_wwid "$_name")
         _removable=$(sbp_removable "$_name")
         _path=$(sbp_device_path "$_name")
-        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s\n' \
+        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s|%s\n' \
             "$_idx" "$_name" "$_size" "$_model" "$_sectors" \
-            "$_diskseq" "$_removable" "$_path" \
+            "$_diskseq" "$_removable" "$_path" "$_wwid" \
             >> "$_candidates"
         _idx=$(( _idx + 1 ))
     done
@@ -372,9 +378,12 @@ sbp_disk_prompt_lines() {
     fi
     printf '%s\n' "Available disks:"
     while IFS='|' read -r _idx _dev _size _model _sectors _diskseq \
-        _removable _path; do
+        _removable _path _wwid; do
         [ -n "$_idx" ] || continue
         printf '%s\n' "$_idx. $_dev  $_size  $_model"
+        printf '%s\n' "   diskseq: ${_diskseq:-unknown}"
+        [ -z "$_wwid" ] || printf '%s\n' "   wwid: $_wwid"
+        [ -z "$_path" ] || printf '%s\n' "   path: $_path"
     done < "$_candidates"
     printf '%s\n' ""
     printf '%s\n' "Type SKIP to leave non-volatile storage unconfigured."

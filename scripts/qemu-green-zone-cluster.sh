@@ -181,15 +181,53 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pid_state() {
+    ps -p "$1" -o stat= 2>/dev/null | tr -d '[:space:]' || true
+}
+
+terminate_pid() {
+    local pid="${1:?pid required}"
+    local label="${2:-process}"
+    kill "$pid" 2>/dev/null || return 0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        case "$(pid_state "$pid")" in
+            Z*) wait "$pid" 2>/dev/null || true; return 0;;
+        esac
+        sleep 0.2
+    done
+    echo "!! $label pid $pid did not stop after SIGTERM; killing" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+request_qemu_quit() {
+    local socket=$1
+    [[ -S "$socket" ]] || return 0
+    python3 - "$socket" <<'PY' || true
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(2)
+sock.connect(sys.argv[1])
+sock.sendall(b"quit\n")
+sock.close()
+PY
+}
+
 stop_node() {
     local n=$1
     local node_dir="$OUTDIR/nodes/node$n"
     if [[ -s "$node_dir/qemu.pid" ]]; then
-        kill "$(cat "$node_dir/qemu.pid")" 2>/dev/null || true
+        request_qemu_quit "$SOCK_DIR/qemu$n.mon"
+        terminate_pid "$(cat "$node_dir/qemu.pid")" "node $n qemu"
         rm -f "$node_dir/qemu.pid"
     fi
     if [[ -s "$node_dir/tpm/swtpm.pid" ]]; then
-        kill "$(cat "$node_dir/tpm/swtpm.pid")" 2>/dev/null || true
+        terminate_pid "$(cat "$node_dir/tpm/swtpm.pid")" "node $n swtpm"
         rm -f "$node_dir/tpm/swtpm.pid"
     fi
     rm -f "$SOCK_DIR/tpm$n.sock"
@@ -299,6 +337,7 @@ start_node() {
         fi
     fi
     local sock="$SOCK_DIR/tpm$n.sock"
+    local monitor="$SOCK_DIR/qemu$n.mon"
     local memory_mib
     memory_mib=$(node_memory_mib "$n")
     local dmi_product
@@ -331,7 +370,7 @@ start_node() {
     tpm_pids+=("$(cat "$node_dir/tpm/swtpm.pid")")
     local nonvolatile_drive=()
     if [[ "$NONVOLATILE" = "1" ]]; then
-        nonvolatile_drive=(-drive "file=$node_dir/nonvolatile.img,format=raw,if=virtio")
+        nonvolatile_drive=(-drive "file=$node_dir/nonvolatile.img,format=raw,if=virtio,cache=writethrough")
     fi
     qemu-system-x86_64 \
         -machine q35,accel=tcg \
@@ -345,6 +384,7 @@ start_node() {
         -chardev "$qemu_chardev" \
         -tpmdev emulator,id=tpm0,chardev=chrtpm \
         -device tpm-tis,tpmdev=tpm0 \
+        -monitor "unix:$monitor,server,nowait" \
         -netdev "user,id=net0,hostfwd=tcp::${port}-:8734" \
         -device virtio-net-pci,netdev=net0 \
         -nographic \
@@ -425,7 +465,9 @@ assert_nonvolatile_status() {
         .body."nonvolatile-storage".mapper == "lapee-nonvolatile" and
         .body."nonvolatile-storage"."mount-point" == "/var/lib/lapee/nonvolatile" and
         .body."nonvolatile-storage".store == "/var/lib/lapee/nonvolatile/store/cache-mainnet/lmdb" and
-        .body."nonvolatile-storage".migration.status == "merged"
+        (.body."nonvolatile-storage"."volume-id" | type == "string" and length > 0) and
+        (.body."nonvolatile-storage".migration.status as $m |
+            ($m == "merged" or $m == "skipped"))
     ' "$file" >/dev/null || {
         echo "!! node $n non-volatile status did not show mounted encrypted storage" >&2
         jq '.body."nonvolatile-storage"' "$file" >&2
@@ -436,7 +478,9 @@ assert_nonvolatile_status() {
 assert_nonvolatile_reused() {
     local n=$1
     local file=$2
-    jq -e '
+    local expected_volume_id=$3
+    jq -e --arg volume_id "$expected_volume_id" '
+        . as $root |
         (.body."nonvolatile-storage".enabled == true or
          .body."nonvolatile-storage".enabled == "true") and
         (.body."nonvolatile-storage".mounted == true or
@@ -444,12 +488,47 @@ assert_nonvolatile_reused() {
         (.body."nonvolatile-storage"."formatted-luks" == false or
          .body."nonvolatile-storage"."formatted-luks" == "false") and
         (.body."nonvolatile-storage"."formatted-filesystem" == false or
-         .body."nonvolatile-storage"."formatted-filesystem" == "false")
+         .body."nonvolatile-storage"."formatted-filesystem" == "false") and
+        $root.body."nonvolatile-storage"."volume-id" == $volume_id
     ' "$file" >/dev/null || {
         echo "!! node $n did not reuse the existing encrypted volume after reboot" >&2
         jq '.body."nonvolatile-storage"' "$file" >&2
         exit 1
     }
+}
+
+assert_nonvolatile_disk_unformatted() {
+    local n=$1
+    local disk="$OUTDIR/nodes/node$n/nonvolatile.img"
+    python3 - "$disk" <<'PY'
+import struct, sys
+
+marker = b"LapEE nonvolatile provisioning marker v1\n"
+disk = sys.argv[1]
+with open(disk, "rb") as f:
+    f.seek(512)
+    header = f.read(512)
+    if header[:8] != b"EFI PART":
+        raise SystemExit("missing GPT header")
+    entries_lba = struct.unpack_from("<Q", header, 72)[0]
+    entries = struct.unpack_from("<I", header, 80)[0]
+    entry_size = struct.unpack_from("<I", header, 84)[0]
+    f.seek(entries_lba * 512)
+    for _ in range(entries):
+        entry = f.read(entry_size)
+        if entry[:16] == b"\0" * 16:
+            continue
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "LAPEE_NONVOLATILE":
+            first_lba = struct.unpack_from("<Q", entry, 32)[0]
+            f.seek(first_lba * 512)
+            first = f.read(max(len(marker), 6))
+            if first.startswith(b"LUKS\xba\xbe"):
+                raise SystemExit("rejected node formatted non-volatile volume")
+            if not first.startswith(marker):
+                raise SystemExit("missing provisioning marker")
+            raise SystemExit(0)
+raise SystemExit("LAPEE_NONVOLATILE partition not found")
+PY
 }
 
 start_node 1 "$IMG"
@@ -633,6 +712,10 @@ for n in 1 2 3; do
 done
 
 if [[ "$NONVOLATILE" = "1" ]]; then
+    node2_volume_id=$(jq -r '.body."nonvolatile-storage"."volume-id"' \
+        "$OUTDIR/responses/node2-status.json")
+    assert_nonvolatile_disk_unformatted 4
+    echo ">> rejected node 4 left its non-volatile disk unformatted"
     echo ">> rebooting node 2 to verify non-volatile store reuse"
     stop_node 2
     start_node 2 "$IMG" 0
@@ -652,7 +735,8 @@ if [[ "$NONVOLATILE" = "1" ]]; then
         "$OUTDIR/responses/node2-reboot-join.json" >/dev/null
     get_json 2 "/~green-zone@1.0/status?name=book-shelf" \
         "$OUTDIR/responses/node2-reboot-status.json"
-    assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json"
+    assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json" \
+        "$node2_volume_id"
     echo ">> node 2 reopened the same encrypted non-volatile volume after reboot"
 fi
 
