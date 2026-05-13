@@ -13,14 +13,33 @@ Production hardening for encrypted non-volatile storage on
 - Prepended the mounted LMDB as primary store and merged the boot LMDB.
 - Added QEMU green-zone non-volatile reboot acceptance test.
 - Added provisioner QEMU smoke test for the destructive partition-label flow.
+- Hardened provisioner selection by revalidating the selected disk immediately
+  before destructive writes and checking the written GPT partition name from
+  disk contents.
+- Rebuilt fresh signed no-TME runtime and Secure Boot provisioner images.
 
 ## Active Checks
 
-- Re-run static shell/Erlang validation.
-- Rebuild signed runtime and provisioner images after hardening patches.
-- Re-run `make qemu-provisioner-nonvolatile`.
-- Re-run `make qemu-green-zone-nonvolatile`.
 - Ask for an independent peer audit after the next green run.
+
+## Latest Verification
+
+- `sh -n buildroot-external/board/lapee/rootfs-overlay/init`
+- `bash -n scripts/qemu-provisioner-nonvolatile.sh`
+- `bash -n scripts/qemu-green-zone-cluster.sh`
+- `git diff --check -- Makefile README.md STATUS.md decisions/nonvolatile-storage-production.md buildroot-external/board/lapee/rootfs-overlay/init hyperbeam-overlay/src/lapee_nonvolatile.erl scripts/qemu-provisioner-nonvolatile.sh`
+- `make provisioner-image`
+- `make runtime-image TME=0 WIFI=0`
+- `make qemu-provisioner-nonvolatile`
+  - `found LAPEE_NONVOLATILE partition`
+  - `=== provisioner non-volatile QEMU smoke PASSED ===`
+- `make qemu-green-zone-nonvolatile`
+  - `node 4 rejected as expected`
+  - `node 2 reopened the same encrypted non-volatile volume after reboot`
+  - `node 1 produced ring-signed membership proof`
+  - `node 2 produced ring-signed membership proof`
+  - `node 3 produced ring-signed membership proof`
+  - `=== green-zone QEMU cluster PASSED ===`
 
 ## Open Review Questions
 

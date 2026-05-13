@@ -345,13 +345,17 @@ sbp_partition_suffix() {
     esac
 }
 
-sbp_wait_nonvolatile_partition() {
+sbp_has_nonvolatile_partition_name() {
+    _dev="$1"
+    parted -m "$_dev" unit s print 2>/dev/null | \
+        awk -F: '$1 == "1" && $6 == "LAPEE_NONVOLATILE" { found = 1 }
+                 END { exit(found ? 0 : 1) }'
+}
+
+sbp_wait_nonvolatile_partition_node() {
     _part="$1"
-    _base=$(basename "$_part")
     for _try in 1 2 3 4 5 6 7 8 9 10; do
-        if [ -b "$_part" ] && \
-           grep -q '^PARTNAME=LAPEE_NONVOLATILE$' \
-                "/sys/class/block/$_base/uevent" 2>/dev/null; then
+        if [ -b "$_part" ]; then
             return 0
         fi
         sleep 1
@@ -390,10 +394,11 @@ sbp_format_nonvolatile_disk() {
     blockdev --rereadpt "$_dev" 2>/dev/null || true
     sync 2>/dev/null || true
     _part="${_dev}$(sbp_partition_suffix "$_dev")"
-    if ! sbp_wait_nonvolatile_partition "$_part"; then
-        sbp_log "ERROR: $_part did not appear with the LAPEE_NONVOLATILE name."
+    if ! sbp_has_nonvolatile_partition_name "$_dev"; then
+        sbp_log "ERROR: $_dev does not contain a LAPEE_NONVOLATILE partition."
         return 1
     fi
+    sbp_wait_nonvolatile_partition_node "$_part" || true
     sbp_log "Prepared $_part as LAPEE_NONVOLATILE."
     return 0
 }
