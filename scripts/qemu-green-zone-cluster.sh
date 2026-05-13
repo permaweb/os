@@ -16,6 +16,11 @@
 #   * node 4 has a different DMI product and is rejected by the same template
 #   * nodes 1-3 install the same green-zone identity
 #   * node 4 never receives that identity
+#
+# With NONVOLATILE=1, each node also receives a second virtio disk containing
+# a single GPT partition named LAPEE_NONVOLATILE. Nodes 1-3 must format/open it
+# with the green-zone key, mount it as the primary HB store, and node 2 is
+# rebooted and rejoined to prove the existing encrypted volume is reused.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -40,6 +45,8 @@ NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-GZ-admit}
 NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-GZ-reject-4}
 SWTPM_CTRL=${SWTPM_CTRL:-unix}
 SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
+NONVOLATILE=${NONVOLATILE:-0}
+NONVOLATILE_SIZE_MIB=${NONVOLATILE_SIZE_MIB:-768}
 
 while (($# > 0)); do
     case "$1" in
@@ -138,6 +145,7 @@ echo "guest-host: $GUEST_HOST"
 echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
 echo "qemu image: $IMG"
+echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
 cat > "$OUTDIR/localca.conf" <<EOF
@@ -172,6 +180,21 @@ cleanup() {
     rm -rf "$SOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+stop_node() {
+    local n=$1
+    local node_dir="$OUTDIR/nodes/node$n"
+    if [[ -s "$node_dir/qemu.pid" ]]; then
+        kill "$(cat "$node_dir/qemu.pid")" 2>/dev/null || true
+        rm -f "$node_dir/qemu.pid"
+    fi
+    if [[ -s "$node_dir/tpm/swtpm.pid" ]]; then
+        kill "$(cat "$node_dir/tpm/swtpm.pid")" 2>/dev/null || true
+        rm -f "$node_dir/tpm/swtpm.pid"
+    fi
+    rm -f "$SOCK_DIR/tpm$n.sock"
+    sleep 1
+}
 
 node_host_url() {
     local n=$1
@@ -221,15 +244,36 @@ manufacture_tpm() {
         > "$dir/setup.log" 2>&1
 }
 
+prepare_nonvolatile_disk() {
+    local n=$1
+    local node_dir="$OUTDIR/nodes/node$n"
+    local disk="$node_dir/nonvolatile.img"
+    truncate -s "${NONVOLATILE_SIZE_MIB}M" "$disk"
+    docker run --rm $DOCKER_PLATFORM \
+        -v "$node_dir":/work \
+        -w /work \
+        "$BUILD_IMAGE" \
+        bash -euo pipefail -c '
+            parted -s /work/nonvolatile.img mklabel gpt \
+                mkpart LAPEE_NONVOLATILE 1MiB 100%
+        '
+}
+
 start_node() {
     local n=$1
     local img=$2
+    local fresh=${3:-1}
     local node_dir="$OUTDIR/nodes/node$n"
     local port=$((BASE_PORT + n))
     mkdir -p "$node_dir"
-    cp "$img" "$node_dir/disk.img"
-    cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
-    manufacture_tpm "$n"
+    if [[ "$fresh" = "1" ]]; then
+        cp "$img" "$node_dir/disk.img"
+        cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
+        manufacture_tpm "$n"
+        if [[ "$NONVOLATILE" = "1" ]]; then
+            prepare_nonvolatile_disk "$n"
+        fi
+    fi
     local sock="$SOCK_DIR/tpm$n.sock"
     local memory_mib
     memory_mib=$(node_memory_mib "$n")
@@ -261,6 +305,10 @@ start_node() {
         return 1
     fi
     tpm_pids+=("$(cat "$node_dir/tpm/swtpm.pid")")
+    local nonvolatile_drive=()
+    if [[ "$NONVOLATILE" = "1" ]]; then
+        nonvolatile_drive=(-drive "file=$node_dir/nonvolatile.img,format=raw,if=virtio")
+    fi
     qemu-system-x86_64 \
         -machine q35,accel=tcg \
         -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx \
@@ -268,6 +316,7 @@ start_node() {
         -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
         -drive "if=pflash,format=raw,file=$node_dir/vars.fd" \
         -drive "file=$node_dir/disk.img,format=raw,if=virtio" \
+        "${nonvolatile_drive[@]}" \
         -smbios "type=1,product=$dmi_product" \
         -chardev "$qemu_chardev" \
         -tpmdev emulator,id=tpm0,chardev=chrtpm \
@@ -277,6 +326,7 @@ start_node() {
         -nographic \
         > "$node_dir/serial.log" 2>&1 &
     pids+=("$!")
+    echo "$!" > "$node_dir/qemu.pid"
     echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product"
 }
 
@@ -335,6 +385,45 @@ require_request() {
     [[ -s "$file" ]] || {
         echo "!! missing generated request: $file" >&2
         ls -la "$OUTDIR/requests" >&2 || true
+        exit 1
+    }
+}
+
+assert_nonvolatile_status() {
+    local n=$1
+    local file=$2
+    jq -e '
+        (.body."nonvolatile-storage".enabled == true or
+         .body."nonvolatile-storage".enabled == "true") and
+        (.body."nonvolatile-storage".mounted == true or
+         .body."nonvolatile-storage".mounted == "true") and
+        (.body."nonvolatile-storage".partition | test("/dev/")) and
+        .body."nonvolatile-storage".mapper == "lapee-nonvolatile" and
+        .body."nonvolatile-storage"."mount-point" == "/var/lib/lapee/nonvolatile" and
+        .body."nonvolatile-storage".store == "/var/lib/lapee/nonvolatile/store/cache-mainnet/lmdb" and
+        .body."nonvolatile-storage".migration.status == "merged"
+    ' "$file" >/dev/null || {
+        echo "!! node $n non-volatile status did not show mounted encrypted storage" >&2
+        jq '.body."nonvolatile-storage"' "$file" >&2
+        exit 1
+    }
+}
+
+assert_nonvolatile_reused() {
+    local n=$1
+    local file=$2
+    jq -e '
+        (.body."nonvolatile-storage".enabled == true or
+         .body."nonvolatile-storage".enabled == "true") and
+        (.body."nonvolatile-storage".mounted == true or
+         .body."nonvolatile-storage".mounted == "true") and
+        (.body."nonvolatile-storage"."formatted-luks" == false or
+         .body."nonvolatile-storage"."formatted-luks" == "false") and
+        (.body."nonvolatile-storage"."formatted-filesystem" == false or
+         .body."nonvolatile-storage"."formatted-filesystem" == "false")
+    ' "$file" >/dev/null || {
+        echo "!! node $n did not reuse the existing encrypted volume after reboot" >&2
+        jq '.body."nonvolatile-storage"' "$file" >&2
         exit 1
     }
 }
@@ -502,6 +591,9 @@ for n in 1 2 3; do
          .body.identity == "green-zone/book-shelf" and
          .body."green-zone"."ring-address" == $addr' \
         "$OUTDIR/responses/node$n-status.json" >/dev/null
+    if [[ "$NONVOLATILE" = "1" ]]; then
+        assert_nonvolatile_status "$n" "$OUTDIR/responses/node$n-status.json"
+    fi
     member_count=$(jq -r '.body."green-zone".members
                           | with_entries(select(.key != "commitments"))
                           | keys | length' \
@@ -515,6 +607,30 @@ for n in 1 2 3; do
     fi
     echo ">> node $n status shows $expected ring member(s) (as expected)"
 done
+
+if [[ "$NONVOLATILE" = "1" ]]; then
+    echo ">> rebooting node 2 to verify non-volatile store reuse"
+    stop_node 2
+    start_node 2 "$IMG" 0
+    wait_node 2
+    get_json 2 "/~tpm@2.0a/credential-subject" \
+        "$OUTDIR/responses/node2-reboot-credential-subject.json"
+    python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+    jq --arg addr "$ring_addr" \
+        '. + {"expected-ring-address": $addr}' \
+        "$OUTDIR/requests/join2.json" \
+        > "$OUTDIR/requests/join2.reboot-pinned.json"
+    mv "$OUTDIR/requests/join2.reboot-pinned.json" "$OUTDIR/requests/join2.json"
+    post_json 2 "/~green-zone@1.0/join" \
+        "$OUTDIR/requests/join2.json" \
+        "$OUTDIR/responses/node2-reboot-join.json"
+    jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
+        "$OUTDIR/responses/node2-reboot-join.json" >/dev/null
+    get_json 2 "/~green-zone@1.0/status?name=book-shelf" \
+        "$OUTDIR/responses/node2-reboot-status.json"
+    assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json"
+    echo ">> node 2 reopened the same encrypted non-volatile volume after reboot"
+fi
 
 for n in 1 2 3; do
     member_addr=$(jq -r '.body.node.address' \

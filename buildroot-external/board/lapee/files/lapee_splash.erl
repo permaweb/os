@@ -65,6 +65,8 @@ provision_mode_path() ->
     os:getenv("LAPEE_PROVISION_MODE", "/run/lapee/sb-provision-mode").
 provision_report_path() ->
     os:getenv("LAPEE_PROVISION_REPORT", "/run/lapee/sb-provision-report").
+provision_prompt_path() ->
+    os:getenv("LAPEE_PROVISION_PROMPT", "/run/lapee/sb-provision-prompt").
 
 splash_layout() ->
     case os:getenv("LAPEE_SPLASH_LAYOUT") of
@@ -732,6 +734,9 @@ draw_provision_panel(Grid, W, H, X, Y, ColW, Footer) ->
         report ->
             draw_provision_report(Grid1, W, H, TextX, Y + 2,
                                   TextW, PanelH - 4);
+        prompt ->
+            draw_provision_prompt(Grid1, W, H, TextX, Y + 2,
+                                  TextW, PanelH - 4);
         warning ->
             draw_provision_warning(Grid1, W, H, TextX, Y, TextW,
                                    PanelH, Footer)
@@ -759,6 +764,18 @@ draw_provision_report(Grid, W, H, TextX, Y, TextW, MaxLines) ->
     Lines = provision_report_lines(TextW, max(1, MaxLines - 2)),
     overlay_lines(Grid1, W, H, TextX, Y + 2, Lines).
 
+draw_provision_prompt(Grid, W, H, TextX, Y, TextW, MaxLines) ->
+    Header = "!!! NON-VOLATILE STORAGE !!!",
+    Grid1 = overlay_centered_lines(Grid, W, H, TextX, Y, TextW, [Header]),
+    Lines = provision_report_lines(TextW, max(1, MaxLines - 5)),
+    Grid2 = overlay_lines(Grid1, W, H, TextX, Y + 2, Lines),
+    PromptY = Y + MaxLines - 2,
+    InputY = Y + MaxLines,
+    Grid3 = overlay_text(Grid2, W, H, TextX, PromptY,
+                         fit_text(read_provision_prompt(), TextW)),
+    Input = "> " ++ read_provision_input() ++ "_",
+    overlay_text(Grid3, W, H, TextX, InputY, fit_text(Input, TextW)).
+
 provision_footer_visible("Type I UNDERSTAND. to continue.") ->
     false;
 provision_footer_visible("Type I UNDERSTAND. to continue:") ->
@@ -782,6 +799,7 @@ provision_mode() ->
         {ok, Bin} ->
             case string:trim(binary_to_list(Bin)) of
                 "report" -> report;
+                "prompt" -> prompt;
                 _ -> warning
             end;
         _ ->
@@ -830,6 +848,17 @@ read_provision_input() ->
             fit_text(binary_to_list(Bin), 80);
         _ ->
             ""
+    end.
+
+read_provision_prompt() ->
+    case file:read_file(provision_prompt_path()) of
+        {ok, Bin} ->
+            case string:trim(binary_to_list(Bin)) of
+                "" -> "Type DESTROY [NUMBER] to format, or SKIP:";
+                Text -> Text
+            end;
+        _ ->
+            "Type DESTROY [NUMBER] to format, or SKIP:"
     end.
 
 blue_left_top_lines(LeftW) ->

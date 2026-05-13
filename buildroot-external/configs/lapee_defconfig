@@ -100,6 +100,13 @@ BR2_PACKAGE_IW=y
 # ip / ss / network setup.
 BR2_PACKAGE_IPROUTE2=y
 
+# Encrypted non-volatile storage. The provisioner uses parted to create the
+# marker partition; runtime uses cryptsetup + ext4 after a green-zone key is
+# available.
+BR2_PACKAGE_CRYPTSETUP=y
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_PARTED=y
+
 # Broad laptop network + graphics firmware. These are the only non-source
 # binaries in the chain; their measurements are extended into PCR 9 by the
 # kernel firmware loader, so a verifier can chain-validate against a

@@ -271,11 +271,18 @@ operation and usually has to be done from the firmware setup UI:
 make provisioner-write DEV=/dev/diskN
 ```
 
-Boot that USB once with firmware in Secure Boot Setup Mode. It should print
-the enrollment progress and then stop. Some firmware still reports
-`SetupMode=1` until the next power cycle even after accepting `PK`. Power
-off, enable Secure Boot if the firmware did not do so automatically, then
-flash and boot a signed runtime image:
+Boot that USB once with firmware in Secure Boot Setup Mode. After the
+`I UNDERSTAND.` confirmation, the provisioner lists writable non-boot disks.
+To prepare one for encrypted green-zone storage, type `DESTROY N` for the
+listed disk number; to leave persistent storage unconfigured, type `SKIP`.
+`DESTROY N` erases that whole disk and creates a GPT partition named
+`LAPEE_NONVOLATILE`. The runtime image will only consider partitions with
+that exact name.
+
+The provisioner should then print the enrollment progress and stop. Some
+firmware still reports `SetupMode=1` until the next power cycle even after
+accepting `PK`. Power off, enable Secure Boot if the firmware did not do so
+automatically, then flash and boot a signed runtime image:
 
 ```sh
 make runtime-write DEV=/dev/diskN
@@ -380,6 +387,18 @@ that named zone and install the same green-zone identity; node 4 carries
 a different boot-attested DMI product and must fail admission with
 `template-mismatch` and remain outside the zone.
 
+Run the same gate with encrypted non-volatile disks:
+
+```sh
+make qemu-green-zone-nonvolatile
+```
+
+That adds a second virtio disk per node, pre-provisioned with the
+`LAPEE_NONVOLATILE` GPT partition name. Admitted nodes initialize or open
+the disk using the green-zone secret, mount it as their primary HyperBEAM
+store, copy the boot LMDB into it, then reboot one node to prove the existing
+encrypted volume is reused rather than reformatted.
+
 Run the operator `config.json` attestation gate:
 
 ```sh
@@ -407,13 +426,20 @@ The image contains:
 - Linux 6.19.12 with EFI stub, TPM, lockdown, WiFi, framebuffer, and
   common laptop networking support.
 - A Buildroot-generated initramfs with busybox, glibc, Erlang/OTP 27,
-  OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, and HyperBEAM.
+  OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, cryptsetup,
+  e2fsprogs, parted, and HyperBEAM.
 - A custom Buildroot `hyperbeam` package that fetches pinned upstream
   HyperBEAM `edge`, stages LapEE-owned TPM devices from
   `hyperbeam-overlay/`, builds Erlang code, and cross-compiles the TPM
   NIF against Buildroot's libtss2.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
+
+If a disk was provisioned with a `LAPEE_NONVOLATILE` partition, the runtime
+mounts it only after a green-zone key is available. Fresh partitions are
+formatted as LUKS2 plus ext4 with a key derived from the zone secret. Existing
+encrypted volumes are opened and mounted; normal runtime activation never
+reformats an existing LUKS volume.
 
 The build uses a Buildroot-built target toolchain
 (`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,

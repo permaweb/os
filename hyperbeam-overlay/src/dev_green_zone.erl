@@ -127,7 +127,8 @@ init(_Base, Req, Opts) ->
             <<"initializer">>,
             Opts
         ),
-        NewOpts = install_ring(Name, Template, AES, Wallet, Members, Opts),
+        NewOpts =
+            install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
@@ -175,7 +176,8 @@ admit(_Base, Req, Opts) ->
             <<"member">>,
             Opts
         ),
-        NewOpts = install_ring(Name, Template, AES, Wallet, Members, Opts),
+        NewOpts =
+            install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts),
         hb_http_server:set_opts(NewOpts),
         Definition = commit_unsigned_tree(
             zone_definition(Name, Template, Wallet, Members, Opts),
@@ -234,7 +236,9 @@ join(_Base, Req, Opts) ->
             <<"member">>,
             Opts
         ),
-        NewOpts = install_ring(Name, Template, AES, Wallet, NewMembers, Opts),
+        NewOpts =
+            install_ring_and_storage(
+                Name, Template, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
@@ -429,6 +433,13 @@ install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
         }
     }.
 
+install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts) ->
+    Opts1 = install_ring(Name, Template, AES, Wallet, Members, Opts),
+    case lapee_nonvolatile:activate(Name, AES, Opts1) of
+        {ok, Opts2} -> Opts2;
+        _ -> Opts1
+    end.
+
 require_ring(Name, Opts) ->
     Priv = hb_opts:get(<<"priv-green-zones">>, #{}, Opts),
     Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
@@ -497,26 +508,34 @@ green_zone_not_initialized(Name) ->
 
 all_status_body(Opts) ->
     Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
-    #{
+    maybe_add_nonvolatile_status(#{
         <<"type">> => <<"green-zone-status">>,
         <<"version">> => <<"1.0">>,
         <<"initialized">> => map_size(Zones) > 0,
         <<"green-zones">> => Zones
-    }.
+    }, Opts).
 
 status_body(Name, Opts) ->
     case hb_maps:get(Name, hb_opts:get(<<"green-zones">>, #{}, Opts),
                      undefined, Opts) of
         undefined -> green_zone_not_initialized(Name);
         Zone ->
-            #{
+            maybe_add_nonvolatile_status(#{
                 <<"type">> => <<"green-zone-status">>,
                 <<"version">> => <<"1.0">>,
                 <<"initialized">> => true,
                 <<"name">> => Name,
                 <<"identity">> => zone_identity(Name),
                 <<"green-zone">> => Zone
-            }
+            }, Opts)
+    end.
+
+maybe_add_nonvolatile_status(Body, Opts) ->
+    case lapee_nonvolatile:status(Opts) of
+        Status when is_map(Status), map_size(Status) > 0 ->
+            Body#{<<"nonvolatile-storage">> => Status};
+        _ ->
+            Body
     end.
 
 zone_definition(Name, Template, Wallet, Members, Opts) ->

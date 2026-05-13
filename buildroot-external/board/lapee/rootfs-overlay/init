@@ -119,11 +119,14 @@ PROVISION_INPUT_FILE=/run/lapee/sb-provision-input
 : > "$PROVISION_INPUT_FILE" 2>/dev/null || true
 PROVISION_MODE_FILE=/run/lapee/sb-provision-mode
 PROVISION_REPORT_FILE=/run/lapee/sb-provision-report
+PROVISION_PROMPT_FILE=/run/lapee/sb-provision-prompt
 printf 'warning\n' > "$PROVISION_MODE_FILE" 2>/dev/null || true
 : > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+: > "$PROVISION_PROMPT_FILE" 2>/dev/null || true
 export LAPEE_PROVISION_INPUT="$PROVISION_INPUT_FILE"
 export LAPEE_PROVISION_MODE="$PROVISION_MODE_FILE"
 export LAPEE_PROVISION_REPORT="$PROVISION_REPORT_FILE"
+export LAPEE_PROVISION_PROMPT="$PROVISION_PROMPT_FILE"
 SPLASH_LAYOUT=$(cmdline_value lapee.splash || true)
 if [ "$LAPEE_MODE" = "sb-provision" ]; then
     SPLASH_LAYOUT=provision
@@ -204,7 +207,8 @@ sbp_log() {
     if [ -w /dev/ttyS0 ]; then
         printf '%s\n' "$*" > /dev/ttyS0 2>/dev/null || true
     fi
-    if [ "$(cat "$PROVISION_MODE_FILE" 2>/dev/null || true)" = "report" ]; then
+    _sbp_mode=$(cat "$PROVISION_MODE_FILE" 2>/dev/null || true)
+    if [ "$_sbp_mode" = "report" ] || [ "$_sbp_mode" = "prompt" ]; then
         printf '%s\n' "$*" >> "$PROVISION_REPORT_FILE" 2>/dev/null || true
     fi
 }
@@ -225,11 +229,185 @@ sbp_set_input() {
 
 sbp_show_report() {
     : > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    : > "$PROVISION_PROMPT_FILE" 2>/dev/null || true
     printf 'report\n' > "$PROVISION_MODE_FILE" 2>/dev/null || true
+}
+
+sbp_show_prompt() {
+    _prompt="$1"
+    : > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    printf '%s\n' "$_prompt" > "$PROVISION_PROMPT_FILE" 2>/dev/null || true
+    printf 'prompt\n' > "$PROVISION_MODE_FILE" 2>/dev/null || true
 }
 
 sbp_char_hex() {
     printf '%s' "$1" | od -An -tx1 2>/dev/null | tr -d ' \n'
+}
+
+parent_block_for_part() {
+    _base=$(basename "$1")
+    # sda1 -> sda, vda1 -> vda, nvme0n1p1 -> nvme0n1,
+    # mmcblk0p1 -> mmcblk0. Busybox sed basic-regexp syntax.
+    printf '%s\n' "$_base" | sed 's/p\{0,1\}[0-9][0-9]*$//'
+}
+
+sbp_size_label() {
+    _sectors="$1"
+    case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
+    _mib=$(( _sectors / 2048 ))
+    if [ "$_mib" -ge 1024 ]; then
+        _gib=$(( _mib / 1024 ))
+        _dec=$(( (_mib % 1024) * 10 / 1024 ))
+        printf '%s.%sGiB' "$_gib" "$_dec"
+    else
+        printf '%sMiB' "$_mib"
+    fi
+}
+
+sbp_disk_model() {
+    _name="$1"
+    _vendor=$(cat "/sys/block/$_name/device/vendor" 2>/dev/null | tr -d '\r\n' || true)
+    _model=$(cat "/sys/block/$_name/device/model" 2>/dev/null | tr -d '\r\n' || true)
+    _serial=$(cat "/sys/block/$_name/device/serial" 2>/dev/null | tr -d '\r\n' || true)
+    _txt="${_vendor:-}${_vendor:+ }${_model:-}${_serial:+ }${_serial:-}"
+    [ -n "$_txt" ] || _txt=$(cat "/sys/block/$_name/device/name" 2>/dev/null | tr -d '\r\n' || true)
+    [ -n "$_txt" ] || _txt="unknown model"
+    printf '%s' "$_txt" | tr -s ' '
+}
+
+sbp_collect_nonvolatile_disks() {
+    _boot_esp="$1"
+    _boot_disk=$(parent_block_for_part "$_boot_esp")
+    _candidates=/run/lapee/nonvolatile-candidates
+    : > "$_candidates"
+    _idx=1
+    for _b in /sys/block/*; do
+        [ -e "$_b" ] || continue
+        _name=$(basename "$_b")
+        case "$_name" in
+            loop*|ram*|dm-*|zram*|sr*) continue ;;
+        esac
+        [ "$_name" = "$_boot_disk" ] && continue
+        [ -b "/dev/$_name" ] || continue
+        _ro=$(cat "$_b/ro" 2>/dev/null || echo 1)
+        [ "$_ro" = "0" ] || continue
+        _sectors=$(cat "$_b/size" 2>/dev/null || echo 0)
+        case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
+        [ "$_sectors" -gt 0 ] || continue
+        _size=$(sbp_size_label "$_sectors")
+        _model=$(sbp_disk_model "$_name")
+        printf '%s|/dev/%s|%s|%s\n' \
+            "$_idx" "$_name" "$_size" "$_model" >> "$_candidates"
+        _idx=$(( _idx + 1 ))
+    done
+}
+
+sbp_disk_prompt_lines() {
+    _candidates=/run/lapee/nonvolatile-candidates
+    printf '%s\n' "LapEE can prepare one disk for encrypted green-zone storage."
+    printf '%s\n' "The selected disk will be erased and recreated with one partition named LAPEE_NONVOLATILE."
+    printf '%s\n' ""
+    if [ ! -s "$_candidates" ]; then
+        printf '%s\n' "No writable non-boot disks were found."
+        return 0
+    fi
+    printf '%s\n' "Available disks:"
+    while IFS='|' read -r _idx _dev _size _model; do
+        [ -n "$_idx" ] || continue
+        printf '%s\n' "$_idx. $_dev  $_size  $_model"
+    done < "$_candidates"
+    printf '%s\n' ""
+    printf '%s\n' "Type SKIP to leave non-volatile storage unconfigured."
+}
+
+sbp_partition_suffix() {
+    case "$1" in
+        *[0-9]) printf 'p1' ;;
+        *) printf '1' ;;
+    esac
+}
+
+sbp_format_nonvolatile_disk() {
+    _dev="$1"
+    [ -b "$_dev" ] || return 1
+    if ! command -v parted >/dev/null 2>&1; then
+        sbp_log "ERROR: parted is not available in this provisioning image."
+        return 1
+    fi
+    if grep -q "^$_dev" /proc/mounts 2>/dev/null; then
+        sbp_log "ERROR: $_dev or one of its partitions is mounted."
+        return 1
+    fi
+    sbp_log "Destroying partition table on $_dev."
+    if ! parted -s "$_dev" mklabel gpt \
+            mkpart LAPEE_NONVOLATILE 1MiB 100% \
+            > /run/lapee/nonvolatile-parted.log 2>&1; then
+        while IFS= read -r _line; do sbp_log "$_line"; done \
+            < /run/lapee/nonvolatile-parted.log
+        sbp_log "ERROR: failed to create LAPEE_NONVOLATILE partition."
+        return 1
+    fi
+    partprobe "$_dev" 2>/dev/null || true
+    blockdev --rereadpt "$_dev" 2>/dev/null || true
+    sync 2>/dev/null || true
+    _part="${_dev}$(sbp_partition_suffix "$_dev")"
+    sbp_log "Prepared $_part as LAPEE_NONVOLATILE."
+    return 0
+}
+
+sbp_prompt_nonvolatile_disk() {
+    _boot_esp="$1"
+    sbp_collect_nonvolatile_disks "$_boot_esp"
+    sbp_show_prompt "Type DESTROY [NUMBER] to format, or SKIP:"
+    sbp_disk_prompt_lines > "$PROVISION_REPORT_FILE" 2>/dev/null || true
+    _sbp_answer=""
+    sbp_set_input "$_sbp_answer"
+    _sbp_stty=$(stty -F /dev/console -g 2>/dev/null || true)
+    stty -F /dev/console raw -echo 2>/dev/null || true
+    while :; do
+        IFS= read -r -n 1 _sbp_ch < /dev/console || _sbp_ch=""
+        _sbp_hex=$(sbp_char_hex "$_sbp_ch")
+        case "$_sbp_hex" in
+            ""|0a|0d)
+                if [ "$_sbp_answer" = "SKIP" ]; then
+                    [ -n "$_sbp_stty" ] && \
+                        stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
+                    sbp_set_input ""
+                    sbp_show_report
+                    sbp_log "Non-volatile storage provisioning skipped."
+                    return 0
+                fi
+                case "$_sbp_answer" in
+                    DESTROY\ [0-9]*)
+                        _num=${_sbp_answer#DESTROY }
+                        _target=$(awk -F'|' -v n="$_num" \
+                            '$1 == n { print $2; exit }' \
+                            /run/lapee/nonvolatile-candidates 2>/dev/null || true)
+                        if [ -n "$_target" ]; then
+                            [ -n "$_sbp_stty" ] && \
+                                stty -F /dev/console "$_sbp_stty" 2>/dev/null || true
+                            sbp_set_input ""
+                            sbp_show_report
+                            sbp_format_nonvolatile_disk "$_target" || true
+                            return 0
+                        fi
+                        ;;
+                esac
+                _sbp_answer=""
+                sbp_set_input "$_sbp_answer"
+                sbp_log "Input did not match. Type DESTROY [NUMBER] or SKIP."
+                ;;
+            08|7f)
+                _sbp_answer=${_sbp_answer%?}
+                ;;
+            *)
+                if [ ${#_sbp_answer} -lt 80 ]; then
+                    _sbp_answer="${_sbp_answer}${_sbp_ch}"
+                fi
+                ;;
+        esac
+        sbp_set_input "$_sbp_answer"
+    done
 }
 
 sbp_confirm_enrolment() {
@@ -310,6 +488,7 @@ run_secure_boot_provisioner() {
 
     sbp_log "Found provisioning bundle on $_esp_found."
     sbp_confirm_enrolment
+    sbp_prompt_nonvolatile_disk "$_esp_found"
     sbp_log "Enrolling db, KEK, then PK. Do not power off during this step."
     if /usr/sbin/lapee-sb-provisioner /sys/firmware/efi/efivars /mnt/esp \
             > /run/lapee/sb-provisioner.log 2>&1; then
@@ -959,13 +1138,6 @@ read_boot_media_config() {
     status "Boot USB was not found; continuing without Wi-Fi settings."
     trace "boot-media: LapEE ESP not found"
     return 1
-}
-
-parent_block_for_part() {
-    _base=$(basename "$1")
-    # sda1 -> sda, vda1 -> vda, nvme0n1p1 -> nvme0n1,
-    # mmcblk0p1 -> mmcblk0. Busybox sed basic-regexp syntax.
-    printf '%s\n' "$_base" | sed 's/p\{0,1\}[0-9][0-9]*$//'
 }
 
 wait_block_gone() {

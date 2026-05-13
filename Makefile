@@ -38,6 +38,8 @@
 #   make qemu-oracle        - boot one node and verify a signed HTTPS relay.
 #   make qemu-gui           - boot the selected image with a QEMU window.
 #   make qemu-green-zone    - run the four-node green-zone acceptance test.
+#   make qemu-green-zone-nonvolatile
+#                           - run green-zone plus encrypted storage reuse.
 #   make qemu-operator-config
 #                           - run the operator-config attestation test.
 #
@@ -118,11 +120,13 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 
 .PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
-        qemu qemu-oracle qemu-gui qemu-green-zone qemu-operator-config \
+        qemu qemu-oracle qemu-gui qemu-green-zone qemu-green-zone-nonvolatile \
+        qemu-operator-config \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
         _operator-config-apply _qemu-green-zone-cluster \
+        _qemu-green-zone-nonvolatile \
         _qemu-operator-config-green-zone \
         all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
@@ -206,6 +210,9 @@ qemu-gui:
 
 qemu-green-zone:
 	$(MAKE) _qemu-green-zone-cluster
+
+qemu-green-zone-nonvolatile:
+	$(MAKE) _qemu-green-zone-nonvolatile
 
 qemu-operator-config:
 	$(MAKE) _qemu-operator-config-green-zone
@@ -394,6 +401,10 @@ _provisioner-write:
 
 _qemu-green-zone-cluster: toolchain
 	./scripts/qemu-green-zone-cluster.sh
+
+_qemu-green-zone-nonvolatile: toolchain
+	NONVOLATILE=1 OUTDIR="$(BUILD_DIR)/qemu-green-zone-nonvolatile" \
+	    ./scripts/qemu-green-zone-cluster.sh
 
 _qemu-operator-config-green-zone: toolchain
 	./scripts/qemu-operator-config-green-zone.sh
