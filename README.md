@@ -275,14 +275,15 @@ Boot that USB once with firmware in Secure Boot Setup Mode. After the
 `I UNDERSTAND.` confirmation, the provisioner lists writable non-boot disks.
 To prepare one for encrypted green-zone storage, type `DESTROY N` for the
 listed disk number; to leave persistent storage unconfigured, type `SKIP`.
-`DESTROY N` erases that whole disk and creates a GPT partition named
-`LAPEE_NONVOLATILE` with a LapEE provisioning marker at the start of the
-partition. The full-disk erase can take a long time on large disks. The
-runtime image will only first-format a non-LUKS partition when both the GPT
-partition name and the LapEE marker are present. The provisioner excludes the
-boot USB and other removable/USB disks from the list, then rechecks the
-selected disk immediately before modifying it so a changed device map cannot
-silently redirect the destructive operation.
+`DESTROY N` destroys the selected disk's partition table and creates a GPT
+partition named `LAPEE_NONVOLATILE` with a LapEE provisioning marker at the
+start of the partition. It is not a secure erase; the runtime will overwrite
+the selected partition with LUKS2 before use. The runtime image will only
+first-format a non-LUKS partition when both the GPT partition name and the
+LapEE marker are present. The provisioner excludes the boot USB and other
+removable/USB disks from the list, then rechecks the selected disk immediately
+before modifying it so a changed device map cannot silently redirect the
+destructive operation.
 
 The provisioner should then print the enrollment progress and stop. Some
 firmware still reports `SetupMode=1` until the next power cycle even after
@@ -412,10 +413,10 @@ make qemu-provisioner-nonvolatile
 
 That boots the provisioner image with a sacrificial disk, types the real
 `I UNDERSTAND.` and `DESTROY 1` prompts through QEMU, and verifies that the
-extra disk is actually erased, receives a GPT partition named
-`LAPEE_NONVOLATILE`, and contains the LapEE provisioning marker. The OVMF
-firmware in this test is not expected to complete Secure Boot enrollment; the
-test is only asserting the non-volatile disk preparation path.
+extra disk receives a GPT partition named `LAPEE_NONVOLATILE` and contains
+the LapEE provisioning marker. The OVMF firmware in this test is not expected
+to complete Secure Boot enrollment; the test is only asserting the
+non-volatile disk preparation path.
 
 Run the operator `config.json` attestation gate:
 

@@ -280,11 +280,6 @@ sbp_diskseq() {
     cat "/sys/block/$_name/diskseq" 2>/dev/null | tr -d '\r\n' || true
 }
 
-sbp_disk_wwid() {
-    _name="$1"
-    cat "/sys/block/$_name/wwid" 2>/dev/null | tr '|\r\n' '   ' || true
-}
-
 sbp_removable() {
     _name="$1"
     cat "/sys/block/$_name/removable" 2>/dev/null | tr -d '\r\n' || echo 1
@@ -356,13 +351,11 @@ sbp_collect_nonvolatile_disks() {
         _size=$(sbp_size_label "$_sectors")
         _model=$(sbp_disk_model "$_name")
         _diskseq=$(sbp_diskseq "$_name")
-        _wwid=$(sbp_disk_wwid "$_name")
         _removable=$(sbp_removable "$_name")
         _path=$(sbp_device_path "$_name")
-        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        printf '%s|/dev/%s|%s|%s|%s|%s|%s|%s\n' \
             "$_idx" "$_name" "$_size" "$_model" "$_sectors" \
-            "$_diskseq" "$_removable" "$_path" "$_wwid" \
-            >> "$_candidates"
+            "$_diskseq" "$_removable" "$_path" >> "$_candidates"
         _idx=$(( _idx + 1 ))
     done
 }
@@ -370,7 +363,7 @@ sbp_collect_nonvolatile_disks() {
 sbp_disk_prompt_lines() {
     _candidates=/run/lapee/nonvolatile-candidates
     printf '%s\n' "LapEE can prepare one disk for encrypted green-zone storage."
-    printf '%s\n' "The selected disk will be erased and recreated with one partition named LAPEE_NONVOLATILE."
+    printf '%s\n' "The selected disk will be repartitioned with one partition named LAPEE_NONVOLATILE."
     printf '%s\n' ""
     if [ ! -s "$_candidates" ]; then
         printf '%s\n' "No writable non-boot disks were found."
@@ -378,12 +371,9 @@ sbp_disk_prompt_lines() {
     fi
     printf '%s\n' "Available disks:"
     while IFS='|' read -r _idx _dev _size _model _sectors _diskseq \
-        _removable _path _wwid; do
+        _removable _path; do
         [ -n "$_idx" ] || continue
         printf '%s\n' "$_idx. $_dev  $_size  $_model"
-        printf '%s\n' "   diskseq: ${_diskseq:-unknown}"
-        [ -z "$_wwid" ] || printf '%s\n' "   wwid: $_wwid"
-        [ -z "$_path" ] || printf '%s\n' "   path: $_path"
     done < "$_candidates"
     printf '%s\n' ""
     printf '%s\n' "Type SKIP to leave non-volatile storage unconfigured."
@@ -412,52 +402,6 @@ sbp_wait_nonvolatile_partition_node() {
         sleep 1
     done
     return 1
-}
-
-sbp_zero_block_device() {
-    _dev="$1"
-    _name=$(basename "$_dev")
-    _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
-    case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$_sectors" -gt 0 ] || return 1
-
-    sbp_log "Erasing all previous contents on $_dev. This can take a long time."
-    _chunk_sectors=32768
-    _chunks=$(( _sectors / _chunk_sectors ))
-    _tail=$(( _sectors % _chunk_sectors ))
-    _group_chunks=1024
-    _offset=0
-    while [ "$_offset" -lt "$_chunks" ]; do
-        _todo=$(( _chunks - _offset ))
-        [ "$_todo" -le "$_group_chunks" ] || _todo="$_group_chunks"
-        if ! dd if=/dev/zero of="$_dev" bs=16M \
-                seek="$_offset" count="$_todo" \
-                > /run/lapee/nonvolatile-wipe.log 2>&1; then
-            while IFS= read -r _line; do sbp_log "$_line"; done \
-                < /run/lapee/nonvolatile-wipe.log
-            sbp_log "ERROR: failed while erasing $_dev."
-            return 1
-        fi
-        _offset=$(( _offset + _todo ))
-        _written=$(( _offset * _chunk_sectors ))
-        _pct=$(( _written * 100 / _sectors ))
-        sbp_log "Erase progress: $_pct%."
-    done
-    if [ "$_tail" -gt 0 ]; then
-        if ! dd if=/dev/zero of="$_dev" bs=512 \
-                seek="$(( _chunks * _chunk_sectors ))" count="$_tail" \
-                > /run/lapee/nonvolatile-wipe-tail.log 2>&1; then
-            while IFS= read -r _line; do sbp_log "$_line"; done \
-                < /run/lapee/nonvolatile-wipe-tail.log
-            sbp_log "ERROR: failed while erasing the end of $_dev."
-            return 1
-        fi
-        sbp_log "Erase progress: 100%."
-    elif [ "$_chunks" -eq 0 ]; then
-        sbp_log "Erase progress: 100%."
-    fi
-    sync 2>/dev/null || true
-    return 0
 }
 
 sbp_write_nonvolatile_marker() {
@@ -495,9 +439,6 @@ sbp_format_nonvolatile_disk() {
     fi
     if grep -q "^$_dev" /proc/mounts 2>/dev/null; then
         sbp_log "ERROR: $_dev or one of its partitions is mounted."
-        return 1
-    fi
-    if ! sbp_zero_block_device "$_dev"; then
         return 1
     fi
     sbp_log "Destroying partition table on $_dev."

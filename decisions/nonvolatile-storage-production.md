@@ -8,9 +8,10 @@ provisioning/runtime/reboot flows.
 
 ## Current Shape
 
-The provisioner zero-erases exactly one operator-selected non-removable disk,
+The provisioner repartitions exactly one operator-selected non-removable disk,
 creates a GPT partition named `LAPEE_NONVOLATILE`, and writes a LapEE marker at
-the partition start. The runtime ignores every other disk surface. After a
+the partition start. It is deliberately not a secure erase. The runtime ignores
+every other disk surface. After a
 green-zone key exists, LapEE derives a disk key from the zone name and AES
 secret, initializes or opens the labeled partition as LUKS2, mounts ext4 with
 `nodev,nosuid,noexec`, prepends that LMDB store, and copies the boot LMDB into
@@ -34,10 +35,6 @@ it.
   input. The disk is now revalidated by device, boot-disk exclusion,
   removability, path, writability, disk sequence, and size immediately before
   destructive writes run.
-- The initial provisioning path could leave old plaintext past the new
-  partition table. It now erases the selected disk before repartitioning, and
-  the QEMU smoke test plants a sentinel string across the disk and fails if it
-  survives.
 - The initial provisioner QEMU validation was manual. It is now captured in
   `scripts/qemu-provisioner-nonvolatile.sh`.
 - Upstream `hb_volume` remains too broad for this path: it shells via `sudo`,
@@ -48,9 +45,9 @@ it.
 
 ## Security Decisions
 
-- Fresh marker partitions may be formatted by runtime because the marker itself
-  is written only after an operator-destructive full-disk wipe. Existing LUKS
-  volumes are never reformatted.
+- Fresh marker partitions may be formatted by runtime because the marker is
+  written only by the explicit provisioner flow after operator confirmation.
+  Existing LUKS volumes are never reformatted.
 - Multiple marker partitions are an error. There is no heuristic selection.
 - Missing storage is a skip, not a node failure. This keeps green-zone admission
   independent from optional persistence.

@@ -33,7 +33,7 @@ activate_enabled(Name, AES, Opts) ->
     ).
 
 activate_enabled_locked(Name, AES, Opts) ->
-    case mounted(Opts) orelse mapper_mounted_at_default() of
+    case mapper_mounted_at_default() of
         true ->
             Store = persistent_store(?DEFAULT_MOUNT, Opts),
             Migration = migrate_primary_lmdb(Store, Opts),
@@ -56,12 +56,6 @@ activate_enabled_locked(Name, AES, Opts) ->
                 {error, Status} ->
                     {ok, set_status(Opts, Status)}
             end
-    end.
-
-mounted(Opts) ->
-    case status(Opts) of
-        #{ <<"mounted">> := true } -> true;
-        _ -> false
     end.
 
 do_activate(Name, AES, Opts) ->
