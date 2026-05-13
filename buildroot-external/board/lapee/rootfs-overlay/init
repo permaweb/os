@@ -416,15 +416,24 @@ sbp_zero_block_device() {
     _chunk_sectors=32768
     _chunks=$(( _sectors / _chunk_sectors ))
     _tail=$(( _sectors % _chunk_sectors ))
-    if [ "$_chunks" -gt 0 ]; then
-        if ! dd if=/dev/zero of="$_dev" bs=16M count="$_chunks" \
+    _group_chunks=1024
+    _offset=0
+    while [ "$_offset" -lt "$_chunks" ]; do
+        _todo=$(( _chunks - _offset ))
+        [ "$_todo" -le "$_group_chunks" ] || _todo="$_group_chunks"
+        if ! dd if=/dev/zero of="$_dev" bs=16M \
+                seek="$_offset" count="$_todo" \
                 > /run/lapee/nonvolatile-wipe.log 2>&1; then
             while IFS= read -r _line; do sbp_log "$_line"; done \
                 < /run/lapee/nonvolatile-wipe.log
             sbp_log "ERROR: failed while erasing $_dev."
             return 1
         fi
-    fi
+        _offset=$(( _offset + _todo ))
+        _written=$(( _offset * _chunk_sectors ))
+        _pct=$(( _written * 100 / _sectors ))
+        sbp_log "Erase progress: $_pct%."
+    done
     if [ "$_tail" -gt 0 ]; then
         if ! dd if=/dev/zero of="$_dev" bs=512 \
                 seek="$(( _chunks * _chunk_sectors ))" count="$_tail" \
@@ -434,6 +443,9 @@ sbp_zero_block_device() {
             sbp_log "ERROR: failed while erasing the end of $_dev."
             return 1
         fi
+        sbp_log "Erase progress: 100%."
+    elif [ "$_chunks" -eq 0 ]; then
+        sbp_log "Erase progress: 100%."
     fi
     sync 2>/dev/null || true
     return 0
