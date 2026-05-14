@@ -720,7 +720,7 @@ render_provision_grid(W, H, Yaw, Lid, Footer) ->
                         RightX + RightW * 0.58 - 5, H * 0.69, Scale),
     Grid2 = overlay_lines(Grid1, W, H, 6, 3,
                           blue_left_top_lines(LeftW)),
-    draw_provision_panel(Grid2, W, H, 6, 15, LeftW - 4, Footer).
+    draw_provision_panel(Grid2, W, H, 6, 16, LeftW - 4, Footer).
 
 draw_provision_panel(Grid, W, H, X, Y, ColW, Footer) ->
     PanelW = (min(64, max(36, ColW)) div 2) * 2,
@@ -854,11 +854,11 @@ read_provision_prompt() ->
     case file:read_file(provision_prompt_path()) of
         {ok, Bin} ->
             case string:trim(binary_to_list(Bin)) of
-                "" -> "Type DESTROY [NUMBER] to format, or SKIP:";
+                "" -> "Type `SKIP` or `DESTROY N[ -> ID]`.";
                 Text -> Text
             end;
         _ ->
-            "Type DESTROY [NUMBER] to format, or SKIP:"
+            "Type `SKIP` or `DESTROY N[ -> ID]`."
     end.
 
 blue_left_top_lines(LeftW) ->

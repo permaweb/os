@@ -4,7 +4,8 @@
 # Responsibilities:
 #   1. Mount the essentials.
 #   2. Read the ESP only long enough to copy optional WiFi credentials.
-#   3. Detach boot media and USB host input before HyperBEAM starts.
+#   3. Detach boot media and USB host input before HyperBEAM starts,
+#      while preserving already-attached non-boot storage.
 #   4. Assemble HB_CONFIG with the enforced config last.
 #   5. exec the HyperBEAM release in foreground mode.
 #
@@ -246,9 +247,37 @@ sbp_char_hex() {
 
 parent_block_for_part() {
     _base=$(basename "$1")
-    # sda1 -> sda, vda1 -> vda, nvme0n1p1 -> nvme0n1,
-    # mmcblk0p1 -> mmcblk0. Busybox sed basic-regexp syntax.
-    printf '%s\n' "$_base" | sed 's/p\{0,1\}[0-9][0-9]*$//'
+    _sys=$(readlink -f "/sys/class/block/$_base" 2>/dev/null || true)
+    if [ -n "$_sys" ]; then
+        if [ -f "$_sys/partition" ]; then
+            basename "$(dirname "$_sys")"
+        else
+            basename "$_sys"
+        fi
+        return 0
+    fi
+    case "$_base" in
+        nvme*n[0-9]p[0-9]*|mmcblk[0-9]p[0-9]*)
+            printf '%s\n' "$_base" | sed 's/p[0-9][0-9]*$//' ;;
+        nvme*n[0-9]|mmcblk[0-9])
+            printf '%s\n' "$_base" ;;
+        *)
+            printf '%s\n' "$_base" | sed 's/[0-9][0-9]*$//' ;;
+    esac
+}
+
+block_disk_has_mounts() {
+    _disk="$1"
+    while read -r _src _rest; do
+        case "$_src" in
+            /dev/*)
+                _node=$(readlink -f "$_src" 2>/dev/null || true)
+                _parent=$(parent_block_for_part "${_node:-$_src}")
+                [ "$_parent" = "$_disk" ] && return 0
+                ;;
+        esac
+    done < /proc/mounts
+    return 1
 }
 
 sbp_size_label() {
@@ -291,6 +320,7 @@ sbp_disk_is_nonvolatile_candidate() {
     _sectors=$(cat "/sys/block/$_name/size" 2>/dev/null || echo 0)
     case "$_sectors" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_sectors" -gt 0 ] || return 1
+    block_disk_has_mounts "$_name" && return 1
     return 0
 }
 
@@ -315,21 +345,18 @@ sbp_collect_nonvolatile_disks() {
 
 sbp_disk_prompt_lines() {
     _candidates=/run/lapee/nonvolatile-candidates
-    printf '%s\n' "LapEE can prepare one disk for encrypted green-zone storage."
-    printf '%s\n' "The selected disk will be repartitioned for one green-zone store."
-    printf '%s\n' "Use DESTROY N for the first zone joined, or DESTROY N -> PREFIX for a specific zone."
+    printf '%s\n' "Would you like to setup encrypted zone storage? This will fully destroy all data on the disk. To provision a disk for a specific zone type 'DESTROY N -> ID', or 'DESTROY N' to enrol the first zone joined."
+    printf '%s\n' ""
+    printf '%s\n' "Disks:"
     printf '%s\n' ""
     if [ ! -s "$_candidates" ]; then
         printf '%s\n' "No writable non-boot disks were found."
         return 0
     fi
-    printf '%s\n' "Available disks:"
     while IFS='|' read -r _idx _dev _size _model; do
         [ -n "$_idx" ] || continue
         printf '%s\n' "$_idx. $_dev  $_size  $_model"
     done < "$_candidates"
-    printf '%s\n' ""
-    printf '%s\n' "Type SKIP to leave non-volatile storage unconfigured."
 }
 
 sbp_nonvolatile_label() {
@@ -448,7 +475,7 @@ sbp_format_nonvolatile_disk() {
         sbp_log "ERROR: selected disk is no longer a writable non-boot disk."
         return 1
     fi
-    if grep -q "^$_dev" /proc/mounts 2>/dev/null; then
+    if block_disk_has_mounts "$(parent_block_for_part "$_dev")"; then
         sbp_log "ERROR: $_dev or one of its partitions is mounted."
         return 1
     fi
@@ -476,6 +503,11 @@ sbp_format_nonvolatile_disk() {
     if ! sbp_write_nonvolatile_marker "$_part"; then
         return 1
     fi
+    sbp_log "Partitioning completed."
+    sbp_log "Disk: $_dev"
+    sbp_log "Partition: $_part"
+    sbp_log "Label: $_label"
+    sbp_log "Marker: written"
     sbp_log "Prepared $_part as $_label."
     return 0
 }
@@ -483,9 +515,13 @@ sbp_format_nonvolatile_disk() {
 sbp_prompt_nonvolatile_disk() {
     _boot_esp="$1"
     sbp_collect_nonvolatile_disks "$_boot_esp"
-    sbp_show_prompt "Type DESTROY [NUMBER], DESTROY [NUMBER] -> PREFIX, or SKIP:"
+    sbp_show_prompt 'Type `SKIP` or `DESTROY N[ -> ID]`.'
     sbp_disk_prompt_lines > "$PROVISION_REPORT_FILE" 2>/dev/null || true
-    sbp_log "Non-volatile storage selection is ready."
+    status "Non-volatile storage selection is ready."
+    if [ -w /dev/ttyS0 ]; then
+        printf '%s\n' "Non-volatile storage selection is ready." \
+            > /dev/ttyS0 2>/dev/null || true
+    fi
     _sbp_answer=""
     sbp_set_input "$_sbp_answer"
     _sbp_stty=$(stty -F /dev/console -g 2>/dev/null || true)
@@ -524,7 +560,7 @@ sbp_prompt_nonvolatile_disk() {
                 fi
                 _sbp_answer=""
                 sbp_set_input "$_sbp_answer"
-                sbp_log "Input did not match. Type DESTROY [NUMBER], DESTROY [NUMBER] -> PREFIX, or SKIP."
+                sbp_log "Input did not match. Type SKIP or DESTROY N[ -> ID]."
                 ;;
             08|7f)
                 _sbp_answer=${_sbp_answer%?}
@@ -1340,6 +1376,17 @@ detach_boot_media() {
     halt_boot "could not detach boot media /dev/$_disk"
 }
 
+usb_device_has_interface_class() {
+    _usb_dev="$1"
+    _class="$2"
+    for _iface in "$_usb_dev"/*:*; do
+        [ -f "$_iface/bInterfaceClass" ] || continue
+        [ "$(cat "$_iface/bInterfaceClass" 2>/dev/null || true)" = "$_class" ] \
+            && return 0
+    done
+    return 1
+}
+
 lock_down_usb_after_boot_media() {
     [ "$LAPEE_DEBUG" != "1" ] || {
         trace "usb: debug mode; leaving USB host stack authorized"
@@ -1356,22 +1403,21 @@ lock_down_usb_after_boot_media() {
         echo 0 > "$_hub/authorized_default" 2>/dev/null || true
     done
 
-    # Deauthorize every already-enumerated USB device. This is after
-    # wifi.conf has been copied out and after boot-media deletion, so
-    # production no longer needs USB storage, HID, tethering, or NICs.
+    # Disable already-enumerated USB input without tearing down
+    # separately provisioned USB storage. Future hotplug is closed by
+    # authorized_default=0 above, and the boot USB was deleted first.
+    for _iface in /sys/bus/usb/drivers/usbhid/*:*; do
+        [ -e "$_iface" ] || continue
+        _ifname=$(basename "$_iface")
+        echo "$_ifname" > /sys/bus/usb/drivers/usbhid/unbind \
+            2>/dev/null || true
+    done
     for _dev in /sys/bus/usb/devices/[0-9]*; do
         [ -e "$_dev/authorized" ] || continue
-        echo 0 > "$_dev/authorized" 2>/dev/null || true
-    done
-
-    # If the host controller supports PCI driver unbind, take it down
-    # too. Built-in xHCI can still exist in memory, but without a bound
-    # controller it cannot enumerate later devices.
-    for _ctrl in /sys/bus/pci/drivers/xhci_hcd/*:*; do
-        [ -e "$_ctrl" ] || continue
-        _bdf=$(basename "$_ctrl")
-        echo "$_bdf" > /sys/bus/pci/drivers/xhci_hcd/unbind \
-            2>/dev/null || true
+        if usb_device_has_interface_class "$_dev" "03" && \
+           ! usb_device_has_interface_class "$_dev" "08"; then
+            echo 0 > "$_dev/authorized" 2>/dev/null || true
+        fi
     done
     status "Local USB input locked."
 }

@@ -536,6 +536,37 @@ assert_current_boot_attestation_after_join() {
     fi
 }
 
+assert_cached_boot_attestation_present() {
+    local n=$1
+    local id=$2
+    local file=$3
+    jq -e '
+        .status == 200 and
+        (.["issued-at-unix"] | type == "number") and
+        (.node.address | type == "string" and length > 0) and
+        (.system.kernel.cmdline | type == "string" and length > 0) and
+        .tpm."extended-pcr" == 15
+    ' "$file" >/dev/null || {
+        echo "!! node $n did not return cached boot-attestation $id" >&2
+        jq '{status, issued: .["issued-at-unix"], address: .node.address,
+             cmdline: .system.kernel.cmdline, extended_pcr: .tpm."extended-pcr",
+             body}' "$file" >&2
+        exit 1
+    }
+}
+
+assert_cached_message_not_found() {
+    local n=$1
+    local id=$2
+    local file=$3
+    jq -e '.status == 404 and .body == "not_found"' "$file" >/dev/null || {
+        echo "!! node $n unexpectedly resolved pre-reboot object $id before rejoin" >&2
+        jq '{status, body, issued: .["issued-at-unix"], address: .node.address}' \
+            "$file" >&2
+        exit 1
+    }
+}
+
 assert_nonvolatile_disk_unformatted() {
     local n=$1
     local disk="$OUTDIR/nodes/node$n/nonvolatile.img"
@@ -753,6 +784,14 @@ done
 if [[ "$NONVOLATILE" = "1" ]]; then
     node2_volume_id=$(jq -r '.body."nonvolatile-storage"."volume-id"' \
         "$OUTDIR/responses/node2-status.json")
+    node2_pre_reboot_boot_id=$(
+        jq -r '.body."nonvolatile-storage".migration."current-boot"."boot-attestation-id"' \
+            "$OUTDIR/responses/node2-status.json")
+    get_json 2 "/$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-pre-reboot-sentinel.json"
+    assert_cached_boot_attestation_present 2 "$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-pre-reboot-sentinel.json"
+    echo ">> node 2 pre-reboot boot-attestation ID is readable from non-volatile store"
     assert_nonvolatile_disk_unformatted 4
     echo ">> rejected node 4 left its non-volatile disk unformatted"
     cp "$OUTDIR/responses/node2-boot-attestation.json" \
@@ -764,6 +803,11 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     wait_node 2
     cp "$OUTDIR/responses/node2-boot-attestation.json" \
         "$OUTDIR/responses/node2-reboot-prejoin-boot-attestation.json"
+    get_json 2 "/$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
+    assert_cached_message_not_found 2 "$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
+    echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
     get_json 2 "/~tpm@2.0a/credential-subject" \
         "$OUTDIR/responses/node2-reboot-credential-subject.json"
     python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
@@ -782,6 +826,19 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json" \
         "$node2_volume_id"
     echo ">> node 2 reopened the same encrypted non-volatile volume after reboot"
+    get_json 2 "/$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-reboot-postjoin-sentinel.json"
+    assert_cached_boot_attestation_present 2 "$node2_pre_reboot_boot_id" \
+        "$OUTDIR/responses/node2-reboot-postjoin-sentinel.json"
+    echo ">> node 2 pre-reboot object is readable again after non-volatile activation"
+    node2_post_rejoin_boot_id=$(
+        jq -r '.body."nonvolatile-storage".migration."current-boot"."boot-attestation-id"' \
+            "$OUTDIR/responses/node2-reboot-status.json")
+    get_json 2 "/$node2_post_rejoin_boot_id" \
+        "$OUTDIR/responses/node2-reboot-current-boot-by-id.json"
+    assert_cached_boot_attestation_present 2 "$node2_post_rejoin_boot_id" \
+        "$OUTDIR/responses/node2-reboot-current-boot-by-id.json"
+    echo ">> node 2 current boot-attestation ID is readable after rejoin"
     get_json 2 "/~tpm@2.0a/boot-attestation" \
         "$OUTDIR/responses/node2-reboot-postjoin-boot-attestation.json"
     assert_current_boot_attestation_after_join \

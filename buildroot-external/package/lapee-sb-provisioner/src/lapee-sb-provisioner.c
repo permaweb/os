@@ -18,6 +18,8 @@
 
 #define EFI_GLOBAL_GUID "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 #define EFI_IMAGE_SECURITY_DB_GUID "d719b2cb-3d3a-4596-a3bc-dad00e67656f"
+#define EFI_SECURE_BOOT_ENABLE_DISABLE_GUID "f0a30bc7-af08-4556-99c4-001009c93a44"
+#define EFI_CUSTOM_MODE_ENABLE_GUID "c076ec0c-7028-4399-a072-71ee5c448b9f"
 
 #define EFI_VARIABLE_NON_VOLATILE 0x00000001U
 #define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002U
@@ -29,6 +31,10 @@ static const uint32_t secure_var_attrs =
 	EFI_VARIABLE_BOOTSERVICE_ACCESS |
 	EFI_VARIABLE_RUNTIME_ACCESS |
 	EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS;
+
+static const uint32_t plain_setup_var_attrs =
+	EFI_VARIABLE_NON_VOLATILE |
+	EFI_VARIABLE_BOOTSERVICE_ACCESS;
 
 static void die(const char *msg)
 {
@@ -92,6 +98,28 @@ static int read_one_byte_var(const char *efivars, const char *name, const char *
 	return data[4];
 }
 
+static uint32_t read_var_attrs_or(const char *efivars, const char *name,
+				  const char *guid, uint32_t fallback)
+{
+	char path[PATH_MAX];
+	uint8_t data[4];
+	int fd;
+	ssize_t got;
+
+	snprintf(path, sizeof(path), "%s/%s-%s", efivars, name, guid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return fallback;
+	got = read(fd, data, sizeof(data));
+	close(fd);
+	if (got < (ssize_t)sizeof(data))
+		return fallback;
+	return (uint32_t)data[0] |
+	       ((uint32_t)data[1] << 8) |
+	       ((uint32_t)data[2] << 16) |
+	       ((uint32_t)data[3] << 24);
+}
+
 static int var_has_payload(const char *efivars, const char *name, const char *guid)
 {
 	char path[PATH_MAX];
@@ -137,6 +165,59 @@ static void write_var(const char *efivars, const char *name, const char *guid,
 	close(fd);
 }
 
+static int write_one_byte_var(const char *efivars, const char *name,
+			      const char *guid, uint8_t value)
+{
+	char path[PATH_MAX];
+	uint8_t buf[5];
+	uint32_t attrs;
+	int fd;
+	ssize_t written;
+
+	attrs = read_var_attrs_or(efivars, name, guid, plain_setup_var_attrs);
+	snprintf(path, sizeof(path), "%s/%s-%s", efivars, name, guid);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return -errno;
+	buf[0] = (uint8_t)(attrs & 0xff);
+	buf[1] = (uint8_t)((attrs >> 8) & 0xff);
+	buf[2] = (uint8_t)((attrs >> 16) & 0xff);
+	buf[3] = (uint8_t)((attrs >> 24) & 0xff);
+	buf[4] = value;
+	written = write(fd, buf, sizeof(buf));
+	if (written != (ssize_t)sizeof(buf)) {
+		int err = errno ? -errno : -EIO;
+		close(fd);
+		return err;
+	}
+	if (fsync(fd) < 0 && errno != EINVAL) {
+		int err = -errno;
+		close(fd);
+		return err;
+	}
+	close(fd);
+	return 0;
+}
+
+static void request_secure_boot_enable(const char *efivars)
+{
+	int rc;
+
+	rc = write_one_byte_var(efivars, "CustomMode",
+				EFI_CUSTOM_MODE_ENABLE_GUID, 0);
+	if (rc == 0)
+		printf("requested CustomMode=0 (standard Secure Boot mode)\n");
+	else
+		printf("could not set CustomMode=0: %s\n", strerror(-rc));
+
+	rc = write_one_byte_var(efivars, "SecureBootEnable",
+				EFI_SECURE_BOOT_ENABLE_DISABLE_GUID, 1);
+	if (rc == 0)
+		printf("requested SecureBootEnable=1\n");
+	else
+		printf("could not set SecureBootEnable=1: %s\n", strerror(-rc));
+}
+
 static void enroll_auth(const char *efivars, const char *root,
 			const char *var, const char *guid, const char *file)
 {
@@ -170,6 +251,7 @@ int main(int argc, char **argv)
 	enroll_auth(efivars, root, "db", EFI_IMAGE_SECURITY_DB_GUID, "db.auth");
 	enroll_auth(efivars, root, "KEK", EFI_GLOBAL_GUID, "KEK.auth");
 	enroll_auth(efivars, root, "PK", EFI_GLOBAL_GUID, "PK.auth");
+	request_secure_boot_enable(efivars);
 
 	setup_mode = read_one_byte_var(efivars, "SetupMode", EFI_GLOBAL_GUID);
 	secure_boot = read_one_byte_var(efivars, "SecureBoot", EFI_GLOBAL_GUID);

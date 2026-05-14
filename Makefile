@@ -91,6 +91,8 @@ DEFCONFIG_EXTRA_SNIPPET ?=
 SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
 SB_PROVISION_BUILDROOT_VOLUME = lapee-buildroot-sb-provisioner
 SB_PROVISION_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner.img
+SB_PROVISION_UNSIGNED_OUT = $(BUILD_DIR)/images/lapee-sb-provisioner-unsigned.img
+SB_PROVISION_SIGNED_UKI = $(BUILD_DIR)/images/lapee-sb-provisioner.signed.efi
 SB_PROVISION_KERNEL = $(SB_PROVISION_BUILD_DIR)/kernel/vmlinuz-lapee
 SB_PROVISION_INITRAMFS = $(SB_PROVISION_BUILD_DIR)/initramfs/initramfs-lapee.cpio.zst
 SB_PROVISION_CMDLINE = console=ttyS0 console=tty0 fbcon=nodefer \
@@ -397,7 +399,13 @@ _provisioner-image: toolchain
 	    KERNEL="$(SB_PROVISION_KERNEL)" \
 	    INITRAMFS="$(SB_PROVISION_INITRAMFS)" \
 	    CMDLINE='$(SB_PROVISION_CMDLINE)' \
-	    OUT="$(SB_PROVISION_OUT)"
+	    OUT="$(SB_PROVISION_UNSIGNED_OUT)"
+	BUILD_UKI="$(abspath $(SB_PROVISION_BUILD_DIR))/usb-build/lapee.efi" \
+	SIGNED_UKI="$(abspath $(SB_PROVISION_SIGNED_UKI))" \
+	USB_IMAGE="$(abspath $(SB_PROVISION_OUT))" \
+	LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
+	WIFI=0 \
+	    ./scripts/sb-setup.sh sign
 
 _provisioner-write:
 	@test -n "$(DEV)" || { \
