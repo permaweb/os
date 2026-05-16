@@ -10,10 +10,11 @@ route green-zone admission through that common measurement protocol.
 ## Latest Checkpoint
 
 The TPM side of the measurement reorg is working through local/QEMU coverage.
-The SNP side now has the intended small native boundary and Erlang-side
-verification shape, but the real remote SNP guest is not yet answering HTTP
-requests after boot. The current blocker is now isolated to real-SNP runtime
-bring-up, not to the local protocol model or the older TPM NIF crash.
+The real remote SEV-SNP path now boots, answers `~measurement@1.0/info`,
+`boot`, and `fresh`, and verifies both boot and fresh SNP measurements through
+`~measurement@1.0/verify` against AMD KDS endorsement material. The remaining
+SNP work is now higher-level integration coverage: mixed TPM/SNP green-zone
+admission and production-image validation.
 
 ## Implemented
 
@@ -46,10 +47,15 @@ bring-up, not to the local protocol model or the older TPM NIF crash.
   body is normalized through the same policy/error path as direct bodies.
 - Rebuilt the SNP backend around a tiny overlay-owned Rust NIF:
   `supported/0` checks `/dev/sev-guest`; `report/2` returns raw SNP report
-  bytes plus the platform certificate table. The NIF no longer performs JSON
-  construction or report verification.
+  bytes. The NIF no longer performs JSON construction or report verification.
+- Switched live SNP report collection to the basic `SNP_GET_REPORT` path. The
+  extended report/certificate-table ioctl wedged the guest on the current
+  remote SNP stack, while the basic report path returns promptly.
 - Moved SNP report parsing, report-data checks, AMD KDS/certificate handling,
   and ECDSA signature verification into `dev_snp.erl`.
+- Added a process-local AMD KDS fetch cache so a verifier does not request the
+  same immutable ARK/ASK/VCEK material repeatedly during one peer verification
+  flow.
 - Added AMD ARK pinning for Milan, Genoa, and Turin.
 - Changed SNP VMPL default to `0`, matching the remote host's
   `sev-guest` initialization (`VMPCK0`).
@@ -130,24 +136,29 @@ bring-up, not to the local protocol model or the older TPM NIF crash.
   - SNP host support is enabled; the guest kernel reports:
     `sev-guest ... using VMPCK0 communication key`.
   - The SNP guest now gets past the previous fatal TPM NIF load failure.
+- Remote SEV-SNP smoke passed on `ssh://hb@dev-1.forward.computer`:
+  - image:
+    `build/images/lapee-measurement-snp-debug-serial-quiet-signed.img`;
+  - command:
+    `TARGET=ssh://hb@dev-1.forward.computer IMAGE=build/images/lapee-measurement-snp-debug-serial-quiet-signed.img MEASUREMENT_DEVICE=snp@1.0 MEASUREMENT_TRACE=1 MEASUREMENT_TIMEOUT_MS=10000 OUTDIR=build/qemu-measurement-remote-snp-full TIMEOUT=300 ./scripts/qemu-measurement-remote.sh`;
+  - `~measurement@1.0/info` selected `snp@1.0`;
+  - `~measurement@1.0/boot` returned a signed `lapee-measurement` with
+    `measurement-device = "snp@1.0"`;
+  - `~measurement@1.0/fresh` returned a nonce-bound signed SNP measurement;
+  - `~measurement@1.0/verify` accepted both boot and fresh measurements;
+  - output ended with `=== remote measurement smoke PASSED ===`.
 
 ## Not Yet Verified
 
-- Real SEV-SNP `~measurement@1.0/boot`, `fresh`, and `verify` on
-  `hb@dev-1.forward.computer`.
 - Mixed TPM/SNP green-zone behavior.
 - Production, non-debug runtime image after the measurement reorg.
 
 ## Known Gaps
 
-- Real SNP endorsement-chain validation is proven only against fetched sample
-  AMD material so far, not against a live guest report.
-- The remote SNP guest currently boots to the HyperBEAM banner and accepts TCP
-  connections on the forwarded port, but HTTP requests to
-  `~measurement@1.0/info`, `~system@1.0/all`, and `~meta@1.0/info` time out
-  with zero response bytes. The latest serial log shows no Erlang crash. This
-  suggests a startup/on-start/runtime wedge inside the real SNP guest rather
-  than the old `lapee_tpm_nif` crash.
+- The live SNP path currently depends on AMD KDS when platform certificates
+  are not embedded in the evidence. Verification is cryptographic and pinned
+  to known AMD ARKs, but fully offline SNP replay is not yet available for
+  live reports from this host.
 - `qemu-measurement-remote` currently implements the SSH/SNP path only; the
   `TARGET=local` placeholder exits explicitly.
 - `~measurement@1.0` is now the intended primary LapEE API, but old
@@ -156,12 +167,8 @@ bring-up, not to the local protocol model or the older TPM NIF crash.
 
 ## Next Steps
 
-1. Isolate the remote SNP HTTP wedge by adding measured diagnostic tracing or
-   by booting a controlled image with the measurement `on/start` hook disabled.
-2. Confirm whether the hang is in the start hook, system report collection,
-   SNP report collection, message signing/cache, or HyperBEAM HTTP startup.
-3. Make the fix in the smallest layer that actually owns the fault.
-4. Re-run the remote SNP smoke until `info`, `boot`, and `fresh` all return
-   signed AO-Core measurement messages.
-5. Run mixed TPM/SNP green-zone admission after the live SNP measurement path
-   works.
+1. Run mixed TPM/SNP green-zone admission with a common template and an
+   SNP-specific template.
+2. Build and boot a production, non-debug measurement image.
+3. Decide whether live SNP measurements should opportunistically embed AMD KDS
+   endorsement material in `evidence.certificates` after successful fetches.

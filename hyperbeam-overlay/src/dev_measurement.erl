@@ -55,6 +55,7 @@ info(_) ->
     }.
 
 info(_Base, _Req, Opts) ->
+    trace(Opts, "info", []),
     {Selected, Reason} = selected_device_or_reason(Opts),
     {ok, #{
         <<"status">> => 200,
@@ -70,11 +71,14 @@ info(_Base, _Req, Opts) ->
     }}.
 
 boot(_Base, _Req, Opts) ->
+    trace(Opts, "boot enter", []),
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
+            trace(Opts, "boot cache hit", []),
             {ok, #{<<"status">> => 200,
                    <<"body">> => materialized_response_body(Msg, Opts)}};
         _ ->
+            trace(Opts, "boot cache miss", []),
             global:trans(
                 {dev_measurement, boot},
                 fun() -> boot_locked(Opts) end,
@@ -82,20 +86,26 @@ boot(_Base, _Req, Opts) ->
     end.
 
 boot_locked(Opts) ->
+    trace(Opts, "boot lock acquired", []),
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
+            trace(Opts, "boot locked cache hit", []),
             {ok, #{<<"status">> => 200,
                    <<"body">> => materialized_response_body(Msg, Opts)}};
         _ ->
+            trace(Opts, "boot generating", []),
             case generate_measurement(boot, #{}, Opts) of
                 {ok, Signed} ->
+                    trace(Opts, "boot generated; writing cache", []),
                     SignedID = hb_message:id(Signed, signed, Opts),
                     {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
                     ok = hb_cache:link(SignedID, ?BOOT_PATH, Opts),
+                    trace(Opts, "boot cache written ~s", [SignedID]),
                     {ok, #{<<"status">> => 200,
                            <<"body">> =>
                                materialized_response_body(Signed, Opts)}};
                 {error, Reason} ->
+                    trace(Opts, "boot failed ~0p", [Reason]),
                     error_resp(500, <<"measurement-boot-failed">>, Reason)
             end
     end.
@@ -174,9 +184,12 @@ unwrap_secret(_Base, Req, Opts) ->
         <<"unwrap-secret-failed">>).
 
 generate_measurement(Purpose, Req, Opts) ->
+    trace(Opts, "generate ~0p enter", [Purpose]),
     with_raw_ok(fun() ->
         Body = measurement_body(Opts),
+        trace(Opts, "generate ~0p body ready", [Purpose]),
         Device = selected_device(Opts),
+        trace(Opts, "generate ~0p selected ~s", [Purpose, Device]),
         Recipient = timed(
             <<"measurement-subject">>,
             fun() ->
@@ -187,6 +200,7 @@ generate_measurement(Purpose, Req, Opts) ->
                     Opts)
             end,
             Opts),
+        trace(Opts, "generate ~0p subject ready", [Purpose]),
         Evidence = timed(
             <<"measurement-evidence">>,
             fun() ->
@@ -202,6 +216,7 @@ generate_measurement(Purpose, Req, Opts) ->
                     Opts)
             end,
             Opts),
+        trace(Opts, "generate ~0p evidence ready", [Purpose]),
         {ok, hb_message:commit(
             #{
                 <<"type">> => ?TYPE,
@@ -218,34 +233,43 @@ generate_measurement(Purpose, Req, Opts) ->
 measurement_body(Opts) ->
     case persistent_term:get({dev_measurement, body}, undefined) of
         Body when is_map(Body) ->
+            trace(Opts, "body cache hit", []),
             Body;
         undefined ->
+            trace(Opts, "body cache miss", []),
             measurement_body_locked(Opts)
     end.
 
 measurement_body_locked(Opts) ->
+    trace(Opts, "body lock enter", []),
     case persistent_term:get({dev_measurement, body}, undefined) of
         Body when is_map(Body) ->
+            trace(Opts, "body locked cache hit", []),
             Body;
         undefined ->
+            trace(Opts, "body resolving system report", []),
             System = timed(
                 <<"system-report">>,
                 fun() ->
                     resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts))
                 end,
                 Opts),
+            trace(Opts, "body system report ready", []),
+            trace(Opts, "body resolving node message", []),
             Node0 = timed(
                 <<"node-message">>,
                 fun() ->
                     resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts))
                 end,
                 Opts),
+            trace(Opts, "body node message ready", []),
             Node = ensure_committed(Node0, Opts),
             Body = #{<<"system">> => System, <<"node">> => Node},
             persistent_term:put({dev_measurement, body}, Body),
             persistent_term:put(
                 {dev_measurement, body_id},
                 hb_message:id(Body, all, Opts)),
+            trace(Opts, "body cached", []),
             Body
     end.
 
@@ -566,6 +590,7 @@ timed(Name, Fun, Opts) ->
         <<"measurement-timeout-ms">>,
         ?DEFAULT_TIMEOUT_MS,
         Opts),
+    trace(Opts, "timed ~s start (~0p ms)", [Name, Timeout]),
     Parent = self(),
     Ref = make_ref(),
     Pid = spawn(fun() ->
@@ -584,15 +609,29 @@ timed(Name, Fun, Opts) ->
     end),
     receive
         {Ref, {ok, Value}} ->
+            trace(Opts, "timed ~s ok", [Name]),
             Value;
         {Ref, {throw, Reason}} ->
+            trace(Opts, "timed ~s throw ~0p", [Name, Reason]),
             throw(Reason);
         {Ref, {error, Reason}} ->
+            trace(Opts, "timed ~s error ~0p", [Name, Reason]),
             throw({measurement_error, #{Name => Reason}})
     after Timeout ->
         exit(Pid, kill),
+        trace(Opts, "timed ~s timeout", [Name]),
         throw({measurement_error,
                #{Name => <<"measurement step timed out">>}})
+    end.
+
+trace(Opts, Format, Args) ->
+    case hb_opts:get(<<"measurement-trace">>, false, Opts) of
+        true ->
+            io:format(standard_error,
+                      "[measurement] " ++ Format ++ "~n",
+                      Args);
+        _ ->
+            ok
     end.
 
 response_body(Link, Opts) when ?IS_LINK(Link) ->

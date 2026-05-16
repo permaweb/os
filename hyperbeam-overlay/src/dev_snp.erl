@@ -414,6 +414,16 @@ fetch_vcek(Product, Report) ->
     http_get(URL).
 
 http_get(URL) ->
+    case persistent_term:get({dev_snp, http_get, URL}, undefined) of
+        Body when is_binary(Body) ->
+            Body;
+        undefined ->
+            Body = http_get_uncached(URL),
+            persistent_term:put({dev_snp, http_get, URL}, Body),
+            Body
+    end.
+
+http_get_uncached(URL) ->
     application:ensure_all_started(ssl),
     application:ensure_all_started(inets),
     case httpc:request(

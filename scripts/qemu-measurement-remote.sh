@@ -16,6 +16,8 @@ IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-debug-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-measurement-remote}
 TARGET=${TARGET:-local}
 MEASUREMENT_DEVICE=${MEASUREMENT_DEVICE:-snp@1.0}
+MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
+MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-30000}
 REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests}
 REMOTE_PORT=${REMOTE_PORT:-19734}
 REMOTE_QEMU=${REMOTE_QEMU:-/home/hb/hb-os/build/snp-release/usr/local/bin/qemu-system-x86_64}
@@ -61,12 +63,19 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 prepare_image() {
     local dst="$OUTDIR/measurement-disk.img"
     local cfg="$OUTDIR/config.json"
+    local trace_json=false
+    [[ "$MEASUREMENT_TRACE" == "1" ]] && trace_json=true
     cp "$IMAGE" "$dst"
-    jq -n --arg device "$MEASUREMENT_DEVICE" '
+    jq -n \
+        --arg device "$MEASUREMENT_DEVICE" \
+        --argjson trace "$trace_json" \
+        --argjson measurement_timeout_ms "$MEASUREMENT_TIMEOUT_MS" '
         {
           "peer-http-connect-timeout-ms": 600000,
-          "peer-http-timeout-ms": 600000
+          "peer-http-timeout-ms": 600000,
+          "measurement-timeout-ms": $measurement_timeout_ms
         }
+        + (if $trace then {"measurement-trace": true} else {} end)
         + (if $device == "auto" then {} else {"measurement-device": $device} end)
     ' > "$cfg"
     docker run --rm $DOCKER_PLATFORM \
@@ -123,7 +132,7 @@ disk="$workdir/measurement-disk.img"
 
 stop_node() {
     if [[ -S "$monitor" ]]; then
-        python3 - "$monitor" <<'PY' || true
+        python3 - "$monitor" 2>/dev/null <<'PY' || true
 import socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(2)
@@ -190,7 +199,9 @@ REMOTE
         "'$remote_dir/run-snp-node.sh' start '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'"
 
     local deadline=$((SECONDS + TIMEOUT))
-    until ssh "$host" "curl --max-time 10 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/info' >/dev/null"; do
+    until ssh "$host" \
+            "curl --max-time 10 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/info' >/dev/null 2>/dev/null"
+    do
         if (( SECONDS >= deadline )); then
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-timeout.log" || true
@@ -230,6 +241,28 @@ REMOTE
     ' "$OUTDIR/info.json" >/dev/null
     jq -e '.body."measurement-device" == "snp@1.0"' "$OUTDIR/boot.json" >/dev/null
     jq -e '.body."measurement-device" == "snp@1.0"' "$OUTDIR/fresh.json" >/dev/null
+    ssh "$host" "curl --max-time 120 -fsS -X POST -H 'content-type: application/json' 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/verify?accept=application/json&accept-bundle=true' --data-binary @-" \
+        < "$OUTDIR/boot.json" > "$OUTDIR/verify-boot.json" || {
+            ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
+                > "$OUTDIR/serial-verify-boot-failed.log" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            exit 1
+        }
+    local fresh_nonce
+    fresh_nonce=$(jq -r '.body.evidence.nonce' "$OUTDIR/fresh.json")
+    ssh "$host" "curl --max-time 120 -fsS -X POST -H 'content-type: application/json' 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/verify?nonce=$fresh_nonce&accept=application/json&accept-bundle=true' --data-binary @-" \
+        < "$OUTDIR/fresh.json" > "$OUTDIR/verify-fresh.json" || {
+            ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
+                > "$OUTDIR/serial-verify-fresh-failed.log" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            exit 1
+        }
+    jq -e '(.body.verified == true or .body.verified == "true")
+        and .body.verdict == "accepted"' \
+        "$OUTDIR/verify-boot.json" >/dev/null
+    jq -e '(.body.verified == true or .body.verified == "true")
+        and .body.verdict == "accepted"' \
+        "$OUTDIR/verify-fresh.json" >/dev/null
 
     if [[ "$KEEP_RUNNING" != "1" ]]; then
         ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true

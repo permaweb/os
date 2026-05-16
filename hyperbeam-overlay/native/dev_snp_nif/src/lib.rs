@@ -3,12 +3,12 @@ use rustler::{Binary, Encoder, Env, NifResult, NewBinary, Term};
 use sev::firmware::guest::{AttestationReport, Firmware};
 use std::mem;
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn supported<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     Ok((ok(), Firmware::open().is_ok()).encode(env))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn report<'a>(env: Env<'a>, report_data: Binary, vmpl: u32) -> NifResult<Term<'a>> {
     let report_data: [u8; 64] = match report_data.as_slice().try_into() {
         Ok(bytes) => bytes,
@@ -20,24 +20,14 @@ fn report<'a>(env: Env<'a>, report_data: Binary, vmpl: u32) -> NifResult<Term<'a
         Err(err) => return Ok((error(), format!("open /dev/sev-guest: {err:?}")).encode(env)),
     };
 
-    match firmware.get_ext_report(None, Some(report_data), Some(vmpl)) {
-        Ok((report, certs)) => {
+    match firmware.get_report(None, Some(report_data), Some(vmpl)) {
+        Ok(report) => {
             let report_bytes = report_as_bytes(&report);
             let report_term = binary_term(env, report_bytes);
-            let cert_terms: Vec<Term> = certs
-                .unwrap_or_default()
-                .iter()
-                .map(|cert| {
-                    (
-                        binary_term(env, cert.guid_string().as_bytes()),
-                        binary_term(env, cert.data()),
-                    )
-                        .encode(env)
-                })
-                .collect();
+            let cert_terms: Vec<Term> = Vec::new();
             Ok((ok(), report_term, cert_terms).encode(env))
         }
-        Err(err) => Ok((error(), format!("SNP_GET_EXT_REPORT: {err:?}")).encode(env)),
+        Err(err) => Ok((error(), format!("SNP_GET_REPORT: {err:?}")).encode(env)),
     }
 }
 
