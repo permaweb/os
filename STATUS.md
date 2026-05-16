@@ -61,24 +61,29 @@ route green-zone admission through that common measurement protocol.
   - nodes 1-3 produced ring-signed membership proofs;
   - node 2 reused encrypted nonvolatile storage after reboot;
   - node 2's current boot measurement stayed current after store activation.
-
-## Currently Running
-
-- Plain TPM four-node QEMU green-zone cluster:
+- Plain TPM four-node QEMU green-zone cluster passed after the final admission
+  response normalization patch:
   - command:
     `IMG=build/images/lapee-measurement-debug-greenjoin-signed.img OUTDIR=build/qemu-measurement-plain TIMEOUT=1200 ./scripts/qemu-green-zone-cluster.sh`
-  - current evidence:
-    - all four nodes answered `~measurement@1.0/boot`;
-    - node 1 initialized the green zone;
-    - node 1 produced a valid `~measurement@1.0/verify-peer` for node 2;
-    - node 1 admitted node 2;
-    - harness is waiting for node 2's local join to complete.
+  - all four nodes answered `~measurement@1.0/boot`;
+  - node 1 initialized the green zone;
+  - node 1 produced a valid `~measurement@1.0/verify-peer` for node 2;
+  - nodes 2 and 3 joined;
+  - node 4 was rejected by template mismatch;
+  - nodes 1-3 produced ring-signed membership proofs;
+  - output ended with `=== green-zone QEMU cluster PASSED ===`.
+- SNP-mock four-node QEMU green-zone cluster passed:
+  - command:
+    `IMG=build/images/lapee-measurement-debug-greenjoin-signed.img OUTDIR=build/qemu-measurement-snp-mock TIMEOUT=900 MEASUREMENT_DEVICE=snp-mock@1.0 ./scripts/qemu-green-zone-cluster.sh`
+  - all four nodes answered `~measurement@1.0/boot`;
+  - all four boot measurements reported `measurement-device = "snp-mock@1.0"`;
+  - nodes 2 and 3 joined;
+  - node 4 was rejected by template mismatch;
+  - nodes 1-3 produced ring-signed membership proofs;
+  - output ended with `=== green-zone QEMU cluster PASSED ===`.
 
 ## Not Yet Verified
 
-- Fresh plain TPM QEMU cluster completion after the final admission response
-  normalization patch.
-- Fresh `MEASUREMENT_DEVICE=snp-mock@1.0` QEMU cluster after this checkpoint.
 - Real SEV-SNP run on `hb@dev-1.forward.computer`.
 - Mixed TPM/SNP green-zone behavior.
 - Production, non-debug runtime image after the measurement reorg.
