@@ -40,6 +40,10 @@ admission and production-image validation.
   `~measurement@1.0` instead of calling TPM functions directly.
 - Updated QEMU green-zone harnesses so `MEASUREMENT_DEVICE=snp-mock@1.0` can
   exercise green-zone without TPM-specific credential paths.
+- Updated the green-zone cluster harness to support per-node measurement
+  devices and common templates that do not pin the backend. This lets one
+  acceptance run exercise TPM-backed nodes and SNP-style nodes in the same
+  ring.
 - Added kernel/build support needed for SEV-SNP guest probing.
 - Replaced green-zone peer transport calls with HB HTTP plus AO-Core JSON
   bundle negotiation, avoiding the older custom JSON helper path.
@@ -130,6 +134,17 @@ admission and production-image validation.
   - node 4 was rejected by template mismatch;
   - nodes 1-3 produced ring-signed membership proofs;
   - output ended with `=== green-zone QEMU cluster PASSED ===`.
+- Mixed TPM/SNP-mock four-node QEMU green-zone cluster passed:
+  - command:
+    `IMG=build/images/lapee-measurement-snp-debug-serial-quiet-signed.img OUTDIR=build/qemu-green-zone-mixed-mock TIMEOUT=1200 GREEN_ZONE_TEMPLATE_MODE=common NODE1_MEASUREMENT_DEVICE=auto NODE2_MEASUREMENT_DEVICE=snp-mock@1.0 NODE3_MEASUREMENT_DEVICE=snp-mock@1.0 NODE4_MEASUREMENT_DEVICE=snp-mock@1.0 ./scripts/qemu-green-zone-cluster.sh`
+  - node 1 reported `measurement-device = "tpm@2.0a"`;
+  - nodes 2-4 reported `measurement-device = "snp-mock@1.0"`;
+  - node 1 initialized a common-template green-zone;
+  - node 1 admitted node 2 across TPM-to-SNP-style secret wrapping;
+  - node 2 admitted node 3;
+  - node 4 was rejected by DMI product mismatch;
+  - nodes 1-3 produced ring-signed membership proofs;
+  - output ended with `=== green-zone QEMU cluster PASSED ===`.
 - Remote SEV-SNP host reconnaissance:
   - Host: `ssh://hb@dev-1.forward.computer`.
   - CPU: AMD EPYC 9254, family 25 model 17, inferred KDS product `Genoa`.
@@ -150,7 +165,7 @@ admission and production-image validation.
 
 ## Not Yet Verified
 
-- Mixed TPM/SNP green-zone behavior.
+- Mixed TPM/real-SNP green-zone behavior across local and remote hosts.
 - Production, non-debug runtime image after the measurement reorg.
 
 ## Known Gaps
@@ -167,8 +182,9 @@ admission and production-image validation.
 
 ## Next Steps
 
-1. Run mixed TPM/SNP green-zone admission with a common template and an
-   SNP-specific template.
-2. Build and boot a production, non-debug measurement image.
-3. Decide whether live SNP measurements should opportunistically embed AMD KDS
+1. Run mixed TPM/real-SNP green-zone admission across local and remote hosts,
+   or add a remote multi-node SNP runner if host networking makes that cleaner.
+2. Add an SNP-specific green-zone template check against real SNP evidence.
+3. Build and boot a production, non-debug measurement image.
+4. Decide whether live SNP measurements should opportunistically embed AMD KDS
    endorsement material in `evidence.certificates` after successful fetches.

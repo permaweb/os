@@ -48,6 +48,11 @@ SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
 NONVOLATILE=${NONVOLATILE:-0}
 NONVOLATILE_SIZE_MIB=${NONVOLATILE_SIZE_MIB:-768}
 MEASUREMENT_DEVICE=${MEASUREMENT_DEVICE:-auto}
+NODE1_MEASUREMENT_DEVICE=${NODE1_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE2_MEASUREMENT_DEVICE=${NODE2_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE3_MEASUREMENT_DEVICE=${NODE3_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE4_MEASUREMENT_DEVICE=${NODE4_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+GREEN_ZONE_TEMPLATE_MODE=${GREEN_ZONE_TEMPLATE_MODE:-device}
 
 while (($# > 0)); do
     case "$1" in
@@ -103,14 +108,34 @@ rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 
+node_measurement_device() {
+    local n=$1
+    case "$n" in
+        1) echo "$NODE1_MEASUREMENT_DEVICE";;
+        2) echo "$NODE2_MEASUREMENT_DEVICE";;
+        3) echo "$NODE3_MEASUREMENT_DEVICE";;
+        4) echo "$NODE4_MEASUREMENT_DEVICE";;
+        *) echo "$MEASUREMENT_DEVICE";;
+    esac
+}
+
+expected_node_measurement_device() {
+    case "$(node_measurement_device "$1")" in
+        auto) echo "tpm@2.0a";;
+        *) node_measurement_device "$1";;
+    esac
+}
+
 prepare_qemu_image() {
     local src="${1:?source image required}"
-    local dst="$OUTDIR/qemu-green-zone-disk.img"
+    local dst="${2:?destination image required}"
+    local device="${3:?measurement device required}"
     local cfg="$OUTDIR/qemu-config.json"
+    local dst_rel="${dst#$OUTDIR/}"
     cp "$src" "$dst"
     python3 - \
         "buildroot-external/board/lapee/rootfs-overlay/etc/lapee/lapee.json" \
-        "$cfg" "$MEASUREMENT_DEVICE" <<'PY'
+        "$cfg" "$device" <<'PY'
 import json, pathlib, sys
 
 base = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -137,22 +162,22 @@ PY
         -w /work \
         "$BUILD_IMAGE" \
         bash -euo pipefail -c '
-            START=$(parted --script --machine /work/qemu-green-zone-disk.img \
+            DISK="/work/$1"
+            START=$(parted --script --machine "$DISK" \
                 unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$2); print \$2}")
-            SECT=$(parted --script --machine /work/qemu-green-zone-disk.img \
+            SECT=$(parted --script --machine "$DISK" \
                 unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$4); print \$4}")
-            dd if=/work/qemu-green-zone-disk.img of=/tmp/esp.img \
+            dd if="$DISK" of=/tmp/esp.img \
                 bs=512 skip=$START count=$SECT status=none
             mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true
             mcopy -i /tmp/esp.img -o /work/qemu-config.json \
                 ::/EFI/boot/config.json
-            dd if=/tmp/esp.img of=/work/qemu-green-zone-disk.img \
+            dd if=/tmp/esp.img of="$DISK" \
                 bs=512 seek=$START count=$SECT conv=notrunc status=none
-        '
+        ' bash "$dst_rel"
     echo "$dst"
 }
 
-IMG=$(prepare_qemu_image "$IMG")
 # AF_UNIX sun_path is 104 bytes on macOS / 108 on Linux. Worktree-rooted
 # OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
 # opaquely with "Path for UnioIO socket is too long". Stage the sockets
@@ -168,6 +193,8 @@ echo "guest-host: $GUEST_HOST"
 echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
 echo "qemu image: $IMG"
+echo "measurement devices: $(node_measurement_device 1), $(node_measurement_device 2), $(node_measurement_device 3), $(node_measurement_device 4)"
+echo "green-zone template mode: $GREEN_ZONE_TEMPLATE_MODE"
 echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
@@ -352,7 +379,10 @@ start_node() {
     local port=$((BASE_PORT + n))
     mkdir -p "$node_dir"
     if [[ "$fresh" = "1" ]]; then
-        cp "$img" "$node_dir/disk.img"
+        prepare_qemu_image \
+            "$img" \
+            "$node_dir/disk.img" \
+            "$(node_measurement_device "$n")" >/dev/null
         cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
         manufacture_tpm "$n"
         if [[ "$NONVOLATILE" = "1" ]]; then
@@ -419,7 +449,7 @@ start_node() {
         > "$node_dir/serial.log" 2>&1 &
     pids+=("$!")
     echo "$!" > "$node_dir/qemu.pid"
-    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product"
+    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product measurement-device=$(node_measurement_device "$n")"
 }
 
 wait_node() {
@@ -675,10 +705,18 @@ jq -n \
         distinct_ak_name: ([.[].ak_name] | unique | length),
         ek_cert_source_kinds: ([.[].ek_cert_source_kind] | unique)
       }' > "$OUTDIR/responses/security-properties.json"
-if [[ "$MEASUREMENT_DEVICE" = "snp-mock@1.0" ]]; then
-    jq -e '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
-           .distinct_dmi_products == 2 and
-           ([.nodes[].measurement_device] | unique) == ["snp-mock@1.0"] and
+expected_devices=$(jq -n \
+    --arg d1 "$(expected_node_measurement_device 1)" \
+    --arg d2 "$(expected_node_measurement_device 2)" \
+    --arg d3 "$(expected_node_measurement_device 3)" \
+    --arg d4 "$(expected_node_measurement_device 4)" \
+    '[$d1, $d2, $d3, $d4]')
+if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; then
+    jq -e --argjson expected "$expected_devices" \
+        '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
+           .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
+           .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
+           [.nodes[].measurement_device] == $expected and
            .nodes[0].cmdline == .nodes[1].cmdline and
            .nodes[1].cmdline == .nodes[2].cmdline and
            .nodes[0].dmi_product == .nodes[1].dmi_product and
@@ -686,9 +724,10 @@ if [[ "$MEASUREMENT_DEVICE" = "snp-mock@1.0" ]]; then
            .nodes[3].dmi_product != .nodes[0].dmi_product' \
         "$OUTDIR/responses/security-properties.json" >/dev/null
 else
-    jq -e '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
-           .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
-           .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
+    jq -e --argjson expected "$expected_devices" \
+        '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
+           .distinct_dmi_products == 2 and
+           [.nodes[].measurement_device] == $expected and
            .nodes[0].cmdline == .nodes[1].cmdline and
            .nodes[1].cmdline == .nodes[2].cmdline and
            .nodes[0].dmi_product == .nodes[1].dmi_product and
@@ -699,7 +738,8 @@ fi
 echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
-python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+GREEN_ZONE_TEMPLATE_MODE="$GREEN_ZONE_TEMPLATE_MODE" \
+    python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
     require_request "$req"
 done

@@ -3,6 +3,7 @@
 
 import base64
 import json
+import os
 import pathlib
 import sys
 
@@ -29,7 +30,27 @@ def main() -> int:
     else:
         evidence_template = {}
 
+    template = {
+        "body": {
+            "system": {
+                "kernel": {"cmdline": cmdline},
+                "firmware": {
+                    "dmi": {"fields": {"product-name": dmi_product}},
+                },
+            },
+        },
+    }
+    if os.environ.get("GREEN_ZONE_TEMPLATE_MODE", "device") == "device":
+        template.update({
+            "measurement-device": measurement["measurement-device"],
+            "evidence": evidence_template,
+        })
+
     (out / "requests/init.json").write_text(json.dumps({
+        "name": "book-shelf",
+        "template": template,
+    }))
+    (out / "requests/init-device-specific.json").write_text(json.dumps({
         "name": "book-shelf",
         "template": {
             "measurement-device": measurement["measurement-device"],
