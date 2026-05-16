@@ -66,11 +66,12 @@ def main() -> int:
         }
     }))
 
-    ca_bundle = (
-        (out / "ca/issuercert.pem").read_text()
-        + (out / "ca/swtpm-localca-rootca-cert.pem").read_text()
-    ).encode()
-    trusted_ca = base64.urlsafe_b64encode(ca_bundle).decode().rstrip("=")
+    ca_files = [out / "ca/issuercert.pem", out / "ca/swtpm-localca-rootca-cert.pem"]
+    if all(path.exists() for path in ca_files):
+        ca_bundle = "".join(path.read_text() for path in ca_files).encode()
+        trusted_ca = base64.urlsafe_b64encode(ca_bundle).decode().rstrip("=")
+    else:
+        trusted_ca = None
 
     # Node 3 joins via node 2 -- not via node 1 -- so the harness
     # exercises the multi-hop members propagation path that the
@@ -79,22 +80,27 @@ def main() -> int:
     # joiner's wallet through stale-commitment cache linkification).
     join_via = {2: 1, 3: 2, 4: 1}
     for n in (2, 3, 4):
-        (out / f"requests/join{n}.json").write_text(json.dumps({
+        join = {
             "name": "book-shelf",
             "peer-url": f"http://{guest_host}:{base_port + join_via[n]}",
             "self-url": f"http://{guest_host}:{base_port + n}",
-            "trusted-ca": trusted_ca,
-        }))
-        (out / f"requests/admit{n}.json").write_text(json.dumps({
+        }
+        admit = {
             "name": "book-shelf",
             "joiner-url": f"http://{guest_host}:{base_port + n}",
-            "trusted-ca": trusted_ca,
-        }))
+        }
+        if trusted_ca:
+            join["trusted-ca"] = trusted_ca
+            admit["trusted-ca"] = trusted_ca
+        (out / f"requests/join{n}.json").write_text(json.dumps(join))
+        (out / f"requests/admit{n}.json").write_text(json.dumps(admit))
 
-    (out / "requests/verify2.json").write_text(json.dumps({
+    verify = {
         "url": f"http://{guest_host}:{base_port + 2}",
-        "trusted-ca": trusted_ca,
-    }))
+    }
+    if trusted_ca:
+        verify["trusted-ca"] = trusted_ca
+    (out / "requests/verify2.json").write_text(json.dumps(verify))
 
     return 0
 

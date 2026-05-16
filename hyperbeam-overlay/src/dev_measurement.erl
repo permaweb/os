@@ -397,7 +397,7 @@ activate_peer_secret(Url, Credential, Opts) ->
         lapee_peer_http:post(
             Url,
             <<"/~measurement@1.0/unwrap-secret">>,
-            Credential,
+            #{<<"credential">> => Credential},
             Opts),
         Opts), Opts).
 

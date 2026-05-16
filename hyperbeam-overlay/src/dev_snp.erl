@@ -117,9 +117,10 @@ wrap_secret(_Base, Req, Opts) ->
 
 unwrap_secret(_Base, Req, Opts) ->
     try
-        {ok, Secret} = unwrap_secret_value(Req, Opts),
+        Credential = activation_credential(Req, Opts),
+        {ok, Secret} = unwrap_secret_value(Credential, Opts),
         Msg = hb_message:commit(
-            secret_activation_public_body(Secret, Req),
+            secret_activation_public_body(Secret, Credential),
             Opts),
         {ok, #{<<"status">> => 200, <<"body">> => Msg}}
     catch
@@ -608,6 +609,15 @@ secret_activation_context(Credential, IssuedAt) ->
       "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
       "credential-id:", (stable_id(Credential, #{}))/binary>>.
 
+activation_credential(Req, Opts) when is_map(Req) ->
+    first_defined([
+        hb_maps:get(<<"credential">>, Req, undefined, Opts),
+        hb_maps:get(<<"wrapped-secret">>, Req, undefined, Opts),
+        Req
+    ]);
+activation_credential(Req, _Opts) ->
+    Req.
+
 secret_aad(SubjectID) ->
     <<"lapee-snp-wrap-secret-v1:", SubjectID/binary>>.
 
@@ -832,6 +842,20 @@ hkdf_roundtrip_test() ->
     Secret = crypto:strong_rand_bytes(32),
     Credential = wrap_secret_for_subject(Subject, Secret, #{}),
     {ok, Secret} = unwrap_secret_value(Credential, #{}).
+
+snp_secret_activation_uses_explicit_credential_request_test() ->
+    Subject = secret_recipient(#{}, #{}),
+    Secret = crypto:strong_rand_bytes(32),
+    Credential = wrap_secret_for_subject(Subject, Secret, #{}),
+    Req = #{
+        <<"credential">> => Credential,
+        <<"accept">> => <<"application/json">>,
+        <<"accept-bundle">> => <<"true">>
+    },
+    Credential = activation_credential(Req, #{}),
+    {ok, Secret} = unwrap_secret_value(Credential, #{}),
+    Activation = secret_activation_public_body(Secret, Credential),
+    ok = ensure_secret_activation(Activation, Credential, Secret, Subject, #{}).
 
 snp_verify_accepts_bound_report_test() ->
     Body = test_body(),

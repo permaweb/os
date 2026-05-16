@@ -12,9 +12,9 @@ route green-zone admission through that common measurement protocol.
 The TPM side of the measurement reorg is working through local/QEMU coverage.
 The real remote SEV-SNP path now boots, answers `~measurement@1.0/info`,
 `boot`, and `fresh`, and verifies both boot and fresh SNP measurements through
-`~measurement@1.0/verify` against AMD KDS endorsement material. The remaining
-SNP work is now higher-level integration coverage: mixed TPM/SNP green-zone
-admission and production-image validation.
+`~measurement@1.0/verify` against AMD KDS endorsement material. A real
+remote SNP-to-SNP four-node green-zone now passes on
+`ssh://hb@dev-1.forward.computer`.
 
 ## Implemented
 
@@ -72,6 +72,12 @@ admission and production-image validation.
 - Added `scripts/qemu-measurement-remote.sh` and `make
   qemu-measurement-remote` for single-node remote measurement smoke tests on
   `TARGET=ssh://...`.
+- Added `scripts/qemu-green-zone-remote-snp.sh` and `make
+  qemu-green-zone-remote-snp` for four-node real SEV-SNP green-zone
+  acceptance on a remote SNP host.
+- Fixed SNP secret activation credential canonicalization so peer HTTP
+  negotiation fields do not change the credential ID used in the X25519
+  unwrap proof.
 
 ## Verified
 
@@ -153,6 +159,21 @@ admission and production-image validation.
   - `~measurement@1.0/info`, `~measurement@1.0/boot`, and
     `~system@1.0/all` answered;
   - output ended with `=== QEMU boot test PASSED ===`.
+- Remote real SEV-SNP green-zone cluster passed on
+  `ssh://hb@dev-1.forward.computer`:
+  - image:
+    `build/images/lapee-measurement-snp-debug-serial-quiet-signed.img`;
+  - command:
+    `TARGET=ssh://hb@dev-1.forward.computer IMAGE=build/images/lapee-measurement-snp-debug-serial-quiet-signed.img OUTDIR=build/qemu-green-zone-remote-snp TIMEOUT=1200 ./scripts/qemu-green-zone-remote-snp.sh`;
+  - all four nodes booted as real SNP guests and reported
+    `measurement-device = "snp@1.0"` with `lapee-snp-evidence`;
+  - nodes 1-3 matched the green-zone template and joined;
+  - node 4 was rejected by DMI product mismatch;
+  - nodes 1-3 produced ring-signed membership proofs;
+  - output ended with `=== remote SNP green-zone QEMU cluster PASSED ===`;
+  - measured timings:
+    prepare image 11s, install helper 2s, copy image 80s, start QEMU 3s,
+    wait boot 29s, fetch subjects 3s, admission flow 36s, total 164s.
 - Remote SEV-SNP host reconnaissance:
   - Host: `ssh://hb@dev-1.forward.computer`.
   - CPU: AMD EPYC 9254, family 25 model 17, inferred KDS product `Genoa`.
@@ -190,8 +211,7 @@ admission and production-image validation.
 
 ## Next Steps
 
-1. Run mixed TPM/real-SNP green-zone admission across local and remote hosts,
-   or add a remote multi-node SNP runner if host networking makes that cleaner.
+1. Run mixed TPM/real-SNP green-zone admission across local and remote hosts.
 2. Add an SNP-specific green-zone template check against real SNP evidence.
 3. Boot the production measurement image on real hardware.
 4. Decide whether live SNP measurements should opportunistically embed AMD KDS
