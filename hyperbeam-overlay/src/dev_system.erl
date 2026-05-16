@@ -84,6 +84,7 @@ evidence_model() ->
         <<"probe-families">> => [
             <<"cpu/cpuid-device">>,
             <<"firmware/boot-guard/msr">>,
+            <<"firmware/acpi/sysfs-table-hashes">>,
             <<"memory-controller/intel-drm-kernel-dram-info/sysfs">>,
             <<"memory-controller/intel-mtl-mem-ss-info-global/resource0-read">>,
             <<"memory-controller/sysfs-edac">>,
@@ -151,6 +152,7 @@ memory_report(Root, Edac, ControllerProbes) ->
 firmware_report(Root, BootGuard) ->
     #{
         <<"dmi">> => dmi_report(Root),
+        <<"acpi">> => acpi_report(Root),
         <<"efi">> => efi_report(Root),
         <<"boot-guard">> => BootGuard
     }.
@@ -714,6 +716,123 @@ dmi_report(Root) ->
         ]
     }.
 
+acpi_report(Root) ->
+    Base = "/sys/firmware/acpi/tables",
+    DynamicBase = filename:join(Base, "dynamic"),
+    Tables = acpi_tables_report(Root, Base),
+    DynamicTables = acpi_tables_report(Root, DynamicBase),
+    #{
+        <<"available">> => dir_exists(Root, Base),
+        <<"source">> => <<"sysfs-acpi">>,
+        <<"tables-path">> => to_bin(Base),
+        <<"final-table-count">> => length(Tables),
+        <<"final-tables">> => Tables,
+        <<"dynamic-table-directory-present">> =>
+            dir_exists(Root, DynamicBase),
+        <<"dynamic-table-count">> => length(DynamicTables),
+        <<"dynamic-tables">> => DynamicTables,
+        <<"override-provenance">> =>
+            acpi_override_provenance(Root, DynamicTables),
+        <<"notes">> =>
+            <<"ACPI tables are firmware-supplied platform descriptions as "
+              "observed by this measured runtime through Linux sysfs. This "
+              "report carries final table bytes by digest and parsed headers; "
+              "it does not treat OEM/header fields as policy by itself.">>
+    }.
+
+acpi_tables_report(Root, Base) ->
+    [acpi_table_report(Root, filename:join(Base, Name), Name)
+     || Name <- sorted_list_dir(Root, Base),
+        Name =/= "dynamic",
+        not dir_exists(Root, filename:join(Base, Name))].
+
+acpi_table_report(Root, Path, Name) ->
+    case read_file(Root, Path) of
+        {ok, Bin} ->
+            Header = acpi_table_header(Name, Bin),
+            Report0 = #{
+                <<"name">> => to_bin(Name),
+                <<"source">> => <<"sysfs-acpi-table">>,
+                <<"path">> => to_bin(Path),
+                <<"length-bytes">> => byte_size(Bin),
+                <<"sha256">> => hb_util:encode(crypto:hash(sha256, Bin)),
+                <<"header">> => Header
+            },
+            maps:merge(
+                Report0,
+                acpi_table_validation(Header, Bin));
+        error ->
+            #{
+                <<"name">> => to_bin(Name),
+                <<"source">> => <<"sysfs-acpi-table">>,
+                <<"path">> => to_bin(Path),
+                <<"status">> => <<"unreadable">>
+            }
+    end.
+
+acpi_table_header("RSDP", Bin) ->
+    dev_tpm_tcg:parse_acpi_rsdp(Bin);
+acpi_table_header("FACS", _Bin) ->
+    #{
+        <<"signature">> => <<"FACS">>,
+        <<"signature-name">> => <<"Firmware ACPI Control Structure">>,
+        <<"note">> => <<"FACS does not use the common ACPI table header.">>
+    };
+acpi_table_header(_Name, Bin) ->
+    dev_tpm_tcg:parse_acpi_table(Bin).
+
+acpi_table_validation(Header, Bin) ->
+    Length = maps:get(<<"length">>, Header, null),
+    Matches = acpi_declared_length_matches(Length, Bin),
+    Checksum = acpi_checksum_valid(Length, Bin),
+    #{
+        <<"declared-length-matches-file">> => Matches,
+        <<"checksum-valid">> => Checksum,
+        <<"status">> => acpi_table_status(Header, Matches, Checksum)
+    }.
+
+acpi_declared_length_matches(Length, Bin) when is_integer(Length) ->
+    Length =:= byte_size(Bin);
+acpi_declared_length_matches(_, _Bin) ->
+    null.
+
+acpi_checksum_valid(Length, Bin)
+  when is_integer(Length), Length > 0, Length =< byte_size(Bin) ->
+    (lists:sum(binary_to_list(binary:part(Bin, 0, Length))) band 16#ff) =:= 0;
+acpi_checksum_valid(_, _Bin) ->
+    null.
+
+acpi_table_status(Header, _Matches, _Checksum)
+  when is_map_key(<<"error">>, Header) ->
+    <<"unparsed">>;
+acpi_table_status(_Header, false, _Checksum) ->
+    <<"length-mismatch">>;
+acpi_table_status(_Header, _Matches, false) ->
+    <<"checksum-invalid">>;
+acpi_table_status(_Header, _Matches, _Checksum) ->
+    <<"observed">>.
+
+acpi_override_provenance(Root, DynamicTables) ->
+    #{
+        <<"dynamic-tables-present">> => DynamicTables =/= [],
+        <<"initrd-override-directory-present">> =>
+            dir_exists(Root, "/kernel/firmware/acpi"),
+        <<"initrd-override-files">> =>
+            [to_bin(F) ||
+                F <- sorted_list_dir(Root, "/kernel/firmware/acpi")],
+        <<"kernel-config">> =>
+            kernel_config_options(
+                Root,
+                ["CONFIG_ACPI_TABLE_UPGRADE",
+                 "CONFIG_ACPI_TABLE_OVERRIDE_VIA_BUILTIN_INITRD",
+                 "CONFIG_ACPI_CUSTOM_DSDT",
+                 "CONFIG_ACPI_CUSTOM_DSDT_FILE"]),
+        <<"notes">> =>
+            <<"Linux can accept ACPI table upgrades from initrd when built "
+              "for that path. LapEE policy should combine these fields with "
+              "the measured UKI/initrd/cmdline and firmware PCR evidence.">>
+    }.
+
 efi_report(Root) ->
     #{
         <<"available">> => dir_exists(Root, "/sys/firmware/efi"),
@@ -1122,6 +1241,102 @@ read_lines(Root, Abs) ->
             []
     end.
 
+read_kernel_config(Root) ->
+    OsRelease = read_trim(Root, "/proc/sys/kernel/osrelease"),
+    Paths0 = ["/proc/config.gz", "/boot/config"],
+    Paths =
+        case OsRelease of
+            null ->
+                Paths0;
+            _ ->
+                ["/proc/config.gz",
+                 binary_to_list(<<"/boot/config-", OsRelease/binary>>),
+                 binary_to_list(
+                    <<"/lib/modules/", OsRelease/binary, "/config">>),
+                 "/boot/config"]
+        end,
+    read_kernel_config_paths(Root, Paths).
+
+read_kernel_config_paths(_Root, []) ->
+    unavailable;
+read_kernel_config_paths(Root, [Path | Rest]) ->
+    case read_file(Root, Path) of
+        {ok, Bin} ->
+            {ok, to_bin(Path), maybe_gunzip(Path, Bin)};
+        error ->
+            read_kernel_config_paths(Root, Rest)
+    end.
+
+maybe_gunzip(Path, Bin) ->
+    case filename:extension(Path) of
+        ".gz" ->
+            try zlib:gunzip(Bin)
+            catch _:_ -> Bin
+            end;
+        _ ->
+            Bin
+    end.
+
+kernel_config_options(Root, Names) ->
+    case read_kernel_config(Root) of
+        {ok, Source, Bin} ->
+            #{
+                <<"available">> => true,
+                <<"source">> => Source,
+                <<"options">> =>
+                    [kernel_config_option(Bin, Name) || Name <- Names]
+            };
+        unavailable ->
+            #{
+                <<"available">> => false,
+                <<"source">> => null,
+                <<"options">> =>
+                    [#{
+                        <<"name">> => to_bin(Name),
+                        <<"state">> => <<"unknown">>,
+                        <<"value">> => null
+                    } || Name <- Names]
+            }
+    end.
+
+kernel_config_option(Bin, Name0) ->
+    Name = to_bin(Name0),
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    Prefix = <<Name/binary, "=">>,
+    Disabled = <<"# ", Name/binary, " is not set">>,
+    Match =
+        lists:filter(
+            fun(Line) ->
+                Line =:= Disabled orelse binary_has_prefix(Line, Prefix)
+            end,
+            Lines),
+    {State, Value} =
+        case Match of
+            [Disabled | _] ->
+                {<<"disabled">>, null};
+            [Line | _] ->
+                ConfigValue = binary:part(
+                    Line, byte_size(Prefix),
+                    byte_size(Line) - byte_size(Prefix)),
+                {kernel_config_value_state(ConfigValue), ConfigValue};
+            [] ->
+                {<<"unknown">>, null}
+        end,
+    #{
+        <<"name">> => Name,
+        <<"state">> => State,
+        <<"value">> => Value
+    }.
+
+kernel_config_value_state(<<"y">>) -> <<"enabled">>;
+kernel_config_value_state(<<"m">>) -> <<"module">>;
+kernel_config_value_state(_) -> <<"value">>.
+
+binary_has_prefix(Bin, Prefix) when byte_size(Bin) >= byte_size(Prefix) ->
+    binary:part(Bin, 0, byte_size(Prefix)) =:= Prefix;
+binary_has_prefix(_, _) ->
+    false.
+
 read_uint_le_at(Root, Abs, Offset, Bytes) ->
     Bits = Bytes * 8,
     case read_exact_at(Root, Abs, Offset, Bytes) of
@@ -1389,6 +1604,19 @@ report_fixture_root_test() ->
             <<"ACME\n">>),
         write_fixture(Root, "/sys/class/dmi/id/product_name",
             <<"LapEE Test Rig\n">>),
+        write_fixture(Root, "/proc/config.gz",
+            zlib:gzip(
+                <<"CONFIG_ACPI_TABLE_UPGRADE=y\n"
+                  "# CONFIG_ACPI_TABLE_OVERRIDE_VIA_BUILTIN_INITRD "
+                  "is not set\n">>)),
+        write_fixture(
+            Root,
+            "/sys/firmware/acpi/tables/DSDT",
+            acpi_table_fixture(<<"DSDT">>, <<"ACME">>, <<"LAPEE">>)),
+        write_fixture(
+            Root,
+            "/sys/firmware/acpi/tables/dynamic/SSDT1",
+            acpi_table_fixture(<<"SSDT">>, <<"ACME">>, <<"DYNTEST">>)),
         write_fixture(Root,
             "/sys/kernel/security/integrity/ima/"
             "runtime_measurements_count",
@@ -1448,6 +1676,35 @@ report_fixture_root_test() ->
         ?assertEqual(<<"ACME">>,
                      maps:get(<<"sys-vendor">>,
                               maps:get(<<"fields">>, Dmi))),
+        Acpi = maps:get(<<"acpi">>, Firmware),
+        ?assertEqual(true, maps:get(<<"available">>, Acpi)),
+        ?assertEqual(1, maps:get(<<"final-table-count">>, Acpi)),
+        [Dsdt] = maps:get(<<"final-tables">>, Acpi),
+        ?assertEqual(<<"DSDT">>,
+                     maps:get(<<"signature">>,
+                              maps:get(<<"header">>, Dsdt))),
+        ?assertEqual(<<"ACME">>,
+                     maps:get(<<"oem-id">>,
+                              maps:get(<<"header">>, Dsdt))),
+        ?assertEqual(true,
+                     maps:get(<<"declared-length-matches-file">>, Dsdt)),
+        ?assertEqual(true, maps:get(<<"checksum-valid">>, Dsdt)),
+        ?assert(maps:is_key(<<"sha256">>, Dsdt)),
+        ?assertEqual(1, maps:get(<<"dynamic-table-count">>, Acpi)),
+        [Ssdt] = maps:get(<<"dynamic-tables">>, Acpi),
+        ?assertEqual(<<"SSDT">>,
+                     maps:get(<<"signature">>,
+                              maps:get(<<"header">>, Ssdt))),
+        AcpiProvenance = maps:get(<<"override-provenance">>, Acpi),
+        ?assertEqual(true,
+                     maps:get(<<"dynamic-tables-present">>,
+                              AcpiProvenance)),
+        AcpiConfig = maps:get(<<"kernel-config">>, AcpiProvenance),
+        ?assertEqual(true, maps:get(<<"available">>, AcpiConfig)),
+        [TableUpgrade | _] = maps:get(<<"options">>, AcpiConfig),
+        ?assertEqual(<<"CONFIG_ACPI_TABLE_UPGRADE">>,
+                     maps:get(<<"name">>, TableUpgrade)),
+        ?assertEqual(<<"enabled">>, maps:get(<<"state">>, TableUpgrade)),
         BootGuard = maps:get(<<"boot-guard">>, Firmware),
         ?assertEqual(true, maps:get(<<"available">>, BootGuard)),
         ?assertEqual(<<"dev-cpu-msr">>, maps:get(<<"source">>, BootGuard)),
@@ -1535,6 +1792,29 @@ write_uint_fixture(Root, Abs, Offset, Value, Bits) ->
     after
         file:close(Io)
     end.
+
+acpi_table_fixture(Sig, OemId, OemTableId) ->
+    Payload = <<"LapEE ACPI fixture">>,
+    Length = 36 + byte_size(Payload),
+    Header0 = <<Sig:4/binary, Length:32/little, 2:8, 0:8,
+                (pad_acpi_field(OemId, 6)):6/binary,
+                (pad_acpi_field(OemTableId, 8)):8/binary,
+                1:32/little,
+                (pad_acpi_field(<<"LAPE">>, 4)):4/binary,
+                1:32/little>>,
+    Checksum =
+        (256 - (lists:sum(binary_to_list(<<Header0/binary, Payload/binary>>))
+            band 16#ff)) band 16#ff,
+    <<Sig:4/binary, Length:32/little, 2:8, Checksum:8,
+      (pad_acpi_field(OemId, 6)):6/binary,
+      (pad_acpi_field(OemTableId, 8)):8/binary,
+      1:32/little,
+      (pad_acpi_field(<<"LAPE">>, 4)):4/binary,
+      1:32/little,
+      Payload/binary>>.
+
+pad_acpi_field(Bin, Size) ->
+    binary:part(<<Bin/binary, (binary:copy(<<0>>, Size))/binary>>, 0, Size).
 
 make_dir_p(Root, Abs) ->
     Path = root_path(Root, Abs),
