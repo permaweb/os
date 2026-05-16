@@ -361,6 +361,14 @@ authorization_id_fields() ->
 
 stable_authorization_payload_id(Msg, Opts) when is_map(Msg) ->
     stable_authorization_payload_id(Msg, Opts, strip_json_metadata);
+stable_authorization_payload_id(Bin, _Opts)
+        when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+stable_authorization_payload_id(Bin, _Opts)
+        when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+stable_authorization_payload_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 stable_authorization_payload_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
@@ -370,6 +378,14 @@ stable_authorization_payload_id(Msg, Opts, MetadataMode) when is_map(Msg) ->
             hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
             Opts,
             MetadataMode));
+stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
+        when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
+        when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+stable_authorization_payload_id(Bin, _Opts, _MetadataMode) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
@@ -905,6 +921,12 @@ assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
     stable_authorization_payload_id(Attestation, Opts);
+attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+attestation_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 attestation_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
 
@@ -1567,6 +1589,15 @@ authorization_payload_id_is_transport_stable_test() ->
         stable_authorization_payload_id(
             Decoded#{<<"ao-types">> => <<"transport=\"atom\"">>},
             Opts)).
+
+authorization_payload_id_uses_ao_core_binary_rules_test() ->
+    NativeID = crypto:strong_rand_bytes(32),
+    HumanID = hb_util:human_id(NativeID),
+    ?assertEqual(HumanID, stable_authorization_payload_id(NativeID, #{})),
+    ?assertEqual(HumanID, stable_authorization_payload_id(HumanID, #{})),
+    ?assertEqual(
+        hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
+        stable_authorization_payload_id(<<"plain challenge">>, #{})).
 
 missing_member_url_is_transport_stable_test() ->
     ?assertEqual(<<>>, null_or_url(undefined)).

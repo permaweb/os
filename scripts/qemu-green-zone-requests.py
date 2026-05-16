@@ -18,6 +18,8 @@ def main() -> int:
     body = measurement["body"]
     evidence = measurement["evidence"]
     cmdline = body["system"]["kernel"]["cmdline"]
+    node = body["node"]
+    loaded_uki = body.get("system", {}).get("boot", {}).get("loaded-uki", {})
     dmi_product = (
         body["system"]["firmware"]["dmi"]["fields"]["product-name"]
     )
@@ -30,6 +32,7 @@ def main() -> int:
     else:
         evidence_template = {}
 
+    template_mode = os.environ.get("GREEN_ZONE_TEMPLATE_MODE", "device")
     template = {
         "body": {
             "system": {
@@ -40,7 +43,36 @@ def main() -> int:
             },
         },
     }
-    if os.environ.get("GREEN_ZONE_TEMPLATE_MODE", "device") == "device":
+
+    if template_mode in ("release", "release-common"):
+        loaded_uki_sha256 = loaded_uki.get("sha256")
+        if not loaded_uki_sha256:
+            raise SystemExit("release template requires body.boot.loaded-uki.sha256")
+        template = {
+            "body": {
+                "system": {
+                    "boot": {
+                        "loaded-uki": {"sha256": loaded_uki_sha256},
+                    },
+                    "kernel": {"cmdline": cmdline},
+                },
+                "node": {
+                    "ao-types":
+                        "access-remote-cache-for-client=\"atom\", "
+                        "initialized=\"atom\", "
+                        "load-remote-devices=\"atom\"",
+                    "initialized": node["initialized"],
+                    "access-remote-cache-for-client":
+                        node["access-remote-cache-for-client"],
+                    "load-remote-devices": node["load-remote-devices"],
+                },
+            },
+        }
+        if template_mode == "release":
+            template["body"]["system"]["firmware"] = {
+                "dmi": {"fields": {"product-name": dmi_product}},
+            }
+    elif template_mode == "device":
         template.update({
             "measurement-device": measurement["measurement-device"],
             "evidence": evidence_template,

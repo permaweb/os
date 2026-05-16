@@ -555,8 +555,7 @@ device_context(Opts) ->
     }.
 
 device_context_digest(Context) ->
-    hb_util:encode(
-        crypto:hash(sha256, term_to_binary(hb_message:uncommitted(Context, #{})))).
+    stable_id(Context, #{}).
 
 vmpl(Opts) ->
     parse_integer(
@@ -749,6 +748,12 @@ stable_id(Msg, Opts) when is_map(Msg) ->
         hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
         uncommitted,
         Opts);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+stable_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
@@ -842,6 +847,15 @@ hkdf_roundtrip_test() ->
     Secret = crypto:strong_rand_bytes(32),
     Credential = wrap_secret_for_subject(Subject, Secret, #{}),
     {ok, Secret} = unwrap_secret_value(Credential, #{}).
+
+stable_id_uses_ao_core_binary_rules_test() ->
+    NativeID = crypto:strong_rand_bytes(32),
+    HumanID = hb_util:human_id(NativeID),
+    ?assertEqual(HumanID, stable_id(NativeID, #{})),
+    ?assertEqual(HumanID, stable_id(HumanID, #{})),
+    ?assertEqual(
+        hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
+        stable_id(<<"plain challenge">>, #{})).
 
 snp_secret_activation_uses_explicit_credential_request_test() ->
     Subject = secret_recipient(#{}, #{}),

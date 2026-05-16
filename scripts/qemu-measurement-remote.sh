@@ -20,6 +20,7 @@ MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
 MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-30000}
 REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests}
 REMOTE_PORT=${REMOTE_PORT:-19734}
+REMOTE_BIND=${REMOTE_BIND:-127.0.0.1}
 REMOTE_QEMU=${REMOTE_QEMU:-/home/hb/hb-os/build/snp-release/usr/local/bin/qemu-system-x86_64}
 REMOTE_OVMF=${REMOTE_OVMF:-/home/hb/hb-os/release/DIRECT_BOOT_OVMF.fd}
 REMOTE_CBITPOS=${REMOTE_CBITPOS:-51}
@@ -124,6 +125,7 @@ qemu=${4:?qemu}
 ovmf=${5:?ovmf}
 cbitpos=${6:?cbitpos}
 memory_mib=${7:?memory}
+bind_addr=${8:?bind-address}
 
 pidfile="$workdir/qemu.pid"
 monitor="$workdir/qemu.mon"
@@ -179,7 +181,7 @@ case "$cmd" in
             -drive "file=$disk,if=none,id=disk0,format=raw" \
             -device virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=true \
             -device scsi-hd,drive=disk0,bootindex=1 \
-            -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${port}-:8734" \
+            -netdev "user,id=net0,hostfwd=tcp:${bind_addr}:${port}-:8734" \
             -device virtio-net-pci,disable-legacy=on,iommu_platform=true,netdev=net0,romfile= \
             -monitor "unix:$monitor,server,nowait" \
             -serial "file:$serial" \
@@ -196,7 +198,7 @@ esac
 REMOTE
     ssh "$host" "chmod +x '$remote_dir/run-snp-node.sh'"
     ssh "$host" \
-        "'$remote_dir/run-snp-node.sh' start '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'"
+        "'$remote_dir/run-snp-node.sh' start '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'"
 
     local deadline=$((SECONDS + TIMEOUT))
     until ssh "$host" \
@@ -205,7 +207,7 @@ REMOTE
         if (( SECONDS >= deadline )); then
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-timeout.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             echo "timed out waiting for remote node; serial: $OUTDIR/serial-timeout.log" >&2
             exit 1
         fi
@@ -216,14 +218,14 @@ REMOTE
         > "$OUTDIR/info.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-info-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     ssh "$host" "curl --max-time 120 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/boot?accept=application/json&accept-bundle=true'" \
         > "$OUTDIR/boot.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-boot-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     local nonce
@@ -232,7 +234,7 @@ REMOTE
         > "$OUTDIR/fresh.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-fresh-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     jq -e --arg device "$MEASUREMENT_DEVICE" '
@@ -245,7 +247,7 @@ REMOTE
         < "$OUTDIR/boot.json" > "$OUTDIR/verify-boot.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-verify-boot-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     local fresh_nonce
@@ -254,7 +256,7 @@ REMOTE
         < "$OUTDIR/fresh.json" > "$OUTDIR/verify-fresh.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-verify-fresh-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     jq -e '(.body.verified == true or .body.verified == "true")
@@ -265,7 +267,7 @@ REMOTE
         "$OUTDIR/verify-fresh.json" >/dev/null
 
     if [[ "$KEEP_RUNNING" != "1" ]]; then
-        ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB'" || true
+        ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
     fi
 }
 

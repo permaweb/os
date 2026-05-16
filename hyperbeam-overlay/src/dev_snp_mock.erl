@@ -135,6 +135,12 @@ stable_id(Msg, Opts) when is_map(Msg) ->
         hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
         uncommitted,
         Opts);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+stable_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 

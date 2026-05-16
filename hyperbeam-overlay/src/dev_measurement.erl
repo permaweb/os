@@ -729,6 +729,12 @@ stable_id(Msg, Opts) when is_map(Msg) ->
         hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
         uncommitted,
         Opts);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    Bin;
+stable_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
 stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
@@ -834,6 +840,15 @@ measurement_body_is_cached_test() ->
     ?assertEqual(
         stable_id(Body, #{}),
         measurement_body_id(Body, #{})).
+
+stable_id_uses_ao_core_binary_rules_test() ->
+    NativeID = crypto:strong_rand_bytes(32),
+    HumanID = hb_util:human_id(NativeID),
+    ?assertEqual(HumanID, stable_id(NativeID, #{})),
+    ?assertEqual(HumanID, stable_id(HumanID, #{})),
+    ?assertEqual(
+        hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
+        stable_id(<<"plain challenge">>, #{})).
 
 measurement_body_id_ignores_transport_commitments_test() ->
     Body = #{<<"system">> => #{<<"kernel">> => <<"same">>}},

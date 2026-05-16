@@ -1052,6 +1052,7 @@ WIFI_SSID=""
 WIFI_PSK=""
 BOOT_ESP_DEV=""
 OPERATOR_CONFIG_JSON=/tmp/config.json
+BOOT_UKI_SHA256=/run/lapee/boot-uki-sha256
 
 write_empty_operator_config_json() {
     printf '{}\n' > "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
@@ -1059,6 +1060,32 @@ write_empty_operator_config_json() {
 }
 
 write_empty_operator_config_json
+
+record_boot_uki_hash() {
+    _uki="$1"
+    [ -f "$_uki" ] || return 1
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        trace "boot-media: sha256sum unavailable; boot UKI hash not recorded"
+        return 1
+    fi
+    _hash=$(sha256sum "$_uki" 2>/dev/null | awk '{ print $1 }' || true)
+    case "$_hash" in
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+            ;;
+        *)
+            trace "boot-media: failed to hash boot UKI"
+            return 1
+            ;;
+    esac
+    if [ ${#_hash} -ne 64 ]; then
+        trace "boot-media: unexpected boot UKI hash length"
+        return 1
+    fi
+    printf '%s\n' "$_hash" > "$BOOT_UKI_SHA256" 2>/dev/null || return 1
+    chmod 600 "$BOOT_UKI_SHA256" 2>/dev/null || true
+    trace "boot-media: recorded boot UKI sha256"
+    return 0
+}
 
 # Gate (1): capability flag on kernel cmdline. Default OFF.
 # Only when `lapee.wifi=enabled' is explicitly present do we even
@@ -1267,6 +1294,7 @@ read_boot_media_config() {
                    [ -f /mnt/esp/LAPEE.MARKER ]; then
                     BOOT_ESP_DEV="$_dev"
                     trace "boot-media: found LapEE ESP at $BOOT_ESP_DEV"
+                    record_boot_uki_hash /mnt/esp/EFI/Boot/BootX64.efi || true
                     if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
                         if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
                             parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true

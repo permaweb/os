@@ -353,6 +353,11 @@ assert_security_properties() {
         def props($node; $att; $cred): {
             node: $node,
             cmdline: $att.body.body.system.kernel.cmdline,
+            boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
+            node_initialized: $att.body.body.node.initialized,
+            access_remote_cache_for_client:
+                $att.body.body.node."access-remote-cache-for-client",
+            load_remote_devices: $att.body.body.node."load-remote-devices",
             memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
             dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
             measurement_device: $att.body."measurement-device",
@@ -365,13 +370,21 @@ assert_security_properties() {
         | {
             nodes: .,
             distinct_cmdlines: ([.[].cmdline] | unique | length),
+            distinct_boot_uki_sha256: ([.[].boot_uki_sha256] | unique | length),
             distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
             distinct_dmi_products: ([.[].dmi_product] | unique | length),
             distinct_recipient_key_id: ([.[].recipient_key_id] | unique | length),
             distinct_recipient_public: ([.[].recipient_public] | unique | length)
           }' > "$OUTDIR/responses/security-properties.json"
     jq -e '
+        def falsy: . == false or . == "false";
         .distinct_cmdlines == 1 and
+        .distinct_boot_uki_sha256 == 1 and
+        all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+            .node_initialized == "permanent" and
+            (.access_remote_cache_for_client | falsy) and
+            (.load_remote_devices | falsy) and
+            ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
         all(.nodes[]; (.memtotal_kb | type == "number" and . > 0)) and
         .distinct_dmi_products == 2 and
         .distinct_recipient_key_id == 4 and

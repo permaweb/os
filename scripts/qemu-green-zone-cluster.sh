@@ -684,9 +684,15 @@ jq -n \
     --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
     --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
     --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
+    def falsy: . == false or . == "false";
     def props($node; $att; $cred): {
         node: $node,
         cmdline: $att.body.body.system.kernel.cmdline,
+        boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
+        node_initialized: $att.body.body.node.initialized,
+        access_remote_cache_for_client:
+            $att.body.body.node."access-remote-cache-for-client",
+        load_remote_devices: $att.body.body.node."load-remote-devices",
         memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
         dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
         measurement_device: $att.body."measurement-device",
@@ -699,6 +705,7 @@ jq -n \
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
+        distinct_boot_uki_sha256: ([.[].boot_uki_sha256] | unique | length),
         distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
         distinct_dmi_products: ([.[].dmi_product] | unique | length),
         distinct_ek_public: ([.[].ek_public] | unique | length),
@@ -713,7 +720,14 @@ expected_devices=$(jq -n \
     '[$d1, $d2, $d3, $d4]')
 if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; then
     jq -e --argjson expected "$expected_devices" \
-        '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
+        'def falsy: . == false or . == "false";
+         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
+           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+             .node_initialized == "permanent" and
+             (.access_remote_cache_for_client | falsy) and
+             (.load_remote_devices | falsy) and
+             ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
+           .distinct_memtotal_kb == 4 and
            .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
            .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
            [.nodes[].measurement_device] == $expected and
@@ -725,7 +739,14 @@ if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; 
         "$OUTDIR/responses/security-properties.json" >/dev/null
 else
     jq -e --argjson expected "$expected_devices" \
-        '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
+        'def falsy: . == false or . == "false";
+         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
+           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+             .node_initialized == "permanent" and
+             (.access_remote_cache_for_client | falsy) and
+             (.load_remote_devices | falsy) and
+             ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
+           .distinct_memtotal_kb == 4 and
            .distinct_dmi_products == 2 and
            [.nodes[].measurement_device] == $expected and
            .nodes[0].cmdline == .nodes[1].cmdline and
