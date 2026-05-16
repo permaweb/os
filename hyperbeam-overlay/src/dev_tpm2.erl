@@ -30,10 +30,12 @@
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
          attestation/3, boot_attestation/3, credential_subject/3,
+         supported/3, subject/3, measure/3, wrap_secret/3, unwrap_secret/3,
          activate_credential/3, activate_credential_secret/2,
          verify_peer/3]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
+-export([ensure_activation_secret/5]).
 -export([event_log/1]).
 %% Exposed for tests + auditors that want to drive chain validation
 %% (including the AIA fallback) directly without going through verify/3.
@@ -73,6 +75,11 @@ info(_) ->
                 <<"attestation">>,
                 <<"boot-attestation">>,
                 <<"credential-subject">>,
+                <<"supported">>,
+                <<"subject">>,
+                <<"measure">>,
+                <<"wrap-secret">>,
+                <<"unwrap-secret">>,
                 <<"activate-credential">>,
                 <<"verify-peer">>,
                 <<"verify">>
@@ -494,16 +501,36 @@ verify(Base, Req, Opts) ->
     }}.
 
 normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
-    case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
-        Body when is_map(Body) ->
-            case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
-                Tpm when is_map(Tpm) -> normalise_attestation(Body, Opts);
+    case measurement_attestation_body(Envelope, Opts) of
+        MeasurementBody when is_map(MeasurementBody) ->
+            normalise_attestation_body(MeasurementBody, Opts);
+        undefined ->
+            case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
+                Body when is_map(Body) ->
+                    case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
+                        Tpm when is_map(Tpm) ->
+                            normalise_attestation(Body, Opts);
+                        _ -> normalise_attestation_body(Envelope, Opts)
+                    end;
                 _ -> normalise_attestation_body(Envelope, Opts)
-            end;
-        _ -> normalise_attestation_body(Envelope, Opts)
+            end
     end;
 normalise_attestation(Other, _Opts) ->
     Other.
+
+measurement_attestation_body(Envelope, Opts) ->
+    case {
+        hb_maps:get(<<"type">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"measurement-device">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"body">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"evidence">>, Envelope, undefined, Opts)
+    } of
+        {<<"lapee-measurement">>, <<"tpm@2.0a">>, Body, Evidence}
+                when is_map(Body), is_map(Evidence) ->
+            Body#{<<"tpm">> => Evidence};
+        _ ->
+            undefined
+    end.
 
 normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
     case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
@@ -511,18 +538,17 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
             Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
             ExtendedSubject =
                 hb_maps:get(<<"extended-subject">>, Tpm, undefined, #{}),
-            LegacyNodeID =
-                case Node of
-                    M1 when is_map(M1) ->
-                        hb_util:human_id(
-                            hb_util:native_id(
-                                hb_message:id(M1, all, Opts)));
-                    _ -> undefined
-                end,
             NodeID =
                 case ExtendedSubject of
                     B when is_binary(B), byte_size(B) > 0 -> B;
-                    _ -> LegacyNodeID
+                    _ ->
+                        case Node of
+                            M1 when is_map(M1) ->
+                                hb_util:human_id(
+                                    hb_util:native_id(
+                                        hb_message:id(M1, all, Opts)));
+                            _ -> undefined
+                        end
                 end,
             Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
             Tpm#{
@@ -595,7 +621,8 @@ resolve_envelope(_Base, _Req, _Opts) ->
 
 is_envelope(M) when is_map(M) ->
     hb_maps:get(<<"lapee-attestation-version">>, M, undefined, #{}) /=
-        undefined;
+        undefined orelse
+    hb_maps:get(<<"type">>, M, undefined, #{}) =:= <<"lapee-measurement">>;
 is_envelope(_) ->
     false.
 
@@ -1705,6 +1732,41 @@ boot_attestation_locked(Opts) ->
             end
     end.
 
+supported(_Base, _Req, _Opts) ->
+    case nif_startup() of
+        ok -> {ok, true};
+        {error, _} -> {ok, false}
+    end.
+
+subject(_Base, Req, Opts) ->
+    case prepare_measurement_subject(Req, Opts) of
+        {ok, _Subject, _SubjectID, _SubjectDigest} ->
+            Subject = credential_subject_body(Opts),
+            {ok, #{
+                <<"status">> => 200,
+                <<"body">> => hb_message:commit(Subject, Opts)
+            }};
+        {error, Reason} ->
+            error_resp(500, <<"subject_failed">>, Reason)
+    end.
+
+measure(_Base, Req, Opts) ->
+    try
+        {ok, Subject, SubjectID, SubjectDigest} =
+            prepare_measurement_subject(Req, Opts),
+        Nonce = resolve_nonce(Req),
+        Tpm = boot_tpm_evidence(
+            Subject, SubjectID, SubjectDigest, Nonce, Opts),
+        {ok, #{<<"status">> => 200, <<"body">> => Tpm}}
+    catch
+        throw:{boot_attestation_error, Reason} ->
+            error_resp(500, <<"measure_failed">>, Reason);
+        Class:Reason ->
+            error_resp(500, <<"measure_failed">>,
+                       #{<<"class">> => to_bin(Class),
+                         <<"reason">> => to_bin(Reason)})
+    end.
+
 credential_subject(_Base, _Req, Opts) ->
     case ensure_ak(Opts) of
         {ok, _AkTr} ->
@@ -1718,10 +1780,18 @@ credential_subject(_Base, _Req, Opts) ->
     end.
 
 credential_subject_body(Opts) ->
+    AkName = ak_name(Opts),
     #{
         <<"type">> => <<"lapee-tpm-credential-subject">>,
         <<"version">> => <<"1.0">>,
-        <<"issued-at-unix">> => erlang:system_time(second),
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"method">> => <<"tpm2-activate-credential">>,
+        <<"key-id">> => AkName,
+        <<"binding">> => #{
+            <<"kind">> => <<"ak-policy-pcr">>,
+            <<"pcr">> => ?NODE_IDENTITY_PCR,
+            <<"policy-pcrs">> => ?AK_POLICY_PCRS
+        },
         <<"ek-cert-pem">> => ek_cert_pem(Opts),
         <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
         <<"ek-cert-source">> => ek_cert_source(),
@@ -1732,10 +1802,35 @@ credential_subject_body(Opts) ->
         <<"ek-qualified-name">> => ek_qualified_name(Opts),
         <<"ak-pub-pem">> => ak_pub_pem(Opts),
         <<"ak-public">> => ak_public(Opts),
-        <<"ak-name">> => ak_name(Opts),
+        <<"ak-name">> => AkName,
         <<"ak-qualified-name">> => ak_qualified_name(Opts),
+        <<"public-material">> => #{
+            <<"ek-public">> => ek_public(Opts),
+            <<"ek-pub-pem">> => ek_pub_pem(Opts),
+            <<"ak-public">> => ak_public(Opts),
+            <<"ak-pub-pem">> => ak_pub_pem(Opts),
+            <<"ak-name">> => AkName
+        },
         <<"tpm-properties">> => tpm_properties()
     }.
+
+wrap_secret(_Base, Req, _Opts) ->
+    with_ok(
+        fun() ->
+            Subject = hb_maps:get(<<"subject">>, Req, undefined, #{}),
+            Secret = decode_optional_secret(Req),
+            #{
+                <<"status">> => 200,
+                <<"body">> =>
+                    (make_credential_for_subject(Subject, Secret))#{
+                        <<"measurement-device">> => <<"tpm@2.0a">>,
+                        <<"method">> => <<"tpm2-activate-credential">>
+                    }
+            }
+        end).
+
+unwrap_secret(Base, Req, Opts) ->
+    activate_credential(Base, Req, Opts).
 
 activate_credential(_Base, Req, Opts) ->
     with_ok(
@@ -2345,6 +2440,18 @@ decode_required(Key, Req, Opts) ->
                    #{Key => <<"missing required base64url field">>}})
     end.
 
+decode_optional_secret(Req) ->
+    case hb_maps:get(<<"secret">>, Req, undefined, #{}) of
+        B when is_binary(B), byte_size(B) > 0 ->
+            try hb_util:decode(B)
+            catch _:_ -> B
+            end;
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"secret">> =>
+                        <<"missing required base64url/binary secret">>}})
+    end.
+
 safe_decode(B) when is_binary(B) ->
     try hb_util:decode(B) catch _:_ -> <<>> end;
 safe_decode(_) ->
@@ -2418,9 +2525,26 @@ boot_subject(Opts) ->
             {Subject, SubjectID, hb_util:native_id(SubjectID)}
     end.
 
+prepare_measurement_subject(Req, Opts) ->
+    {Subject, SubjectID, SubjectDigest} =
+        case hb_maps:get(<<"body">>, Req, undefined, Opts) of
+            Body when is_map(Body) ->
+                ID = hb_message:id(Body, all, Opts),
+                {Body, ID, hb_util:native_id(ID)};
+            _ ->
+                boot_subject(Opts)
+        end,
+    case ensure_ak(Subject, SubjectID, SubjectDigest, Opts) of
+        {ok, _AkTr} -> {ok, Subject, SubjectID, SubjectDigest};
+        {error, _} = E -> E
+    end.
+
 boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts) ->
+    boot_tpm_evidence(
+        Subject, SubjectID, SubjectDigest, crypto:strong_rand_bytes(32), Opts).
+
+boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
     Pcrs = ?DEFAULT_QUOTE_PCRS,
-    Nonce = crypto:strong_rand_bytes(32),
     case ensure_ak(Subject, SubjectID, SubjectDigest, Opts) of
         {ok, AkTr} ->
             case nif_quote(AkTr, Pcrs, Nonce) of
@@ -4500,6 +4624,28 @@ normalise_boot_attestation_uses_extended_subject_test() ->
     ?assertNotEqual(NodeOnlyID, SubjectID),
     ?assertEqual(SubjectID,
                  hb_maps:get(<<"node-message-id">>, Normalised, undefined,
+                             #{})).
+
+normalise_measurement_attestation_uses_evidence_test() ->
+    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
+    Node = #{<<"address">> => <<"node-address">>},
+    Subject = #{<<"system">> => System, <<"node">> => Node},
+    SubjectID = hb_message:id(Subject, all, #{}),
+    Measurement = #{
+        <<"type">> => <<"lapee-measurement">>,
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"body">> => Subject,
+        <<"evidence">> => #{
+            <<"extended-subject">> => SubjectID,
+            <<"quote">> => #{}
+        }
+    },
+    Normalised = normalise_attestation(Measurement, #{}),
+    ?assertEqual(SubjectID,
+                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
+                             #{})),
+    ?assertEqual(Node,
+                 hb_maps:get(<<"node-message">>, Normalised, undefined,
                              #{})).
 
 ek_cert_chain_handles_include_intel_odca_range_test() ->

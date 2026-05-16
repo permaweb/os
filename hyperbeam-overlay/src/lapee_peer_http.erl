@@ -9,12 +9,19 @@
 -export([get/3, post/4]).
 
 get(BaseURL, Path, Opts) ->
-    result(hb_http:get(strip_trailing_slash(BaseURL), #{<<"path">> => Path},
-                       peer_opts(Opts))).
+    result(hb_http:get(
+        strip_trailing_slash(BaseURL),
+        peer_message(#{<<"path">> => Path}),
+        peer_opts(Opts)
+    )).
 
 post(BaseURL, Path, Body, Opts) ->
-    result(hb_http:post(strip_trailing_slash(BaseURL), Path, Body,
-                        peer_opts(Opts))).
+    result(hb_http:post(
+        strip_trailing_slash(BaseURL),
+        Path,
+        peer_message(Body),
+        peer_opts(Opts)
+    )).
 
 result({ok, Msg}) ->
     Msg;
@@ -30,7 +37,13 @@ result({Status, Reason}) ->
 
 peer_opts(Opts) ->
     Base = Opts#{
+        http_only_result => false,
         <<"http-only-result">> => false,
+        http_client =>
+            hb_opts:get(
+                <<"peer-http-client">>,
+                hb_opts:get(<<"http-client">>, gun, Opts),
+                Opts),
         <<"http-client">> =>
             hb_opts:get(
                 <<"peer-http-client">>,
@@ -42,11 +55,14 @@ peer_opts(Opts) ->
         http_client_connect_timeout,
         with_timeout(
             <<"peer-http-timeout-ms">>,
-            http_client_send_timeout,
-            Base)).
+            http_client_hackney_recv_timeout,
+            with_timeout(
+                <<"peer-http-timeout-ms">>,
+                http_client_send_timeout,
+                Base))).
 
 with_timeout(From, To, Opts) ->
-    case hb_opts:get(From, undefined, Opts) of
+    case hb_opts:get(From, undefined, Opts#{<<"prefer">> => local}) of
         N when is_integer(N), N > 0 -> Opts#{To => N};
         B when is_binary(B) ->
             try binary_to_integer(B) of
@@ -56,6 +72,12 @@ with_timeout(From, To, Opts) ->
             end;
         _ -> Opts
     end.
+
+peer_message(Msg) ->
+    maps:merge(#{
+        <<"accept">> => <<"application/json">>,
+        <<"accept-bundle">> => <<"true">>
+    }, Msg).
 
 strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     case binary:last(B) of

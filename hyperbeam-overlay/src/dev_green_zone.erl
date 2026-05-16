@@ -1,4 +1,4 @@
-%%% @doc TPM-backed green-zone rings.
+%%% @doc Measurement-backed green-zone rings.
 %%%
 %%% A green-zone is a shared signing identity admitted by evidence rather than
 %%% by operator fiat. The device is intentionally small:
@@ -6,14 +6,14 @@
 %%% * `init' creates a named ring wallet, a 256-bit AES ring secret, and a
 %%%   deeply-nested template after proving that the initializing node matches
 %%%   the template.
-%%% * `admit' verifies a candidate peer through `~tpm@2.0a/verify-peer',
+%%% * `admit' verifies a candidate peer through `~measurement@1.0/verify-peer',
 %%%   matches the candidate's boot attestation against the template, then
-%%%   wraps the ring AES secret to the peer's TPM using MakeCredential. The
-%%%   fresh attestation and ActivateCredential proof establish liveness and
-%%%   possession of the AK named in that boot attestation. The ring wallet is
-%%%   encrypted under the wrapped AES key.
+%%%   wraps the ring AES secret to the peer's measured secret recipient. The
+%%%   fresh measurement and secret-activation proof establish liveness and
+%%%   possession of the engine-native recipient named in that boot measurement.
+%%%   The ring wallet is encrypted under the wrapped AES key.
 %%% * `join' asks an existing member for a named ring admission, checks the
-%%%   envelope, unwraps the AES key through `~tpm@2.0a/activate-credential',
+%%%   envelope, unwraps the AES key through `~measurement@1.0/unwrap-secret',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
 %%%   it as a local green-zone identity.
 %%% * `member' returns a narrow membership proof signed by the installed
@@ -36,16 +36,17 @@
 %%% The admission protocol is:
 %%%
 %%% 1. The initializer calls `init' with a `name' and `template'. The node
-%%%    reads its own cached `~tpm@2.0a/boot-attestation', verifies that the
+%%%    reads its own cached `~measurement@1.0/boot', verifies that the
 %%%    template matches it, then generates the ring AES key and wallet locally.
 %%%    Callers cannot provide those secrets.
 %%% 2. A joiner calls its local `join' with the green-zone `name', a member
 %%%    `peer-url', its own `self-url', and the expected `ring-address'.
 %%% 3. The joiner sends an admission request to the peer. The peer calls
-%%%    `~tpm@2.0a/verify-peer' for the joiner's URL. That TPM device verifies
-%%%    the joiner's boot attestation, verifies a fresh nonce-bound quote, checks
-%%%    the EK/AK/credential subject agree, and performs MakeCredential /
-%%%    ActivateCredential to prove the joiner controls the AK inside that TPM.
+%%%    `~measurement@1.0/verify-peer' for the joiner's URL. That device verifies
+%%%    the joiner's boot measurement, verifies a fresh nonce-bound measurement,
+%%%    checks the secret recipient agrees, and performs the engine-native
+%%%    wrap/unwrap proof to prove the joiner controls the recipient inside that
+%%%    measured environment.
 %%%    It returns a signed `green-zone-peer-attestation'.
 %%% 4. The peer matches the ring template against the boot attestation inside
 %%%    that peer attestation. If it matches, the peer wraps the ring AES key to
@@ -62,7 +63,7 @@
 %%%    `peer-attestation' because that assertion is produced from JSON-restored
 %%%    peer evidence.
 %%% 6. The joiner verifies the ring-signed authorization, checks every payload
-%%%    ID, activates the TPM credential locally, decrypts the wallet, confirms
+%%%    ID, activates the credential locally, decrypts the wallet, confirms
 %%%    the wallet address equals the expected ring address, and installs the
 %%%    identity as `green-zone/<name>'.
 %%% 7. A member can call `member' to receive a signed, narrow statement that
@@ -97,15 +98,17 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"description">> =>
-                <<"TPM-backed green-zone ring admission and shared identity">>,
+                <<"Measurement-backed green-zone ring admission and shared "
+                  "identity">>,
             <<"version">> => <<"1.0">>,
             <<"template-semantics">> =>
                 <<"HyperBEAM message primary match; non-map values exact; "
                   "'_' wildcard">>,
             <<"peer-attestation-trust">> =>
                 <<"Green-zone admission verifies live peers through "
-                  "~tpm@2.0a/verify-peer. Reusable/transitive peer-attestation "
-                  "publisher trust is a TPM-device concern, not ring state.">>
+                  "~measurement@1.0/verify-peer. Reusable/transitive "
+                  "peer-attestation publisher trust is a measurement-device "
+                  "concern, not ring state.">>
         }
     }}.
 
@@ -116,7 +119,7 @@ init(_Base, Req, Opts) ->
             hb_maps:get(<<"template">>, Req, #{}, Opts),
             Opts),
         reject_supplied_secret_material(Req, Opts),
-        Self = self_attestation_body(Opts),
+        Self = self_attestation_body(Template, Opts),
         ok = assert_template_match(Template, Self, <<"self">>, Opts),
         AES = crypto:strong_rand_bytes(32),
         Wallet = ar_wallet:new(),
@@ -161,12 +164,13 @@ admit(_Base, Req, Opts) ->
         RingReference = ring_reference(Name, Template, Wallet, Opts),
         {JoinerURL, PeerAttestation} =
             peer_attestation_from_req(Req, RingReference, Opts),
-        PolicyAttestation = peer_boot_attestation_body(PeerAttestation, Opts),
+        PolicyAttestation =
+            peer_boot_attestation_body(Template, PeerAttestation, Opts),
         ok = assert_template_match(Template, PolicyAttestation, JoinerURL, Opts),
         Subject = hb_maps:get(
             <<"peer-credential-subject">>, PeerAttestation, undefined, Opts),
         Credential = commit_unsigned_tree(
-            dev_tpm2:make_credential_for_subject(Subject, AES),
+            dev_measurement:wrap_secret_for_subject(Subject, AES, Opts),
             Opts),
         EncryptedWallet = commit_unsigned_tree(encrypt_wallet(Wallet, AES), Opts),
         Members = add_member_to_members(
@@ -228,7 +232,7 @@ join(_Base, Req, Opts) ->
         Definition = hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
         Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
         NewMembers = add_member_to_members(
-            Members, SelfURL, peer_boot_attestation_body(
+            Members, SelfURL, peer_boot_attestation_body(Template,
                 response_body(
                     hb_maps:get(<<"peer-attestation">>, Admission, #{}, Opts),
                     Opts),
@@ -363,7 +367,9 @@ stable_authorization_payload_id(Value, _Opts) ->
 stable_authorization_payload_id(Msg, Opts, MetadataMode) when is_map(Msg) ->
     stable_uncommitted_id(
         canonical_authorization_payload(
-            response_body(Msg, Opts), Opts, MetadataMode));
+            hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
+            Opts,
+            MetadataMode));
 stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
@@ -373,10 +379,11 @@ canonical_authorization_payload(Value, Opts) ->
 canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
     canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
 canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
+    Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
     maps:from_list(
         [
             {Key, canonical_authorization_payload(Value, Opts, MetadataMode)}
-         || {Key, Value} <- hb_maps:to_list(Msg, Opts),
+         || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
             not authorization_meta_key(Key, MetadataMode)
         ]);
 canonical_authorization_payload(List, Opts, MetadataMode) when is_list(List) ->
@@ -645,10 +652,10 @@ required_zone(Req, Opts) ->
 zone_identity(Name) ->
     <<?IDENTITY_PREFIX/binary, Name/binary>>.
 
-self_attestation_body(Opts) ->
-    case dev_tpm2:boot_attestation(#{}, #{}, Opts) of
+self_attestation_body(Template, Opts) ->
+    case dev_measurement:boot(#{}, #{}, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
-            response_body(Body, Opts);
+            measurement_template_target(Template, response_body(Body, Opts), Opts);
         _ ->
             throw({green_zone_error, #{
                 <<"error">> => <<"self-attestation-failed">>
@@ -698,14 +705,14 @@ add_member_to_members(Members, URL, Attestation, Role, Opts) ->
     end.
 
 attestation_node_address(Attestation, Opts) ->
-    Body = response_body(Attestation, Opts),
+    Body = measurement_body(response_body(Attestation, Opts), Opts),
     Node = hb_maps:get(<<"node">>, Body, #{}, Opts),
     case hb_maps:get(<<"address">>, Node, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 -> B;
         _ -> undefined
     end.
 
-null_or_url(undefined) -> null;
+null_or_url(undefined) -> <<>>;
 null_or_url(URL) -> strip_trailing_slash(URL).
 
 first_defined([]) -> undefined;
@@ -725,7 +732,7 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
         <<"url">> => JoinerURL,
         <<"peer-attestation-scope">> => RingReference
     },
-    case dev_tpm2:verify_peer(#{}, VerifyReq, Opts) of
+    case dev_measurement:verify_peer(#{}, VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
         _ ->
             throw({green_zone_error, #{
@@ -876,13 +883,13 @@ assert_peer_attestation_scope(PeerAttestation, RingReference, Opts) ->
     Subject = hb_maps:get(
         <<"peer-credential-subject">>, PeerAttestation, #{}, Opts),
     case {
-        hb_maps:get(<<"ek-public-sha256">>, Scope, undefined, Opts),
-        encoded_field_sha256(<<"ek-public">>, Subject, Opts),
-        hb_maps:get(<<"ak-name-sha256">>, Scope, undefined, Opts),
-        encoded_field_sha256(<<"ak-name">>, Subject, Opts)
+        hb_maps:get(<<"measurement-device">>, Scope, undefined, Opts),
+        hb_maps:get(<<"measurement-device">>, Subject, undefined, Opts),
+        hb_maps:get(<<"secret-recipient-id">>, Scope, undefined, Opts),
+        stable_authorization_payload_id(Subject, Opts)
     } of
-        {Ek, Ek, Ak, Ak} -> ok;
-        _ -> bad_peer_attestation(<<"peer-scope.tpm-material">>)
+        {Device, Device, ID, ID} when Device =/= undefined -> ok;
+        _ -> bad_peer_attestation(<<"peer-scope.secret-recipient">>)
     end.
 
 assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
@@ -897,7 +904,7 @@ assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
     end.
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
-    hb_message:id(Attestation, all, Opts);
+    stable_authorization_payload_id(Attestation, Opts);
 attestation_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
 
@@ -909,10 +916,79 @@ assert_scope_field(Key, Scope, RingReference, Opts) ->
     end.
 
 peer_boot_attestation_body(PeerAttestation, Opts) ->
-    response_body(
-        hb_maps:get(
-            <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+    measurement_template_target(
+        #{},
+        response_body(
+            hb_maps:get(
+                <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+            Opts),
         Opts).
+
+peer_boot_attestation_body(Template, PeerAttestation, Opts) ->
+    measurement_template_target(
+        Template,
+        response_body(
+            hb_maps:get(
+                <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
+            Opts),
+        Opts).
+
+measurement_template_target(Template, Measurement, Opts) ->
+    Candidate = materialize_measurement_candidate(Template, Measurement, Opts),
+    case template_mentions_measurement(Template, Opts) of
+        true -> Candidate;
+        false -> measurement_body(Candidate, Opts)
+    end.
+
+materialize_measurement_candidate(Template, Measurement, Opts)
+        when is_map(Measurement) ->
+    Decoded = hb_link:decode_all_links(Measurement),
+    lists:foldl(
+        fun(Key, Acc) -> materialize_measurement_key(Key, Acc, Opts) end,
+        Decoded,
+        materialized_measurement_keys(Template, Opts));
+materialize_measurement_candidate(_Template, Measurement, _Opts) ->
+    Measurement.
+
+materialized_measurement_keys(Template, Opts) ->
+    [<<"body">> |
+        [
+            Key
+         || Key <- [<<"evidence">>, <<"secret-recipient">>],
+            hb_maps:get(Key, Template, undefined, Opts) =/= undefined
+        ]].
+
+materialize_measurement_key(Key, Measurement, Opts) ->
+    LinkKey = <<Key/binary, "+link">>,
+    WithoutLink = maps:remove(LinkKey, Measurement),
+    case hb_maps:get(Key, Measurement, undefined, Opts) of
+        undefined -> WithoutLink;
+        Value ->
+            WithoutLink#{Key => hb_cache:ensure_all_loaded(Value, Opts)}
+    end.
+
+template_mentions_measurement(Template, Opts) when is_map(Template) ->
+    lists:any(
+        fun(Key) ->
+            hb_maps:get(Key, Template, undefined, Opts) =/= undefined
+        end,
+        [<<"measurement-device">>, <<"evidence">>, <<"body">>,
+         <<"secret-recipient">>]);
+template_mentions_measurement(_Template, _Opts) ->
+    false.
+
+measurement_body(Measurement, Opts) when is_map(Measurement) ->
+    Decoded = hb_link:decode_all_links(Measurement),
+    case hb_maps:get(<<"type">>, Decoded, undefined, Opts) of
+        <<"lapee-measurement">> ->
+            hb_cache:ensure_all_loaded(
+                hb_maps:get(<<"body">>, Decoded, #{}, Opts),
+                Opts);
+        _ ->
+            Decoded
+    end;
+measurement_body(Other, _Opts) ->
+    Other.
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     Body = maps:with(
@@ -936,19 +1012,41 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     catch
         throw:{green_zone_error, ErrorBody} ->
             throw({green_zone_error, ErrorBody});
-        _:_ ->
+        Class:Reason:_Stack ->
             throw({green_zone_error, #{
-                <<"error">> => <<"admission-request-failed">>
+                <<"error">> => <<"admission-request-failed">>,
+                <<"class">> => hb_util:bin(Class),
+                <<"reason">> =>
+                    iolist_to_binary(io_lib:format("~0p", [Reason]))
             }})
     end.
 
+admission_response_body(
+        #{<<"status">> := 200, <<"body">> := #{<<"status">> := _} = Body},
+        Opts) ->
+    admission_response_body(Body, Opts);
 admission_response_body(#{<<"status">> := 200, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
+    admission_or_error_body(response_body(Body, Opts), Opts);
 admission_response_body(#{<<"status">> := Status, <<"body">> := Body}, _Opts)
         when is_integer(Status), Status >= 400, is_map(Body) ->
     throw({green_zone_error, Body});
+admission_response_body(#{<<"body">> := Body}, Opts) when is_map(Body) ->
+    admission_response_body(Body, Opts);
 admission_response_body(Other, Opts) ->
-    response_body(Other, Opts).
+    admission_or_error_body(response_body(Other, Opts), Opts).
+
+admission_or_error_body(Body, Opts) when is_map(Body) ->
+    case {
+        hb_maps:get(<<"type">>, Body, undefined, Opts),
+        hb_maps:get(<<"error">>, Body, undefined, Opts)
+    } of
+        {undefined, Error} when is_binary(Error) ->
+            throw({green_zone_error, Body});
+        _ ->
+            Body
+    end;
+admission_or_error_body(Body, _Opts) ->
+    Body.
 
 assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
     Self = strip_trailing_slash(SelfURL),
@@ -1069,7 +1167,7 @@ assert_expected_ring_address(Admission, Req, Opts) ->
     end.
 
 activate_local_credential(Credential, Opts) ->
-    case dev_tpm2:activate_credential_secret(Credential, Opts) of
+    case dev_measurement:unwrap_secret_value(Credential, Opts) of
         {ok, Secret} when is_binary(Secret) ->
             Secret;
         _ ->
@@ -1080,8 +1178,13 @@ activate_local_credential(Credential, Opts) ->
 
 response_body(Link, Opts) when ?IS_LINK(Link) ->
     response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
-response_body(#{<<"body">> := Body}, Opts) ->
+response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
     response_body(Body, Opts);
+response_body(#{<<"body">> := Body} = Msg, Opts) ->
+    case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
+        <<"lapee-measurement">> -> Msg;
+        _ -> response_body(Body, Opts)
+    end;
 response_body(Body, _Opts) ->
     Body.
 
@@ -1262,9 +1365,21 @@ admission_response_body_preserves_policy_rejection_test() ->
         <<"status">> => 400,
         <<"body">> => #{<<"error">> => <<"template-mismatch">>}
     },
+    WrappedRejection = #{
+        <<"status">> => 200,
+        <<"body">> => Rejection
+    },
     ?assertThrow(
         {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
-        admission_response_body(Rejection, #{})).
+        admission_response_body(Rejection, #{})),
+    ?assertThrow(
+        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        admission_response_body(WrappedRejection, #{})),
+    ?assertThrow(
+        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        admission_response_body(
+            #{<<"error">> => <<"template-mismatch">>},
+            #{})).
 
 stored_peer_attestation_is_not_green_zone_trust_input_test() ->
     PublisherWallet = ar_wallet:new(),
@@ -1301,8 +1416,52 @@ green_zone_policy_uses_boot_attestation_test() ->
         response_body(
             hb_maps:get(
                 <<"peer-fresh-attestation">>, Attestation, undefined, #{}),
-            #{}),
+        #{}),
         #{})).
+
+measurement_template_preserves_cached_measurement_envelope_test() ->
+    Opts = #{
+        <<"store">> => hb_test_utils:test_store(),
+        <<"priv-wallet">> => ar_wallet:new(),
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Template = #{
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"body">> => #{
+            <<"system">> => #{
+                <<"kernel">> => #{<<"cmdline">> => <<"good">>}
+            }
+        },
+        <<"evidence">> => #{
+            <<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>}
+        }
+    },
+    Measurement = hb_message:commit(
+        #{
+            <<"type">> => <<"lapee-measurement">>,
+            <<"version">> => <<"1.0">>,
+            <<"measurement-device">> => <<"tpm@2.0a">>,
+            <<"body">> => #{
+                <<"system">> => #{
+                    <<"kernel">> => #{<<"cmdline">> => <<"good">>}
+                },
+                <<"node">> => #{<<"address">> => <<"addr">>}
+            },
+            <<"evidence">> => #{
+                <<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>},
+                <<"extra">> => true
+            }
+        },
+        Opts),
+    {ok, ID} = hb_cache:write(Measurement, Opts),
+    Cached = hb_cache:ensure_loaded(
+        {link, ID, #{<<"type">> => <<"link">>, <<"lazy">> => false}},
+        Opts),
+    Candidate = measurement_template_target(
+        Template,
+        response_body(Cached, Opts),
+        Opts),
+    ?assert(match_template(Template, Candidate, Opts)).
 
 expired_peer_attestation_rejected_test() ->
     PublisherWallet = ar_wallet:new(),
@@ -1408,6 +1567,9 @@ authorization_payload_id_is_transport_stable_test() ->
         stable_authorization_payload_id(
             Decoded#{<<"ao-types">> => <<"transport=\"atom\"">>},
             Opts)).
+
+missing_member_url_is_transport_stable_test() ->
+    ?assertEqual(<<>>, null_or_url(undefined)).
 
 ring_wallet_address_mismatch_rejected_test() ->
     Wallet = ar_wallet:new(),

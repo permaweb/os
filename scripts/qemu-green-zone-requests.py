@@ -13,20 +13,35 @@ def main() -> int:
     guest_host = sys.argv[3]
 
     att = json.loads((out / "responses/node1-boot-attestation.json").read_text())
-    cmdline = att["body"]["system"]["kernel"]["cmdline"]
+    measurement = att["body"]
+    body = measurement["body"]
+    evidence = measurement["evidence"]
+    cmdline = body["system"]["kernel"]["cmdline"]
     dmi_product = (
-        att["body"]["system"]["firmware"]["dmi"]["fields"]["product-name"]
+        body["system"]["firmware"]["dmi"]["fields"]["product-name"]
     )
+    if "ek-cert-source" in evidence:
+        evidence_template = {
+            "ek-cert-source": {"kind": evidence["ek-cert-source"]["kind"]}
+        }
+    elif "type" in evidence:
+        evidence_template = {"type": evidence["type"]}
+    else:
+        evidence_template = {}
+
     (out / "requests/init.json").write_text(json.dumps({
         "name": "book-shelf",
         "template": {
-            "system": {
-                "kernel": {"cmdline": cmdline},
-                "firmware": {
-                    "dmi": {"fields": {"product-name": dmi_product}},
+            "measurement-device": measurement["measurement-device"],
+            "body": {
+                "system": {
+                    "kernel": {"cmdline": cmdline},
+                    "firmware": {
+                        "dmi": {"fields": {"product-name": dmi_product}},
+                    },
                 },
             },
-            "tpm": {"ek-cert-source": {"kind": "tpm-nv"}},
+            "evidence": evidence_template,
         }
     }))
 

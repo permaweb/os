@@ -1,69 +1,94 @@
-# LapEE Non-Volatile Storage Status
+# LapEE Measurement/SNP Status
 
 ## Current Focus
 
-Production hardening for encrypted non-volatile storage on
-`feat/persistent-storage`.
+Branch: `feat/measurement-snp`.
 
-## Completed
+Normalize TPM and SEV-SNP style node evidence under `~measurement@1.0`, then
+route green-zone admission through that common measurement protocol.
 
-- Implemented provisioner disk listing and explicit `DESTROY N` flow.
-- Implemented green-zone-keyed LUKS2/ext4 runtime activation.
-- Reused existing LUKS volumes across reboot without reformatting.
-- Prepended the mounted LMDB as primary store and merged the boot LMDB.
-- Added QEMU green-zone non-volatile reboot acceptance test.
-- Added provisioner QEMU smoke test for the destructive partition-label flow.
-- Added `GREENZONE_PRIMARY` and `GREENZONE_<ring-address-prefix>` partition
-  labels so a disk can either bind to the first joined zone or to a named zone
-  prefix.
-- Added peer-audited hardening for idempotent activation and first-format
-  safety.
-- Hardened provisioner selection by revalidating the selected disk immediately
-  before destructive writes as a writable non-boot block device and checking
-  the written GPT partition name from disk contents.
-- Hardened first-format authorization: the provisioner writes a LapEE
-  partition marker, and runtime refuses to first-format a non-LUKS partition
-  without that marker.
-- Hardened existing-volume behavior: existing LUKS volumes are mounted before
-  any format decision, so weak filesystem probes cannot wipe a real store.
-- Removed full-disk zeroing from provisioning. The provisioner repartitions and
-  marks the selected disk; LUKS formatting overwrites the selected partition
-  when the runtime first admits the node.
-- Rebuilt fresh signed no-TME runtime and Secure Boot provisioner images.
+## Implemented In This Checkpoint
 
-## Active Checks
+- Added `~measurement@1.0` as the primary LapEE measurement API:
+  `info`, `boot`, `fresh`, `verify`, `verify-peer`, `subject`,
+  `wrap-secret`, and `unwrap-secret`.
+- Standardized measurement messages as signed AO-Core messages with:
+  `type`, `version`, `issued-at-unix`, `measurement-device`, `body`,
+  `evidence`, and `secret-recipient`.
+- Moved the common subject construction into measurement:
+  `body.system` comes from `~system@1.0/all`; `body.node` comes from signed
+  `~meta@1.0/info`.
+- Refactored `~tpm@2.0a` into a measurement-capable backend while preserving
+  TPM-specific public endpoints for debugging and compatibility.
+- Mapped TPM `MakeCredential` / `ActivateCredential` onto generic
+  `wrap-secret` / `unwrap-secret`.
+- Added `~snp@1.0` as a measurement-capable backend with boot-local X25519
+  recipient keys, report-data binding, Erlang-side report parsing, and
+  X25519/HKDF/AES-GCM secret wrapping.
+- Added explicit test-only `~snp-mock@1.0` protocol backend. It is never part
+  of production `measurement-device = auto` selection.
+- Updated `~green-zone@1.0` to verify peers and wrap ring secrets through
+  `~measurement@1.0` instead of calling TPM functions directly.
+- Updated QEMU green-zone harnesses so `MEASUREMENT_DEVICE=snp-mock@1.0` can
+  exercise green-zone without TPM-specific credential paths.
+- Added kernel/build support needed for SEV-SNP guest probing.
+- Replaced green-zone peer transport calls with HB HTTP plus AO-Core JSON
+  bundle negotiation, avoiding the older custom JSON helper path.
+- Fixed admission response handling so a status-200 response with a linked
+  body is normalized through the same policy/error path as direct bodies.
 
-- None.
+## Verified
 
-## Latest Verification
+- Staged the overlay into `build/hyperbeam/src-edge`.
+- Unit tests:
+  - `HB_PORT=0 rebar3 eunit --module=dev_measurement`
+    - 2 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_tpm2`
+    - 42 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_green_zone`
+    - 23 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_snp`
+    - 6 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_snp_mock`
+    - compiles; no tests defined.
+- Built signed debug no-TME image:
+  - `build/images/lapee-measurement-debug-greenjoin-signed.img`
+  - `sbverify` reported `Signature verification OK`.
+- QEMU nonvolatile TPM green-zone cluster passed before the final admission
+  response normalization patch:
+  - four nodes booted and answered `~measurement@1.0/boot`;
+  - node 4 was rejected by template mismatch;
+  - nodes 1-3 produced ring-signed membership proofs;
+  - node 2 reused encrypted nonvolatile storage after reboot;
+  - node 2's current boot measurement stayed current after store activation.
 
-- `sh -n buildroot-external/board/lapee/rootfs-overlay/init`
-- `bash -n scripts/qemu-provisioner-nonvolatile.sh`
-- `bash -n scripts/qemu-green-zone-cluster.sh`
-- `erlc -I build/hyperbeam/src-edge/src -o /tmp hyperbeam-overlay/src/lapee_nonvolatile.erl hyperbeam-overlay/src/dev_green_zone.erl`
-- `git diff --check -- README.md STATUS.md decisions/nonvolatile-storage-production.md buildroot-external/board/lapee/rootfs-overlay/init hyperbeam-overlay/src/dev_green_zone.erl hyperbeam-overlay/src/lapee_nonvolatile.erl scripts/qemu-green-zone-cluster.sh scripts/qemu-provisioner-nonvolatile.sh`
-- `make provisioner-image`
-- `make runtime-image TME=0 WIFI=0`
-  - `Signature verification OK`
-  - signed image: `build/images/lapee-runtime-no-tme-signed.img`
-- `make qemu-provisioner-nonvolatile`
-  - `found GREENZONE_test-zone partition`
-  - `=== provisioner non-volatile QEMU smoke PASSED ===`
-- `make qemu-green-zone-nonvolatile`
-  - `node 4 rejected as expected`
-  - `rejected node 4 left its non-volatile disk unformatted`
-  - `node 2 reopened the same encrypted non-volatile volume after reboot`
-  - `node 1 produced ring-signed membership proof`
-  - `node 2 produced ring-signed membership proof`
-  - `node 3 produced ring-signed membership proof`
-  - `=== green-zone QEMU cluster PASSED ===`
+## Currently Running
 
-## Open Review Questions
+- Plain TPM four-node QEMU green-zone cluster:
+  - command:
+    `IMG=build/images/lapee-measurement-debug-greenjoin-signed.img OUTDIR=build/qemu-measurement-plain TIMEOUT=1200 ./scripts/qemu-green-zone-cluster.sh`
+  - current evidence:
+    - all four nodes answered `~measurement@1.0/boot`;
+    - node 1 initialized the green zone;
+    - node 1 produced a valid `~measurement@1.0/verify-peer` for node 2;
+    - node 1 admitted node 2;
+    - harness is waiting for node 2's local join to complete.
 
-- Whether v1 should support more than one green-zone-backed persistent store.
-  Current decision: no, first mounted store wins.
-- Whether optional storage failure should prevent joining a green zone.
-  Current decision: no, report status and keep the node live.
-- Full-cluster cold restart requires at least one live peer or a future
-  TPM-sealed recovery design, because v1 derives the disk key from the
-  green-zone secret rather than operator material.
+## Not Yet Verified
+
+- Fresh plain TPM QEMU cluster completion after the final admission response
+  normalization patch.
+- Fresh `MEASUREMENT_DEVICE=snp-mock@1.0` QEMU cluster after this checkpoint.
+- Real SEV-SNP run on `hb@dev-1.forward.computer`.
+- Mixed TPM/SNP green-zone behavior.
+- Production, non-debug runtime image after the measurement reorg.
+
+## Known Gaps
+
+- Real SNP endorsement-chain validation is not yet proven on hardware. The
+  current SNP implementation has report binding/parsing and mock protocol
+  coverage, but the remote SEV-SNP acceptance test is still required before
+  calling SNP production-ready.
+- `~measurement@1.0` is now the intended primary LapEE API, but old
+  TPM-specific endpoints still exist for compatibility/debugging during the
+  transition.

@@ -17,7 +17,7 @@
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
--define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
+-define(BOOT_ATTESTATION_PATH, <<"~measurement@1.0/boot">>).
 -define(KEY_DIR, "/run/lapee/nonvolatile-keys").
 -define(FORMAT_MARKER, <<"LapEE nonvolatile provisioning marker v1\n">>).
 -define(VOLUME_ID_FILE, ".lapee-volume-id").
