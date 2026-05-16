@@ -7,7 +7,15 @@ Branch: `feat/measurement-snp`.
 Normalize TPM and SEV-SNP style node evidence under `~measurement@1.0`, then
 route green-zone admission through that common measurement protocol.
 
-## Implemented In This Checkpoint
+## Latest Checkpoint
+
+The TPM side of the measurement reorg is working through local/QEMU coverage.
+The SNP side now has the intended small native boundary and Erlang-side
+verification shape, but the real remote SNP guest is not yet answering HTTP
+requests after boot. The current blocker is now isolated to real-SNP runtime
+bring-up, not to the local protocol model or the older TPM NIF crash.
+
+## Implemented
 
 - Added `~measurement@1.0` as the primary LapEE measurement API:
   `info`, `boot`, `fresh`, `verify`, `verify-peer`, `subject`,
@@ -36,6 +44,24 @@ route green-zone admission through that common measurement protocol.
   bundle negotiation, avoiding the older custom JSON helper path.
 - Fixed admission response handling so a status-200 response with a linked
   body is normalized through the same policy/error path as direct bodies.
+- Rebuilt the SNP backend around a tiny overlay-owned Rust NIF:
+  `supported/0` checks `/dev/sev-guest`; `report/2` returns raw SNP report
+  bytes plus the platform certificate table. The NIF no longer performs JSON
+  construction or report verification.
+- Moved SNP report parsing, report-data checks, AMD KDS/certificate handling,
+  and ECDSA signature verification into `dev_snp.erl`.
+- Added AMD ARK pinning for Milan, Genoa, and Turin.
+- Changed SNP VMPL default to `0`, matching the remote host's
+  `sev-guest` initialization (`VMPCK0`).
+- Made `lapee_tpm_nif` load failure nonfatal. SNP guests and verifier-only
+  nodes can now load modules that reference TPM code without a local TPM; TPM
+  operations still fail closed through the Erlang stubs if called.
+- Added bounded measurement steps around system report, node message, backend
+  subject, and backend evidence collection. A stuck probe should now fail the
+  measurement instead of wedging the caller forever.
+- Added `scripts/qemu-measurement-remote.sh` and `make
+  qemu-measurement-remote` for single-node remote measurement smoke tests on
+  `TARGET=ssh://...`.
 
 ## Verified
 
@@ -51,8 +77,25 @@ route green-zone admission through that common measurement protocol.
     - 6 tests passed.
   - `HB_PORT=0 rebar3 eunit --module=dev_snp_mock`
     - compiles; no tests defined.
+- Re-ran the core staged overlay tests after the raw SNP NIF changes:
+  - `HB_PORT=0 rebar3 eunit --module=dev_measurement`
+    - 2 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_snp`
+    - 6 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_green_zone`
+    - 23 tests passed.
+  - `HB_PORT=0 rebar3 eunit --module=dev_tpm2`
+    - 42 tests passed.
+- The raw `dev_snp_nif` crate compiles when staged into
+  `build/hyperbeam/src-edge`.
+- A real AMD SNP sample report from AMD KDS material validates through the
+  Erlang-side certificate/signature path after the EC public-key fix.
 - Built signed debug no-TME image:
   - `build/images/lapee-measurement-debug-greenjoin-signed.img`
+  - `sbverify` reported `Signature verification OK`.
+- Built signed serial debug no-TME SNP images for the remote host:
+  - `build/images/lapee-measurement-snp-debug-serial-signed.img`
+  - `build/images/lapee-measurement-snp-debug-serial-quiet-signed.img`
   - `sbverify` reported `Signature verification OK`.
 - QEMU nonvolatile TPM green-zone cluster passed before the final admission
   response normalization patch:
@@ -81,19 +124,44 @@ route green-zone admission through that common measurement protocol.
   - node 4 was rejected by template mismatch;
   - nodes 1-3 produced ring-signed membership proofs;
   - output ended with `=== green-zone QEMU cluster PASSED ===`.
+- Remote SEV-SNP host reconnaissance:
+  - Host: `ssh://hb@dev-1.forward.computer`.
+  - CPU: AMD EPYC 9254, family 25 model 17, inferred KDS product `Genoa`.
+  - SNP host support is enabled; the guest kernel reports:
+    `sev-guest ... using VMPCK0 communication key`.
+  - The SNP guest now gets past the previous fatal TPM NIF load failure.
 
 ## Not Yet Verified
 
-- Real SEV-SNP run on `hb@dev-1.forward.computer`.
+- Real SEV-SNP `~measurement@1.0/boot`, `fresh`, and `verify` on
+  `hb@dev-1.forward.computer`.
 - Mixed TPM/SNP green-zone behavior.
 - Production, non-debug runtime image after the measurement reorg.
 
 ## Known Gaps
 
-- Real SNP endorsement-chain validation is not yet proven on hardware. The
-  current SNP implementation has report binding/parsing and mock protocol
-  coverage, but the remote SEV-SNP acceptance test is still required before
-  calling SNP production-ready.
+- Real SNP endorsement-chain validation is proven only against fetched sample
+  AMD material so far, not against a live guest report.
+- The remote SNP guest currently boots to the HyperBEAM banner and accepts TCP
+  connections on the forwarded port, but HTTP requests to
+  `~measurement@1.0/info`, `~system@1.0/all`, and `~meta@1.0/info` time out
+  with zero response bytes. The latest serial log shows no Erlang crash. This
+  suggests a startup/on-start/runtime wedge inside the real SNP guest rather
+  than the old `lapee_tpm_nif` crash.
+- `qemu-measurement-remote` currently implements the SSH/SNP path only; the
+  `TARGET=local` placeholder exits explicitly.
 - `~measurement@1.0` is now the intended primary LapEE API, but old
   TPM-specific endpoints still exist for compatibility/debugging during the
   transition.
+
+## Next Steps
+
+1. Isolate the remote SNP HTTP wedge by adding measured diagnostic tracing or
+   by booting a controlled image with the measurement `on/start` hook disabled.
+2. Confirm whether the hang is in the start hook, system report collection,
+   SNP report collection, message signing/cache, or HyperBEAM HTTP startup.
+3. Make the fix in the smallest layer that actually owns the fault.
+4. Re-run the remote SNP smoke until `info`, `boot`, and `fresh` all return
+   signed AO-Core measurement messages.
+5. Run mixed TPM/SNP green-zone admission after the live SNP measurement path
+   works.

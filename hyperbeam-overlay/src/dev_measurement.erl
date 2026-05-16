@@ -38,6 +38,7 @@
 -define(PEER_ATTESTATION_PREFIX,
         <<"~measurement@1.0/peer-attestations">>).
 -define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>]).
+-define(DEFAULT_TIMEOUT_MS, 30000).
 
 info(_) ->
     #{
@@ -176,20 +177,30 @@ generate_measurement(Purpose, Req, Opts) ->
     with_raw_ok(fun() ->
         Body = measurement_body(Opts),
         Device = selected_device(Opts),
-        Recipient = resolve_device_body(
-            Device,
-            <<"subject">>,
-            #{<<"body">> => Body},
+        Recipient = timed(
+            <<"measurement-subject">>,
+            fun() ->
+                resolve_device_body(
+                    Device,
+                    <<"subject">>,
+                    #{<<"body">> => Body},
+                    Opts)
+            end,
             Opts),
-        Evidence = resolve_device_body(
-            Device,
-            <<"measure">>,
-            #{
-                <<"body">> => Body,
-                <<"nonce">> => nonce_for(Purpose, Req, Opts),
-                <<"purpose">> => purpose_name(Purpose),
-                <<"secret-recipient">> => Recipient
-            },
+        Evidence = timed(
+            <<"measurement-evidence">>,
+            fun() ->
+                resolve_device_body(
+                    Device,
+                    <<"measure">>,
+                    #{
+                        <<"body">> => Body,
+                        <<"nonce">> => nonce_for(Purpose, Req, Opts),
+                        <<"purpose">> => purpose_name(Purpose),
+                        <<"secret-recipient">> => Recipient
+                    },
+                    Opts)
+            end,
             Opts),
         {ok, hb_message:commit(
             #{
@@ -217,8 +228,18 @@ measurement_body_locked(Opts) ->
         Body when is_map(Body) ->
             Body;
         undefined ->
-            System = resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts)),
-            Node0 = resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts)),
+            System = timed(
+                <<"system-report">>,
+                fun() ->
+                    resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts))
+                end,
+                Opts),
+            Node0 = timed(
+                <<"node-message">>,
+                fun() ->
+                    resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts))
+                end,
+                Opts),
             Node = ensure_committed(Node0, Opts),
             Body = #{<<"system">> => System, <<"node">> => Node},
             persistent_term:put({dev_measurement, body}, Body),
@@ -539,6 +560,40 @@ resolve_body({ok, #{<<"body">> := Body}}) -> Body;
 resolve_body({ok, Msg}) -> Msg;
 resolve_body({error, Reason}) -> throw({measurement_error, Reason});
 resolve_body(Other) -> throw({measurement_error, Other}).
+
+timed(Name, Fun, Opts) ->
+    Timeout = hb_opts:get(
+        <<"measurement-timeout-ms">>,
+        ?DEFAULT_TIMEOUT_MS,
+        Opts),
+    Parent = self(),
+    Ref = make_ref(),
+    Pid = spawn(fun() ->
+        Parent ! {Ref,
+            try {ok, Fun()}
+            catch
+                throw:Reason ->
+                    {throw, Reason};
+                Class:Reason:Stack ->
+                    {error, #{
+                        <<"class">> => hb_util:bin(Class),
+                        <<"reason">> => reason_to_text(Reason),
+                        <<"stack">> => reason_to_text(Stack)
+                    }}
+            end}
+    end),
+    receive
+        {Ref, {ok, Value}} ->
+            Value;
+        {Ref, {throw, Reason}} ->
+            throw(Reason);
+        {Ref, {error, Reason}} ->
+            throw({measurement_error, #{Name => Reason}})
+    after Timeout ->
+        exit(Pid, kill),
+        throw({measurement_error,
+               #{Name => <<"measurement step timed out">>}})
+    end.
 
 response_body(Link, Opts) when ?IS_LINK(Link) ->
     response_body(hb_cache:ensure_loaded(Link, Opts), Opts);

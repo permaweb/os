@@ -31,6 +31,7 @@ done
 # Remove overlay-owned files whose names changed across LapEE iterations.
 rm -f "$repo/src/dev_system_probe.erl"
 rm -rf "$repo/native/lapee_tpm_nif" \
+       "$repo/native/dev_snp_nif" \
        "$repo/priv/tpm-interpret"
 
 cp -R "$overlay/src/." "$repo/src/"

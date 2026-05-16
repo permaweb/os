@@ -44,6 +44,8 @@
 #                           - test provisioner destructive disk selection.
 #   make qemu-operator-config
 #                           - run the operator-config attestation test.
+#   make qemu-measurement-remote
+#                           - run one measurement node on TARGET=ssh://...
 #
 # ============================================================
 
@@ -126,6 +128,7 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         signing-keys write-image wifi-creds operator-config-apply \
         qemu qemu-oracle qemu-gui qemu-green-zone qemu-green-zone-nonvolatile \
         qemu-provisioner-nonvolatile qemu-operator-config \
+        qemu-measurement-remote \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
@@ -133,6 +136,7 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         _qemu-green-zone-nonvolatile \
         _qemu-provisioner-nonvolatile \
         _qemu-operator-config-green-zone \
+        _qemu-measurement-remote \
         all build native-build toolchain \
         kernel buildroot buildroot-shell buildroot-clean \
         hb-fetch paper clean
@@ -224,6 +228,9 @@ qemu-provisioner-nonvolatile:
 
 qemu-operator-config:
 	$(MAKE) _qemu-operator-config-green-zone
+
+qemu-measurement-remote:
+	$(MAKE) _qemu-measurement-remote
 
 _check-runtime-flags:
 	@case "$(TME)" in 0|1) ;; \
@@ -426,6 +433,9 @@ _qemu-provisioner-nonvolatile: toolchain
 
 _qemu-operator-config-green-zone: toolchain
 	./scripts/qemu-operator-config-green-zone.sh
+
+_qemu-measurement-remote: toolchain
+	./scripts/qemu-measurement-remote.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \
