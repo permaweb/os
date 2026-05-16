@@ -145,6 +145,14 @@ admission and production-image validation.
   - node 4 was rejected by DMI product mismatch;
   - nodes 1-3 produced ring-signed membership proofs;
   - output ended with `=== green-zone QEMU cluster PASSED ===`.
+- Production-shaped signed no-TME image booted under local QEMU+swtpm:
+  - image: `build/images/lapee-measurement-prod-no-tme-signed.img`;
+  - command:
+    `OUTDIR=build/qemu-prod-measurement-smoke TIMEOUT=600 ./scripts/boot-usb-image.sh --img build/images/lapee-measurement-prod-no-tme-signed.img --timeout 600`;
+  - `sbverify` reported `Signature verification OK` during image build;
+  - `~measurement@1.0/info`, `~measurement@1.0/boot`, and
+    `~system@1.0/all` answered;
+  - output ended with `=== QEMU boot test PASSED ===`.
 - Remote SEV-SNP host reconnaissance:
   - Host: `ssh://hb@dev-1.forward.computer`.
   - CPU: AMD EPYC 9254, family 25 model 17, inferred KDS product `Genoa`.
@@ -166,7 +174,7 @@ admission and production-image validation.
 ## Not Yet Verified
 
 - Mixed TPM/real-SNP green-zone behavior across local and remote hosts.
-- Production, non-debug runtime image after the measurement reorg.
+- Production image on real hardware after the measurement reorg.
 
 ## Known Gaps
 
@@ -185,6 +193,6 @@ admission and production-image validation.
 1. Run mixed TPM/real-SNP green-zone admission across local and remote hosts,
    or add a remote multi-node SNP runner if host networking makes that cleaner.
 2. Add an SNP-specific green-zone template check against real SNP evidence.
-3. Build and boot a production, non-debug measurement image.
+3. Boot the production measurement image on real hardware.
 4. Decide whether live SNP measurements should opportunistically embed AMD KDS
    endorsement material in `evidence.certificates` after successful fetches.
