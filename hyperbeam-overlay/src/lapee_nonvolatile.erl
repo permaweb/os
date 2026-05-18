@@ -234,8 +234,27 @@ disk_key(Name, RingAddress, AES) ->
     ).
 
 select_partition(RingAddress) ->
-    select_partition_for_labels(
-        [zone_partition_label(RingAddress), ?PRIMARY_LABEL]).
+    case select_zone_partition(RingAddress) of
+        not_found -> select_partition_for_labels([?PRIMARY_LABEL]);
+        Selected -> Selected
+    end.
+
+select_zone_partition(RingAddress) ->
+    case zone_labeled_partitions(RingAddress) of
+        [] -> not_found;
+        Matches -> select_most_specific_zone_partition(RingAddress, Matches)
+    end.
+
+select_most_specific_zone_partition(RingAddress, Matches) ->
+    Max = lists:max([byte_size(zone_label_prefix_from_label(Label))
+        || {Label, _Partition} <- Matches]),
+    Best = [{Label, Partition}
+        || {Label, Partition} <- Matches,
+           byte_size(zone_label_prefix_from_label(Label)) =:= Max],
+    case Best of
+        [{Label, Partition}] -> {ok, Label, Partition};
+        _ -> {multiple, zone_partition_label(RingAddress), [P || {_L, P} <- Best]}
+    end.
 
 select_partition_for_labels([]) ->
     not_found;
@@ -255,14 +274,40 @@ zone_label_prefix(RingAddress)
 zone_label_prefix(RingAddress) ->
     binary:part(RingAddress, 0, ?MAX_ZONE_LABEL_PREFIX_BYTES).
 
+zone_label_matches(RingAddress, Label) ->
+    case zone_label_prefix_from_label(Label) of
+        undefined ->
+            false;
+        <<>> ->
+            false;
+        Prefix when byte_size(Prefix) =< byte_size(RingAddress) ->
+            binary:part(RingAddress, 0, byte_size(Prefix)) =:= Prefix;
+        _ ->
+            false
+    end.
+
+zone_label_prefix_from_label(<<"GREENZONE_", Prefix/binary>>) ->
+    Prefix;
+zone_label_prefix_from_label(_) ->
+    undefined.
+
 labeled_partitions(Label) ->
+    [Partition || {PartitionLabel, Partition} <- labeled_partitions(),
+                  PartitionLabel =:= Label].
+
+zone_labeled_partitions(RingAddress) ->
+    [{Label, Partition}
+     || {Label, Partition} <- labeled_partitions(),
+        zone_label_matches(RingAddress, Label)].
+
+labeled_partitions() ->
     case file:list_dir("/sys/class/block") of
         {ok, Names} ->
             lists:filtermap(
                 fun(Name) ->
                     case partition_label(Name) of
-                        Label -> {true, "/dev/" ++ Name};
-                        _ -> false
+                        undefined -> false;
+                        Label -> {true, {Label, "/dev/" ++ Name}}
                     end
                 end,
                 Names
@@ -272,6 +317,12 @@ labeled_partitions(Label) ->
     end.
 
 partition_label(Name) ->
+    case sysfs_partition_label(Name) of
+        undefined -> blkid_partition_label(Name);
+        Label -> Label
+    end.
+
+sysfs_partition_label(Name) ->
     Dir = filename:join("/sys/class/block", Name),
     case file:read_file(filename:join(Dir, "partition")) of
         {ok, _} ->
@@ -283,6 +334,19 @@ partition_label(Name) ->
             end;
         _ ->
             undefined
+    end.
+
+blkid_partition_label(Name) ->
+    Dev = <<"/dev/", (unicode:characters_to_binary(Name))/binary>>,
+    case run(<<"blkid">>, [<<"-o">>, <<"value">>, <<"-s">>, <<"PARTLABEL">>, Dev]) of
+        {ok, Output} -> clean_partition_label(Output);
+        _ -> undefined
+    end.
+
+clean_partition_label(Output) ->
+    case string:trim(binary:replace(Output, <<"\n">>, <<" ">>, [global])) of
+        <<>> -> undefined;
+        Label -> Label
     end.
 
 uevent_value(Key, UEvent) ->
@@ -776,3 +840,33 @@ command_reason(Reason) when is_binary(Reason) ->
     Reason;
 command_reason(Reason) ->
     unicode:characters_to_binary(io_lib:format("~p", [Reason])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+clean_partition_label_test() ->
+    ?assertEqual(<<"GREENZONE_PRIMARY">>,
+        clean_partition_label(<<"GREENZONE_PRIMARY\n">>)),
+    ?assertEqual(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>,
+        clean_partition_label(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertEqual(undefined, clean_partition_label(<<"\n">>)).
+
+zone_label_matches_test() ->
+    Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
+    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDK">>)),
+    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_AMDL">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_PRIMARY">>)).
+
+select_most_specific_zone_partition_test() ->
+    Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
+    ?assertEqual(
+        {ok, <<"GREENZONE_AMDK">>, "/dev/sdb1"},
+        select_most_specific_zone_partition(Ring, [
+            {<<"GREENZONE_A">>, "/dev/sda1"},
+            {<<"GREENZONE_AMDK">>, "/dev/sdb1"}
+        ])
+    ).
+
+-endif.

@@ -371,6 +371,17 @@ raise SystemExit("GREENZONE_PRIMARY partition not found")
 PY
 }
 
+rename_nonvolatile_disk_label() {
+    local n=$1
+    local label=$2
+    local node_dir="$OUTDIR/nodes/node$n"
+    docker run --rm $DOCKER_PLATFORM \
+        -v "$node_dir":/work \
+        -w /work \
+        "$BUILD_IMAGE" \
+        parted -s /work/nonvolatile.img name 1 "$label"
+}
+
 start_node() {
     local n=$1
     local img=$2
@@ -907,6 +918,9 @@ if [[ "$NONVOLATILE" = "1" ]]; then
         "$OUTDIR/responses/node2-first-boot-attestation.json"
     echo ">> rebooting node 2 with changed boot evidence to verify non-volatile store reuse"
     stop_node 2
+    partial_ring_label="GREENZONE_${ring_addr:0:4}"
+    rename_nonvolatile_disk_label 2 "$partial_ring_label"
+    echo ">> node 2 non-volatile disk renamed to partial zone label $partial_ring_label"
     NODE2_MEMORY_MIB=$((NODE2_MEMORY_MIB + 512))
     start_node 2 "$IMG" 0
     wait_node 2
