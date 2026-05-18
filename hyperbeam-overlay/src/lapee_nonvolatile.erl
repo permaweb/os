@@ -99,6 +99,7 @@ do_activate(Name, RingAddress, AES, Opts) ->
                 <<"ring-address">> => RingAddress,
                 <<"zone-partition-label">> => zone_partition_label(RingAddress),
                 <<"primary-partition-label">> => ?PRIMARY_LABEL,
+                <<"discovered-partitions">> => discovered_partitions(),
                 <<"reason">> => <<"not-provisioned">>
             }};
         {ok, Label, Partition} ->
@@ -305,9 +306,9 @@ labeled_partitions() ->
         {ok, Names} ->
             lists:filtermap(
                 fun(Name) ->
-                    case partition_label(Name) of
-                        undefined -> false;
-                        Label -> {true, {Label, "/dev/" ++ Name}}
+                    case partition_label_with_source(Name) of
+                        {undefined, _Source} -> false;
+                        {Label, _Source} -> {true, {Label, "/dev/" ++ Name}}
                     end
                 end,
                 Names
@@ -317,22 +318,53 @@ labeled_partitions() ->
     end.
 
 partition_label(Name) ->
+    element(1, partition_label_with_source(Name)).
+
+partition_label_with_source(Name) ->
     case sysfs_partition_label(Name) of
-        undefined -> blkid_partition_label(Name);
-        Label -> Label
+        undefined ->
+            case blkid_partition_label(Name) of
+                undefined ->
+                    {gpt_partition_label(Name), <<"gpt">>};
+                Label ->
+                    {Label, <<"blkid">>}
+            end;
+        Label ->
+            {Label, <<"sysfs-uevent">>}
+    end.
+
+discovered_partitions() ->
+    case file:list_dir("/sys/class/block") of
+        {ok, Names} ->
+            [discovered_partition(Name)
+             || Name <- Names,
+                is_partition(Name)];
+        _ ->
+            []
+    end.
+
+discovered_partition(Name) ->
+    {Label, Source} = partition_label_with_source(Name),
+    Msg0 = #{
+        <<"name">> => unicode:characters_to_binary(Name),
+        <<"path">> => unicode:characters_to_binary("/dev/" ++ Name)
+    },
+    case Label of
+        undefined -> Msg0;
+        _ -> Msg0#{<<"label">> => Label, <<"label-source">> => Source}
     end.
 
 sysfs_partition_label(Name) ->
     Dir = filename:join("/sys/class/block", Name),
-    case file:read_file(filename:join(Dir, "partition")) of
-        {ok, _} ->
+    case is_partition(Name) of
+        true ->
             case file:read_file(filename:join(Dir, "uevent")) of
                 {ok, UEvent} ->
                     uevent_value(<<"PARTNAME">>, UEvent);
                 _ ->
                     undefined
             end;
-        _ ->
+        false ->
             undefined
     end.
 
@@ -347,6 +379,130 @@ clean_partition_label(Output) ->
     case string:trim(binary:replace(Output, <<"\n">>, <<" ">>, [global])) of
         <<>> -> undefined;
         Label -> Label
+    end.
+
+gpt_partition_label(Name) ->
+    case partition_index(Name) of
+        undefined ->
+            undefined;
+        Index ->
+            case parent_block_name(Name) of
+                undefined -> undefined;
+                Parent -> read_gpt_partition_label(Parent, Index)
+            end
+    end.
+
+read_gpt_partition_label(Parent, Index) ->
+    Dev = "/dev/" ++ Parent,
+    case file:open(Dev, [read, raw, binary]) of
+        {ok, FD} ->
+            try
+                read_gpt_partition_label(FD, Parent, Index)
+            after
+                file:close(FD)
+            end;
+        _ ->
+            undefined
+    end.
+
+read_gpt_partition_label(FD, Parent, Index) ->
+    BlockSize = logical_block_size(Parent),
+    case file:pread(FD, BlockSize, BlockSize) of
+        {ok, Header} when byte_size(Header) >= 92 ->
+            decode_gpt_partition_label(FD, Header, BlockSize, Index);
+        _ ->
+            undefined
+    end.
+
+decode_gpt_partition_label(FD, Header, BlockSize, Index) ->
+    case Header of
+        <<"EFI PART", _Revision:32/little, _HeaderSize:32/little,
+          _HeaderCRC:32/little, _Reserved:32/little,
+          _CurrentLBA:64/little, _BackupLBA:64/little,
+          _FirstUsableLBA:64/little, _LastUsableLBA:64/little,
+          _DiskGUID:16/binary, EntriesLBA:64/little,
+          EntryCount:32/little, EntrySize:32/little,
+          _EntriesCRC:32/little, _/binary>>
+                when Index >= 1,
+                     Index =< EntryCount,
+                     EntrySize >= 128 ->
+            Offset = (EntriesLBA * BlockSize) + ((Index - 1) * EntrySize),
+            case file:pread(FD, Offset, EntrySize) of
+                {ok, Entry} -> decode_gpt_entry_name(Entry);
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+decode_gpt_entry_name(Entry) when byte_size(Entry) >= 128 ->
+    case Entry of
+        <<0:128, _/binary>> ->
+            undefined;
+        _ ->
+            NameBytes = binary:part(Entry, 56, 72),
+            decode_gpt_utf16_name(NameBytes)
+    end;
+decode_gpt_entry_name(_) ->
+    undefined.
+
+decode_gpt_utf16_name(NameBytes) ->
+    Trimmed = trim_utf16le_nul(NameBytes),
+    case Trimmed of
+        <<>> ->
+            undefined;
+        _ ->
+            case unicode:characters_to_binary(Trimmed, {utf16, little}, utf8) of
+                Label when is_binary(Label) -> Label;
+                _ -> undefined
+            end
+    end.
+
+trim_utf16le_nul(<<>>) ->
+    <<>>;
+trim_utf16le_nul(<<0, 0, _/binary>>) ->
+    <<>>;
+trim_utf16le_nul(<<A, B, Rest/binary>>) ->
+    Tail = trim_utf16le_nul(Rest),
+    <<A, B, Tail/binary>>.
+
+logical_block_size(Parent) ->
+    Path = filename:join(
+        ["/sys/class/block", Parent, "queue", "logical_block_size"]
+    ),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case string:to_integer(string:trim(Bin)) of
+                {Size, _} when Size > 0 -> Size;
+                _ -> 512
+            end;
+        _ ->
+            512
+    end.
+
+is_partition(Name) ->
+    filelib:is_file(filename:join(["/sys/class/block", Name, "partition"])).
+
+partition_index(Name) ->
+    Path = filename:join(["/sys/class/block", Name, "partition"]),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case string:to_integer(string:trim(Bin)) of
+                {Index, _} when Index > 0 -> Index;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+parent_block_name(Name) ->
+    case re:run(Name, "^(.*)p[0-9]+$", [{capture, [1], list}]) of
+        {match, [Parent]} -> Parent;
+        nomatch ->
+            case re:run(Name, "^([^0-9]+)[0-9]+$", [{capture, [1], list}]) of
+                {match, [Parent]} -> Parent;
+                nomatch -> undefined
+            end
     end.
 
 uevent_value(Key, UEvent) ->
@@ -868,5 +1024,20 @@ select_most_specific_zone_partition_test() ->
             {<<"GREENZONE_AMDK">>, "/dev/sdb1"}
         ])
     ).
+
+parent_block_name_test() ->
+    ?assertEqual("sda", parent_block_name("sda1")),
+    ?assertEqual("vda", parent_block_name("vda12")),
+    ?assertEqual("nvme0n1", parent_block_name("nvme0n1p1")),
+    ?assertEqual("mmcblk0", parent_block_name("mmcblk0p2")),
+    ?assertEqual(undefined, parent_block_name("nvme0n1")).
+
+gpt_entry_name_test() ->
+    Label = <<"GREENZONE_PRIMARY">>,
+    Label16 = unicode:characters_to_binary(Label, utf8, {utf16, little}),
+    Pad = binary:copy(<<0>>, 72 - byte_size(Label16)),
+    Entry = <<1:128, 0:(40 * 8), Label16/binary, Pad/binary>>,
+    ?assertEqual(Label, decode_gpt_entry_name(Entry)),
+    ?assertEqual(undefined, decode_gpt_entry_name(<<0:128, 0:(112 * 8)>>)).
 
 -endif.
