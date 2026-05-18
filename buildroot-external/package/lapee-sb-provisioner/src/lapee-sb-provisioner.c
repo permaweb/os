@@ -243,6 +243,18 @@ int main(int argc, char **argv)
 	secure_boot = read_one_byte_var(efivars, "SecureBoot", EFI_GLOBAL_GUID);
 	printf("SetupMode=%d SecureBoot=%d\n", setup_mode, secure_boot);
 	if (setup_mode != 1) {
+		if (var_has_payload(efivars, "db", EFI_IMAGE_SECURITY_DB_GUID) &&
+		    var_has_payload(efivars, "KEK", EFI_GLOBAL_GUID) &&
+		    var_has_payload(efivars, "PK", EFI_GLOBAL_GUID)) {
+			printf("Secure Boot variables are already populated; skipping key enrollment.\n");
+			if (secure_boot != 1)
+				request_secure_boot_enable(efivars);
+			setup_mode = read_one_byte_var(efivars, "SetupMode", EFI_GLOBAL_GUID);
+			secure_boot = read_one_byte_var(efivars, "SecureBoot", EFI_GLOBAL_GUID);
+			printf("finished. SetupMode=%d SecureBoot=%d\n", setup_mode, secure_boot);
+			printf("power off, enable Secure Boot if needed, then boot the signed LapEE USB image.\n");
+			return 0;
+		}
 		fprintf(stderr,
 			"refusing to enroll keys: firmware is not in Setup Mode\n");
 		return 2;

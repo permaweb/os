@@ -1,9 +1,13 @@
 {
     "render_index_page": false,
+    "initialized": "permanent",
+    "access_remote_cache_for_client": false,
+    "load_remote_devices": false,
+    "trusted_device_signers": [],
     "on": {
         "start": {
-            "device": "tpm@2.0a",
-            "path": "boot-attestation",
+            "device": "measurement@1.0",
+            "path": "boot",
             "method": "POST",
             "target": "body",
             "hook": {
@@ -43,6 +47,7 @@
         {"name": "lookup@1.0", "module": "dev_lookup", "ao-types": "module=\"atom\""},
         {"name": "lua@5.3a", "module": "dev_lua", "ao-types": "module=\"atom\""},
         {"name": "manifest@1.0", "module": "dev_manifest", "ao-types": "module=\"atom\""},
+        {"name": "measurement@1.0", "module": "dev_measurement", "ao-types": "module=\"atom\""},
         {"name": "message@1.0", "module": "dev_message", "ao-types": "module=\"atom\""},
         {"name": "meta@1.0", "module": "dev_meta", "ao-types": "module=\"atom\""},
         {"name": "monitor@1.0", "module": "dev_monitor", "ao-types": "module=\"atom\""},

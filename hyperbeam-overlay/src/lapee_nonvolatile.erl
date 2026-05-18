@@ -17,7 +17,7 @@
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
 -define(DEFAULT_STORE, <<"store/cache-mainnet/lmdb">>).
--define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
+-define(BOOT_ATTESTATION_PATH, <<"~measurement@1.0/boot">>).
 -define(KEY_DIR, "/run/lapee/nonvolatile-keys").
 -define(FORMAT_MARKER, <<"LapEE nonvolatile provisioning marker v1\n">>).
 -define(VOLUME_ID_FILE, ".lapee-volume-id").
@@ -99,6 +99,7 @@ do_activate(Name, RingAddress, AES, Opts) ->
                 <<"ring-address">> => RingAddress,
                 <<"zone-partition-label">> => zone_partition_label(RingAddress),
                 <<"primary-partition-label">> => ?PRIMARY_LABEL,
+                <<"discovered-partitions">> => discovered_partitions(),
                 <<"reason">> => <<"not-provisioned">>
             }};
         {ok, Label, Partition} ->
@@ -120,11 +121,11 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
     with_key_file(Key, fun(KeyFile) ->
         case ensure_luks(Partition, KeyFile) of
             {ok, LuksFormatted} ->
-                case ensure_open(Partition, KeyFile) of
-                    ok ->
+                case ensure_open_or_reformat(Partition, KeyFile, LuksFormatted) of
+                    {ok, EffectiveLuksFormatted} ->
                         MapperDev = <<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>,
                         case ensure_mounted_filesystem(
-                            MapperDev, ?DEFAULT_MOUNT, LuksFormatted) of
+                            MapperDev, ?DEFAULT_MOUNT, EffectiveLuksFormatted) of
                             {ok, FsFormatted} ->
                                 Store = persistent_store(?DEFAULT_MOUNT, Opts),
                                 case prepare_persistent_store(Store, Opts) of
@@ -135,7 +136,7 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
                                             Label,
                                             unicode:characters_to_binary(Partition),
                                             Store,
-                                            LuksFormatted,
+                                            EffectiveLuksFormatted,
                                             FsFormatted,
                                             Migration
                                         )};
@@ -234,8 +235,27 @@ disk_key(Name, RingAddress, AES) ->
     ).
 
 select_partition(RingAddress) ->
-    select_partition_for_labels(
-        [zone_partition_label(RingAddress), ?PRIMARY_LABEL]).
+    case select_zone_partition(RingAddress) of
+        not_found -> select_partition_for_labels([?PRIMARY_LABEL]);
+        Selected -> Selected
+    end.
+
+select_zone_partition(RingAddress) ->
+    case zone_labeled_partitions(RingAddress) of
+        [] -> not_found;
+        Matches -> select_most_specific_zone_partition(RingAddress, Matches)
+    end.
+
+select_most_specific_zone_partition(RingAddress, Matches) ->
+    Max = lists:max([byte_size(zone_label_prefix_from_label(Label))
+        || {Label, _Partition} <- Matches]),
+    Best = [{Label, Partition}
+        || {Label, Partition} <- Matches,
+           byte_size(zone_label_prefix_from_label(Label)) =:= Max],
+    case Best of
+        [{Label, Partition}] -> {ok, Label, Partition};
+        _ -> {multiple, zone_partition_label(RingAddress), [P || {_L, P} <- Best]}
+    end.
 
 select_partition_for_labels([]) ->
     not_found;
@@ -255,14 +275,40 @@ zone_label_prefix(RingAddress)
 zone_label_prefix(RingAddress) ->
     binary:part(RingAddress, 0, ?MAX_ZONE_LABEL_PREFIX_BYTES).
 
+zone_label_matches(RingAddress, Label) ->
+    case zone_label_prefix_from_label(Label) of
+        undefined ->
+            false;
+        <<>> ->
+            false;
+        Prefix when byte_size(Prefix) =< byte_size(RingAddress) ->
+            binary:part(RingAddress, 0, byte_size(Prefix)) =:= Prefix;
+        _ ->
+            false
+    end.
+
+zone_label_prefix_from_label(<<"GREENZONE_", Prefix/binary>>) ->
+    Prefix;
+zone_label_prefix_from_label(_) ->
+    undefined.
+
 labeled_partitions(Label) ->
+    [Partition || {PartitionLabel, Partition} <- labeled_partitions(),
+                  PartitionLabel =:= Label].
+
+zone_labeled_partitions(RingAddress) ->
+    [{Label, Partition}
+     || {Label, Partition} <- labeled_partitions(),
+        zone_label_matches(RingAddress, Label)].
+
+labeled_partitions() ->
     case file:list_dir("/sys/class/block") of
         {ok, Names} ->
             lists:filtermap(
                 fun(Name) ->
-                    case partition_label(Name) of
-                        Label -> {true, "/dev/" ++ Name};
-                        _ -> false
+                    case partition_label_with_source(Name) of
+                        {undefined, _Source} -> false;
+                        {Label, _Source} -> {true, {Label, "/dev/" ++ Name}}
                     end
                 end,
                 Names
@@ -272,17 +318,191 @@ labeled_partitions(Label) ->
     end.
 
 partition_label(Name) ->
+    element(1, partition_label_with_source(Name)).
+
+partition_label_with_source(Name) ->
+    case sysfs_partition_label(Name) of
+        undefined ->
+            case blkid_partition_label(Name) of
+                undefined ->
+                    {gpt_partition_label(Name), <<"gpt">>};
+                Label ->
+                    {Label, <<"blkid">>}
+            end;
+        Label ->
+            {Label, <<"sysfs-uevent">>}
+    end.
+
+discovered_partitions() ->
+    case file:list_dir("/sys/class/block") of
+        {ok, Names} ->
+            [discovered_partition(Name)
+             || Name <- Names,
+                is_partition(Name)];
+        _ ->
+            []
+    end.
+
+discovered_partition(Name) ->
+    {Label, Source} = partition_label_with_source(Name),
+    Msg0 = #{
+        <<"name">> => unicode:characters_to_binary(Name),
+        <<"path">> => unicode:characters_to_binary("/dev/" ++ Name)
+    },
+    case Label of
+        undefined -> Msg0;
+        _ -> Msg0#{<<"label">> => Label, <<"label-source">> => Source}
+    end.
+
+sysfs_partition_label(Name) ->
     Dir = filename:join("/sys/class/block", Name),
-    case file:read_file(filename:join(Dir, "partition")) of
-        {ok, _} ->
+    case is_partition(Name) of
+        true ->
             case file:read_file(filename:join(Dir, "uevent")) of
                 {ok, UEvent} ->
                     uevent_value(<<"PARTNAME">>, UEvent);
                 _ ->
                     undefined
             end;
+        false ->
+            undefined
+    end.
+
+blkid_partition_label(Name) ->
+    Dev = <<"/dev/", (unicode:characters_to_binary(Name))/binary>>,
+    case run(<<"blkid">>, [<<"-o">>, <<"value">>, <<"-s">>, <<"PARTLABEL">>, Dev]) of
+        {ok, Output} -> clean_partition_label(Output);
+        _ -> undefined
+    end.
+
+clean_partition_label(Output) ->
+    case string:trim(binary:replace(Output, <<"\n">>, <<" ">>, [global])) of
+        <<>> -> undefined;
+        Label -> Label
+    end.
+
+gpt_partition_label(Name) ->
+    case partition_index(Name) of
+        undefined ->
+            undefined;
+        Index ->
+            case parent_block_name(Name) of
+                undefined -> undefined;
+                Parent -> read_gpt_partition_label(Parent, Index)
+            end
+    end.
+
+read_gpt_partition_label(Parent, Index) ->
+    Dev = "/dev/" ++ Parent,
+    case file:open(Dev, [read, raw, binary]) of
+        {ok, FD} ->
+            try
+                read_gpt_partition_label(FD, Parent, Index)
+            after
+                file:close(FD)
+            end;
         _ ->
             undefined
+    end.
+
+read_gpt_partition_label(FD, Parent, Index) ->
+    BlockSize = logical_block_size(Parent),
+    case file:pread(FD, BlockSize, BlockSize) of
+        {ok, Header} when byte_size(Header) >= 92 ->
+            decode_gpt_partition_label(FD, Header, BlockSize, Index);
+        _ ->
+            undefined
+    end.
+
+decode_gpt_partition_label(FD, Header, BlockSize, Index) ->
+    case Header of
+        <<"EFI PART", _Revision:32/little, _HeaderSize:32/little,
+          _HeaderCRC:32/little, _Reserved:32/little,
+          _CurrentLBA:64/little, _BackupLBA:64/little,
+          _FirstUsableLBA:64/little, _LastUsableLBA:64/little,
+          _DiskGUID:16/binary, EntriesLBA:64/little,
+          EntryCount:32/little, EntrySize:32/little,
+          _EntriesCRC:32/little, _/binary>>
+                when Index >= 1,
+                     Index =< EntryCount,
+                     EntrySize >= 128 ->
+            Offset = (EntriesLBA * BlockSize) + ((Index - 1) * EntrySize),
+            case file:pread(FD, Offset, EntrySize) of
+                {ok, Entry} -> decode_gpt_entry_name(Entry);
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+decode_gpt_entry_name(Entry) when byte_size(Entry) >= 128 ->
+    case Entry of
+        <<0:128, _/binary>> ->
+            undefined;
+        _ ->
+            NameBytes = binary:part(Entry, 56, 72),
+            decode_gpt_utf16_name(NameBytes)
+    end;
+decode_gpt_entry_name(_) ->
+    undefined.
+
+decode_gpt_utf16_name(NameBytes) ->
+    Trimmed = trim_utf16le_nul(NameBytes),
+    case Trimmed of
+        <<>> ->
+            undefined;
+        _ ->
+            case unicode:characters_to_binary(Trimmed, {utf16, little}, utf8) of
+                Label when is_binary(Label) -> Label;
+                _ -> undefined
+            end
+    end.
+
+trim_utf16le_nul(<<>>) ->
+    <<>>;
+trim_utf16le_nul(<<0, 0, _/binary>>) ->
+    <<>>;
+trim_utf16le_nul(<<A, B, Rest/binary>>) ->
+    Tail = trim_utf16le_nul(Rest),
+    <<A, B, Tail/binary>>.
+
+logical_block_size(Parent) ->
+    Path = filename:join(
+        ["/sys/class/block", Parent, "queue", "logical_block_size"]
+    ),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case string:to_integer(string:trim(Bin)) of
+                {Size, _} when Size > 0 -> Size;
+                _ -> 512
+            end;
+        _ ->
+            512
+    end.
+
+is_partition(Name) ->
+    filelib:is_file(filename:join(["/sys/class/block", Name, "partition"])).
+
+partition_index(Name) ->
+    Path = filename:join(["/sys/class/block", Name, "partition"]),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case string:to_integer(string:trim(Bin)) of
+                {Index, _} when Index > 0 -> Index;
+                _ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+parent_block_name(Name) ->
+    case re:run(Name, "^(.*)p[0-9]+$", [{capture, [1], list}]) of
+        {match, [Parent]} -> Parent;
+        nomatch ->
+            case re:run(Name, "^([^0-9]+)[0-9]+$", [{capture, [1], list}]) of
+                {match, [Parent]} -> Parent;
+                nomatch -> undefined
+            end
     end.
 
 uevent_value(Key, UEvent) ->
@@ -310,21 +530,7 @@ ensure_luks(Partition, KeyFile) ->
         {error, _} ->
             case has_format_marker(Partition) of
                 true ->
-                    case run(
-                        <<"cryptsetup">>,
-                        [
-                            <<"luksFormat">>,
-                            <<"--batch-mode">>,
-                            <<"--type">>, <<"luks2">>,
-                            <<"--label">>, <<"lapee-nonvolatile">>,
-                            <<"--cipher">>, <<"aes-xts-plain64">>,
-                            <<"--key-size">>, <<"256">>,
-                            <<"--hash">>, <<"sha256">>,
-                            <<"--key-file">>, KeyFile,
-                            Partition
-                        ],
-                        ?FORMAT_TIMEOUT_MS
-                    ) of
+                    case format_luks(Partition, KeyFile) of
                         {ok, _} ->
                             sync_storage(),
                             {ok, true};
@@ -334,6 +540,45 @@ ensure_luks(Partition, KeyFile) ->
                     {error, <<"missing-provisioning-marker">>}
             end
     end.
+
+ensure_open_or_reformat(Partition, KeyFile, LuksFormatted) ->
+    case ensure_open(Partition, KeyFile) of
+        ok ->
+            {ok, LuksFormatted};
+        {error, Reason} ->
+            case {LuksFormatted, has_format_marker(Partition)} of
+                {false, true} ->
+                    case format_luks(Partition, KeyFile) of
+                        {ok, _} ->
+                            sync_storage(),
+                            case ensure_open(Partition, KeyFile) of
+                                ok -> {ok, true};
+                                Error -> Error
+                            end;
+                        Error ->
+                            Error
+                    end;
+                _ ->
+                    {error, Reason}
+            end
+    end.
+
+format_luks(Partition, KeyFile) ->
+    run(
+        <<"cryptsetup">>,
+        [
+            <<"luksFormat">>,
+            <<"--batch-mode">>,
+            <<"--type">>, <<"luks2">>,
+            <<"--label">>, <<"lapee-nonvolatile">>,
+            <<"--cipher">>, <<"aes-xts-plain64">>,
+            <<"--key-size">>, <<"256">>,
+            <<"--hash">>, <<"sha256">>,
+            <<"--key-file">>, KeyFile,
+            Partition
+        ],
+        ?FORMAT_TIMEOUT_MS
+    ).
 
 has_format_marker(Partition) ->
     case file:open(Partition, [read, raw, binary]) of
@@ -776,3 +1021,48 @@ command_reason(Reason) when is_binary(Reason) ->
     Reason;
 command_reason(Reason) ->
     unicode:characters_to_binary(io_lib:format("~p", [Reason])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+clean_partition_label_test() ->
+    ?assertEqual(<<"GREENZONE_PRIMARY">>,
+        clean_partition_label(<<"GREENZONE_PRIMARY\n">>)),
+    ?assertEqual(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>,
+        clean_partition_label(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertEqual(undefined, clean_partition_label(<<"\n">>)).
+
+zone_label_matches_test() ->
+    Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
+    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDK">>)),
+    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_AMDL">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_">>)),
+    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_PRIMARY">>)).
+
+select_most_specific_zone_partition_test() ->
+    Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
+    ?assertEqual(
+        {ok, <<"GREENZONE_AMDK">>, "/dev/sdb1"},
+        select_most_specific_zone_partition(Ring, [
+            {<<"GREENZONE_A">>, "/dev/sda1"},
+            {<<"GREENZONE_AMDK">>, "/dev/sdb1"}
+        ])
+    ).
+
+parent_block_name_test() ->
+    ?assertEqual("sda", parent_block_name("sda1")),
+    ?assertEqual("vda", parent_block_name("vda12")),
+    ?assertEqual("nvme0n1", parent_block_name("nvme0n1p1")),
+    ?assertEqual("mmcblk0", parent_block_name("mmcblk0p2")),
+    ?assertEqual(undefined, parent_block_name("nvme0n1")).
+
+gpt_entry_name_test() ->
+    Label = <<"GREENZONE_PRIMARY">>,
+    Label16 = unicode:characters_to_binary(Label, utf8, {utf16, little}),
+    Pad = binary:copy(<<0>>, 72 - byte_size(Label16)),
+    Entry = <<1:128, 0:(40 * 8), Label16/binary, Pad/binary>>,
+    ?assertEqual(Label, decode_gpt_entry_name(Entry)),
+    ?assertEqual(undefined, decode_gpt_entry_name(<<0:128, 0:(112 * 8)>>)).
+
+-endif.

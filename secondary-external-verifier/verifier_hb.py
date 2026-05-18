@@ -103,6 +103,15 @@ def unwrap_envelope(raw):
 def normalise_boot_attestation(body):
     if not isinstance(body, dict):
         return None
+    if body.get("type") == "lapee-measurement":
+        if body.get("measurement-device") != "tpm@2.0a":
+            return None
+        subject = body.get("body")
+        evidence = body.get("evidence")
+        if not isinstance(subject, dict) or not isinstance(evidence, dict):
+            return None
+        body = dict(subject)
+        body["tpm"] = evidence
     system = body.get("system")
     node = body.get("node")
     tpm = body.get("tpm")

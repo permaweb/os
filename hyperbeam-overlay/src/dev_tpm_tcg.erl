@@ -760,8 +760,8 @@ parse_acpi_table(<<Sig:4/binary, Length:32/little, Rev:8, Checksum:8,
                      OemRev:32/little, CreatorId:4/binary,
                      CreatorRev:32/little, _Rest/binary>> = Bin)
   when byte_size(Bin) >= 36 ->
-    #{<<"signature">>          => Sig,
-      <<"signature-name">>     => acpi_signature_name(Sig),
+    #{<<"table-signature">>    => Sig,
+      <<"table-signature-name">> => acpi_signature_name(Sig),
       <<"length">>             => Length,
       <<"revision">>           => Rev,
       <<"checksum">>           => Checksum,
@@ -787,7 +787,7 @@ parse_acpi_table(_) ->
 %%   Reserved   3 bytes
 parse_acpi_rsdp(<<"RSD PTR ", Checksum:8, OemId:6/binary,
                     Rev:8, RsdtAddr:32/little, Rest/binary>>) ->
-    Base = #{<<"signature">>  => <<"RSD PTR ">>,
+    Base = #{<<"table-signature">> => <<"RSD PTR ">>,
              <<"checksum">>   => Checksum,
              <<"oem-id">>     => strip_trailing_nulls(OemId),
              <<"revision">>   => Rev,
@@ -4352,12 +4352,25 @@ parse_acpi_tpm2_header_test() ->
             16#0001:32/little,
             0:4/unit:8>>,   %% 4 bytes padding after the 36-byte header
     P = parse_acpi_table(Hdr),
-    ?assertEqual(<<"TPM2">>,                  maps:get(<<"signature">>, P)),
+    ?assertEqual(<<"TPM2">>,                  maps:get(<<"table-signature">>, P)),
     ?assertEqual(<<"Trusted Platform Module 2.0">>,
-                 maps:get(<<"signature-name">>, P)),
+                 maps:get(<<"table-signature-name">>, P)),
     ?assertEqual(76,                          maps:get(<<"length">>, P)),
     ?assertEqual(<<"LENOVO">>,                maps:get(<<"oem-id">>, P)),
     ?assertEqual(<<"TP-TPM2_">>,              maps:get(<<"oem-table-id">>, P)).
+
+parse_acpi_asf_bang_header_test() ->
+    Hdr = <<"ASF!",
+            36:32/little,
+            1:8, 0:8,
+            "LENOVO",
+            "ASF     ",
+            1:32/little,
+            "LNVO",
+            1:32/little>>,
+    P = parse_acpi_table(Hdr),
+    ?assertEqual(<<"ASF!">>, maps:get(<<"table-signature">>, P)),
+    ?assertEqual(false, maps:is_key(<<"signature">>, P)).
 
 %% ACPI RSDP v2 (36 bytes).
 parse_acpi_rsdp_v2_test() ->
@@ -4366,7 +4379,7 @@ parse_acpi_rsdp_v2_test() ->
              36:32/little, 16#0000000080000000:64/little,
              16#CC:8, 0, 0, 0>>,
     P = parse_acpi_rsdp(Rsdp),
-    ?assertEqual(<<"RSD PTR ">>, maps:get(<<"signature">>, P)),
+    ?assertEqual(<<"RSD PTR ">>, maps:get(<<"table-signature">>, P)),
     ?assertEqual(2,              maps:get(<<"revision">>, P)),
     ?assertEqual(16#7FF00000,    maps:get(<<"rsdt-address">>, P)),
     ?assertEqual(16#0000000080000000,

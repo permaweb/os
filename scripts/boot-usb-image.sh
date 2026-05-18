@@ -158,7 +158,7 @@ if (( GUI )); then
 fi
 
 # Poll the forwarded HTTP port until HB answers. The cheap /info
-# endpoint is readiness; /boot-attestation is the end-to-end proof.
+    # endpoint is readiness; /boot is the end-to-end proof.
 BASE_URL=http://127.0.0.1:18734
 INFO_OUT="$OUTDIR/info.json"
 ATT_OUT="$OUTDIR/boot-attestation.json"
@@ -172,7 +172,7 @@ while (( SECONDS < deadline )); do
     if curl -fsSL \
             -H "accept: application/json" \
             -H "accept-bundle: true" \
-            "$BASE_URL/~tpm@2.0a/info" \
+            "$BASE_URL/~measurement@1.0/info" \
             -o "$INFO_OUT" 2>/dev/null && [[ -s "$INFO_OUT" ]]; then
         echo ">> HB /info answered on $BASE_URL"
         break
@@ -196,7 +196,7 @@ echo ">> fetching boot attestation"
 if ! curl -fsSL \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
-        "$BASE_URL/~tpm@2.0a/boot-attestation" \
+        "$BASE_URL/~measurement@1.0/boot" \
         -o "$ATT_OUT"; then
     echo "!! boot-attestation fetch failed from $BASE_URL" >&2
     echo "!! last 80 lines of serial log:" >&2

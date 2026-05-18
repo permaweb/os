@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# qemu-green-zone-cluster.sh -- four-node TPM/green-zone acceptance harness.
+# qemu-green-zone-cluster.sh -- four-node measurement/green-zone harness.
 #
 # The harness boots three admissible LapEE nodes and one inadmissible node
 # under QEMU+OVMF+swtpm. The nodes intentionally vary observable system
 # properties. The three admitted nodes share the template-matched DMI product;
 # node 4 carries a different boot-attested DMI product. Each swtpm is
-# manufactured with a local EK certificate so `~tpm@2.0a/verify-peer' can
-# exercise the real MakeCredential/ActivateCredential path instead of a
-# no-cert shortcut.
+# manufactured with a local EK certificate so `~measurement@1.0/verify-peer'
+# can exercise the real TPM MakeCredential/ActivateCredential path instead of
+# a no-cert shortcut.
 #
 # Acceptance checked here:
-#   * all four nodes answer `~tpm@2.0a/boot-attestation'
+#   * all four nodes answer `~measurement@1.0/boot'
 #   * node 1 initializes a named green-zone template from its system report
 #   * nodes 2 and 3 join through node 1 and receive the shared ring wallet
 #   * node 4 has a different DMI product and is rejected by the same template
@@ -47,6 +47,12 @@ SWTPM_CTRL=${SWTPM_CTRL:-unix}
 SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
 NONVOLATILE=${NONVOLATILE:-0}
 NONVOLATILE_SIZE_MIB=${NONVOLATILE_SIZE_MIB:-768}
+MEASUREMENT_DEVICE=${MEASUREMENT_DEVICE:-auto}
+NODE1_MEASUREMENT_DEVICE=${NODE1_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE2_MEASUREMENT_DEVICE=${NODE2_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE3_MEASUREMENT_DEVICE=${NODE3_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+NODE4_MEASUREMENT_DEVICE=${NODE4_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
+GREEN_ZONE_TEMPLATE_MODE=${GREEN_ZONE_TEMPLATE_MODE:-device}
 
 while (($# > 0)); do
     case "$1" in
@@ -54,6 +60,7 @@ while (($# > 0)); do
         --outdir) OUTDIR=$2; shift 2;;
         --base-port) BASE_PORT=$2; shift 2;;
         --timeout) TIMEOUT=$2; shift 2;;
+        --measurement-device) MEASUREMENT_DEVICE=$2; shift 2;;
         --keep-running) KEEP_RUNNING=1; shift;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
@@ -101,35 +108,76 @@ rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 
+node_measurement_device() {
+    local n=$1
+    case "$n" in
+        1) echo "$NODE1_MEASUREMENT_DEVICE";;
+        2) echo "$NODE2_MEASUREMENT_DEVICE";;
+        3) echo "$NODE3_MEASUREMENT_DEVICE";;
+        4) echo "$NODE4_MEASUREMENT_DEVICE";;
+        *) echo "$MEASUREMENT_DEVICE";;
+    esac
+}
+
+expected_node_measurement_device() {
+    case "$(node_measurement_device "$1")" in
+        auto) echo "tpm@2.0a";;
+        *) node_measurement_device "$1";;
+    esac
+}
+
 prepare_qemu_image() {
     local src="${1:?source image required}"
-    local dst="$OUTDIR/qemu-green-zone-disk.img"
+    local dst="${2:?destination image required}"
+    local device="${3:?measurement device required}"
     local cfg="$OUTDIR/qemu-config.json"
+    local dst_rel="${dst#$OUTDIR/}"
     cp "$src" "$dst"
-    cat > "$cfg" <<'EOF'
-{"lapee_allow_request_trusted_ca":true}
-EOF
+    python3 - \
+        "buildroot-external/board/lapee/rootfs-overlay/etc/lapee/lapee.json" \
+        "$cfg" "$device" <<'PY'
+import json, pathlib, sys
+
+base = json.loads(pathlib.Path(sys.argv[1]).read_text())
+cfg = {
+    "lapee_allow_request_trusted_ca": True,
+    "peer-http-connect-timeout-ms": 600000,
+    "peer-http-timeout-ms": 600000,
+}
+device = sys.argv[3]
+if device != "auto":
+    cfg["measurement-device"] = device
+if device == "snp-mock@1.0":
+    preloaded = list(base["preloaded_devices"])
+    preloaded.append({
+        "name": "snp-mock@1.0",
+        "module": "dev_snp_mock",
+        "ao-types": "module=\"atom\"",
+    })
+    cfg["preloaded_devices"] = preloaded
+pathlib.Path(sys.argv[2]).write_text(json.dumps(cfg))
+PY
     docker run --rm $DOCKER_PLATFORM \
         -v "$OUTDIR":/work \
         -w /work \
         "$BUILD_IMAGE" \
         bash -euo pipefail -c '
-            START=$(parted --script --machine /work/qemu-green-zone-disk.img \
+            DISK="/work/$1"
+            START=$(parted --script --machine "$DISK" \
                 unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$2); print \$2}")
-            SECT=$(parted --script --machine /work/qemu-green-zone-disk.img \
+            SECT=$(parted --script --machine "$DISK" \
                 unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$4); print \$4}")
-            dd if=/work/qemu-green-zone-disk.img of=/tmp/esp.img \
+            dd if="$DISK" of=/tmp/esp.img \
                 bs=512 skip=$START count=$SECT status=none
             mmd -i /tmp/esp.img -D s ::/EFI/boot 2>/dev/null || true
             mcopy -i /tmp/esp.img -o /work/qemu-config.json \
                 ::/EFI/boot/config.json
-            dd if=/tmp/esp.img of=/work/qemu-green-zone-disk.img \
+            dd if=/tmp/esp.img of="$DISK" \
                 bs=512 seek=$START count=$SECT conv=notrunc status=none
-        '
+        ' bash "$dst_rel"
     echo "$dst"
 }
 
-IMG=$(prepare_qemu_image "$IMG")
 # AF_UNIX sun_path is 104 bytes on macOS / 108 on Linux. Worktree-rooted
 # OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
 # opaquely with "Path for UnioIO socket is too long". Stage the sockets
@@ -145,6 +193,8 @@ echo "guest-host: $GUEST_HOST"
 echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
 echo "qemu image: $IMG"
+echo "measurement devices: $(node_measurement_device 1), $(node_measurement_device 2), $(node_measurement_device 3), $(node_measurement_device 4)"
+echo "green-zone template mode: $GREEN_ZONE_TEMPLATE_MODE"
 echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
@@ -321,6 +371,17 @@ raise SystemExit("GREENZONE_PRIMARY partition not found")
 PY
 }
 
+rename_nonvolatile_disk_label() {
+    local n=$1
+    local label=$2
+    local node_dir="$OUTDIR/nodes/node$n"
+    docker run --rm $DOCKER_PLATFORM \
+        -v "$node_dir":/work \
+        -w /work \
+        "$BUILD_IMAGE" \
+        parted -s /work/nonvolatile.img name 1 "$label"
+}
+
 start_node() {
     local n=$1
     local img=$2
@@ -329,7 +390,10 @@ start_node() {
     local port=$((BASE_PORT + n))
     mkdir -p "$node_dir"
     if [[ "$fresh" = "1" ]]; then
-        cp "$img" "$node_dir/disk.img"
+        prepare_qemu_image \
+            "$img" \
+            "$node_dir/disk.img" \
+            "$(node_measurement_device "$n")" >/dev/null
         cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
         manufacture_tpm "$n"
         if [[ "$NONVOLATILE" = "1" ]]; then
@@ -396,7 +460,7 @@ start_node() {
         > "$node_dir/serial.log" 2>&1 &
     pids+=("$!")
     echo "$!" > "$node_dir/qemu.pid"
-    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product"
+    echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product measurement-device=$(node_measurement_device "$n")"
 }
 
 wait_node() {
@@ -408,10 +472,10 @@ wait_node() {
     local deadline=$((SECONDS + TIMEOUT))
     while (( SECONDS < deadline )); do
         if curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
-                "$url/~tpm@2.0a/info" -o "$info" 2>/dev/null &&
+                "$url/~measurement@1.0/info" -o "$info" 2>/dev/null &&
                 [[ -s "$info" ]]; then
             curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
-                "$url/~tpm@2.0a/boot-attestation" -o "$att"
+                "$url/~measurement@1.0/boot" -o "$att"
             echo ">> node $n ready"
             return 0
         fi
@@ -506,7 +570,7 @@ assert_nonvolatile_reused() {
 }
 
 boot_memtotal_kb() {
-    jq -r '.body.system.memory.meminfo.memtotal.value' "$1"
+    jq -r '(.body.body // .body).system.memory.meminfo.memtotal.value' "$1"
 }
 
 assert_current_boot_attestation_after_join() {
@@ -541,15 +605,25 @@ assert_cached_boot_attestation_present() {
     local id=$2
     local file=$3
     jq -e '
+        def measurement:
+            if .body.type == "lapee-measurement" then .body
+            elif .type == "lapee-measurement" then .
+            else empty end;
         .status == 200 and
-        (.["issued-at-unix"] | type == "number") and
-        (.node.address | type == "string" and length > 0) and
-        (.system.kernel.cmdline | type == "string" and length > 0) and
-        .tpm."extended-pcr" == 15
+        (measurement."issued-at-unix" | type == "number") and
+        (measurement.body.node.address | type == "string" and length > 0) and
+        (measurement.body.system.kernel.cmdline | type == "string" and length > 0) and
+        measurement.evidence."extended-pcr" == 15
     ' "$file" >/dev/null || {
         echo "!! node $n did not return cached boot-attestation $id" >&2
-        jq '{status, issued: .["issued-at-unix"], address: .node.address,
-             cmdline: .system.kernel.cmdline, extended_pcr: .tpm."extended-pcr",
+        jq 'def measurement:
+                if .body.type == "lapee-measurement" then .body
+                elif .type == "lapee-measurement" then .
+                else {} end;
+             {status, issued: measurement["issued-at-unix"],
+             address: measurement.body.node.address,
+             cmdline: measurement.body.system.kernel.cmdline,
+             extended_pcr: measurement.evidence."extended-pcr",
              body}' "$file" >&2
         exit 1
     }
@@ -608,7 +682,7 @@ start_node 4 "$IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
 for n in 1 2 3 4; do
-    get_json "$n" "/~tpm@2.0a/credential-subject" \
+    get_json "$n" "/~measurement@1.0/subject" \
         "$OUTDIR/responses/node$n-credential-subject.json"
 done
 
@@ -621,12 +695,19 @@ jq -n \
     --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
     --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
     --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
+    def falsy: . == false or . == "false";
     def props($node; $att; $cred): {
         node: $node,
-        cmdline: $att.body.system.kernel.cmdline,
-        memtotal_kb: $att.body.system.memory.meminfo.memtotal.value,
-        dmi_product: $att.body.system.firmware.dmi.fields."product-name",
-        ek_cert_source_kind: $att.body.tpm."ek-cert-source".kind,
+        cmdline: $att.body.body.system.kernel.cmdline,
+        boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
+        node_initialized: $att.body.body.node.initialized,
+        access_remote_cache_for_client:
+            $att.body.body.node."access-remote-cache-for-client",
+        load_remote_devices: $att.body.body.node."load-remote-devices",
+        memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
+        dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
+        measurement_device: $att.body."measurement-device",
+        ek_cert_source_kind: $att.body.evidence."ek-cert-source".kind,
         ek_public: $cred.body."ek-public",
         ak_name: $cred.body."ak-name"
     };
@@ -635,25 +716,62 @@ jq -n \
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
+        distinct_boot_uki_sha256: ([.[].boot_uki_sha256] | unique | length),
         distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
         distinct_dmi_products: ([.[].dmi_product] | unique | length),
         distinct_ek_public: ([.[].ek_public] | unique | length),
         distinct_ak_name: ([.[].ak_name] | unique | length),
         ek_cert_source_kinds: ([.[].ek_cert_source_kind] | unique)
       }' > "$OUTDIR/responses/security-properties.json"
-jq -e '.distinct_cmdlines == 1 and .distinct_memtotal_kb == 4 and
-       .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
-       .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
-       .nodes[0].cmdline == .nodes[1].cmdline and
-       .nodes[1].cmdline == .nodes[2].cmdline and
-       .nodes[0].dmi_product == .nodes[1].dmi_product and
-       .nodes[1].dmi_product == .nodes[2].dmi_product and
-       .nodes[3].dmi_product != .nodes[0].dmi_product' \
-    "$OUTDIR/responses/security-properties.json" >/dev/null
+expected_devices=$(jq -n \
+    --arg d1 "$(expected_node_measurement_device 1)" \
+    --arg d2 "$(expected_node_measurement_device 2)" \
+    --arg d3 "$(expected_node_measurement_device 3)" \
+    --arg d4 "$(expected_node_measurement_device 4)" \
+    '[$d1, $d2, $d3, $d4]')
+if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; then
+    jq -e --argjson expected "$expected_devices" \
+        'def falsy: . == false or . == "false";
+         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
+           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+             .node_initialized == "permanent" and
+             (.access_remote_cache_for_client | falsy) and
+             (.load_remote_devices | falsy) and
+             ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
+           .distinct_memtotal_kb == 4 and
+           .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
+           .distinct_ak_name == 4 and .ek_cert_source_kinds == ["tpm-nv"] and
+           [.nodes[].measurement_device] == $expected and
+           .nodes[0].cmdline == .nodes[1].cmdline and
+           .nodes[1].cmdline == .nodes[2].cmdline and
+           .nodes[0].dmi_product == .nodes[1].dmi_product and
+           .nodes[1].dmi_product == .nodes[2].dmi_product and
+           .nodes[3].dmi_product != .nodes[0].dmi_product' \
+        "$OUTDIR/responses/security-properties.json" >/dev/null
+else
+    jq -e --argjson expected "$expected_devices" \
+        'def falsy: . == false or . == "false";
+         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
+           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+             .node_initialized == "permanent" and
+             (.access_remote_cache_for_client | falsy) and
+             (.load_remote_devices | falsy) and
+             ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
+           .distinct_memtotal_kb == 4 and
+           .distinct_dmi_products == 2 and
+           [.nodes[].measurement_device] == $expected and
+           .nodes[0].cmdline == .nodes[1].cmdline and
+           .nodes[1].cmdline == .nodes[2].cmdline and
+           .nodes[0].dmi_product == .nodes[1].dmi_product and
+           .nodes[1].dmi_product == .nodes[2].dmi_product and
+           .nodes[3].dmi_product != .nodes[0].dmi_product' \
+        "$OUTDIR/responses/security-properties.json" >/dev/null
+fi
 echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
-python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+GREEN_ZONE_TEMPLATE_MODE="$GREEN_ZONE_TEMPLATE_MODE" \
+    python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
     require_request "$req"
 done
@@ -680,7 +798,7 @@ for n in 2 3 4; do
 done
 echo ">> node 1 initialized green-zone $ring_addr"
 
-post_json 1 "/~tpm@2.0a/verify-peer" \
+post_json 1 "/~measurement@1.0/verify-peer" \
     "$OUTDIR/requests/verify2.json" \
     "$OUTDIR/responses/node1-verify2.json"
 jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
@@ -695,7 +813,9 @@ jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
 post_json 1 "/~green-zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
     "$OUTDIR/responses/node1-admit2.json"
-jq -e '.status == 200 and .body.credential."credential-blob" and .body."encrypted-wallet"' \
+jq -e '.status == 200 and
+       .body.credential.type == "lapee-wrapped-secret" and
+       .body."encrypted-wallet".ciphertext' \
     "$OUTDIR/responses/node1-admit2.json" >/dev/null
 echo ">> node 1 can admit node 2"
 
@@ -719,7 +839,7 @@ if [[ "$join4_rc" != 0 ]]; then
     exit 1
 fi
 if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-            .body."mismatch-path" == "/system/firmware/dmi/fields/product-name"' \
+            .body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"' \
         "$OUTDIR/responses/node4-join.json" >/dev/null; then
     echo "!! node 4 rejection was not the expected template-mismatch" >&2
     cat "$OUTDIR/responses/node4-join.json" >&2
@@ -798,6 +918,9 @@ if [[ "$NONVOLATILE" = "1" ]]; then
         "$OUTDIR/responses/node2-first-boot-attestation.json"
     echo ">> rebooting node 2 with changed boot evidence to verify non-volatile store reuse"
     stop_node 2
+    partial_ring_label="GREENZONE_${ring_addr:0:4}"
+    rename_nonvolatile_disk_label 2 "$partial_ring_label"
+    echo ">> node 2 non-volatile disk renamed to partial zone label $partial_ring_label"
     NODE2_MEMORY_MIB=$((NODE2_MEMORY_MIB + 512))
     start_node 2 "$IMG" 0
     wait_node 2
@@ -808,7 +931,7 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_cached_message_not_found 2 "$node2_pre_reboot_boot_id" \
         "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
     echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
-    get_json 2 "/~tpm@2.0a/credential-subject" \
+    get_json 2 "/~measurement@1.0/subject" \
         "$OUTDIR/responses/node2-reboot-credential-subject.json"
     python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     jq --arg addr "$ring_addr" \
@@ -839,7 +962,7 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_cached_boot_attestation_present 2 "$node2_post_rejoin_boot_id" \
         "$OUTDIR/responses/node2-reboot-current-boot-by-id.json"
     echo ">> node 2 current boot-attestation ID is readable after rejoin"
-    get_json 2 "/~tpm@2.0a/boot-attestation" \
+    get_json 2 "/~measurement@1.0/boot" \
         "$OUTDIR/responses/node2-reboot-postjoin-boot-attestation.json"
     assert_current_boot_attestation_after_join \
         "$OUTDIR/responses/node2-first-boot-attestation.json" \
@@ -849,7 +972,7 @@ if [[ "$NONVOLATILE" = "1" ]]; then
 fi
 
 for n in 1 2 3; do
-    member_addr=$(jq -r '.body.node.address' \
+    member_addr=$(jq -r '.body.body.node.address' \
         "$OUTDIR/responses/node$n-boot-attestation.json")
     get_json "$n" \
         "/~green-zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=qemu-green-zone-index" \

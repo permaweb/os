@@ -50,29 +50,23 @@ init() ->
             false -> DefaultTcti;
             V -> V
         end,
-    %% Allow verifier-only HB instances (no TPM present) to load this
-    %% module successfully. With LAPEE_TPM_ALLOW_NO_NIF=1, a load
-    %% failure is logged but treated as OK — the NIF stubs still
-    %% raise `nif_not_loaded' if called, so attest operations fail
-    %% explicitly while verify/parse paths (which don't touch the
-    %% TPM) continue to work.
+    %% The TPM NIF must not be a global VM precondition: SNP guests,
+    %% verifier-only nodes, and tests may load modules that reference
+    %% `lapee_tpm_nif' without having a TPM TCTI. A load failure leaves
+    %% the Erlang stubs active, so TPM operations still fail closed with
+    %% `nif_not_loaded' while non-TPM paths can run.
     case erlang:load_nif(SoName, Tcti) of
         ok ->
             ok;
         {error, _} = Err ->
-            case os:getenv("LAPEE_TPM_ALLOW_NO_NIF") of
-                V1 when V1 =:= false; V1 =:= ""; V1 =:= "0" ->
-                    Err;
-                _ ->
-                    %% on_load runs very early — logger may not be up
-                    %% yet. Use stderr directly.
-                    io:format(standard_error,
-                              "[lapee_tpm_nif] running without NIF "
-                              "(LAPEE_TPM_ALLOW_NO_NIF set; load_nif "
-                              "returned ~p)~n",
-                              [Err]),
-                    ok
-            end
+            %% on_load runs very early -- logger may not be up yet.
+            io:format(
+                standard_error,
+                "[lapee_tpm_nif] running without NIF "
+                "(load_nif returned ~p)~n",
+                [Err]
+            ),
+            ok
     end.
 
 %% --- NIF stubs; real implementations live in c_src/ ---

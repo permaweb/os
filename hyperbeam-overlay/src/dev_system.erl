@@ -61,6 +61,7 @@ report_from_root(Root0) ->
         <<"version">> => <<"1.0">>,
         <<"probed-at-unix">> => erlang:system_time(second),
         <<"evidence-model">> => evidence_model(),
+        <<"boot">> => boot_report(Root),
         <<"kernel">> => kernel_report(Root),
         <<"cpu">> => cpu_report(Root),
         <<"memory">> => memory_report(Root, Edac, MemoryController),
@@ -98,6 +99,40 @@ evidence_model() ->
             <<"network/hardware-address">>
         ]
     }.
+
+boot_report(Root) ->
+    #{
+        <<"loaded-uki">> => loaded_uki_report(Root)
+    }.
+
+loaded_uki_report(Root) ->
+    Source = <<"/run/lapee/boot-uki-sha256">>,
+    case read_trim(Root, binary_to_list(Source)) of
+        null ->
+            #{
+                <<"available">> => false,
+                <<"source">> => Source,
+                <<"sha256">> => null,
+                <<"status">> => <<"unavailable">>
+            };
+        Hex ->
+            case sha256_hex_to_id(Hex) of
+                {ok, ID} ->
+                    #{
+                        <<"available">> => true,
+                        <<"source">> => Source,
+                        <<"sha256">> => ID,
+                        <<"status">> => <<"observed">>
+                    };
+                error ->
+                    #{
+                        <<"available">> => false,
+                        <<"source">> => Source,
+                        <<"sha256">> => null,
+                        <<"status">> => <<"invalid-source-value">>
+                    }
+            end
+    end.
 
 kernel_report(Root) ->
     #{
@@ -719,18 +754,18 @@ dmi_report(Root) ->
 acpi_report(Root) ->
     Base = "/sys/firmware/acpi/tables",
     DynamicBase = filename:join(Base, "dynamic"),
-    Tables = acpi_tables_report(Root, Base),
-    DynamicTables = acpi_tables_report(Root, DynamicBase),
+    Tables = acpi_tables_map(Root, Base),
+    DynamicTables = acpi_tables_map(Root, DynamicBase),
     #{
         <<"available">> => dir_exists(Root, Base),
         <<"source">> => <<"sysfs-acpi">>,
-        <<"tables-path">> => to_bin(Base),
-        <<"final-table-count">> => length(Tables),
-        <<"final-tables">> => Tables,
+        <<"tables">> => acpi_tables_namespace(Tables, DynamicTables),
+        <<"table-counts">> => #{
+            <<"final">> => maps:size(Tables),
+            <<"dynamic">> => maps:size(DynamicTables)
+        },
         <<"dynamic-table-directory-present">> =>
             dir_exists(Root, DynamicBase),
-        <<"dynamic-table-count">> => length(DynamicTables),
-        <<"dynamic-tables">> => DynamicTables,
         <<"override-provenance">> =>
             acpi_override_provenance(Root, DynamicTables),
         <<"notes">> =>
@@ -740,22 +775,49 @@ acpi_report(Root) ->
               "it does not treat OEM/header fields as policy by itself.">>
     }.
 
-acpi_tables_report(Root, Base) ->
-    [acpi_table_report(Root, filename:join(Base, Name), Name)
-     || Name <- sorted_list_dir(Root, Base),
-        Name =/= "dynamic",
-        not dir_exists(Root, filename:join(Base, Name))].
+acpi_tables_map(Root, Base) ->
+    Entries =
+        [{Name,
+          acpi_path_key_base(Name),
+          acpi_table_report(Root, filename:join(Base, Name), Name)}
+         || Name <- sorted_list_dir(Root, Base),
+            Name =/= "dynamic",
+            not dir_exists(Root, filename:join(Base, Name))],
+    KeyCounts =
+        lists:foldl(
+            fun({_Name, Key, _Report}, Counts) ->
+                maps:update_with(Key, fun(N) -> N + 1 end, 1, Counts)
+            end,
+            #{},
+            Entries),
+    maps:from_list(
+        [{acpi_path_key(Name, Key, KeyCounts), Report}
+         || {Name, Key, Report} <- Entries]).
+
+acpi_tables_namespace(Tables, DynamicTables) ->
+    #{
+        <<"sys">> => #{
+            <<"firmware">> => #{
+                <<"acpi">> => #{
+                    <<"tables">> => Tables#{
+                        <<"dynamic">> => DynamicTables
+                    }
+                }
+            }
+        }
+    }.
 
 acpi_table_report(Root, Path, Name) ->
     case read_file(Root, Path) of
         {ok, Bin} ->
             Header = acpi_table_header(Name, Bin),
             Report0 = #{
-                <<"name">> => to_bin(Name),
                 <<"source">> => <<"sysfs-acpi-table">>,
-                <<"path">> => to_bin(Path),
+                <<"source-path">> => to_bin(Path),
+                <<"sysfs-name">> => to_bin(Name),
                 <<"length-bytes">> => byte_size(Bin),
-                <<"sha256">> => hb_util:encode(crypto:hash(sha256, Bin)),
+                <<"table-sha256">> =>
+                    hb_util:encode(crypto:hash(sha256, Bin)),
                 <<"header">> => Header
             },
             maps:merge(
@@ -763,19 +825,47 @@ acpi_table_report(Root, Path, Name) ->
                 acpi_table_validation(Header, Bin));
         error ->
             #{
-                <<"name">> => to_bin(Name),
                 <<"source">> => <<"sysfs-acpi-table">>,
-                <<"path">> => to_bin(Path),
+                <<"source-path">> => to_bin(Path),
+                <<"sysfs-name">> => to_bin(Name),
                 <<"status">> => <<"unreadable">>
             }
     end.
+
+acpi_path_key(Name) ->
+    acpi_path_key(Name, acpi_path_key_base(Name), #{acpi_path_key_base(Name) => 1}).
+
+acpi_path_key(Name, Key, KeyCounts) ->
+    case maps:get(Key, KeyCounts) of
+        1 -> Key;
+        _ -> <<Key/binary, "-b32-", (acpi_base32_key(Name))/binary>>
+    end.
+
+acpi_path_key_base(Name) ->
+    Key = iolist_to_binary([acpi_key_byte(B) || <<B:8>> <= to_bin(Name)]),
+    case Key of
+        <<>> -> <<"empty">>;
+        _ -> Key
+    end.
+
+acpi_key_byte(B) when B >= $A, B =< $Z -> B + 32;
+acpi_key_byte(B) when B >= $a, B =< $z -> B;
+acpi_key_byte(B) when B >= $0, B =< $9 -> B;
+acpi_key_byte(B) -> [<<"-x">>, byte_hex(B)].
+
+byte_hex(B) ->
+    iolist_to_binary(io_lib:format("~2.16.0b", [B])).
+
+acpi_base32_key(Name) ->
+    string:lowercase(
+        binary:replace(base32:encode(to_bin(Name)), <<"=">>, <<>>, [global])).
 
 acpi_table_header("RSDP", Bin) ->
     dev_tpm_tcg:parse_acpi_rsdp(Bin);
 acpi_table_header("FACS", _Bin) ->
     #{
-        <<"signature">> => <<"FACS">>,
-        <<"signature-name">> => <<"Firmware ACPI Control Structure">>,
+        <<"table-signature">> => <<"FACS">>,
+        <<"table-signature-name">> => <<"Firmware ACPI Control Structure">>,
         <<"note">> => <<"FACS does not use the common ACPI table header.">>
     };
 acpi_table_header(_Name, Bin) ->
@@ -814,7 +904,7 @@ acpi_table_status(_Header, _Matches, _Checksum) ->
 
 acpi_override_provenance(Root, DynamicTables) ->
     #{
-        <<"dynamic-tables-present">> => DynamicTables =/= [],
+        <<"dynamic-tables-present">> => maps:size(DynamicTables) > 0,
         <<"initrd-override-directory-present">> =>
             dir_exists(Root, "/kernel/firmware/acpi"),
         <<"initrd-override-files">> =>
@@ -1377,6 +1467,36 @@ read_cpuid_leaf(Root, Abs, Leaf, Subleaf) ->
             Error
     end.
 
+sha256_hex_to_id(Hex0) ->
+    Hex = trim(to_bin(Hex0)),
+    case byte_size(Hex) =:= 64 andalso hex_binary(Hex) of
+        Bin when is_binary(Bin), byte_size(Bin) =:= 32 ->
+            {ok, hb_util:human_id(Bin)};
+        _ ->
+            error
+    end.
+
+hex_binary(Hex) ->
+    try
+        << <<(hex_pair_to_int(A, B))>> ||
+            <<A:8, B:8>> <= lowercase(Hex) >>
+    catch
+        _:_ -> error
+    end.
+
+hex_pair_to_int(A, B) ->
+    (hex_digit(A) bsl 4) bor hex_digit(B).
+
+hex_digit(C) when C >= $0, C =< $9 -> C - $0;
+hex_digit(C) when C >= $a, C =< $f -> C - $a + 10;
+hex_digit(_) -> error(invalid_hex_digit).
+
+lowercase(Bin) ->
+    << <<(lower_char(C))>> || <<C:8>> <= Bin >>.
+
+lower_char(C) when C >= $A, C =< $Z -> C + 32;
+lower_char(C) -> C.
+
 read_attr_map(Root, Abs, Names) ->
     maps:from_list(
         [{normalise_key(to_bin(Name)), Value}
@@ -1598,6 +1718,11 @@ report_fixture_root_test() ->
             <<"quiet rdinit=/init">>),
         write_fixture(Root, "/proc/modules",
             <<"iwlwifi 1 0 - Live 0x0\nxe 2 0 - Live 0x0\n">>),
+        BootHash = crypto:hash(sha256, <<"fixture-uki">>),
+        BootHashHex = iolist_to_binary([
+            io_lib:format("~2.16.0b", [B]) || <<B:8>> <= BootHash
+        ]),
+        write_fixture(Root, "/run/lapee/boot-uki-sha256", BootHashHex),
         write_fixture(Root, "/proc/self/mountinfo",
             <<"12 1 8:1 / / rw - ext4 /dev/sda1 rw\n">>),
         write_fixture(Root, "/sys/class/dmi/id/sys_vendor",
@@ -1668,6 +1793,12 @@ report_fixture_root_test() ->
             <<"aa:bb:cc:dd:ee:ff\n">>),
         write_fixture(Root, "/sys/class/net/wlan0/operstate", <<"up\n">>),
         Report = report_from_root(Root),
+        Boot = maps:get(<<"boot">>, Report),
+        LoadedUKI = maps:get(<<"loaded-uki">>, Boot),
+        ?assertEqual(true, maps:get(<<"available">>, LoadedUKI)),
+        ?assertEqual(<<"observed">>, maps:get(<<"status">>, LoadedUKI)),
+        ?assertEqual(hb_util:human_id(BootHash),
+                     maps:get(<<"sha256">>, LoadedUKI)),
         CpuInfo = maps:get(<<"cpuinfo">>, maps:get(<<"cpu">>, Report)),
         ?assertEqual(true, maps:get(<<"available">>, CpuInfo)),
         ?assert(lists:member(<<"tme">>, maps:get(<<"flags">>, CpuInfo))),
@@ -1678,10 +1809,23 @@ report_fixture_root_test() ->
                               maps:get(<<"fields">>, Dmi))),
         Acpi = maps:get(<<"acpi">>, Firmware),
         ?assertEqual(true, maps:get(<<"available">>, Acpi)),
-        ?assertEqual(1, maps:get(<<"final-table-count">>, Acpi)),
-        [Dsdt] = maps:get(<<"final-tables">>, Acpi),
+        ?assertEqual(<<"asf-x21">>, acpi_path_key("ASF!")),
+        TableCounts = maps:get(<<"table-counts">>, Acpi),
+        ?assertEqual(1, maps:get(<<"final">>, TableCounts)),
+        Tables =
+            maps:get(
+                <<"tables">>,
+                maps:get(
+                    <<"acpi">>,
+                    maps:get(
+                        <<"firmware">>,
+                        maps:get(<<"sys">>, maps:get(<<"tables">>, Acpi))))),
+        ?assert(maps:is_key(acpi_path_key("DSDT"), Tables)),
+        ?assertNot(maps:is_key(<<"DSDT">>, Tables)),
+        Dsdt = maps:get(acpi_path_key("DSDT"), Tables),
+        ?assertEqual(<<"DSDT">>, maps:get(<<"sysfs-name">>, Dsdt)),
         ?assertEqual(<<"DSDT">>,
-                     maps:get(<<"signature">>,
+                     maps:get(<<"table-signature">>,
                               maps:get(<<"header">>, Dsdt))),
         ?assertEqual(<<"ACME">>,
                      maps:get(<<"oem-id">>,
@@ -1689,11 +1833,14 @@ report_fixture_root_test() ->
         ?assertEqual(true,
                      maps:get(<<"declared-length-matches-file">>, Dsdt)),
         ?assertEqual(true, maps:get(<<"checksum-valid">>, Dsdt)),
-        ?assert(maps:is_key(<<"sha256">>, Dsdt)),
-        ?assertEqual(1, maps:get(<<"dynamic-table-count">>, Acpi)),
-        [Ssdt] = maps:get(<<"dynamic-tables">>, Acpi),
+        ?assert(maps:is_key(<<"table-sha256">>, Dsdt)),
+        ?assertEqual(1, maps:get(<<"dynamic">>, TableCounts)),
+        DynamicTables = maps:get(<<"dynamic">>, Tables),
+        ?assert(maps:is_key(acpi_path_key("SSDT1"), DynamicTables)),
+        Ssdt = maps:get(acpi_path_key("SSDT1"), DynamicTables),
+        ?assertEqual(<<"SSDT1">>, maps:get(<<"sysfs-name">>, Ssdt)),
         ?assertEqual(<<"SSDT">>,
-                     maps:get(<<"signature">>,
+                     maps:get(<<"table-signature">>,
                               maps:get(<<"header">>, Ssdt))),
         AcpiProvenance = maps:get(<<"override-provenance">>, Acpi),
         ?assertEqual(true,

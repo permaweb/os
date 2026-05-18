@@ -8,7 +8,7 @@
 # Acceptance checked here:
 #   * node 1 exposes ADDR at /~meta@1.0/info/trusted-device-signers
 #   * node 2 exposes the default empty trusted-device-signers list
-#   * both boot attestations contain the same values in body.node
+#   * both boot measurements contain the same values in body.body.node
 #   * verifier replay proves PCR15 commits to the attested node-message-id
 #   * green-zone init succeeds/fails according to signer-list templates
 
@@ -261,10 +261,10 @@ wait_node() {
     local deadline=$((SECONDS + TIMEOUT))
     while (( SECONDS < deadline )); do
         if curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
-                "$url/~tpm@2.0a/info" \
-                -o "$OUTDIR/responses/node$n-tpm-info.json" 2>/dev/null &&
-           [[ -s "$OUTDIR/responses/node$n-tpm-info.json" ]]; then
-            get_json "$n" "/~tpm@2.0a/boot-attestation" \
+                "$url/~measurement@1.0/info" \
+                -o "$OUTDIR/responses/node$n-measurement-info.json" 2>/dev/null &&
+           [[ -s "$OUTDIR/responses/node$n-measurement-info.json" ]]; then
+            get_json "$n" "/~measurement@1.0/boot" \
                 "$OUTDIR/responses/node$n-boot-attestation.json"
             get_json "$n" "/~meta@1.0/info" \
                 "$OUTDIR/responses/node$n-meta-info.json"
@@ -309,9 +309,9 @@ jq -e '([to_entries[] | select(.key | test("^[0-9]+$")) | .value] == [])' \
 echo ">> /~meta@1.0/info exposes operator trusted-device-signers"
 
 jq -e --arg signer "$SIGNER" \
-    '.body.node."trusted-device-signers" == [$signer]' \
+    '.body.body.node."trusted-device-signers" == [$signer]' \
     "$OUTDIR/responses/node1-boot-attestation.json" >/dev/null
-jq -e '.body.node."trusted-device-signers" == []' \
+jq -e '.body.body.node."trusted-device-signers" == []' \
     "$OUTDIR/responses/node2-boot-attestation.json" >/dev/null
 echo ">> boot-attestation node-message contains expected signer lists"
 

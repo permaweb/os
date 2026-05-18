@@ -1,0 +1,13 @@
+[package]
+name = "dev_snp_nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dev_snp_nif"
+path = "src/lib.rs"
+crate-type = ["dylib"]
+
+[dependencies]
+rustler = "0.36.0"
+sev = { git = "https://github.com/PeterFarber/sev.git", features = ["openssl"] }

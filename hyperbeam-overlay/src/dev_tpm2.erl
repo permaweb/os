@@ -30,10 +30,12 @@
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
          attestation/3, boot_attestation/3, credential_subject/3,
+         supported/3, subject/3, measure/3, wrap_secret/3, unwrap_secret/3,
          activate_credential/3, activate_credential_secret/2,
          verify_peer/3]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
+-export([ensure_activation_secret/5]).
 -export([event_log/1]).
 %% Exposed for tests + auditors that want to drive chain validation
 %% (including the AIA fallback) directly without going through verify/3.
@@ -73,6 +75,11 @@ info(_) ->
                 <<"attestation">>,
                 <<"boot-attestation">>,
                 <<"credential-subject">>,
+                <<"supported">>,
+                <<"subject">>,
+                <<"measure">>,
+                <<"wrap-secret">>,
+                <<"unwrap-secret">>,
                 <<"activate-credential">>,
                 <<"verify-peer">>,
                 <<"verify">>
@@ -216,10 +223,9 @@ info(_Base, _Req, _Opts) ->
 %%   * If the resolved subject is a binary of exactly 32 bytes, it is
 %%     used as the SHA-256 digest directly.
 %%   * If it is any other binary, SHA-256 is applied.
-%%   * If it is a map (HyperBEAM message), `hb_message:id(Subject, all, Opts)'
-%%     is used -- this commits to every committed and uncommitted field in
-%%     the message, which is exactly the "bind this specific node identity"
-%%     semantic the LapEE paper requires.
+%%   * If it is a map (HyperBEAM message), the transport-independent
+%%     measurement subject ID is used. This commits to the semantic subject
+%%     while excluding nested commitment transport metadata.
 %%
 %% The PCR is taken from `Req/pcr' (integer or integer-binary), defaulting
 %% to 15 -- the LapEE node-identity PCR.
@@ -251,7 +257,7 @@ extend(Base, Req, Opts) ->
                             S0 when is_map(S0) ->
                                 iolist_to_binary(
                                     io_lib:format(
-                                        "hb_message:id(Subject, all) over "
+                                        "measurement subject ID over "
                                         "~B-key message",
                                         [maps:size(S0)]));
                             _ -> <<"binary subject (non-message)">>
@@ -494,16 +500,36 @@ verify(Base, Req, Opts) ->
     }}.
 
 normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
-    case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
-        Body when is_map(Body) ->
-            case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
-                Tpm when is_map(Tpm) -> normalise_attestation(Body, Opts);
+    case measurement_attestation_body(Envelope, Opts) of
+        MeasurementBody when is_map(MeasurementBody) ->
+            normalise_attestation_body(MeasurementBody, Opts);
+        undefined ->
+            case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
+                Body when is_map(Body) ->
+                    case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
+                        Tpm when is_map(Tpm) ->
+                            normalise_attestation(Body, Opts);
+                        _ -> normalise_attestation_body(Envelope, Opts)
+                    end;
                 _ -> normalise_attestation_body(Envelope, Opts)
-            end;
-        _ -> normalise_attestation_body(Envelope, Opts)
+            end
     end;
 normalise_attestation(Other, _Opts) ->
     Other.
+
+measurement_attestation_body(Envelope, Opts) ->
+    case {
+        hb_maps:get(<<"type">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"measurement-device">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"body">>, Envelope, undefined, Opts),
+        hb_maps:get(<<"evidence">>, Envelope, undefined, Opts)
+    } of
+        {<<"lapee-measurement">>, <<"tpm@2.0a">>, Body, Evidence}
+                when is_map(Body), is_map(Evidence) ->
+            Body#{<<"tpm">> => Evidence};
+        _ ->
+            undefined
+    end.
 
 normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
     case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
@@ -511,18 +537,17 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
             Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
             ExtendedSubject =
                 hb_maps:get(<<"extended-subject">>, Tpm, undefined, #{}),
-            LegacyNodeID =
-                case Node of
-                    M1 when is_map(M1) ->
-                        hb_util:human_id(
-                            hb_util:native_id(
-                                hb_message:id(M1, all, Opts)));
-                    _ -> undefined
-                end,
             NodeID =
                 case ExtendedSubject of
                     B when is_binary(B), byte_size(B) > 0 -> B;
-                    _ -> LegacyNodeID
+                    _ ->
+                        case Node of
+                            M1 when is_map(M1) ->
+                                hb_util:human_id(
+                                    hb_util:native_id(
+                                        hb_message:id(M1, all, Opts)));
+                            _ -> undefined
+                        end
                 end,
             Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
             Tpm#{
@@ -595,7 +620,8 @@ resolve_envelope(_Base, _Req, _Opts) ->
 
 is_envelope(M) when is_map(M) ->
     hb_maps:get(<<"lapee-attestation-version">>, M, undefined, #{}) /=
-        undefined;
+        undefined orelse
+    hb_maps:get(<<"type">>, M, undefined, #{}) =:= <<"lapee-measurement">>;
 is_envelope(_) ->
     false.
 
@@ -1705,6 +1731,42 @@ boot_attestation_locked(Opts) ->
             end
     end.
 
+supported(_Base, _Req, _Opts) ->
+    case nif_startup() of
+        ok -> {ok, true};
+        {error, _} -> {ok, false}
+    end.
+
+subject(_Base, Req, Opts) ->
+    case prepare_measurement_subject(Req, Opts) of
+        {ok, _Subject, _SubjectID, _SubjectDigest} ->
+            Subject = credential_subject_body(Opts),
+            {ok, #{
+                <<"status">> => 200,
+                <<"body">> => hb_message:commit(Subject, Opts)
+            }};
+        {error, Reason} ->
+            error_resp(500, <<"subject_failed">>, Reason)
+    end.
+
+measure(_Base, Req, Opts) ->
+    try
+        {ok, Subject, SubjectID, SubjectDigest} =
+            prepare_measurement_subject(Req, Opts),
+        Nonce = resolve_nonce(Req),
+        Tpm = boot_tpm_evidence(
+            Subject, SubjectID, SubjectDigest, Nonce, Opts),
+        {ok, #{<<"status">> => 200, <<"body">> => Tpm}}
+    catch
+        throw:{boot_attestation_error, Reason} ->
+            error_resp(500, <<"measure_failed">>, Reason);
+        Class:Reason:Stack ->
+            error_resp(500, <<"measure_failed">>,
+                       #{<<"class">> => to_bin(Class),
+                         <<"reason">> => to_bin(Reason),
+                         <<"stack">> => reason_to_text(Stack)})
+    end.
+
 credential_subject(_Base, _Req, Opts) ->
     case ensure_ak(Opts) of
         {ok, _AkTr} ->
@@ -1718,10 +1780,18 @@ credential_subject(_Base, _Req, Opts) ->
     end.
 
 credential_subject_body(Opts) ->
+    AkName = ak_name(Opts),
     #{
         <<"type">> => <<"lapee-tpm-credential-subject">>,
         <<"version">> => <<"1.0">>,
-        <<"issued-at-unix">> => erlang:system_time(second),
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"method">> => <<"tpm2-activate-credential">>,
+        <<"key-id">> => AkName,
+        <<"binding">> => #{
+            <<"kind">> => <<"ak-policy-pcr">>,
+            <<"pcr">> => ?NODE_IDENTITY_PCR,
+            <<"policy-pcrs">> => ?AK_POLICY_PCRS
+        },
         <<"ek-cert-pem">> => ek_cert_pem(Opts),
         <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
         <<"ek-cert-source">> => ek_cert_source(),
@@ -1732,10 +1802,35 @@ credential_subject_body(Opts) ->
         <<"ek-qualified-name">> => ek_qualified_name(Opts),
         <<"ak-pub-pem">> => ak_pub_pem(Opts),
         <<"ak-public">> => ak_public(Opts),
-        <<"ak-name">> => ak_name(Opts),
+        <<"ak-name">> => AkName,
         <<"ak-qualified-name">> => ak_qualified_name(Opts),
+        <<"public-material">> => #{
+            <<"ek-public">> => ek_public(Opts),
+            <<"ek-pub-pem">> => ek_pub_pem(Opts),
+            <<"ak-public">> => ak_public(Opts),
+            <<"ak-pub-pem">> => ak_pub_pem(Opts),
+            <<"ak-name">> => AkName
+        },
         <<"tpm-properties">> => tpm_properties()
     }.
+
+wrap_secret(_Base, Req, _Opts) ->
+    with_ok(
+        fun() ->
+            Subject = hb_maps:get(<<"subject">>, Req, undefined, #{}),
+            Secret = decode_optional_secret(Req),
+            #{
+                <<"status">> => 200,
+                <<"body">> =>
+                    (make_credential_for_subject(Subject, Secret))#{
+                        <<"measurement-device">> => <<"tpm@2.0a">>,
+                        <<"method">> => <<"tpm2-activate-credential">>
+                    }
+            }
+        end).
+
+unwrap_secret(Base, Req, Opts) ->
+    activate_credential(Base, Req, Opts).
 
 activate_credential(_Base, Req, Opts) ->
     with_ok(
@@ -1932,10 +2027,130 @@ make_credential_for_subject(Subject, Secret) ->
                 <<"credential-blob">> => hb_util:encode(Blob),
                 <<"secret">> => hb_util:encode(EncSecret)
             };
+        {'EXIT', {nif_not_loaded, _}} ->
+            software_make_credential(EkPublic, AkName, Secret);
         {error, Reason} ->
             throw({boot_attestation_error,
                    #{<<"make-credential">> => reason_to_text(Reason)}})
     end.
+
+software_make_credential(EkPublic, AkName, Secret) ->
+    try
+        Params = credential_public_params(EkPublic),
+        #{hash := Hash, rsa := Rsa, sym_bits := SymBits} = Params,
+        HashBytes = hash_size(Hash),
+        Seed = crypto:strong_rand_bytes(HashBytes),
+        EncryptedSeed = public_key:encrypt_public(
+            Seed,
+            Rsa,
+            [
+                {rsa_padding, rsa_pkcs1_oaep_padding},
+                {rsa_oaep_md, Hash},
+                {rsa_mgf1_md, Hash},
+                {rsa_oaep_label, <<"IDENTITY", 0>>}
+            ]),
+        SymKey = kdfa(Hash, Seed, <<"STORAGE">>, AkName, <<>>, SymBits),
+        IV = <<0:128>>,
+        PlainIdentity = <<
+            (byte_size(Secret)):16/unsigned-big,
+            Secret/binary
+        >>,
+        EncIdentity =
+            crypto:crypto_one_time(
+                aes_cfb_cipher(SymBits), SymKey, IV, PlainIdentity, true),
+        HmacKey =
+            kdfa(Hash, Seed, <<"INTEGRITY">>, <<>>, <<>>, HashBytes * 8),
+        Integrity =
+            crypto:mac(
+                hmac, Hash, HmacKey,
+                <<EncIdentity/binary, AkName/binary>>),
+        IDObject = <<
+            (byte_size(Integrity)):16/unsigned-big,
+            Integrity/binary,
+            EncIdentity/binary
+        >>,
+        #{
+            <<"credential-blob">> =>
+                hb_util:encode(<<
+                    (byte_size(IDObject)):16/unsigned-big,
+                    IDObject/binary
+                >>),
+            <<"secret">> =>
+                hb_util:encode(<<
+                    (byte_size(EncryptedSeed)):16/unsigned-big,
+                    EncryptedSeed/binary
+                >>)
+        }
+    catch
+        Class:Reason ->
+            throw({boot_attestation_error, #{
+                <<"make-credential">> =>
+                    reason_to_text({software, Class, Reason})
+            }})
+    end.
+
+credential_public_params(EkPublic) ->
+    {ok, Public} = tpm2b_public_body(EkPublic),
+    <<16#0001:16/unsigned-big, NameAlg:16/unsigned-big,
+      _Attrs:32/unsigned-big, Rest0/binary>> = Public,
+    {ok, Hash} = tpm_name_hash_alg(NameAlg),
+    {_AuthPolicy, Rest1} = tpm2b(Rest0),
+    {SymBits, Rest2} = rsa_symmetric_params(Rest1),
+    Rest3 = skip_tpm2_rsa_scheme(Rest2),
+    <<_KeyBits:16/unsigned-big, Exponent0:32/unsigned-big, Rest4/binary>> =
+        Rest3,
+    {ModulusBin, _Rest5} = tpm2b(Rest4),
+    Exponent =
+        case Exponent0 of
+            0 -> 65537;
+            _ -> Exponent0
+        end,
+    #{
+        hash => Hash,
+        sym_bits => SymBits,
+        rsa => #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = Exponent
+        }
+    }.
+
+rsa_symmetric_params(<<16#0006:16/unsigned-big,
+                       KeyBits:16/unsigned-big,
+                       16#0043:16/unsigned-big,
+                       Rest/binary>>) ->
+    {KeyBits, Rest};
+rsa_symmetric_params(<<16#0010:16/unsigned-big, _Rest/binary>>) ->
+    throw(unsupported_null_symmetric);
+rsa_symmetric_params(_) ->
+    throw(bad_tpm2b_public_symmetric).
+
+hash_size(sha) -> 20;
+hash_size(sha256) -> 32;
+hash_size(sha384) -> 48;
+hash_size(sha512) -> 64.
+
+aes_cfb_cipher(128) -> aes_128_cfb128;
+aes_cfb_cipher(256) -> aes_256_cfb128;
+aes_cfb_cipher(Other) -> throw({unsupported_symmetric_key_bits, Other}).
+
+kdfa(Hash, Key, Label, ContextU, ContextV, Bits) ->
+    Bytes = (Bits + 7) div 8,
+    Derived = kdfa_blocks(Hash, Key, Label, ContextU, ContextV, Bits, 1, <<>>),
+    binary:part(Derived, 0, Bytes).
+
+kdfa_blocks(_Hash, _Key, _Label, _ContextU, _ContextV, Bits, _Counter, Acc)
+        when bit_size(Acc) >= Bits ->
+    Acc;
+kdfa_blocks(Hash, Key, Label, ContextU, ContextV, Bits, Counter, Acc) ->
+    Block = crypto:mac(
+        hmac,
+        Hash,
+        Key,
+        <<Counter:32/unsigned-big, Label/binary, 0,
+          ContextU/binary, ContextV/binary, Bits:32/unsigned-big>>),
+    kdfa_blocks(
+        Hash, Key, Label, ContextU, ContextV, Bits, Counter + 1,
+        <<Acc/binary, Block/binary>>).
 
 activate_peer_credential(Url, Credential, Opts) ->
     Req = #{
@@ -2345,6 +2560,18 @@ decode_required(Key, Req, Opts) ->
                    #{Key => <<"missing required base64url field">>}})
     end.
 
+decode_optional_secret(Req) ->
+    case hb_maps:get(<<"secret">>, Req, undefined, #{}) of
+        B when is_binary(B), byte_size(B) > 0 ->
+            try hb_util:decode(B)
+            catch _:_ -> B
+            end;
+        _ ->
+            throw({boot_attestation_error,
+                   #{<<"secret">> =>
+                        <<"missing required base64url/binary secret">>}})
+    end.
+
 safe_decode(B) when is_binary(B) ->
     try hb_util:decode(B) catch _:_ -> <<>> end;
 safe_decode(_) ->
@@ -2370,57 +2597,50 @@ with_ok(Fun) ->
     catch
         throw:{boot_attestation_error, Reason} ->
             {error, Reason};
-        Class:Reason ->
+        Class:Reason:Stack ->
             {error, #{
                 <<"class">> => to_bin(Class),
-                <<"reason">> => to_bin(Reason)
+                <<"reason">> => to_bin(Reason),
+                <<"stack">> => reason_to_text(Stack)
             }}
     end.
-
-resolve_body({ok, #{<<"body">> := Body}}) ->
-    Body;
-resolve_body({ok, Msg}) ->
-    Msg;
-resolve_body({error, Reason}) ->
-    throw({boot_attestation_error, Reason});
-resolve_body(Other) ->
-    throw({boot_attestation_error, Other}).
-
-ensure_committed(Msg, Opts) when is_map(Msg) ->
-    case hb_message:signers(Msg, Opts) of
-        [] -> hb_message:commit(Msg, Opts);
-        _ -> Msg
-    end;
-ensure_committed(Msg, _Opts) ->
-    Msg.
 
 boot_subject(Opts) ->
     case persistent_term:get({dev_tpm2, attested_boot_subject}, undefined) of
         Subject when is_map(Subject) ->
             SubjectID = persistent_term:get(
                 {dev_tpm2, attested_boot_subject_id},
-                hb_message:id(Subject, all, Opts)),
+                subject_id(Subject, Opts)),
             SubjectDigest = persistent_term:get(
                 {dev_tpm2, attested_boot_subject_digest},
                 hb_util:native_id(SubjectID)),
             {Subject, SubjectID, SubjectDigest};
         undefined ->
-            System =
-                resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts)),
-            Node0 =
-                resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts)),
-            Node = ensure_committed(Node0, Opts),
-            Subject = #{
-                <<"system">> => System,
-                <<"node">> => Node
-            },
-            SubjectID = hb_message:id(Subject, all, Opts),
+            Subject = dev_measurement:measurement_body(Opts),
+            SubjectID = subject_id(Subject, Opts),
             {Subject, SubjectID, hb_util:native_id(SubjectID)}
     end.
 
+prepare_measurement_subject(Req, Opts) ->
+    {Subject, SubjectID, SubjectDigest} =
+        case hb_maps:get(<<"body">>, Req, undefined, Opts) of
+            Body when is_map(Body) ->
+                ID = subject_id(Body, Opts),
+                {Body, ID, hb_util:native_id(ID)};
+            _ ->
+                boot_subject(Opts)
+        end,
+    case ensure_ak(Subject, SubjectID, SubjectDigest, Opts) of
+        {ok, _AkTr} -> {ok, Subject, SubjectID, SubjectDigest};
+        {error, _} = E -> E
+    end.
+
 boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts) ->
+    boot_tpm_evidence(
+        Subject, SubjectID, SubjectDigest, crypto:strong_rand_bytes(32), Opts).
+
+boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
     Pcrs = ?DEFAULT_QUOTE_PCRS,
-    Nonce = crypto:strong_rand_bytes(32),
     case ensure_ak(Subject, SubjectID, SubjectDigest, Opts) of
         {ok, AkTr} ->
             case nif_quote(AkTr, Pcrs, Nonce) of
@@ -2747,14 +2967,14 @@ decoded_nonce(_) ->
 
 %% @doc Produce a 32-byte SHA-256 digest for a subject.
 %%
-%% For HyperBEAM messages, `hb_message:id(Subject, all, Opts)' returns
-%% a human-encoded (base64url, 43 chars) ID; we decode it back to the
-%% raw 32-byte hash via `hb_util:native_id/1'. For binaries that are
-%% already 32 bytes we use them as-is; for other binaries we hash with
-%% SHA-256; for anything else we serialise and hash.
+%% For HyperBEAM messages, use the same transport-independent subject
+%% ID as `~measurement@1.0'. That binds the semantic subject without
+%% requiring boot-critical PCR calculation to re-encode nested HTTP
+%% signature metadata. For binaries that are already 32 bytes we use
+%% them as-is; for other binaries we hash with SHA-256; for anything
+%% else we serialise and hash.
 digest_of(Subject, Opts) when is_map(Subject) ->
-    HumanId = hb_message:id(Subject, all, Opts),
-    hb_util:native_id(HumanId);
+    hb_util:native_id(subject_id(Subject, Opts));
 digest_of(B, _Opts) when is_binary(B), byte_size(B) =:= 32 ->
     B;
 digest_of(B, _Opts) when is_binary(B) ->
@@ -2762,6 +2982,22 @@ digest_of(B, _Opts) when is_binary(B) ->
 digest_of(Other, _Opts) ->
     crypto:hash(sha256,
         iolist_to_binary(io_lib:format("~0p", [Other]))).
+
+subject_id(Subject, Opts) when is_map(Subject) ->
+    dev_measurement:measurement_body_id(Subject, Opts);
+subject_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    hb_util:human_id(Bin);
+subject_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
+    try hb_util:native_id(Bin) of
+        Native when byte_size(Native) =:= 32 -> Bin;
+        _ -> hb_util:encode(hb_crypto:sha256(Bin))
+    catch
+        _:_ -> hb_util:encode(hb_crypto:sha256(Bin))
+    end;
+subject_id(Bin, _Opts) when is_binary(Bin) ->
+    hb_util:encode(hb_crypto:sha256(Bin));
+subject_id(Other, _Opts) ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
 
 error_resp(Status, Err, Reason) ->
     {error, #{
@@ -2816,19 +3052,14 @@ legacy_attested_subject(Opts) ->
         Subject when is_map(Subject) ->
             SubjectID = persistent_term:get(
                 {dev_tpm2, attested_boot_subject_id},
-                hb_message:id(Subject, all, Opts)),
+                subject_id(Subject, Opts)),
             {Subject, SubjectID};
         undefined ->
             case get_node_msg(Opts) of
                 undefined ->
                     {null, null};
                 Msg ->
-                    {
-                        Msg,
-                        hb_util:human_id(
-                            hb_util:native_id(
-                                hb_message:id(Msg, all, Opts)))
-                    }
+                    {Msg, subject_id(Msg, Opts)}
             end
     end.
 
@@ -3379,7 +3610,7 @@ ek_cert_source() ->
 %% is provisioned in the TCG EK-chain NV range starting at 0x01C00100.
 %% Intel documents this as the EICA chain path for ODCA PTT certs.
 -define(EK_NV_CHAIN_FIRST, 16#01C00100).
--define(EK_NV_CHAIN_LAST,  16#01C001FF).
+-define(EK_NV_CHAIN_PREFIX_LIMIT, 16).
 
 %% Fetch the EK certificate from TPM NV storage and cache it. The list
 %% below is iterated in order; the first NV index that yields a valid
@@ -3413,7 +3644,7 @@ fetch_ek_cert_from_nv(Opts) ->
             %% intermediates only, never as trust anchors.
             ChainHandle = Handle + 1,
             {ChainDers, ChainSource, ChainHits, ChainDiagnostics} =
-                fetch_ek_cert_chain(ChainHandle),
+                fetch_ek_cert_chain(ChainHandle, Opts),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders},
                                 ChainDers),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem},
@@ -3456,10 +3687,15 @@ fetch_ek_cert_from_nv(Opts) ->
 %% Candidate EK-chain NV handles for a leaf EK cert at `EkHandle`.
 %% Keep adjacent first for older TPMs, then the standardized EK-chain
 %% range used by Intel ODCA PTT. De-dupe so a caller that points
-%% directly into the chain range does not double-read.
+%% directly into the chain range does not double-read. The prefix limit
+%% avoids making boot wait on hundreds of physical TPM NV misses; unusual
+%% platforms can provide explicit handles via `lapee_tpm_ek_chain_nv_handles'.
 ek_cert_chain_handles(EkHandle) ->
     uniq_preserve_order(
-        [EkHandle + 1 | lists:seq(?EK_NV_CHAIN_FIRST, ?EK_NV_CHAIN_LAST)]).
+        [EkHandle + 1 |
+         lists:seq(
+             ?EK_NV_CHAIN_FIRST,
+             ?EK_NV_CHAIN_FIRST + ?EK_NV_CHAIN_PREFIX_LIMIT - 1)]).
 
 uniq_preserve_order(List) ->
     uniq_preserve_order(List, #{}, []).
@@ -3477,13 +3713,43 @@ uniq_preserve_order([H | Rest], Seen, Acc) ->
 %% intermediate; some ship the full chain down to the root. We parse
 %% whatever's there and return all DER cert binaries plus the NV
 %% handles that yielded parseable certificates.
-fetch_ek_cert_chain(ChainHandle) when is_integer(ChainHandle) ->
+fetch_ek_cert_chain(ChainHandle, Opts) when is_integer(ChainHandle) ->
+    case configured_chain_handles(Opts) of
+        Handles when is_list(Handles) ->
+            fetch_ek_cert_chain_handles(Handles);
+        undefined ->
+            fetch_default_ek_cert_chain(ChainHandle)
+    end;
+fetch_ek_cert_chain(ChainHandles, _Opts) when is_list(ChainHandles) ->
+    fetch_ek_cert_chain_handles(ChainHandles).
+
+fetch_default_ek_cert_chain(ChainHandle) ->
     merge_chain_results(
         [fetch_ek_cert_chain_handles([ChainHandle]),
-         fetch_ek_cert_chain_range(?EK_NV_CHAIN_FIRST,
-                                   ?EK_NV_CHAIN_LAST)]);
-fetch_ek_cert_chain(ChainHandles) when is_list(ChainHandles) ->
-    fetch_ek_cert_chain_handles(ChainHandles).
+         fetch_ek_cert_chain_prefix(?EK_NV_CHAIN_FIRST,
+                                    ?EK_NV_CHAIN_PREFIX_LIMIT)]).
+
+configured_chain_handles(Opts) ->
+    case first_defined([
+        hb_opts:get(lapee_tpm_ek_chain_nv_handles, undefined, Opts),
+        hb_opts:get(<<"lapee-tpm-ek-chain-nv-handles">>, undefined, Opts),
+        hb_opts:get(<<"lapee_tpm_ek_chain_nv_handles">>, undefined, Opts)
+    ]) of
+        undefined -> undefined;
+        Handles when is_list(Handles) -> [parse_nv_handle(H) || H <- Handles];
+        Other -> [parse_nv_handle(Other)]
+    end.
+
+parse_nv_handle(H) when is_integer(H) ->
+    H;
+parse_nv_handle(<<"0x", Hex/binary>>) ->
+    binary_to_integer(Hex, 16);
+parse_nv_handle(<<"0X", Hex/binary>>) ->
+    binary_to_integer(Hex, 16);
+parse_nv_handle(Bin) when is_binary(Bin) ->
+    binary_to_integer(Bin);
+parse_nv_handle(Other) ->
+    parse_nv_handle(hb_util:bin(Other)).
 
 fetch_ek_cert_chain_handles(ChainHandles) ->
     fetch_ek_cert_chain(ChainHandles, [], [], [], []).
@@ -3504,12 +3770,24 @@ fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts,
                 [Diagnostic | Diagnostics])
     end.
 
-fetch_ek_cert_chain_range(First, Last) ->
-    Entries = read_chain_range_entries(First, Last),
+fetch_ek_cert_chain_prefix(First, Limit) ->
+    Entries = read_chain_prefix_entries(First, Limit),
     parse_chain_range_entries(Entries).
 
-read_chain_range_entries(First, Last) ->
-    [read_chain_range_entry(Handle) || Handle <- lists:seq(First, Last)].
+read_chain_prefix_entries(First, Limit) ->
+    read_chain_prefix_entries(First, Limit, []).
+
+read_chain_prefix_entries(_Handle, 0, Acc) ->
+    lists:reverse(Acc);
+read_chain_prefix_entries(Handle, Remaining, Acc) ->
+    Entry = read_chain_range_entry(Handle),
+    case Entry of
+        {ok, _Handle, _Bin} ->
+            read_chain_prefix_entries(
+                Handle + 1, Remaining - 1, [Entry | Acc]);
+        {error, _Handle, _Reason} ->
+            lists:reverse([Entry | Acc])
+    end.
 
 read_chain_range_entry(Handle) ->
     case lapee_tpm_nif:nv_read(Handle) of
@@ -4097,6 +4375,49 @@ chk_quote_rejects_verifier_nonce_mismatch_test() ->
         {error, <<"quote nonce does not match verifier challenge">>},
         chk_quote(Envelope, <<"verifier-nonce">>)).
 
+software_make_credential_shape_test() ->
+    Priv = public_key:generate_key({rsa, 2048, 65537}),
+    Rsa = #'RSAPublicKey'{
+        modulus = Priv#'RSAPrivateKey'.modulus,
+        publicExponent = Priv#'RSAPrivateKey'.publicExponent
+    },
+    EkPublic = test_ek_tpm2b_public(Rsa),
+    Secret = <<"green-zone-secret">>,
+    AkName = <<16#000B:16/unsigned-big, (crypto:hash(sha256, <<"ak">>))/binary>>,
+    Credential = software_make_credential(
+        EkPublic,
+        AkName,
+        Secret),
+    Blob = hb_util:decode(
+        maps:get(<<"credential-blob">>, Credential)),
+    EncSecret = hb_util:decode(
+        maps:get(<<"secret">>, Credential)),
+    <<BlobSize:16/unsigned-big, IDObject:BlobSize/binary>> = Blob,
+    <<32:16/unsigned-big, Hmac:32/binary, EncIdentity/binary>> = IDObject,
+    <<256:16/unsigned-big, EncryptedSeed:256/binary>> = EncSecret,
+    ?assertEqual(byte_size(Secret) + 2, byte_size(EncIdentity)),
+    Seed = public_key:decrypt_private(
+        EncryptedSeed,
+        Priv,
+        [
+            {rsa_padding, rsa_pkcs1_oaep_padding},
+            {rsa_oaep_md, sha256},
+            {rsa_mgf1_md, sha256},
+            {rsa_oaep_label, <<"IDENTITY", 0>>}
+        ]),
+    SymKey = kdfa(sha256, Seed, <<"STORAGE">>, AkName, <<>>, 128),
+    PlainIdentity = crypto:crypto_one_time(
+        aes_128_cfb128, SymKey, <<0:128>>, EncIdentity, false),
+    <<SecretSize:16/unsigned-big, Recovered:SecretSize/binary>> =
+        PlainIdentity,
+    HmacKey = kdfa(sha256, Seed, <<"INTEGRITY">>, <<>>, <<>>, 256),
+    ?assertEqual(
+        crypto:mac(
+            hmac, sha256, HmacKey,
+            <<EncIdentity/binary, AkName/binary>>),
+        Hmac),
+    ?assertEqual(Secret, Recovered).
+
 rsa_pub_from_tpm2b_public_test() ->
     ModulusBin = <<1:2048>>,
     Public = test_rsa_tpm2b_public(ModulusBin, 0),
@@ -4211,6 +4532,31 @@ test_rsa_tpm2b_public(ModulusBin, Exponent, AuthPolicy) ->
     >>,
     test_tpm2b(Body).
 
+test_ek_tpm2b_public(#'RSAPublicKey'{
+        modulus = Modulus,
+        publicExponent = Exponent
+    }) ->
+    ModulusBin = left_pad(binary:encode_unsigned(Modulus), 256),
+    Body = <<
+        16#0001:16/unsigned-big,
+        16#000B:16/unsigned-big,
+        0:32/unsigned-big,
+        (test_tpm2b(<<>>))/binary,
+        16#0006:16/unsigned-big,
+        128:16/unsigned-big,
+        16#0043:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        2048:16/unsigned-big,
+        Exponent:32/unsigned-big,
+        (test_tpm2b(ModulusBin))/binary
+    >>,
+    test_tpm2b(Body).
+
+left_pad(Bin, Size) when byte_size(Bin) < Size ->
+    <<0:((Size - byte_size(Bin)) * 8), Bin/binary>>;
+left_pad(Bin, _Size) ->
+    Bin.
+
 test_rsa_public_pem(Rsa) ->
     public_key:pem_encode([public_key:pem_entry_encode('RSAPublicKey', Rsa)]).
 
@@ -4269,9 +4615,7 @@ digest_of_arbitrary_binary_test() ->
     Bin = <<"hello">>,
     ?assertEqual(crypto:hash(sha256, Bin), digest_of(Bin, #{})).
 
-digest_of_message_uses_hb_message_id_test() ->
-    %% Placeholder: would require hb_message loaded; sanity-check the
-    %% code path at least.
+digest_of_message_uses_measurement_subject_id_test() ->
     Msg = #{<<"a">> => 1, <<"b">> => 2},
     D = digest_of(Msg, #{}),
     ?assert(byte_size(D) =:= 32).
@@ -4486,10 +4830,9 @@ normalise_boot_attestation_uses_extended_subject_test() ->
     System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
     Node = #{<<"address">> => <<"node-address">>},
     Subject = #{<<"system">> => System, <<"node">> => Node},
-    SubjectID = hb_message:id(Subject, all, #{}),
+    SubjectID = subject_id(Subject, #{}),
     NodeOnlyID =
-        hb_util:human_id(
-            hb_util:native_id(hb_message:id(Node, all, #{}))),
+        subject_id(Node, #{}),
     Envelope = Subject#{
         <<"tpm">> => #{
             <<"extended-subject">> => SubjectID,
@@ -4502,12 +4845,37 @@ normalise_boot_attestation_uses_extended_subject_test() ->
                  hb_maps:get(<<"node-message-id">>, Normalised, undefined,
                              #{})).
 
+normalise_measurement_attestation_uses_evidence_test() ->
+    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
+    Node = #{<<"address">> => <<"node-address">>},
+    Subject = #{<<"system">> => System, <<"node">> => Node},
+    SubjectID = subject_id(Subject, #{}),
+    Measurement = #{
+        <<"type">> => <<"lapee-measurement">>,
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"body">> => Subject,
+        <<"evidence">> => #{
+            <<"extended-subject">> => SubjectID,
+            <<"quote">> => #{}
+        }
+    },
+    Normalised = normalise_attestation(Measurement, #{}),
+    ?assertEqual(SubjectID,
+                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
+                             #{})),
+    ?assertEqual(Node,
+                 hb_maps:get(<<"node-message">>, Normalised, undefined,
+                             #{})).
+
 ek_cert_chain_handles_include_intel_odca_range_test() ->
     ?assertEqual(
-        [16#01C00003 | lists:seq(16#01C00100, 16#01C001FF)],
+        [16#01C00003 |
+         lists:seq(16#01C00100,
+                   16#01C00100 + ?EK_NV_CHAIN_PREFIX_LIMIT - 1)],
         ek_cert_chain_handles(16#01C00002)),
     ?assertEqual(
-        lists:seq(16#01C00100, 16#01C001FF),
+        lists:seq(16#01C00100,
+                  16#01C00100 + ?EK_NV_CHAIN_PREFIX_LIMIT - 1),
         ek_cert_chain_handles(16#01C000FF)).
 
 intel_odca_ek_chain_accepts_tcg_key_usage_test() ->

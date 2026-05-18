@@ -56,7 +56,7 @@ console_path()     -> os:getenv("LAPEE_CONSOLE",     "/dev/console").
 primary_net_path() -> os:getenv("LAPEE_PRIMARY_NET", "/run/lapee/primary-net").
 probe_host()       -> os:getenv("LAPEE_PROBE_HOST",  "127.0.0.1").
 probe_port()       -> list_to_integer(os:getenv("LAPEE_PROBE_PORT", "8734")).
-probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~tpm@2.0a/info").
+probe_path()       -> os:getenv("LAPEE_PROBE_PATH",  "/~measurement@1.0/info").
 log_path()         -> os:getenv("LAPEE_SPLASH_LOG",  "/run/lapee/splash.log").
 status_path()      -> os:getenv("LAPEE_STATUS",      "/run/lapee/status").
 provision_input_path() ->

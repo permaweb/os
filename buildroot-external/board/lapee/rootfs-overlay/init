@@ -458,6 +458,35 @@ sbp_write_nonvolatile_marker() {
     return 0
 }
 
+sbp_wipe_nonvolatile_signatures() {
+    _part="$1"
+    _sectors=$(blockdev --getsz "$_part" 2>/dev/null || echo 0)
+    case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
+    _wipe=32768
+    [ "$_sectors" -le 0 ] && _head_wipe="$_wipe" || _head_wipe="$_sectors"
+    [ "$_head_wipe" -gt "$_wipe" ] && _head_wipe="$_wipe"
+    if ! dd if=/dev/zero of="$_part" bs=512 count="$_head_wipe" conv=notrunc \
+            > /run/lapee/nonvolatile-wipe-head.log 2>&1; then
+        while IFS= read -r _line; do sbp_log "$_line"; done \
+            < /run/lapee/nonvolatile-wipe-head.log
+        sbp_log "ERROR: failed to clear old metadata at the start of $_part."
+        return 1
+    fi
+    if [ "$_sectors" -gt "$_wipe" ]; then
+        _seek=$(( _sectors - _wipe ))
+        if ! dd if=/dev/zero of="$_part" bs=512 count="$_wipe" \
+                seek="$_seek" conv=notrunc \
+                > /run/lapee/nonvolatile-wipe-tail.log 2>&1; then
+            while IFS= read -r _line; do sbp_log "$_line"; done \
+                < /run/lapee/nonvolatile-wipe-tail.log
+            sbp_log "ERROR: failed to clear old metadata at the end of $_part."
+            return 1
+        fi
+    fi
+    sync 2>/dev/null || true
+    return 0
+}
+
 sbp_format_nonvolatile_disk() {
     _dev="$1"
     _boot_esp="$2"
@@ -498,6 +527,9 @@ sbp_format_nonvolatile_disk() {
     fi
     if ! sbp_wait_nonvolatile_partition_node "$_part"; then
         sbp_log "ERROR: $_part did not appear after partitioning."
+        return 1
+    fi
+    if ! sbp_wipe_nonvolatile_signatures "$_part"; then
         return 1
     fi
     if ! sbp_write_nonvolatile_marker "$_part"; then
@@ -1052,6 +1084,7 @@ WIFI_SSID=""
 WIFI_PSK=""
 BOOT_ESP_DEV=""
 OPERATOR_CONFIG_JSON=/tmp/config.json
+BOOT_UKI_SHA256=/run/lapee/boot-uki-sha256
 
 write_empty_operator_config_json() {
     printf '{}\n' > "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
@@ -1059,6 +1092,32 @@ write_empty_operator_config_json() {
 }
 
 write_empty_operator_config_json
+
+record_boot_uki_hash() {
+    _uki="$1"
+    [ -f "$_uki" ] || return 1
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        trace "boot-media: sha256sum unavailable; boot UKI hash not recorded"
+        return 1
+    fi
+    _hash=$(sha256sum "$_uki" 2>/dev/null | awk '{ print $1 }' || true)
+    case "$_hash" in
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+            ;;
+        *)
+            trace "boot-media: failed to hash boot UKI"
+            return 1
+            ;;
+    esac
+    if [ ${#_hash} -ne 64 ]; then
+        trace "boot-media: unexpected boot UKI hash length"
+        return 1
+    fi
+    printf '%s\n' "$_hash" > "$BOOT_UKI_SHA256" 2>/dev/null || return 1
+    chmod 600 "$BOOT_UKI_SHA256" 2>/dev/null || true
+    trace "boot-media: recorded boot UKI sha256"
+    return 0
+}
 
 # Gate (1): capability flag on kernel cmdline. Default OFF.
 # Only when `lapee.wifi=enabled' is explicitly present do we even
@@ -1267,6 +1326,7 @@ read_boot_media_config() {
                    [ -f /mnt/esp/LAPEE.MARKER ]; then
                     BOOT_ESP_DEV="$_dev"
                     trace "boot-media: found LapEE ESP at $BOOT_ESP_DEV"
+                    record_boot_uki_hash /mnt/esp/EFI/Boot/BootX64.efi || true
                     if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
                         if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
                             parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true
@@ -1650,9 +1710,17 @@ fi
 # file is last so it keeps the enforced devices and on/start PCR-15
 # boot-attestation hook.
 LAPEE_JSON=/etc/lapee/lapee.json
+DEBUG_CONFIG_JSON=/tmp/lapee-debug.json
 
 status "Preparing HyperBEAM configuration."
-HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_MEASUREMENT_TRACE; then
+    printf '%s\n' '{"measurement-trace":true}' > "$DEBUG_CONFIG_JSON" \
+        2>/dev/null || true
+    HB_CONFIG="$DEBUG_CONFIG_JSON,$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+    trace "hyperbeam: measurement trace enabled"
+else
+    HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+fi
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
 
@@ -1753,4 +1821,9 @@ else
     trace "hyperbeam: stdout/stderr -> /dev/null"
     exec >/dev/null 2>&1
 fi
-exec /usr/lib/hyperbeam/bin/hb foreground
+if /usr/lib/hyperbeam/bin/hb foreground; then
+    halt_boot "HyperBEAM exited normally."
+else
+    _hb_rc=$?
+    halt_boot "HyperBEAM exited with status $_hb_rc."
+fi
