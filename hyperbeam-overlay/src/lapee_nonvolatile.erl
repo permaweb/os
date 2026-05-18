@@ -121,11 +121,11 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
     with_key_file(Key, fun(KeyFile) ->
         case ensure_luks(Partition, KeyFile) of
             {ok, LuksFormatted} ->
-                case ensure_open(Partition, KeyFile) of
-                    ok ->
+                case ensure_open_or_reformat(Partition, KeyFile, LuksFormatted) of
+                    {ok, EffectiveLuksFormatted} ->
                         MapperDev = <<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>,
                         case ensure_mounted_filesystem(
-                            MapperDev, ?DEFAULT_MOUNT, LuksFormatted) of
+                            MapperDev, ?DEFAULT_MOUNT, EffectiveLuksFormatted) of
                             {ok, FsFormatted} ->
                                 Store = persistent_store(?DEFAULT_MOUNT, Opts),
                                 case prepare_persistent_store(Store, Opts) of
@@ -136,7 +136,7 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
                                             Label,
                                             unicode:characters_to_binary(Partition),
                                             Store,
-                                            LuksFormatted,
+                                            EffectiveLuksFormatted,
                                             FsFormatted,
                                             Migration
                                         )};
@@ -530,21 +530,7 @@ ensure_luks(Partition, KeyFile) ->
         {error, _} ->
             case has_format_marker(Partition) of
                 true ->
-                    case run(
-                        <<"cryptsetup">>,
-                        [
-                            <<"luksFormat">>,
-                            <<"--batch-mode">>,
-                            <<"--type">>, <<"luks2">>,
-                            <<"--label">>, <<"lapee-nonvolatile">>,
-                            <<"--cipher">>, <<"aes-xts-plain64">>,
-                            <<"--key-size">>, <<"256">>,
-                            <<"--hash">>, <<"sha256">>,
-                            <<"--key-file">>, KeyFile,
-                            Partition
-                        ],
-                        ?FORMAT_TIMEOUT_MS
-                    ) of
+                    case format_luks(Partition, KeyFile) of
                         {ok, _} ->
                             sync_storage(),
                             {ok, true};
@@ -554,6 +540,45 @@ ensure_luks(Partition, KeyFile) ->
                     {error, <<"missing-provisioning-marker">>}
             end
     end.
+
+ensure_open_or_reformat(Partition, KeyFile, LuksFormatted) ->
+    case ensure_open(Partition, KeyFile) of
+        ok ->
+            {ok, LuksFormatted};
+        {error, Reason} ->
+            case {LuksFormatted, has_format_marker(Partition)} of
+                {false, true} ->
+                    case format_luks(Partition, KeyFile) of
+                        {ok, _} ->
+                            sync_storage(),
+                            case ensure_open(Partition, KeyFile) of
+                                ok -> {ok, true};
+                                Error -> Error
+                            end;
+                        Error ->
+                            Error
+                    end;
+                _ ->
+                    {error, Reason}
+            end
+    end.
+
+format_luks(Partition, KeyFile) ->
+    run(
+        <<"cryptsetup">>,
+        [
+            <<"luksFormat">>,
+            <<"--batch-mode">>,
+            <<"--type">>, <<"luks2">>,
+            <<"--label">>, <<"lapee-nonvolatile">>,
+            <<"--cipher">>, <<"aes-xts-plain64">>,
+            <<"--key-size">>, <<"256">>,
+            <<"--hash">>, <<"sha256">>,
+            <<"--key-file">>, KeyFile,
+            Partition
+        ],
+        ?FORMAT_TIMEOUT_MS
+    ).
 
 has_format_marker(Partition) ->
     case file:open(Partition, [read, raw, binary]) of

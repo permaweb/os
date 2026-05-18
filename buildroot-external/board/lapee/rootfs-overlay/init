@@ -458,6 +458,35 @@ sbp_write_nonvolatile_marker() {
     return 0
 }
 
+sbp_wipe_nonvolatile_signatures() {
+    _part="$1"
+    _sectors=$(blockdev --getsz "$_part" 2>/dev/null || echo 0)
+    case "$_sectors" in ''|*[!0-9]*) _sectors=0 ;; esac
+    _wipe=32768
+    [ "$_sectors" -le 0 ] && _head_wipe="$_wipe" || _head_wipe="$_sectors"
+    [ "$_head_wipe" -gt "$_wipe" ] && _head_wipe="$_wipe"
+    if ! dd if=/dev/zero of="$_part" bs=512 count="$_head_wipe" conv=notrunc \
+            > /run/lapee/nonvolatile-wipe-head.log 2>&1; then
+        while IFS= read -r _line; do sbp_log "$_line"; done \
+            < /run/lapee/nonvolatile-wipe-head.log
+        sbp_log "ERROR: failed to clear old metadata at the start of $_part."
+        return 1
+    fi
+    if [ "$_sectors" -gt "$_wipe" ]; then
+        _seek=$(( _sectors - _wipe ))
+        if ! dd if=/dev/zero of="$_part" bs=512 count="$_wipe" \
+                seek="$_seek" conv=notrunc \
+                > /run/lapee/nonvolatile-wipe-tail.log 2>&1; then
+            while IFS= read -r _line; do sbp_log "$_line"; done \
+                < /run/lapee/nonvolatile-wipe-tail.log
+            sbp_log "ERROR: failed to clear old metadata at the end of $_part."
+            return 1
+        fi
+    fi
+    sync 2>/dev/null || true
+    return 0
+}
+
 sbp_format_nonvolatile_disk() {
     _dev="$1"
     _boot_esp="$2"
@@ -498,6 +527,9 @@ sbp_format_nonvolatile_disk() {
     fi
     if ! sbp_wait_nonvolatile_partition_node "$_part"; then
         sbp_log "ERROR: $_part did not appear after partitioning."
+        return 1
+    fi
+    if ! sbp_wipe_nonvolatile_signatures "$_part"; then
         return 1
     fi
     if ! sbp_write_nonvolatile_marker "$_part"; then
