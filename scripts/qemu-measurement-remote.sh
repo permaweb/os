@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
-IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-debug-signed.img}
+IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-measurement-remote}
 TARGET=${TARGET:-local}
 MEASUREMENT_DEVICE=${MEASUREMENT_DEVICE:-snp@1.0}
@@ -32,7 +32,7 @@ usage() {
     cat >&2 <<EOF
 usage:
   TARGET=ssh://hb@dev-1.forward.computer \\
-  IMAGE=build/images/lapee-runtime-no-tme-debug-signed.img \\
+  IMAGE=build/images/lapee-runtime-no-tme-signed.img \\
   MEASUREMENT_DEVICE=snp@1.0 \\
   ./scripts/qemu-measurement-remote.sh
 EOF

@@ -9,12 +9,20 @@ route green-zone admission through that common measurement protocol.
 
 ## Latest Checkpoint
 
-The TPM side of the measurement reorg is working through local/QEMU coverage.
-The real remote SEV-SNP path now boots, answers `~measurement@1.0/info`,
-`boot`, and `fresh`, and verifies both boot and fresh SNP measurements through
-`~measurement@1.0/verify` against AMD KDS endorsement material. A real
-remote SNP-to-SNP four-node green-zone now passes on
-`ssh://hb@dev-1.forward.computer`.
+The measurement reorg is live-validated on the signed production-shaped
+no-TME runtime image. Local TPM/QEMU, remote real SEV-SNP/QEMU, and mixed
+real Framework TPM + remote SEV-SNP + Yoga TPM green-zone flows all pass
+through `~measurement@1.0`.
+
+Current validated artefact:
+
+- image: `build/images/lapee-runtime-no-tme-signed.img`
+- image SHA-256:
+  `6c0fb241fdd1848549f214fa08b3659afd5a6a0ead22e8d95fb8ee2de98842e5`
+- signed UKI SHA-256 / release template value:
+  `p29uO0tz_uX9tUOM2BEqcu1naOMEjmApy8Kqa2QntSo`
+- cmdline:
+  `console=tty0 quiet loglevel=0 vt.global_cursor_default=0 rdinit=/init lapee.mode=prod lapee.wifi=enabled lapee.splash=blue LAPEE_NO_TME=1`
 
 ## Implemented
 
@@ -191,11 +199,44 @@ remote SNP-to-SNP four-node green-zone now passes on
   - `~measurement@1.0/fresh` returned a nonce-bound signed SNP measurement;
   - `~measurement@1.0/verify` accepted both boot and fresh measurements;
   - output ended with `=== remote measurement smoke PASSED ===`.
+- Local production-shaped TPM QEMU green-zone cluster passed on the current
+  signed no-TME image:
+  - command:
+    `IMG=build/images/lapee-runtime-no-tme-signed.img OUTDIR=build/qemu-green-zone-measurement-fix2-local BASE_PORT=19380 TIMEOUT=900 KEEP_RUNNING=0 ./scripts/qemu-green-zone-cluster.sh`;
+  - all four nodes reported UKI hash
+    `p29uO0tz_uX9tUOM2BEqcu1naOMEjmApy8Kqa2QntSo`;
+  - nodes 1-3 joined and produced ring-signed membership proofs;
+  - node 4 was rejected by template mismatch;
+  - output ended with `=== green-zone QEMU cluster PASSED ===`.
+- Remote real SEV-SNP production-shaped green-zone cluster passed on the
+  current signed no-TME image:
+  - command:
+    `TARGET=ssh://hb@dev-1.forward.computer IMAGE=build/images/lapee-runtime-no-tme-signed.img OUTDIR=build/qemu-green-zone-remote-snp-measurement-fix2 REMOTE_WORKDIR=/home/hb/lapee-green-zone-remote-snp-measurement-fix2 BASE_PORT=20040 TIMEOUT=1200 KEEP_RUNNING=0 MEASUREMENT_TIMEOUT_MS=30000 ./scripts/qemu-green-zone-remote-snp.sh`;
+  - all four guests reported `measurement-device = "snp@1.0"` and the same
+    UKI hash above;
+  - nodes 1-3 joined and produced ring-signed membership proofs;
+  - node 4 was rejected by template mismatch;
+  - output ended with `=== remote SNP green-zone QEMU cluster PASSED ===`;
+  - total remote run time was 172s.
+- Mixed real-device green-zone passed:
+  - remote SEV-SNP node initialized `book-shelf`;
+  - Framework `.207` joined the SNP node;
+  - Yoga `.210` joined through Framework `.207`;
+  - all three used the same release template constraints: signed UKI hash
+    `p29uO0tz_uX9tUOM2BEqcu1naOMEjmApy8Kqa2QntSo`, permanent node message,
+    `load-remote-devices = false`, and
+    `access-remote-cache-for-client = false`;
+  - Framework and Yoga both loaded `green-zone/book-shelf` and produced
+    ring-signed membership proofs;
+  - local `status.members` is not a convergent global roster. It includes
+    only members known through that node's admission history, plus AO-Core
+    commitment metadata in the raw message map.
 
 ## Not Yet Verified
 
-- Mixed TPM/real-SNP green-zone behavior across local and remote hosts.
-- Production image on real hardware after the measurement reorg.
+- TME-enabled runtime image after the measurement reorg.
+- Nonvolatile green-zone rejoin on the current production-shaped measurement
+  image after a real Framework power cycle.
 
 ## Known Gaps
 
@@ -211,8 +252,9 @@ remote SNP-to-SNP four-node green-zone now passes on
 
 ## Next Steps
 
-1. Run mixed TPM/real-SNP green-zone admission across local and remote hosts.
+1. Reboot the Framework with its nonvolatile green-zone disk and confirm it
+   can rejoin via Yoga using the persisted ring material.
 2. Add an SNP-specific green-zone template check against real SNP evidence.
-3. Boot the production measurement image on real hardware.
+3. Build and validate the signed TME runtime image.
 4. Decide whether live SNP measurements should opportunistically embed AMD KDS
    endorsement material in `evidence.certificates` after successful fetches.

@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
-IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-measurement-snp-debug-serial-quiet-signed.img}
+IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone-remote-snp}
 TARGET=${TARGET:-ssh://hb@dev-1.forward.computer}
 REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests/green-zone-snp}
@@ -36,7 +36,7 @@ usage() {
     cat >&2 <<EOF
 usage:
   TARGET=ssh://hb@dev-1.forward.computer \\
-  IMAGE=build/images/lapee-measurement-snp-debug-serial-quiet-signed.img \\
+  IMAGE=build/images/lapee-runtime-no-tme-signed.img \\
   ./scripts/qemu-green-zone-remote-snp.sh
 EOF
 }
