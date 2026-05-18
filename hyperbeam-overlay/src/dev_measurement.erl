@@ -263,12 +263,13 @@ measurement_body_locked(Opts) ->
                 end,
                 Opts),
             trace(Opts, "body node message ready", []),
-            Node = ensure_committed(Node0, Opts),
-            Body = #{<<"system">> => System, <<"node">> => Node},
+            Body = canonical_payload(
+                #{<<"system">> => System, <<"node">> => Node0},
+                Opts),
             persistent_term:put({dev_measurement, body}, Body),
             persistent_term:put(
                 {dev_measurement, body_id},
-                hb_message:id(Body, all, Opts)),
+                measurement_body_id(Body, Opts)),
             trace(Opts, "body cached", []),
             Body
     end.
@@ -278,14 +279,14 @@ measurement_body_id(Body, Opts) when is_map(Body) ->
 
 verify_peer_url(Url, Req, Opts) ->
     with_raw_ok(fun() ->
-        Boot = detached_peer_payload(response_body(
+        Boot = peer_measurement_payload(response_body(
             lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
             Opts), Opts),
         Subject = detached_peer_payload(response_body(
             lapee_peer_http:get(Url, <<"/~measurement@1.0/subject">>, Opts),
             Opts), Opts),
         FreshNonce = crypto:strong_rand_bytes(32),
-        Fresh = detached_peer_payload(response_body(
+        Fresh = peer_measurement_payload(response_body(
             lapee_peer_http:get(
                 Url,
                 <<"/~measurement@1.0/fresh?nonce=",
@@ -347,6 +348,99 @@ verify_peer_url(Url, Req, Opts) ->
         ok = store_peer_attestation(Signed, Opts),
         {ok, Signed}
     end).
+
+peer_measurement_payload(Msg, Opts) ->
+    materialize_peer_measurement(
+        measurement_payload(detached_peer_payload(Msg, Opts), Opts),
+        Opts).
+
+measurement_payload(Link, Opts) when ?IS_LINK(Link) ->
+    measurement_payload(response_body(Link, Opts), Opts);
+measurement_payload(Msg, Opts) when is_map(Msg) ->
+    Normalized = normalize_top_keys(Msg),
+    case hb_maps:get(<<"type">>, Normalized, undefined, Opts) of
+        ?TYPE ->
+            Normalized;
+        _ ->
+            Decoded = normalize_top_keys(hb_link:decode_all_links(Msg)),
+            case first_defined([
+                    hb_maps:get(<<"measurement">>, Decoded, undefined, Opts),
+                    hb_maps:get(measurement, Decoded, undefined, Opts),
+                    hb_maps:get(<<"body">>, Decoded, undefined, Opts),
+                    hb_maps:get(body, Decoded, undefined, Opts)
+                ]) of
+                undefined ->
+                    throw({measurement_error, #{
+                        <<"peer-measurement-payload">> =>
+                            summarize_peer_shape(Decoded)
+                    }});
+                Payload ->
+                    measurement_payload(Payload, Opts)
+            end
+    end;
+measurement_payload(Measurement, _Opts) ->
+    Measurement.
+
+materialize_peer_measurement(Measurement, Opts) when is_map(Measurement) ->
+    Decoded = normalize_top_keys(Measurement),
+    lists:foldl(
+        fun(Key, Acc) ->
+            case hb_maps:get(Key, Acc, undefined, Opts) of
+                undefined -> Acc;
+                Value -> Acc#{Key => materialize_peer_value(Value, Opts)}
+            end
+        end,
+        Decoded,
+        [<<"body">>, <<"evidence">>, <<"secret-recipient">>]);
+materialize_peer_measurement(Measurement, _Opts) ->
+    Measurement.
+
+materialize_peer_value(Link, Opts) when ?IS_LINK(Link) ->
+    hb_cache:ensure_all_loaded(Link, Opts);
+materialize_peer_value(Value, _Opts) ->
+    Value.
+
+normalize_top_keys(Msg) when is_map(Msg) ->
+    maps:from_list(
+        [{normalize_key(Key), Value} || {Key, Value} <- maps:to_list(Msg)]);
+normalize_top_keys(Value) ->
+    Value.
+
+normalize_key(Key) when is_binary(Key) -> Key;
+normalize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
+normalize_key(Key) -> Key.
+
+summarize_peer_shape(Msg) when is_map(Msg) ->
+    #{
+        <<"keys">> => [summarize_key(Key) || Key <- maps:keys(Msg)],
+        <<"value-classes">> => maps:from_list(
+            [
+                {summarize_key(Key), summarize_value(Value)}
+             || {Key, Value} <- maps:to_list(Msg)
+            ])
+    };
+summarize_peer_shape(Value) ->
+    summarize_value(Value).
+
+summarize_key(Key) when is_binary(Key) -> Key;
+summarize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
+summarize_key(Key) -> hb_util:bin(Key).
+
+summarize_value(Value) when is_map(Value) ->
+    #{<<"class">> => <<"map">>,
+      <<"keys">> => [summarize_key(Key) || Key <- maps:keys(Value)]};
+summarize_value(Value) when is_list(Value) ->
+    #{<<"class">> => <<"list">>, <<"length">> => length(Value)};
+summarize_value(Value) when is_binary(Value) ->
+    #{<<"class">> => <<"binary">>, <<"size">> => byte_size(Value)};
+summarize_value(Value) when is_atom(Value) ->
+    #{<<"class">> => <<"atom">>, <<"value">> => atom_to_binary(Value, utf8)};
+summarize_value(Value) when is_integer(Value) ->
+    #{<<"class">> => <<"integer">>, <<"value">> => Value};
+summarize_value(Value) when is_tuple(Value) ->
+    #{<<"class">> => <<"tuple">>, <<"size">> => tuple_size(Value)};
+summarize_value(_) ->
+    #{<<"class">> => <<"other">>}.
 
 verify_measurement_body(Measurement, Req, Opts) ->
     {ok, #{<<"status">> := 200, <<"body">> := Body}} =
@@ -455,13 +549,26 @@ ensure_same_subject(A, B, Opts) ->
 
 ensure_subject_matches_measurement(Subject, Measurement, Opts) ->
     Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
-    case {measurement_device(Subject, Opts), measurement_device(Measurement, Opts),
-          stable_id(Subject, Opts), stable_id(Recipient, Opts)} of
+    SubjectDevice = measurement_device(Subject, Opts),
+    MeasurementDevice = measurement_device(Measurement, Opts),
+    SubjectID = secret_recipient_id(Subject, Opts),
+    RecipientID = secret_recipient_id(Recipient, Opts),
+    case {SubjectDevice, MeasurementDevice, SubjectID, RecipientID} of
         {Device, Device, ID, ID} -> ok;
         _ ->
             throw({measurement_error,
-                   #{<<"secret-recipient">> =>
-                        <<"subject does not match measurement recipient">>}})
+                   #{
+                       <<"secret-recipient">> =>
+                           <<"subject does not match measurement recipient">>,
+                       <<"subject-device">> => SubjectDevice,
+                       <<"measurement-device">> => MeasurementDevice,
+                       <<"subject-id">> => SubjectID,
+                       <<"recipient-id">> => RecipientID,
+                       <<"subject-identity">> =>
+                           secret_recipient_identity(Subject, Opts),
+                       <<"recipient-identity">> =>
+                           secret_recipient_identity(Recipient, Opts)
+                   }})
     end.
 
 peer_attestation_scope(Url, Boot, Fresh, Subject, Req, Opts) ->
@@ -640,26 +747,28 @@ response_body({ok, Msg}, Opts) ->
     response_body(Msg, Opts);
 response_body({error, Reason}, _Opts) ->
     throw({measurement_error, Reason});
-response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
-response_body(#{<<"body">> := Body} = Msg, Opts) ->
-    case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
-        ?TYPE -> Msg;
-        _ -> response_body(Body, Opts)
+response_body(Msg, Opts) when is_map(Msg) ->
+    Normalized = normalize_top_keys(Msg),
+    Status = hb_maps:get(<<"status">>, Normalized, undefined, Opts),
+    Body = hb_maps:get(<<"body">>, Normalized, undefined, Opts),
+    Type = hb_maps:get(<<"type">>, Normalized, undefined, Opts),
+    case {Status, Body, Type} of
+        {Status, Body, _} when is_integer(Status), Status >= 400 ->
+            throw({measurement_error, Body});
+        {Status, Body, _} when is_integer(Status), Body =/= undefined ->
+            response_body(Body, Opts);
+        {_, Body, ?TYPE} when Body =/= undefined ->
+            Normalized;
+        {_, Body, _} when Body =/= undefined ->
+            response_body(Body, Opts);
+        _ ->
+            Normalized
     end;
 response_body(Body, _Opts) ->
     Body.
 
 materialized_response_body(Msg, Opts) ->
     hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts).
-
-ensure_committed(Msg, Opts) when is_map(Msg) ->
-    case hb_message:signers(Msg, Opts) of
-        [] -> hb_message:commit(Msg, Opts);
-        _ -> Msg
-    end;
-ensure_committed(Msg, _Opts) ->
-    Msg.
 
 nonce_for(boot, _Req, _Opts) ->
     crypto:strong_rand_bytes(32);
@@ -732,11 +841,44 @@ stable_id(Msg, Opts) when is_map(Msg) ->
 stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
 stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
-    Bin;
+    try hb_util:native_id(Bin) of
+        Native when byte_size(Native) =:= 32 -> Bin;
+        _ -> hb_util:encode(hb_crypto:sha256(Bin))
+    catch
+        _:_ -> hb_util:encode(hb_crypto:sha256(Bin))
+    end;
 stable_id(Bin, _Opts) when is_binary(Bin) ->
     hb_util:encode(hb_crypto:sha256(Bin));
 stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
+
+secret_recipient_id(Subject, Opts) ->
+    case secret_recipient_identity(Subject, Opts) of
+        Identity when map_size(Identity) > 0 -> stable_id(Identity, Opts);
+        _ -> stable_id(Subject, Opts)
+    end.
+
+secret_recipient_identity(Subject, Opts) when is_map(Subject) ->
+    maps:from_list(
+        [
+            {Key, canonical_payload(Value, Opts)}
+         || Key <- secret_recipient_identity_keys(),
+            Value <- [hb_maps:get(Key, Subject, undefined, Opts)],
+            Value =/= undefined
+        ]);
+secret_recipient_identity(_Subject, _Opts) ->
+    #{}.
+
+secret_recipient_identity_keys() ->
+    [
+        <<"type">>,
+        <<"version">>,
+        <<"measurement-device">>,
+        <<"method">>,
+        <<"key-id">>,
+        <<"public-material">>,
+        <<"binding">>
+    ].
 
 canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_payload(response_body(Link, Opts), Opts);
@@ -745,19 +887,19 @@ canonical_payload(Msg, Opts) when is_map(Msg) ->
         [
             {Key, Value}
          || {Key, Value} <- hb_maps:to_list(Msg, Opts),
-            Key =/= <<"commitments">>,
-            Key =/= <<"ao-types">>
+            not detached_transport_key(Key)
         ]),
     Loaded = hb_cache:ensure_all_loaded(Body, Opts),
     maps:from_list(
         [
             {Key, canonical_payload(Value, Opts)}
          || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
-            Key =/= <<"commitments">>,
-            Key =/= <<"ao-types">>
+            not detached_transport_key(Key)
         ]);
 canonical_payload(List, Opts) when is_list(List) ->
     [canonical_payload(Value, Opts) || Value <- List];
+canonical_payload(Value, _Opts) when is_atom(Value) ->
+    hb_util:bin(Value);
 canonical_payload(Value, _Opts) ->
     Value.
 
@@ -782,7 +924,7 @@ detached_peer_payload(Link, Opts) when ?IS_LINK(Link) ->
 detached_peer_payload(Msg, Opts) when is_map(Msg) ->
     maps:from_list(
         [
-            {Key, detached_peer_payload(Value, Opts)}
+            {normalize_key(Key), detached_peer_payload(Value, Opts)}
          || {Key, Value} <- maps:to_list(Msg),
             not detached_transport_key(Key)
         ]);
@@ -803,10 +945,11 @@ with_ok(Fun, Error) ->
         {ok, #{<<"status">> => 200, <<"body">> => Fun()}}
     catch
         throw:{measurement_error, Reason} -> error_resp(500, Error, Reason);
-        Class:Reason ->
+        Class:Reason:Stack ->
             error_resp(500, Error, #{
                 <<"class">> => reason_to_text(Class),
-                <<"reason">> => reason_to_text(Reason)
+                <<"reason">> => reason_to_text(Reason),
+                <<"stack">> => reason_to_text(Stack)
             })
     end.
 
@@ -814,10 +957,11 @@ with_raw_ok(Fun) ->
     try Fun()
     catch
         throw:{measurement_error, Reason} -> {error, Reason};
-        Class:Reason ->
+        Class:Reason:Stack ->
             {error, #{
                 <<"class">> => reason_to_text(Class),
-                <<"reason">> => reason_to_text(Reason)
+                <<"reason">> => reason_to_text(Reason),
+                <<"stack">> => reason_to_text(Stack)
             }}
     end.
 
@@ -846,6 +990,10 @@ stable_id_uses_ao_core_binary_rules_test() ->
     HumanID = hb_util:human_id(NativeID),
     ?assertEqual(HumanID, stable_id(NativeID, #{})),
     ?assertEqual(HumanID, stable_id(HumanID, #{})),
+    InvalidHumanID = <<(binary:part(HumanID, 0, 42))/binary, "!">>,
+    ?assertEqual(
+        hb_util:encode(hb_crypto:sha256(InvalidHumanID)),
+        stable_id(InvalidHumanID, #{})),
     ?assertEqual(
         hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
         stable_id(<<"plain challenge">>, #{})).
@@ -863,3 +1011,172 @@ measurement_body_id_ignores_transport_commitments_test() ->
     ?assertEqual(
         measurement_body_id(Body, #{}),
         measurement_body_id(WithCommitment, #{})).
+
+measurement_body_id_ignores_atom_transport_keys_test() ->
+    Body = #{<<"system">> => #{<<"kernel">> => <<"same">>}},
+    WithAtomTransport = Body#{
+        commitments => #{<<"foreign-id">> => #{<<"type">> => <<"httpsig">>}},
+        'ao-types' => <<"system=\"message\"">>
+    },
+    ?assertEqual(
+        measurement_body_id(Body, #{}),
+        measurement_body_id(WithAtomTransport, #{})).
+
+measurement_body_id_is_atom_transport_stable_test() ->
+    Native = #{
+        <<"system">> => #{
+            <<"drivers">> => [dev_tpm2, dev_measurement],
+            <<"available">> => true
+        },
+        <<"node">> => #{<<"initialized">> => permanent}
+    },
+    Wire = #{
+        <<"system">> => #{
+            <<"drivers">> => [<<"dev_tpm2">>, <<"dev_measurement">>],
+            <<"available">> => <<"true">>
+        },
+        <<"node">> => #{<<"initialized">> => <<"permanent">>}
+    },
+    ?assertEqual(
+        measurement_body_id(Native, #{}),
+        measurement_body_id(Wire, #{})).
+
+measurement_body_id_ignores_nested_invalid_commitment_ids_test() ->
+    NativeID = crypto:strong_rand_bytes(32),
+    InvalidHumanID =
+        <<(binary:part(hb_util:human_id(NativeID), 0, 42))/binary, "!">>,
+    Body = #{
+        <<"system">> => #{<<"kernel">> => <<"same">>},
+        <<"node">> => #{<<"address">> => <<"node-address">>}
+    },
+    WithNestedCommitment = Body#{
+        <<"node">> => #{
+            <<"address">> => <<"node-address">>,
+            <<"commitments">> => #{
+                InvalidHumanID => #{<<"type">> => <<"httpsig">>}
+            }
+        }
+    },
+    ?assertEqual(
+        measurement_body_id(Body, #{}),
+        measurement_body_id(WithNestedCommitment, #{})).
+
+peer_measurement_payload_unwraps_committed_measurement_key_test() ->
+    Measurement = #{
+        <<"type">> => ?TYPE,
+        <<"body">> => #{<<"system">> => #{}, <<"node">> => #{}},
+        <<"evidence">> => #{<<"quote">> => <<"ok">>},
+        <<"secret-recipient">> => #{<<"method">> => <<"test">>}
+    },
+    Wrapper = #{
+        <<"measurement">> => Measurement,
+        <<"commitments">> => #{
+            <<"foreign-id">> => #{
+                <<"committed">> => [<<"measurement">>],
+                <<"type">> => <<"hmac-sha256">>
+            }
+        }
+    },
+    ?assertEqual(Measurement, peer_measurement_payload(Wrapper, #{})),
+    ?assertEqual(ok, ensure_measurement_shape(
+        peer_measurement_payload(Wrapper, #{}))).
+
+peer_measurement_payload_accepts_atom_top_level_keys_test() ->
+    Measurement = #{
+        type => ?TYPE,
+        body => #{<<"system">> => #{}, <<"node">> => #{}},
+        evidence => #{<<"quote">> => <<"ok">>},
+        'secret-recipient' => #{<<"method">> => <<"test">>}
+    },
+    ?assertEqual(
+        #{
+            <<"type">> => ?TYPE,
+            <<"body">> => #{<<"system">> => #{}, <<"node">> => #{}},
+            <<"evidence">> => #{<<"quote">> => <<"ok">>},
+            <<"secret-recipient">> => #{<<"method">> => <<"test">>}
+        },
+        peer_measurement_payload(Measurement, #{})).
+
+secret_recipient_match_uses_wrapping_identity_test() ->
+    Subject = #{
+        <<"type">> => <<"lapee-tpm-credential-subject">>,
+        <<"version">> => <<"1.0">>,
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"method">> => <<"tpm2-activate-credential">>,
+        <<"key-id">> => <<"ak-name">>,
+        <<"public-material">> => #{<<"ak-public">> => <<"ak">>},
+        <<"binding">> => #{<<"pcr">> => 15},
+        <<"tpm-properties">> => #{<<"available">> => true}
+    },
+    Recipient = Subject#{
+        <<"commitments">> => #{<<"ignored">> => #{<<"type">> => <<"x">>}},
+        <<"tpm-properties">> => #{<<"available">> => <<"true">>}
+    },
+    Measurement = #{
+        <<"type">> => ?TYPE,
+        <<"body">> => #{<<"system">> => #{}, <<"node">> => #{}},
+        <<"evidence">> => #{},
+        <<"measurement-device">> => <<"tpm@2.0a">>,
+        <<"secret-recipient">> => Recipient
+    },
+    ?assertEqual(ok, ensure_subject_matches_measurement(
+        Subject, Measurement, #{})),
+    ?assertThrow(
+        {measurement_error, _},
+        ensure_subject_matches_measurement(
+            Subject#{<<"key-id">> => <<"other-ak">>},
+            Measurement,
+            #{})).
+
+detached_peer_payload_normalizes_atom_keys_test() ->
+    ?assertEqual(
+        #{
+            <<"measurement-device">> => <<"tpm@2.0a">>,
+            <<"nested">> => #{<<"key">> => <<"value">>}
+        },
+        detached_peer_payload(
+            #{
+                'measurement-device' => <<"tpm@2.0a">>,
+                nested => #{key => <<"value">>},
+                commitments => #{<<"ignored">> => #{}}
+            },
+            #{})).
+
+response_body_unwraps_atom_keyed_http_wrappers_test() ->
+    Subject = #{
+        'measurement-device' => <<"tpm@2.0a">>,
+        method => <<"tpm2-activate-credential">>
+    },
+    Wrapped = #{
+        <<"status">> => 200,
+        <<"body">> => #{
+            status => 200,
+            body => Subject
+        }
+    },
+    ?assertEqual(
+        #{
+            <<"measurement-device">> => <<"tpm@2.0a">>,
+            <<"method">> => <<"tpm2-activate-credential">>
+        },
+        response_body(Wrapped, #{})).
+
+peer_measurement_payload_keeps_bundled_body_values_test() ->
+    Body = #{
+        <<"commitments">> => #{
+            <<"body-id">> => #{
+                <<"committed">> => [<<"node">>, <<"system">>],
+                <<"type">> => <<"hmac-sha256">>
+            }
+        },
+        <<"node">> => #{<<"initialized">> => permanent},
+        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"ok">>}}
+    },
+    Measurement = #{
+        <<"type">> => ?TYPE,
+        <<"body">> => Body,
+        <<"evidence">> => #{<<"quote">> => <<"ok">>},
+        <<"secret-recipient">> => #{<<"method">> => <<"test">>}
+    },
+    #{<<"body">> := LoadedBody} = peer_measurement_payload(Measurement, #{}),
+    ?assertEqual(maps:without([<<"commitments">>], Body), LoadedBody).

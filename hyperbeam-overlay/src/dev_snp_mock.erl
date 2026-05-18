@@ -157,6 +157,8 @@ canonical_payload(Msg, Opts) when is_map(Msg) ->
         ]);
 canonical_payload(List, Opts) when is_list(List) ->
     [canonical_payload(Value, Opts) || Value <- List];
+canonical_payload(Value, _Opts) when is_atom(Value) ->
+    hb_util:bin(Value);
 canonical_payload(Value, _Opts) ->
     Value.
 

@@ -1678,9 +1678,17 @@ fi
 # file is last so it keeps the enforced devices and on/start PCR-15
 # boot-attestation hook.
 LAPEE_JSON=/etc/lapee/lapee.json
+DEBUG_CONFIG_JSON=/tmp/lapee-debug.json
 
 status "Preparing HyperBEAM configuration."
-HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_MEASUREMENT_TRACE; then
+    printf '%s\n' '{"measurement-trace":true}' > "$DEBUG_CONFIG_JSON" \
+        2>/dev/null || true
+    HB_CONFIG="$DEBUG_CONFIG_JSON,$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+    trace "hyperbeam: measurement trace enabled"
+else
+    HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+fi
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
 
@@ -1781,4 +1789,9 @@ else
     trace "hyperbeam: stdout/stderr -> /dev/null"
     exec >/dev/null 2>&1
 fi
-exec /usr/lib/hyperbeam/bin/hb foreground
+if /usr/lib/hyperbeam/bin/hb foreground; then
+    halt_boot "HyperBEAM exited normally."
+else
+    _hb_rc=$?
+    halt_boot "HyperBEAM exited with status $_hb_rc."
+fi

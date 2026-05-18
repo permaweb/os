@@ -59,9 +59,8 @@
 %%%    template, peer-attestation, credential, and encrypted-wallet. Nested
 %%%    transport commitments are ignored for this ID calculation so an attacker
 %%%    cannot smuggle a signed ID into a modified payload. JSON type metadata is
-%%%    ignored for locally generated payloads, but preserved for the
-%%%    `peer-attestation' because that assertion is produced from JSON-restored
-%%%    peer evidence.
+%%%    transport metadata and is ignored for this authorization hash; scalar
+%%%    type checks happen in the peer-attestation and measurement verifiers.
 %%% 6. The joiner verifies the ring-signed authorization, checks every payload
 %%%    ID, activates the credential locally, decrypts the wallet, confirms
 %%%    the wallet address equals the expected ring address, and installs the
@@ -354,7 +353,7 @@ authorization_id_fields() ->
         {<<"ring-reference-id">>, <<"ring-reference">>, strip_json_metadata},
         {<<"green-zone-id">>, <<"green-zone">>, strip_json_metadata},
         {<<"template-id">>, <<"template">>, strip_json_metadata},
-        {<<"peer-attestation-id">>, <<"peer-attestation">>, keep_json_metadata},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>, strip_json_metadata},
         {<<"credential-id">>, <<"credential">>, strip_json_metadata},
         {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>, strip_json_metadata}
     ].
@@ -396,9 +395,11 @@ canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
     canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
 canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
     Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
+    Types = authorization_ao_types(Loaded),
     maps:from_list(
         [
-            {Key, canonical_authorization_payload(Value, Opts, MetadataMode)}
+            {Key, canonical_authorization_value(
+                Key, Value, Types, Opts, MetadataMode)}
          || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
             not authorization_meta_key(Key, MetadataMode)
         ]);
@@ -407,12 +408,60 @@ canonical_authorization_payload(List, Opts, MetadataMode) when is_list(List) ->
         canonical_authorization_payload(Value, Opts, MetadataMode)
      || Value <- List
     ];
+canonical_authorization_payload(Value, _Opts, _MetadataMode)
+        when is_atom(Value) ->
+    hb_util:bin(Value);
 canonical_authorization_payload(Value, _Opts, _MetadataMode) ->
     Value.
+
+canonical_authorization_value(Key, Value, Types, Opts, MetadataMode) ->
+    authorization_typed_value(
+        maps:get(Key, Types, undefined),
+        canonical_authorization_payload(Value, Opts, MetadataMode)).
 
 authorization_meta_key(<<"commitments">>, _MetadataMode) -> true;
 authorization_meta_key(<<"ao-types">>, strip_json_metadata) -> true;
 authorization_meta_key(_Key, _MetadataMode) -> false.
+
+authorization_ao_types(Msg) ->
+    case maps:get(<<"ao-types">>, Msg, undefined) of
+        Types when is_binary(Types) ->
+            maps:from_list(
+                [Parsed
+                 || Part <- binary:split(Types, <<",">>, [global]),
+                    Parsed <- [authorization_ao_type(Part)],
+                    Parsed =/= undefined]);
+        _ ->
+            #{}
+    end.
+
+authorization_ao_type(Part0) ->
+    Part = iolist_to_binary(string:trim(binary_to_list(Part0))),
+    case binary:split(Part, <<"=">>) of
+        [RawKey, RawType0] ->
+            Key = iolist_to_binary(string:trim(binary_to_list(RawKey))),
+            Type0 = iolist_to_binary(string:trim(binary_to_list(RawType0))),
+            {Key, trim_type_quotes(Type0)};
+        _ ->
+            undefined
+    end.
+
+trim_type_quotes(<<"\"", Rest/binary>>) ->
+    case Rest of
+        <<Inner:(byte_size(Rest) - 1)/binary, "\"">> -> Inner;
+        _ -> Rest
+    end;
+trim_type_quotes(Type) ->
+    Type.
+
+authorization_typed_value(<<"atom">>, Value) ->
+    hb_util:bin(Value);
+authorization_typed_value(<<"integer">>, Value) when is_binary(Value) ->
+    try binary_to_integer(Value)
+    catch _:_ -> Value
+    end;
+authorization_typed_value(_Type, Value) ->
+    Value.
 
 stable_uncommitted_id(Msg) ->
     hb_message:id(
@@ -1163,14 +1212,14 @@ assert_authorization_ids(Authorization, Admission, Opts) ->
         authorization_id_fields()).
 
 assert_admission_validity(Admission, Opts) ->
-    Now = erlang:system_time(second),
-    Skew = clock_skew_seconds(Opts),
     Validity = hb_maps:get(<<"validity">>, Admission, #{}, Opts),
     NotBefore = hb_maps:get(<<"not-before-unix">>, Validity, undefined, Opts),
     Expires = hb_maps:get(<<"expires-at-unix">>, Validity, undefined, Opts),
+    % The admission's replay protection is the fresh admission-nonce above.
+    % Keep the signed validity window as metadata without requiring commodity
+    % laptop RTCs to agree before a ring can form.
     case {NotBefore, Expires} of
-        {NB, Ex} when is_integer(NB), is_integer(Ex),
-                      NB =< Now + Skew, Ex + Skew >= Now ->
+        {NB, Ex} when is_integer(NB), is_integer(Ex), NB =< Ex ->
             ok;
         _ -> bad_admission(<<"validity">>)
     end.
@@ -1541,6 +1590,58 @@ admission_body_accepts_expected_ring_test() ->
             },
             #{})).
 
+admission_body_accepts_skewed_validity_when_nonce_matches_test() ->
+    Wallet = ar_wallet:new(),
+    Future = erlang:system_time(second) + 14400,
+    Admission0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
+    Admission1 = Admission0#{
+        <<"validity">> => #{
+            <<"not-before-unix">> => Future,
+            <<"expires-at-unix">> => Future + 300
+        }
+    },
+    Admission = Admission1#{
+        <<"authorization">> => admission_authorization(Admission1, Wallet, #{})
+    },
+    ?assertEqual(ok,
+        assert_admission_body(
+            Admission,
+            <<"http://self.example">>,
+            <<"nonce">>,
+            #{
+                <<"name">> => test_name(),
+                <<"expected-ring-address">> => wallet_address(Wallet)
+            },
+            #{})).
+
+admission_body_rejects_invalid_validity_window_test() ->
+    Wallet = ar_wallet:new(),
+    Now = erlang:system_time(second),
+    Admission0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
+    Admission1 = Admission0#{
+        <<"validity">> => #{
+            <<"not-before-unix">> => Now + 300,
+            <<"expires-at-unix">> => Now
+        }
+    },
+    Admission = Admission1#{
+        <<"authorization">> => admission_authorization(Admission1, Wallet, #{})
+    },
+    ?assertThrow(
+        {green_zone_error, #{
+            <<"error">> := <<"admission-invalid">>,
+            <<"field">> := <<"validity">>
+        }},
+        assert_admission_body(
+            Admission,
+            <<"http://self.example">>,
+            <<"nonce">>,
+            #{
+                <<"name">> => test_name(),
+                <<"expected-ring-address">> => wallet_address(Wallet)
+            },
+            #{})).
+
 admission_rejects_payload_commitment_id_substitution_test() ->
     Wallet = ar_wallet:new(),
     Admission0 = test_admission(Wallet),
@@ -1564,6 +1665,35 @@ admission_rejects_payload_commitment_id_substitution_test() ->
                 <<"expected-ring-address">> => wallet_address(Wallet)
             },
             #{})).
+
+admission_authorization_ids_survive_json_bundle_roundtrip_test() ->
+    Wallet = ar_wallet:new(),
+    Opts = #{
+        <<"priv-wallet">> => Wallet,
+        <<"commitment-device">> => <<"httpsig@1.0">>
+    },
+    Base0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
+    RingReference = hb_maps:get(<<"ring-reference">>, Base0, #{}, Opts),
+    Admission0 = Base0#{
+        <<"joiner-url">> => <<"http://peer.example">>,
+        <<"peer-attestation">> =>
+            signed_peer_attestation(Wallet, #{}, RingReference)
+    },
+    Admission = Admission0#{
+        <<"authorization">> => admission_authorization(
+            Admission0, Wallet, Opts)
+    },
+    {ok, JSON} = dev_codec_json:to(
+        #{<<"status">> => 200, <<"body">> => Admission},
+        #{<<"bundle">> => true},
+        Opts),
+    #{<<"body">> := DecodedAdmission} = json:decode(JSON),
+    Authorization = response_body(
+        hb_maps:get(<<"authorization">>, DecodedAdmission, undefined, Opts),
+        Opts),
+    ?assertEqual(
+        ok,
+        assert_authorization_ids(Authorization, DecodedAdmission, Opts)).
 
 authorization_payload_id_is_transport_stable_test() ->
     Wallet = ar_wallet:new(),
@@ -1598,6 +1728,19 @@ authorization_payload_id_uses_ao_core_binary_rules_test() ->
     ?assertEqual(
         hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
         stable_authorization_payload_id(<<"plain challenge">>, #{})).
+
+authorization_payload_id_is_atom_transport_stable_test() ->
+    Native = #{
+        <<"verification">> => #{<<"verified">> => true},
+        <<"drivers">> => [dev_tpm2, dev_measurement]
+    },
+    Wire = #{
+        <<"verification">> => #{<<"verified">> => <<"true">>},
+        <<"drivers">> => [<<"dev_tpm2">>, <<"dev_measurement">>]
+    },
+    ?assertEqual(
+        stable_authorization_payload_id(Native, #{}),
+        stable_authorization_payload_id(Wire, #{})).
 
 missing_member_url_is_transport_stable_test() ->
     ?assertEqual(<<>>, null_or_url(undefined)).
