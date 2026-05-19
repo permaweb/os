@@ -101,7 +101,7 @@ BR2_PACKAGE_IW=y
 BR2_PACKAGE_IPROUTE2=y
 
 # Encrypted non-volatile storage. The provisioner uses parted to create the
-# marker partition; runtime uses cryptsetup + ext4 after a green-zone key is
+# marker partition; runtime uses cryptsetup + ext4 after a zone key is
 # available.
 BR2_PACKAGE_CRYPTSETUP=y
 BR2_PACKAGE_E2FSPROGS=y

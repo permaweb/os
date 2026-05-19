@@ -1,8 +1,8 @@
 %%% @doc LapEE non-volatile store activation.
 %%%
 %%% This module is deliberately not an HTTP device. It is called only after a
-%%% green-zone key exists, scans first for a zone-specific GPT partition label
-%%% and then for `GREENZONE_PRIMARY', and uses the zone AES secret to open or
+%%% zone key exists, scans first for a zone-specific GPT partition label
+%%% and then for `ZONE_PRIMARY', and uses the zone AES secret to open or
 %%% initialize an encrypted ext4 volume. On success the mounted LMDB becomes
 %%% the first local HyperBEAM store. Missing keys from the temporary boot LMDB
 %%% are copied across, then current-boot pseudo-paths are refreshed into the
@@ -11,8 +11,8 @@
 
 -export([activate/4, status/1]).
 
--define(PRIMARY_LABEL, <<"GREENZONE_PRIMARY">>).
--define(ZONE_LABEL_PREFIX, <<"GREENZONE_">>).
+-define(PRIMARY_LABEL, <<"ZONE_PRIMARY">>).
+-define(ZONE_LABEL_PREFIX, <<"ZONE_">>).
 -define(MAX_ZONE_LABEL_PREFIX_BYTES, 26).
 -define(DEFAULT_MAPPER, <<"lapee-nonvolatile">>).
 -define(DEFAULT_MOUNT, <<"/var/lib/lapee/nonvolatile">>).
@@ -224,7 +224,7 @@ disk_key(Name, RingAddress, AES) ->
     crypto:hash(
         sha256,
         [
-            <<"LapEE green-zone nonvolatile storage v1">>,
+            <<"LapEE zone nonvolatile storage v1">>,
             0,
             Name,
             0,
@@ -287,7 +287,7 @@ zone_label_matches(RingAddress, Label) ->
             false
     end.
 
-zone_label_prefix_from_label(<<"GREENZONE_", Prefix/binary>>) ->
+zone_label_prefix_from_label(<<"ZONE_", Prefix/binary>>) ->
     Prefix;
 zone_label_prefix_from_label(_) ->
     undefined.
@@ -1026,27 +1026,27 @@ command_reason(Reason) ->
 -include_lib("eunit/include/eunit.hrl").
 
 clean_partition_label_test() ->
-    ?assertEqual(<<"GREENZONE_PRIMARY">>,
-        clean_partition_label(<<"GREENZONE_PRIMARY\n">>)),
-    ?assertEqual(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>,
-        clean_partition_label(<<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertEqual(<<"ZONE_PRIMARY">>,
+        clean_partition_label(<<"ZONE_PRIMARY\n">>)),
+    ?assertEqual(<<"ZONE_AMDKSQBj3lNcbuziC9imAOh31u">>,
+        clean_partition_label(<<"ZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
     ?assertEqual(undefined, clean_partition_label(<<"\n">>)).
 
 zone_label_matches_test() ->
     Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
-    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDK">>)),
-    ?assert(zone_label_matches(Ring, <<"GREENZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
-    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_AMDL">>)),
-    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_">>)),
-    ?assertNot(zone_label_matches(Ring, <<"GREENZONE_PRIMARY">>)).
+    ?assert(zone_label_matches(Ring, <<"ZONE_AMDK">>)),
+    ?assert(zone_label_matches(Ring, <<"ZONE_AMDKSQBj3lNcbuziC9imAOh31u">>)),
+    ?assertNot(zone_label_matches(Ring, <<"ZONE_AMDL">>)),
+    ?assertNot(zone_label_matches(Ring, <<"ZONE_">>)),
+    ?assertNot(zone_label_matches(Ring, <<"ZONE_PRIMARY">>)).
 
 select_most_specific_zone_partition_test() ->
     Ring = <<"AMDKSQBj3lNcbuziC9imAOh31uY5uxZbLt8819xSHhs">>,
     ?assertEqual(
-        {ok, <<"GREENZONE_AMDK">>, "/dev/sdb1"},
+        {ok, <<"ZONE_AMDK">>, "/dev/sdb1"},
         select_most_specific_zone_partition(Ring, [
-            {<<"GREENZONE_A">>, "/dev/sda1"},
-            {<<"GREENZONE_AMDK">>, "/dev/sdb1"}
+            {<<"ZONE_A">>, "/dev/sda1"},
+            {<<"ZONE_AMDK">>, "/dev/sdb1"}
         ])
     ).
 
@@ -1058,7 +1058,7 @@ parent_block_name_test() ->
     ?assertEqual(undefined, parent_block_name("nvme0n1")).
 
 gpt_entry_name_test() ->
-    Label = <<"GREENZONE_PRIMARY">>,
+    Label = <<"ZONE_PRIMARY">>,
     Label16 = unicode:characters_to_binary(Label, utf8, {utf16, little}),
     Pad = binary:copy(<<0>>, 72 - byte_size(Label16)),
     Entry = <<1:128, 0:(40 * 8), Label16/binary, Pad/binary>>,

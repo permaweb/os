@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qemu-operator-config-green-zone.sh -- prove USB config.json is attested.
+# qemu-operator-config-zone.sh -- prove USB config.json is attested.
 #
 # Boots two LapEE nodes under QEMU+OVMF+swtpm from the same signed image:
 #   * node 1 has ESP /EFI/boot/config.json with trusted-device-signers=[ADDR]
@@ -10,7 +10,7 @@
 #   * node 2 exposes the default empty trusted-device-signers list
 #   * both boot measurements contain the same values in body.body.node
 #   * verifier replay proves PCR15 commits to the attested node-message-id
-#   * green-zone init succeeds/fails according to signer-list templates
+#   * zone init succeeds/fails according to signer-list templates
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,7 +19,7 @@ BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMG=${IMG:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
-OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-operator-config-green-zone}
+OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-operator-config-zone}
 BASE_PORT=${BASE_PORT:-19120}
 TIMEOUT=${TIMEOUT:-420}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
@@ -83,7 +83,7 @@ fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{ca,nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
-SOCK_DIR=$(mktemp -d /tmp/lapee-config-gz.XXXXXX)
+SOCK_DIR=$(mktemp -d /tmp/lapee-config-zone.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
 {"trusted-device-signers":["$SIGNER"]}
@@ -280,7 +280,7 @@ wait_node() {
     return 1
 }
 
-echo "=== operator config green-zone QEMU smoke ==="
+echo "=== operator config zone QEMU smoke ==="
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 git status --short 2>/dev/null || true
 echo "qemu: $(qemu-system-x86_64 --version | head -n 1)"
@@ -328,20 +328,20 @@ for n in 1 2; do
 done
 echo ">> verifier proves PCR15 commits to each node-message-id"
 
-post_json 1 "/~green-zone@1.0/init" \
+post_json 1 "/~zone@1.0/init" \
     "$OUTDIR/with-signer-init.json" \
     "$OUTDIR/responses/node1-with-signer-init.json"
 jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
     "$OUTDIR/responses/node1-with-signer-init.json" >/dev/null
 
-post_json 2 "/~green-zone@1.0/init" \
+post_json 2 "/~zone@1.0/init" \
     "$OUTDIR/with-signer-init.json" \
     "$OUTDIR/responses/node2-with-signer-init.json"
 jq -e '.status == 400 and .body.error == "template-mismatch" and
        (.body."mismatch-path" | startswith("/node/trusted-device-signers"))' \
     "$OUTDIR/responses/node2-with-signer-init.json" >/dev/null
-echo ">> only configured node can initialize signer-required green-zone"
+echo ">> only configured node can initialize signer-required zone"
 
 echo ""
-echo "=== operator config green-zone QEMU smoke PASSED ==="
+echo "=== operator config zone QEMU smoke PASSED ==="
 echo "out: $OUTDIR"

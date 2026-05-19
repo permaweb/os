@@ -180,10 +180,9 @@ docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
                 'linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz' >> \"\$hash_file\"
     "
 
-# Re-generate defconfig when absent or when the external defconfig
-# changes. This preserves package build artefacts but keeps the
-# Buildroot .config aligned with the moving BR2_EXTERNAL tree during
-# the from-scratch-toolchain transition.
+# Re-generate defconfig when absent or when the external defconfig changes.
+# This preserves package build artefacts while keeping Buildroot .config
+# aligned with BR2_EXTERNAL inputs.
 DEFCONFIG_SHA=$(
     {
         shasum -a 256 "buildroot-external/configs/$DEFCONFIG"
@@ -313,12 +312,10 @@ if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
         "
 fi
 
-# Rebuild HyperBEAM when its Buildroot recipe changes. Buildroot
-# correctly tracks package source files once extracted, but it does not
-# automatically notice edits to BR2_EXTERNAL package makefiles. During
-# this toolchain transition those makefile hooks are exactly where
-# cross-compile fixes land, so stale release trees are more dangerous
-# than a short dirclean.
+# Rebuild HyperBEAM when its Buildroot recipe changes. Buildroot correctly
+# tracks package source files once extracted, but it does not automatically
+# notice edits to BR2_EXTERNAL package makefiles, where cross-compile settings
+# live.
 if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
         bash -c "test \"\$(cat /build/out/.lapee-hyperbeam-recipe.sha256 2>/dev/null)\" = '$HYPERBEAM_RECIPE_SHA'" 2>/dev/null; then
     echo "=== HyperBEAM recipe changed or untracked; cleaning HyperBEAM ==="

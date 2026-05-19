@@ -2,7 +2,7 @@
 %%%
 %%% This module is not preloaded by the production LapEE config and is not an
 %%% `auto' candidate. QEMU harnesses can explicitly preload/select it to prove
-%%% that green-zone depends on `~measurement@1.0' rather than TPM-specific
+%%% that zone depends on `~measurement@1.0' rather than TPM-specific
 %%% MakeCredential details.
 -module(dev_snp_mock).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,

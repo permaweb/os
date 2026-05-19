@@ -213,8 +213,8 @@ info(_Base, _Req, _Opts) ->
                           "(binary / bool / string / \"unknown\") "
                           "and a `_provenance' key listing the "
                           "source events that backed the derivation. "
-                          "Designed to compose directly with green-"
-                          "zone style predicates: "
+                          "Designed to compose directly with zone-style "
+                          "predicates: "
                           "\"claim.secure_boot.enabled == true AND "
                           "claim.tme.enabled == true AND "
                           "claim.kernel.uki_hash IN {X, Y, Z}\".">>,

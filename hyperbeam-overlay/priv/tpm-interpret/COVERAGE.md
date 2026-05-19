@@ -5,11 +5,6 @@ this library decodes, with citations to the primary sources for each.
 Maintained alongside the code; each entry names the module + function
 that implements it.
 
-> **Where this differs from COMPARISON.md:** COMPARISON.md ranks us
-> against other parsers. COVERAGE.md is the self-referential catalogue
-> of *what we do*, with citations, so an integrator knows exactly
-> what they can expect from the library.
-
 ## Scope
 
 We decode:
@@ -490,16 +485,17 @@ quirk). Every fixture is parse-tested by the eunit harness in
 ## 5. Known gaps (explicit, deliberate)
 
 - **IMA per-file runtime event log (PCR 10)** — only the final PCR
-  10 digest is in the attestation envelope. Per-file chain
-  transport requires an envelope schema bump in `~tpm@2.0a`.
+  10 digest is in the measurement envelope. Per-file chain transport
+  requires a measurement evidence schema change.
 - **Per-platform PCR 0/7 profiles** — `pcr-profiles/` has 1
   populated entry (QEMU). Additional real-hardware profiles
   require captures from the deployer's specific hardware mix.
-- **Vendor EK root CAs** — `root-cas/` is empty; deployers supply
-  the `.pem` files matching the TPMs they trust.
+- **Vendor EK root CAs** — `root-cas/` is populated from the current
+  shipped corpus, but trust-anchor coverage remains a data-maintenance
+  problem. Refresh it when TPM manufacturer roots or intermediates change.
 
-None of these gaps are code problems — each is either a data
-problem (profiles, CAs) or a schema-bump problem (IMA transport).
+None of these gaps are core parser problems — each is either a data
+problem (profiles, CAs) or a schema problem (IMA transport).
 
 ## 6. Module map
 

@@ -1,15 +1,14 @@
 # Secondary external verifier
 
 This directory holds an **external, non-HyperBEAM** verifier for LapEE
-attestation envelopes. It exists to let a third party check an envelope
-without running a HyperBEAM node, and as an independent implementation
-that can be compared against `~tpm-interpret@1.0` (the primary verifier,
-which lives on the `agent/lapee` branch in `src/dev_tpm_interpret.erl`).
+TPM evidence. It exists to let a third party check TPM envelopes without
+running a HyperBEAM node, and as an independent implementation that can be
+compared against `~tpm-interpret@1.0`.
 
-This is the *secondary* verifier. In normal use, an off-LapEE
-HyperBEAM node running `~tpm-interpret@1.0` is what verifies; the code
-in this directory is for reviewers / auditors / CI jobs that want a
-standalone tool with a minimal dependency surface.
+This is the *secondary* verifier. Normal LapEE peer flows use
+`~measurement@1.0` and device-native verification inside HyperBEAM. The
+code in this directory is for reviewers, auditors, and CI jobs that want
+a standalone TPM-only check with a minimal dependency surface.
 
 ## What it does
 
@@ -41,7 +40,8 @@ Eight checks, in order:
 ## Intentional limitations
 
 - Envelope shape: currently handles `lapee-attestation-version = "0.4"`,
-  the live shape emitted by `~tpm@2.0a/attestation`.
+  the TPM-specific shape emitted by `~tpm@2.0a/attestation`. It is not a
+  generic verifier for `~measurement@1.0` SNP evidence.
 - No hardware introspection — this tool never talks to a TPM; it only
   validates cryptographic evidence in the envelope itself.
 - Trust anchor selection: by default the verifier reads from the LapEE

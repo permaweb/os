@@ -1,14 +1,14 @@
 # LapEE
 
-LapEE, the Laptop Execution Environment, turns an ordinary UEFI laptop
-with a TPM 2.0 into a single-purpose HyperBEAM node. HyperBEAM is the
-AO-Core runtime: it executes messages, produces signed results, and
-participates in AO's distributed compute network. Boot LapEE from a USB
-stick and the laptop starts that runtime, shows a QR code for the node
-URL, and serves a TPM-backed boot attestation at:
+LapEE, the Laptop Execution Environment, turns commodity hardware into a
+single-purpose HyperBEAM appliance node. HyperBEAM is the AO-Core runtime:
+it executes messages, produces signed results, and participates in AO's
+distributed compute network. Boot LapEE from a USB stick and the machine
+starts that runtime, shows a QR code for the node URL, and serves a signed
+hardware measurement at:
 
 ```text
-http://<node-ip>:8734/~tpm@2.0a/boot-attestation
+http://<node-ip>:8734/~measurement@1.0/boot
 ```
 
 The point is simple: people should be able to contribute useful AO-Core
@@ -17,9 +17,10 @@ and other nodes something concrete to verify about the machine that is
 doing the work.
 
 Why this can work on commodity hardware: UEFI, TPM 2.0, Secure Boot,
-and measured boot already ship in ordinary laptops. LapEE uses those
-parts to bind an operator-owned HyperBEAM node to a measured boot,
-instead of requiring a cloud TEE vendor to host the worker.
+measured boot, and newer hardware measurement engines already ship in
+ordinary laptops and servers. LapEE uses those parts to bind a HyperBEAM
+node to a measured boot and node message, instead of requiring every
+worker to be hosted by one cloud TEE vendor.
 
 LapEE is not a magic cloud TEE and does not make arbitrary multi-tenant
 Linux safe. It takes a different trade-off: make the whole laptop one
@@ -27,10 +28,10 @@ auditable appliance OS/node, keep local inputs and writable runtime
 storage out of the production path, and let AO-Core get tenancy by
 distributing work across HyperBEAM workers. Single-tenant here means
 one appliance OS/node; it is not a proof that arbitrary AO workloads are
-safely isolated from each other by LapEE itself. The TPM quote,
-firmware event log, PCR-15 HyperBEAM start events, Secure Boot state,
-and node identity let a verifier ask, "what actually booted, and what
-key is speaking for it?"
+safely isolated from each other by LapEE itself. The measurement device,
+firmware event log, Secure Boot state, system report, and node identity
+let a verifier ask, "what actually booted, and what key is speaking for
+it?"
 
 ## Quick Start
 
@@ -104,10 +105,10 @@ with:
 HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
 ```
 
-The measured LapEE config is last, so enforced TPM devices and the
-boot-attestation hook remain part of the node. Do not put secrets in
+The measured LapEE config is last, so enforced measurement devices and
+the boot measurement hook remain part of the node. Do not put secrets in
 `config.json`: it is operator policy, and the resulting node message is
-included in boot-attestation evidence.
+included in boot measurement evidence.
 
 A small example:
 
@@ -144,7 +145,7 @@ make hb-fetch
   --label "Framework 13"
 ```
 
-The verifier fetches the node's attestation evidence, interprets it,
+The verifier fetches the node's measurement evidence, interprets it,
 and writes an HTML dashboard under:
 
 ```text
@@ -156,8 +157,10 @@ Useful live endpoints:
 ```text
 http://<node-ip>:8734/~tpm@2.0a/info
 http://<node-ip>:8734/~tpm@2.0a/pcr-read&pcr=0
-http://<node-ip>:8734/~tpm@2.0a/boot-attestation
+http://<node-ip>:8734/~measurement@1.0/info
+http://<node-ip>:8734/~measurement@1.0/boot
 http://<node-ip>:8734/~system@1.0/all
+http://<node-ip>:8734/~zone@1.0/status
 http://<node-ip>:8734/~hyperbuddy@1.0/index
 ```
 
@@ -169,11 +172,15 @@ warnings that should be understood.
 
 It checks:
 
-- TPM EK and AK material, when the firmware provisions EK certificates.
+- Measurement envelope signatures and device-specific evidence.
+- TPM EK and AK material, when the measurement backend is TPM and the
+  firmware provisions EK certificates.
 - TPM quote signature, nonce, selected PCR values, and PCR digest
   consistency. A valid quote proves the reported PCR values came from
   the quoted AK/TPM; accepting those PCRs still requires verifier policy
   and known-good baselines.
+- SEV-SNP report signatures and report-data binding, when the measurement
+  backend is SNP.
 - Firmware TCG event log replay where firmware exposes the log.
 - AK `authPolicy` over the quoted boot PCRs, including PCR 15, plus
   runtime PCR-15 replay tying the HyperBEAM boot subject to the AK.
@@ -202,7 +209,7 @@ In production:
   block device, and then starts network and HyperBEAM.
 - HyperBEAM runs with stdin/stdout/stderr on `/dev/null`; the splash is
   the only intended local output.
-- Verification happens over the network attestation endpoint, not by
+- Verification happens over the network measurement endpoint, not by
   writing logs back to the USB stick.
 
 This does not protect against every physical attack, malicious firmware,
@@ -216,7 +223,7 @@ still consume the boot USB/ESP before init deauthorizes USB devices.
 
 ## Limitations And Non-Goals
 
-Attestation is evidence, not a TEE guarantee. It does not make firmware
+Measurement is evidence, not a TEE guarantee. It does not make firmware
 honest, does not prove HyperBEAM or Linux bug-free, and does not isolate
 mutually distrustful workloads inside the same OS process/kernel
 boundary.
@@ -273,13 +280,13 @@ make provisioner-write DEV=/dev/diskN
 
 Boot that USB once with firmware in Secure Boot Setup Mode. After the
 `I UNDERSTAND.` confirmation, the provisioner lists writable non-boot disks.
-To prepare one for encrypted green-zone storage, type `DESTROY N` for the
+To prepare one for encrypted zone storage, type `DESTROY N` for the
 listed disk number; to leave persistent storage unconfigured, type `SKIP`.
-`DESTROY N` creates a `GREENZONE_PRIMARY` GPT partition, which binds to the
-first green-zone the node successfully joins. To pre-bind the disk to a
+`DESTROY N` creates a `ZONE_PRIMARY` GPT partition, which binds to the
+first zone the node successfully joins. To pre-bind the disk to a
 specific zone, type `DESTROY N -> PREFIX`, where `PREFIX` is the first
 characters of that zone's ring address; the partition will be named
-`GREENZONE_PREFIX`, truncated to fit GPT's partition-name limit.
+`ZONE_PREFIX`, truncated to fit GPT's partition-name limit.
 
 Either form destroys the selected disk's partition table and writes a LapEE
 provisioning marker at the start of the new partition. It is not a secure
@@ -303,7 +310,7 @@ Keep `secureboot/*.key` private. They are operator keys and are ignored by
 git. The files under `secureboot/enrol/` are public enrollment artifacts.
 
 Secure Boot controls firmware admission of the UKI. It is related to,
-but separate from, the runtime TPM quote served by the node.
+but separate from, the runtime measurement served by the node.
 
 ## Build From Source
 
@@ -386,31 +393,31 @@ bundle and the node signature on the returned response:
 make qemu-oracle TME=0
 ```
 
-Run the TPM-backed multi-node acceptance gate:
+Run the measurement-backed multi-node acceptance gate:
 
 ```sh
-make qemu-green-zone
+make qemu-zone
 ```
 
 That boots four QEMU+swtpm nodes from the same image. Node 1 initializes
-a named green-zone from its measured system report. Nodes 2 and 3 join
-that named zone and install the same green-zone identity; node 4 carries
+a named zone from its measured system report. Nodes 2 and 3 join
+that named zone and install the same zone identity; node 4 carries
 a different boot-attested DMI product and must fail admission with
 `template-mismatch` and remain outside the zone.
 
 Run the same gate with encrypted non-volatile disks:
 
 ```sh
-make qemu-green-zone-nonvolatile
+make qemu-zone-nonvolatile
 ```
 
 That adds a second virtio disk per node, pre-provisioned with the
-`GREENZONE_PRIMARY` GPT partition name. Admitted nodes initialize or open
-the disk using the green-zone secret, mount it as their primary HyperBEAM
+`ZONE_PRIMARY` GPT partition name. Admitted nodes initialize or open
+the disk using the zone secret, mount it as their primary HyperBEAM
 store, copy the boot LMDB into it, refresh current-boot pseudo-paths such as
-`~tpm@2.0a/boot-attestation`, then reboot one node with changed boot evidence
+`~measurement@1.0/boot`, then reboot one node with changed boot evidence
 to prove the existing encrypted volume is reopened rather than reformatted and
-cannot shadow the current boot's attestation.
+cannot shadow the current boot's measurement.
 
 Run the provisioner storage-selection smoke test:
 
@@ -421,7 +428,7 @@ make qemu-provisioner-nonvolatile
 That boots the provisioner image with a sacrificial disk, types the real
 `I UNDERSTAND.` and `DESTROY 1 -> test-zone` prompts through QEMU, and
 verifies that the extra disk receives a GPT partition named
-`GREENZONE_test-zone` and contains the LapEE provisioning marker. The OVMF
+`ZONE_test-zone` and contains the LapEE provisioning marker. The OVMF
 firmware in this test is not expected to complete Secure Boot enrollment; the
 test is only asserting the non-volatile disk preparation path.
 
@@ -432,7 +439,7 @@ make qemu-operator-config
 ```
 
 That boots QEMU+swtpm nodes from signed runtime images and checks that
-operator config appears in `/~meta@1.0/info`, boot-attestation node
+operator config appears in `/~meta@1.0/info`, boot measurement node
 evidence, and PCR15 replay.
 
 Write a freshly built image directly to USB:
@@ -455,28 +462,28 @@ The image contains:
   OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, cryptsetup,
   e2fsprogs, parted, and HyperBEAM.
 - A custom Buildroot `hyperbeam` package that fetches pinned upstream
-  HyperBEAM `edge`, stages LapEE-owned TPM devices from
-  `hyperbeam-overlay/`, builds Erlang code, and cross-compiles the TPM
-  NIF against Buildroot's libtss2.
+  HyperBEAM `edge`, stages LapEE-owned measurement, TPM, SNP, zone, and
+  system devices from `hyperbeam-overlay/`, builds Erlang code, and
+  cross-compiles the native TPM/SNP helpers.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
 
-If a disk was provisioned with a `GREENZONE_<ring-address-prefix>` partition,
-the runtime tries that partition first after joining the matching green-zone.
-If no zone-specific partition exists, it falls back to `GREENZONE_PRIMARY`.
+If a disk was provisioned with a `ZONE_<ring-address-prefix>` partition,
+the runtime tries that partition first after joining the matching zone.
+If no zone-specific partition exists, it falls back to `ZONE_PRIMARY`.
 Fresh partitions are formatted as LUKS2 plus ext4 with a key derived from the
 zone name, ring address, and zone secret, and the fresh-format path requires
 the LapEE provisioning marker written by the provisioner. Existing encrypted
 volumes are opened and mounted; normal runtime activation never reformats an
-existing LUKS volume. Because the disk key is derived from the green-zone
+existing LUKS volume. Because the disk key is derived from the zone
 secret, a rebooted node must be able to rejoin a live holder of that same zone
 secret before it can reopen the store.
 
 Before an opened non-volatile LMDB becomes the first HyperBEAM store, LapEE
-rewrites current-boot pseudo-paths such as `~tpm@2.0a/boot-attestation` into
-that store from the fresh volatile cache. Activation fails closed if those
-links cannot be refreshed, so stale persistent boot evidence cannot shadow the
-current boot after a zone is joined.
+rewrites current-boot pseudo-paths such as `~measurement@1.0/boot` into that
+store from the fresh volatile cache. Activation fails closed if those links
+cannot be refreshed, so stale persistent boot evidence cannot shadow the current
+boot after a zone is joined.
 
 The build uses a Buildroot-built target toolchain
 (`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,
@@ -495,9 +502,9 @@ are built from source.
   `make operator-config-apply IMAGE=build/images/lapee-usb.img`, and
   confirm the laptop's wireless hardware is covered by the release
   firmware set.
-- `/attestation` fails but `/pcr-read&pcr=0` works: the TPM is alive;
-  the failure is likely in quote/key policy, EK material, or verifier
-  policy, not basic TPM discovery.
+- `~measurement@1.0/boot` fails but `~tpm@2.0a/pcr-read&pcr=0` works:
+  the TPM is alive; the failure is likely in quote/key policy, EK material,
+  measurement backend selection, or verifier policy, not basic TPM discovery.
 - `interpret-local-capture.sh` says no HyperBEAM checkout: run
   `make hb-fetch`, or set `REPO=/path/to/HyperBEAM`.
 - macOS asks for a password while writing: the write path uses `sudo dd`

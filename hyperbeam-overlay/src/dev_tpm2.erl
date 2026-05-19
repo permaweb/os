@@ -175,7 +175,7 @@ info(_Base, _Req, _Opts) ->
             <<"activate-credential">> => #{
                 <<"description">> =>
                     <<"Run TPM2_ActivateCredential with the node's loaded AK "
-                      "and EK. Used by verifiers and green-zone admission to "
+                      "and EK. Used by verifiers and zone admission to "
                       "prove the AK and EK are resident in the same TPM. The "
                       "HTTP endpoint returns a MAC proof, not the recovered "
                       "secret; local callers that need the secret use the "
@@ -1938,7 +1938,7 @@ verify_peer_url(Url, Req, Opts) ->
             Now = erlang:system_time(second),
             Signed = hb_message:commit(
                 #{
-                    <<"type">> => <<"green-zone-peer-attestation">>,
+                    <<"type">> => <<"zone-peer-attestation">>,
                     <<"version">> => <<"1.0">>,
                     <<"issued-at-unix">> => Now,
                     <<"validity">> =>
@@ -2677,7 +2677,7 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                             infer_log_format(TcgLogBin),
                         %% Derived signals from the firmware-side TCG
                         %% event log replay -- exposed in the signed
-                        %% boot-attestation so green-zone templates and
+                        %% boot-attestation so zone templates and
                         %% external auditors can pin policy-actionable
                         %% facts (currently `secure-boot.enabled') without
                         %% re-walking the log themselves. Mirrors the
@@ -4380,7 +4380,7 @@ software_make_credential_shape_test() ->
         publicExponent = Priv#'RSAPrivateKey'.publicExponent
     },
     EkPublic = test_ek_tpm2b_public(Rsa),
-    Secret = <<"green-zone-secret">>,
+    Secret = <<"zone-secret">>,
     AkName = <<16#000B:16/unsigned-big, (crypto:hash(sha256, <<"ak">>))/binary>>,
     Credential = software_make_credential(
         EkPublic,

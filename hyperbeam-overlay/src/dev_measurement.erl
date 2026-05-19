@@ -1,7 +1,7 @@
 %%% @doc Common LapEE hardware-measurement protocol.
 %%%
 %%% `~measurement@1.0' is the normalized attestation surface consumed by
-%%% green-zone and external callers. It owns the public LapEE subject:
+%%% zone and external callers. It owns the public LapEE subject:
 %%%
 %%%     #{ <<"system">> => ~system@1.0/all,
 %%%        <<"node">>   => signed ~meta@1.0/info }
@@ -311,7 +311,7 @@ verify_peer_url(Url, Req, Opts) ->
         Now = erlang:system_time(second),
         Signed = hb_message:commit(
             #{
-                <<"type">> => <<"green-zone-peer-attestation">>,
+                <<"type">> => <<"zone-peer-attestation">>,
                 <<"version">> => <<"1.0">>,
                 <<"issued-at-unix">> => Now,
                 <<"measurement-device">> => measurement_device(Boot, Opts),
