@@ -137,6 +137,17 @@ Remove historical/debug-only surfaces:
   - QEMU artefacts:
     `build/qemu-network-test/boot-attestation.json` (`156K`) and
     `build/qemu-network-test/system.json` (`60K`).
+- Third cleanup checkpoint in progress:
+  - Removed the obsolete standalone Python TPM verifier. Runtime and QEMU
+    checks now use `~measurement@1.0/verify`, keeping one measured verifier
+    implementation rather than a parallel off-node policy engine.
+  - Updated the operator-config QEMU flow to prove quote, PCR15 replay, and
+    PCR15 node-message binding through the node's measurement verifier.
+  - `make qemu-operator-config IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. Two QEMU nodes booted; one with a trusted signer could initialize the
+    signer-required zone and the empty-signer node was rejected.
+  - Tracked text count after this cut: `26,603` lines outside `.git` and
+    `build/`.
 
 ## Reviewer Notes For Next Pass
 

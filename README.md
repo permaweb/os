@@ -522,10 +522,8 @@ are built from source.
 - `hyperbeam-overlay/` - LapEE-owned HyperBEAM device modules, TPM NIF
   sources, verifier catalogues, and the `lapee` rebar profile fragment
   staged into the temporary HyperBEAM checkout during builds.
-- `scripts/` - image assembly, QEMU boot, verifier capture, WiFi and
+- `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
   Secure Boot helpers.
-- `secondary-external-verifier/` - standalone Python verifier for
-  reviewers and CI-style checks.
 - `paper/` - research paper and design notes.
 
 `build/`, `wifi.conf`, `config.json`, and `secureboot/` are

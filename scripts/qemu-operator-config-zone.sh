@@ -316,17 +316,20 @@ jq -e '.body.body.node."trusted-device-signers" == []' \
 echo ">> boot-attestation node-message contains expected signer lists"
 
 for n in 1 2; do
-    python3 secondary-external-verifier/verifier_hb.py \
+    post_json "$n" "/~measurement@1.0/verify" \
         "$OUTDIR/responses/node$n-boot-attestation.json" \
-        > "$OUTDIR/responses/node$n-verifier.txt" || true
-    grep -q "\\[PASS\\] TPM2_Quote signature + pcrDigest + nonce all valid" \
-        "$OUTDIR/responses/node$n-verifier.txt"
-    grep -q "\\[PASS\\] Runtime event log replay of PCR 15 matches quoted value" \
-        "$OUTDIR/responses/node$n-verifier.txt"
-    grep -q "\\[PASS\\] PCR 15 event commits to node-message-id" \
-        "$OUTDIR/responses/node$n-verifier.txt"
+        "$OUTDIR/responses/node$n-measurement-verify.json"
+    jq -e '
+        def ok: (.ok == true or .ok == "true");
+        def pass($name):
+            any(.body.checks[]; .name == $name and ok);
+        .status == 200 and
+        pass("TPM2_Quote signature + pcrDigest + nonce all valid") and
+        pass("Runtime event log replay of PCR 15 matches quoted value") and
+        pass("PCR 15 extension commits to node_message_id")
+    ' "$OUTDIR/responses/node$n-measurement-verify.json" >/dev/null
 done
-echo ">> verifier proves PCR15 commits to each node-message-id"
+echo ">> measurement verifier proves PCR15 commits to each node-message-id"
 
 post_json 1 "/~zone@1.0/init" \
     "$OUTDIR/with-signer-init.json" \
