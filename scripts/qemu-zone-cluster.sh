@@ -147,14 +147,6 @@ cfg = {
 device = sys.argv[3]
 if device != "auto":
     cfg["measurement-device"] = device
-if device == "snp-mock@1.0":
-    preloaded = list(base["preloaded-devices"])
-    preloaded.append({
-        "name": "snp-mock@1.0",
-        "module": "dev_snp_mock",
-        "ao-types": "module=\"atom\"",
-    })
-    cfg["preloaded-devices"] = preloaded
 pathlib.Path(sys.argv[2]).write_text(json.dumps(cfg))
 PY
     docker run --rm $DOCKER_PLATFORM \
@@ -681,22 +673,14 @@ start_node 3 "$IMG"
 start_node 4 "$IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
-for n in 1 2 3 4; do
-    get_json "$n" "/~measurement@1.0/subject" \
-        "$OUTDIR/responses/node$n-credential-subject.json"
-done
 
 jq -n \
     --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
     --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
     --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
-    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" \
-    --slurpfile c1 "$OUTDIR/responses/node1-credential-subject.json" \
-    --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
-    --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
-    --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
+    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
     def falsy: . == false or . == "false";
-    def props($node; $att; $cred): {
+    def props($node; $att): {
         node: $node,
         cmdline: $att.body.body.system.kernel.cmdline,
         boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
@@ -708,11 +692,11 @@ jq -n \
         dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
         measurement_device: $att.body."measurement-device",
         ek_cert_source_kind: $att.body.evidence."ek-cert-source".kind,
-        ek_public: $cred.body."ek-public",
-        ak_name: $cred.body."ak-name"
+        ek_public: $att.body."secret-recipient"."ek-public",
+        ak_name: $att.body."secret-recipient"."ak-name"
     };
-    [props(1; $n1[0]; $c1[0]), props(2; $n2[0]; $c2[0]),
-     props(3; $n3[0]; $c3[0]), props(4; $n4[0]; $c4[0])]
+    [props(1; $n1[0]), props(2; $n2[0]),
+     props(3; $n3[0]), props(4; $n4[0])]
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
@@ -931,8 +915,6 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_cached_message_not_found 2 "$node2_pre_reboot_boot_id" \
         "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
     echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
-    get_json 2 "/~measurement@1.0/subject" \
-        "$OUTDIR/responses/node2-reboot-credential-subject.json"
     python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     jq --arg addr "$ring_addr" \
         '. + {"expected-ring-address": $addr}' \

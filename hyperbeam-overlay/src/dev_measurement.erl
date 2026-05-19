@@ -7,7 +7,7 @@
 %%% provenance as signed AO-Core messages.
 -module(dev_measurement).
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
-         subject/3, unwrap_secret/3]).
+         unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          measurement_body/1, measurement_body_id/2]).
 
@@ -29,20 +29,15 @@ info(_) ->
             <<"fresh">>,
             <<"verify">>,
             <<"verify-peer">>,
-            <<"subject">>,
             <<"unwrap-secret">>
         ]
     }.
 
 info(_Base, _Req, Opts) ->
-    trace(Opts, "info", []),
     {Selected, Reason} = selected_device_or_reason(Opts),
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"Common LapEE measurement protocol over TPM, SNP, and "
-                  "future hardware-measurement devices.">>,
             <<"version">> => ?VERSION,
             <<"selected-measurement-device">> => Selected,
             <<"selection-reason">> => Reason,
@@ -51,14 +46,11 @@ info(_Base, _Req, Opts) ->
     }}.
 
 boot(_Base, _Req, Opts) ->
-    trace(Opts, "boot enter", []),
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
-            trace(Opts, "boot cache hit", []),
             {ok, #{<<"status">> => 200,
                    <<"body">> => materialized_response_body(Msg, Opts)}};
         _ ->
-            trace(Opts, "boot cache miss", []),
             global:trans(
                 {dev_measurement, boot},
                 fun() -> boot_locked(Opts) end,
@@ -66,26 +58,20 @@ boot(_Base, _Req, Opts) ->
     end.
 
 boot_locked(Opts) ->
-    trace(Opts, "boot lock acquired", []),
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
-            trace(Opts, "boot locked cache hit", []),
             {ok, #{<<"status">> => 200,
                    <<"body">> => materialized_response_body(Msg, Opts)}};
         _ ->
-            trace(Opts, "boot generating", []),
             case generate_measurement(boot, #{}, Opts) of
                 {ok, Signed} ->
-                    trace(Opts, "boot generated; writing cache", []),
                     SignedID = hb_message:id(Signed, signed, Opts),
                     {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
                     ok = hb_cache:link(SignedID, ?BOOT_PATH, Opts),
-                    trace(Opts, "boot cache written ~s", [SignedID]),
                     {ok, #{<<"status">> => 200,
                            <<"body">> =>
                                materialized_response_body(Signed, Opts)}};
                 {error, Reason} ->
-                    trace(Opts, "boot failed ~0p", [Reason]),
                     error_resp(500, <<"measurement-boot-failed">>, Reason)
             end
     end.
@@ -98,21 +84,6 @@ fresh(_Base, Req, Opts) ->
         {error, Reason} ->
             error_resp(500, <<"measurement-fresh-failed">>, Reason)
     end.
-
-subject(_Base, Req, Opts) ->
-    with_ok(
-        fun() ->
-            Device = selected_device(Opts),
-            Body = measurement_body(Opts),
-            materialized_response_body(
-                resolve_device_body(
-                    Device,
-                    <<"subject">>,
-                    Req#{<<"body">> => Body},
-                    Opts),
-                Opts)
-        end,
-        <<"measurement-subject-failed">>).
 
 verify(Base, Req, Opts) ->
     Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),
@@ -155,12 +126,9 @@ unwrap_secret(_Base, Req, Opts) ->
         <<"unwrap-secret-failed">>).
 
 generate_measurement(Purpose, Req, Opts) ->
-    trace(Opts, "generate ~0p enter", [Purpose]),
     with_raw_ok(fun() ->
         Body = measurement_body(Opts),
-        trace(Opts, "generate ~0p body ready", [Purpose]),
         Device = selected_device(Opts),
-        trace(Opts, "generate ~0p selected ~s", [Purpose, Device]),
         Recipient = timed(
             <<"measurement-subject">>,
             fun() ->
@@ -171,7 +139,6 @@ generate_measurement(Purpose, Req, Opts) ->
                     Opts)
             end,
             Opts),
-        trace(Opts, "generate ~0p subject ready", [Purpose]),
         Evidence = timed(
             <<"measurement-evidence">>,
             fun() ->
@@ -187,7 +154,6 @@ generate_measurement(Purpose, Req, Opts) ->
                     Opts)
             end,
             Opts),
-        trace(Opts, "generate ~0p evidence ready", [Purpose]),
         {ok, hb_message:commit(
             #{
                 <<"type">> => ?TYPE,
@@ -204,36 +170,28 @@ generate_measurement(Purpose, Req, Opts) ->
 measurement_body(Opts) ->
     case persistent_term:get({dev_measurement, body}, undefined) of
         Body when is_map(Body) ->
-            trace(Opts, "body cache hit", []),
             Body;
         undefined ->
-            trace(Opts, "body cache miss", []),
             measurement_body_locked(Opts)
     end.
 
 measurement_body_locked(Opts) ->
-    trace(Opts, "body lock enter", []),
     case persistent_term:get({dev_measurement, body}, undefined) of
         Body when is_map(Body) ->
-            trace(Opts, "body locked cache hit", []),
             Body;
         undefined ->
-            trace(Opts, "body resolving system report", []),
             System = timed(
                 <<"system-report">>,
                 fun() ->
                     resolve_body(hb_ao:resolve(<<"~system@1.0/all">>, Opts))
                 end,
                 Opts),
-            trace(Opts, "body system report ready", []),
-            trace(Opts, "body resolving node message", []),
             Node0 = timed(
                 <<"node-message">>,
                 fun() ->
                     resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts))
                 end,
                 Opts),
-            trace(Opts, "body node message ready", []),
             Body = canonical_payload(
                 #{<<"system">> => System, <<"node">> => Node0},
                 Opts),
@@ -241,7 +199,6 @@ measurement_body_locked(Opts) ->
             persistent_term:put(
                 {dev_measurement, body_id},
                 measurement_body_id(Body, Opts)),
-            trace(Opts, "body cached", []),
             Body
     end.
 
@@ -253,9 +210,6 @@ verify_peer_url(Url, Req, Opts) ->
         Boot = peer_measurement_payload(response_body(
             lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
             Opts), Opts),
-        Subject = detached_peer_payload(response_body(
-            lapee_peer_http:get(Url, <<"/~measurement@1.0/subject">>, Opts),
-            Opts), Opts),
         FreshNonce = crypto:strong_rand_bytes(32),
         Fresh = peer_measurement_payload(response_body(
             lapee_peer_http:get(
@@ -266,6 +220,7 @@ verify_peer_url(Url, Req, Opts) ->
             Opts), Opts),
         ok = ensure_measurement_shape(Boot),
         ok = ensure_measurement_shape(Fresh),
+        Subject = secret_recipient(Boot, Opts),
         ok = ensure_same_subject(Boot, Fresh, Opts),
         ok = ensure_subject_matches_measurement(Subject, Boot, Opts),
         ok = ensure_subject_matches_measurement(Subject, Fresh, Opts),
@@ -322,35 +277,8 @@ verify_peer_url(Url, Req, Opts) ->
 
 peer_measurement_payload(Msg, Opts) ->
     materialize_peer_measurement(
-        measurement_payload(detached_peer_payload(Msg, Opts), Opts),
+        response_body(detached_peer_payload(Msg, Opts), Opts),
         Opts).
-
-measurement_payload(Link, Opts) when ?IS_LINK(Link) ->
-    measurement_payload(response_body(Link, Opts), Opts);
-measurement_payload(Msg, Opts) when is_map(Msg) ->
-    Normalized = normalize_top_keys(Msg),
-    case hb_maps:get(<<"type">>, Normalized, undefined, Opts) of
-        ?TYPE ->
-            Normalized;
-        _ ->
-            Decoded = normalize_top_keys(hb_link:decode_all_links(Msg)),
-            case first_defined([
-                    hb_maps:get(<<"measurement">>, Decoded, undefined, Opts),
-                    hb_maps:get(measurement, Decoded, undefined, Opts),
-                    hb_maps:get(<<"body">>, Decoded, undefined, Opts),
-                    hb_maps:get(body, Decoded, undefined, Opts)
-                ]) of
-                undefined ->
-                    throw({measurement_error, #{
-                        <<"peer-measurement-payload">> =>
-                            summarize_peer_shape(Decoded)
-                    }});
-                Payload ->
-                    measurement_payload(Payload, Opts)
-            end
-    end;
-measurement_payload(Measurement, _Opts) ->
-    Measurement.
 
 materialize_peer_measurement(Measurement, Opts) when is_map(Measurement) ->
     Decoded = normalize_top_keys(Measurement),
@@ -380,38 +308,6 @@ normalize_top_keys(Value) ->
 normalize_key(Key) when is_binary(Key) -> Key;
 normalize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
 normalize_key(Key) -> Key.
-
-summarize_peer_shape(Msg) when is_map(Msg) ->
-    #{
-        <<"keys">> => [summarize_key(Key) || Key <- maps:keys(Msg)],
-        <<"value-classes">> => maps:from_list(
-            [
-                {summarize_key(Key), summarize_value(Value)}
-             || {Key, Value} <- maps:to_list(Msg)
-            ])
-    };
-summarize_peer_shape(Value) ->
-    summarize_value(Value).
-
-summarize_key(Key) when is_binary(Key) -> Key;
-summarize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
-summarize_key(Key) -> hb_util:bin(Key).
-
-summarize_value(Value) when is_map(Value) ->
-    #{<<"class">> => <<"map">>,
-      <<"keys">> => [summarize_key(Key) || Key <- maps:keys(Value)]};
-summarize_value(Value) when is_list(Value) ->
-    #{<<"class">> => <<"list">>, <<"length">> => length(Value)};
-summarize_value(Value) when is_binary(Value) ->
-    #{<<"class">> => <<"binary">>, <<"size">> => byte_size(Value)};
-summarize_value(Value) when is_atom(Value) ->
-    #{<<"class">> => <<"atom">>, <<"value">> => atom_to_binary(Value, utf8)};
-summarize_value(Value) when is_integer(Value) ->
-    #{<<"class">> => <<"integer">>, <<"value">> => Value};
-summarize_value(Value) when is_tuple(Value) ->
-    #{<<"class">> => <<"tuple">>, <<"size">> => tuple_size(Value)};
-summarize_value(_) ->
-    #{<<"class">> => <<"other">>}.
 
 verify_measurement_body(Measurement, Req, Opts) ->
     {ok, #{<<"status">> := 200, <<"body">> := Body}} =
@@ -450,7 +346,6 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     case measurement_device(Credential, Opts) of
         <<"tpm@2.0a">> -> dev_tpm2:activate_credential_secret(Credential, Opts);
         <<"snp@1.0">> -> dev_snp:unwrap_secret_value(Credential, Opts);
-        <<"snp-mock@1.0">> -> dev_snp_mock:unwrap_secret_value(Credential, Opts);
         Device ->
             throw({measurement_error,
                    #{<<"unwrap-secret">> =>
@@ -474,9 +369,6 @@ ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
                 Activation, Credential, Expected, Subject, Opts);
         <<"snp@1.0">> ->
             dev_snp:ensure_secret_activation(
-                Activation, Credential, Expected, Subject, Opts);
-        <<"snp-mock@1.0">> ->
-            dev_snp_mock:ensure_secret_activation(
                 Activation, Credential, Expected, Subject, Opts);
         _ ->
             ExpectedHash = hb_util:encode(crypto:hash(sha256, Expected)),
@@ -506,6 +398,14 @@ ensure_measurement_shape(Measurement) when is_map(Measurement) ->
         _ ->
             throw({measurement_error,
                    #{<<"measurement">> => <<"invalid measurement shape">>}})
+    end.
+
+secret_recipient(Measurement, Opts) ->
+    case hb_maps:get(<<"secret-recipient">>, Measurement, undefined, Opts) of
+        Recipient when is_map(Recipient) -> Recipient;
+        _ ->
+            throw({measurement_error,
+                   #{<<"secret-recipient">> => <<"missing">>}})
     end.
 
 ensure_same_subject(A, B, Opts) ->
@@ -631,7 +531,6 @@ resolve_device_response(Device, Path, Req, Opts) ->
 
 known_device_module(<<"tpm@2.0a">>) -> dev_tpm2;
 known_device_module(<<"snp@1.0">>) -> dev_snp;
-known_device_module(<<"snp-mock@1.0">>) -> dev_snp_mock;
 known_device_module(_Device) -> undefined.
 
 measurement_export(<<"supported">>) -> supported;
@@ -664,7 +563,6 @@ timed(Name, Fun, Opts) ->
         <<"measurement-timeout-ms">>,
         ?DEFAULT_TIMEOUT_MS,
         Opts),
-    trace(Opts, "timed ~s start (~0p ms)", [Name, Timeout]),
     Parent = self(),
     Ref = make_ref(),
     Pid = spawn(fun() ->
@@ -683,29 +581,15 @@ timed(Name, Fun, Opts) ->
     end),
     receive
         {Ref, {ok, Value}} ->
-            trace(Opts, "timed ~s ok", [Name]),
             Value;
         {Ref, {throw, Reason}} ->
-            trace(Opts, "timed ~s throw ~0p", [Name, Reason]),
             throw(Reason);
         {Ref, {error, Reason}} ->
-            trace(Opts, "timed ~s error ~0p", [Name, Reason]),
             throw({measurement_error, #{Name => Reason}})
     after Timeout ->
         exit(Pid, kill),
-        trace(Opts, "timed ~s timeout", [Name]),
         throw({measurement_error,
                #{Name => <<"measurement step timed out">>}})
-    end.
-
-trace(Opts, Format, Args) ->
-    case hb_opts:get(<<"measurement-trace">>, false, Opts) of
-        true ->
-            io:format(standard_error,
-                      "[measurement] " ++ Format ++ "~n",
-                      Args);
-        _ ->
-            ok
     end.
 
 response_body(Link, Opts) when ?IS_LINK(Link) ->

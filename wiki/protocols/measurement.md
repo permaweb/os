@@ -51,7 +51,6 @@ nonce with at least 128 bits of entropy.
 - `verify`: return an AO-Core result message with `verified = true | false`.
 - `verify-peer`: fetch peer `boot` and fresh measurement; verify them; return
   a signed `zone-peer-attestation`.
-- `subject`: return the backend recipient object used for challenge wrapping.
 - `unwrap-secret`: recover a locally addressed challenge and return only a
   signed activation proof. It must never return the plaintext secret.
 

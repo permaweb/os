@@ -31,18 +31,8 @@ info(_Base, _Req, _Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"Measurement-backed zone ring admission and shared "
-                  "identity">>,
             <<"version">> => <<"1.0">>,
-            <<"template-semantics">> =>
-                <<"HyperBEAM message primary match; non-map values exact; "
-                  "'_' wildcard">>,
-            <<"peer-attestation-trust">> =>
-                <<"Zone admission verifies live peers through "
-                  "~measurement@1.0/verify-peer. Reusable/transitive "
-                  "peer-attestation publisher trust is a measurement-device "
-                  "concern, not ring state.">>
+            <<"exports">> => maps:get(exports, info(#{}), [])
         }
     }}.
 
@@ -315,11 +305,9 @@ canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
     canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
 canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
     Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
-    Types = authorization_ao_types(Loaded),
     maps:from_list(
         [
-            {Key, canonical_authorization_value(
-                Key, Value, Types, Opts, MetadataMode)}
+            {Key, canonical_authorization_payload(Value, Opts, MetadataMode)}
          || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
             not authorization_meta_key(Key, MetadataMode)
         ]);
@@ -334,54 +322,9 @@ canonical_authorization_payload(Value, _Opts, _MetadataMode)
 canonical_authorization_payload(Value, _Opts, _MetadataMode) ->
     Value.
 
-canonical_authorization_value(Key, Value, Types, Opts, MetadataMode) ->
-    authorization_typed_value(
-        maps:get(Key, Types, undefined),
-        canonical_authorization_payload(Value, Opts, MetadataMode)).
-
 authorization_meta_key(<<"commitments">>, _MetadataMode) -> true;
 authorization_meta_key(<<"ao-types">>, strip_json_metadata) -> true;
 authorization_meta_key(_Key, _MetadataMode) -> false.
-
-authorization_ao_types(Msg) ->
-    case maps:get(<<"ao-types">>, Msg, undefined) of
-        Types when is_binary(Types) ->
-            maps:from_list(
-                [Parsed
-                 || Part <- binary:split(Types, <<",">>, [global]),
-                    Parsed <- [authorization_ao_type(Part)],
-                    Parsed =/= undefined]);
-        _ ->
-            #{}
-    end.
-
-authorization_ao_type(Part0) ->
-    Part = iolist_to_binary(string:trim(binary_to_list(Part0))),
-    case binary:split(Part, <<"=">>) of
-        [RawKey, RawType0] ->
-            Key = iolist_to_binary(string:trim(binary_to_list(RawKey))),
-            Type0 = iolist_to_binary(string:trim(binary_to_list(RawType0))),
-            {Key, trim_type_quotes(Type0)};
-        _ ->
-            undefined
-    end.
-
-trim_type_quotes(<<"\"", Rest/binary>>) ->
-    case Rest of
-        <<Inner:(byte_size(Rest) - 1)/binary, "\"">> -> Inner;
-        _ -> Rest
-    end;
-trim_type_quotes(Type) ->
-    Type.
-
-authorization_typed_value(<<"atom">>, Value) ->
-    hb_util:bin(Value);
-authorization_typed_value(<<"integer">>, Value) when is_binary(Value) ->
-    try binary_to_integer(Value)
-    catch _:_ -> Value
-    end;
-authorization_typed_value(_Type, Value) ->
-    Value.
 
 stable_uncommitted_id(Msg) ->
     hb_message:id(

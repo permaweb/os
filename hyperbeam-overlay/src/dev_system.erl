@@ -10,10 +10,6 @@
 -include_lib("kernel/include/file.hrl").
 -define(EFI_GLOBAL_VARIABLE_GUID, "8be4df61-93ca-11d2-aa0d-00e098032b8c").
 -define(MSR_BOOT_GUARD_SACM_INFO, 16#13a).
-%%%============================================================================
-%%% Device surface
-%%%============================================================================
-
 info(_) ->
     #{exports => [<<"info">>, <<"all">>]}.
 
@@ -21,20 +17,8 @@ info(_Base, _Req, _Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"Structured system evidence device. Returns a live report "
-                  "from generic read-only /proc and /sys interfaces.">>,
             <<"version">> => <<"1.0">>,
-            <<"api">> => #{
-                <<"all">> => #{
-                    <<"description">> =>
-                        <<"Return a nested machine report. Stable secrets "
-                          "and operator identifiers are redacted; every probe "
-                          "records source, method, status, raw values where "
-                          "available, and parse errors without making "
-                          "trust-policy claims.">>
-                }
-            }
+            <<"exports">> => maps:get(exports, info(#{}), [])
         }
     }}.
 
@@ -55,34 +39,14 @@ report_from_root(Root0) ->
         <<"schema">> => <<"lapee-system-report@1">>,
         <<"version">> => <<"1.0">>,
         <<"probed-at-unix">> => erlang:system_time(second),
-        <<"evidence-model">> => evidence_model(),
         <<"boot">> => boot_report(Root),
         <<"kernel">> => kernel_report(Root),
         <<"cpu">> => cpu_report(Root),
         <<"memory">> => memory_report(Root, Edac, MemoryController),
         <<"firmware">> => firmware_report(Root, BootGuard),
-        <<"hardware-probes">> => hardware_probes_report(BootGuard, MemoryController),
         <<"tpm">> => tpm_report(Root),
         <<"iommu">> => iommu_report(Root),
         <<"integrity">> => integrity_report(Root)
-    }.
-
-evidence_model() ->
-    #{
-        <<"purpose">> =>
-            <<"collect-and-parse-evidence">>,
-        <<"policy">> =>
-            <<"No field in this report declares itself trusted. Consumers "
-              "must apply their own policy to source, method, raw, decoded, "
-              "and status fields.">>,
-        <<"probe-families">> => [
-            <<"cpu/cpuid-device">>,
-            <<"firmware/boot-guard/msr">>,
-            <<"firmware/acpi/sysfs-table-hashes">>,
-            <<"memory-controller/intel-drm-kernel-dram-info/sysfs">>,
-            <<"memory-controller/sysfs-edac">>,
-            <<"generic-proc-sysfs">>
-        ]
     }.
 
 boot_report(Root) ->
@@ -158,11 +122,7 @@ memory_report(Root, Edac, ControllerProbes) ->
         <<"controller-probes">> => ControllerProbes,
         <<"topology">> => #{
             <<"generic-edac">> => Edac,
-            <<"controller-probes">> => ControllerProbes,
-            <<"notes">> =>
-                <<"Generic EDAC/sysfs memory data is included for "
-                  "observability. Consumers decide which source/method/status "
-                  "tuples satisfy their policy.">>
+            <<"controller-probes">> => ControllerProbes
         }
     }.
 
@@ -172,20 +132,6 @@ firmware_report(Root, BootGuard) ->
         <<"acpi">> => acpi_report(Root),
         <<"efi">> => efi_report(Root),
         <<"boot-guard">> => BootGuard
-    }.
-
-hardware_probes_report(BootGuard, MemoryController) ->
-    #{
-        <<"schema">> => <<"lapee-hardware-probes@1">>,
-        <<"boot-guard">> => BootGuard,
-        <<"memory-controller">> => MemoryController,
-        <<"collection">> => #{
-            <<"userspace-pcode-mailbox-writes">> => false,
-            <<"notes">> =>
-                <<"This report surfaces observations and explicit unavailable "
-                  "or unsupported states. It preserves source/method/status "
-                  "for policy engines rather than assigning trust locally.">>
-        }
     }.
 
 tpm_report(Root) ->
@@ -278,11 +224,7 @@ cpuid_report(Root) ->
                 <<"available">> => true,
                 <<"source">> => <<"dev-cpu-cpuid">>,
                 <<"interface">> => to_bin(Path),
-                <<"leaves">> => Results,
-                <<"notes">> =>
-                    <<"CPUID leaves read through /dev/cpu/0/cpuid. The lower "
-                      "32 bits of the file offset are EAX; the upper 32 bits "
-                      "are ECX.">>
+                <<"leaves">> => Results
             };
         false ->
             #{
@@ -400,12 +342,7 @@ memory_controller_probe_report(Root, Edac) ->
     IntelDrm = intel_drm_memory_probe(Root),
     #{
         <<"intel-drm-controller">> => IntelDrm,
-        <<"generic-edac">> => edac_memory_probe(Edac),
-        <<"notes">> =>
-            <<"The Intel DRM probe prefers the kernel's DRAM decode export. "
-              "That export is populated by the same controller-backed driver "
-              "logic used for display bandwidth decisions. Generic EDAC is "
-              "included as additional parsed evidence.">>
+        <<"generic-edac">> => edac_memory_probe(Edac)
     }.
 
 intel_drm_memory_probe(Root) ->
@@ -414,12 +351,7 @@ intel_drm_memory_probe(Root) ->
         <<"available">> => Cards =/= [],
         <<"source">> => <<"sysfs-drm-pci">>,
         <<"cards">> => Cards,
-        <<"lpddr-class-observed">> => any_lpddr_card(Cards),
-        <<"notes">> =>
-            <<"The preferred path consumes read-only sysfs files exported by "
-              "the active Intel DRM driver. That gives controller-decoded "
-              "DRAM evidence without reproducing PCODE/MCU transactions in "
-              "userspace.">>
+        <<"lpddr-class-observed">> => any_lpddr_card(Cards)
     }.
 
 intel_drm_memory_cards(Root) ->
@@ -544,10 +476,7 @@ edac_memory_probe(Edac) ->
         <<"available">> => maps:get(<<"available">>, Edac, false),
         <<"source">> => <<"sysfs-edac">>,
         <<"memory-types">> => Types,
-        <<"lpddr-class-observed">> => edac_lpddr_observed(Types),
-        <<"notes">> =>
-            <<"EDAC is kernel-observed memory-controller state where a driver "
-              "is present. Consumers decide how to use its taxonomy.">>
+        <<"lpddr-class-observed">> => edac_lpddr_observed(Types)
     }.
 
 edac_memory_types(Edac) ->
@@ -622,12 +551,7 @@ acpi_report(Root) ->
         <<"dynamic-table-directory-present">> =>
             dir_exists(Root, DynamicBase),
         <<"override-provenance">> =>
-            acpi_override_provenance(Root, DynamicTables),
-        <<"notes">> =>
-            <<"ACPI tables are firmware-supplied platform descriptions as "
-              "observed by this measured runtime through Linux sysfs. This "
-              "report carries final table bytes by digest and parsed headers; "
-              "it does not treat OEM/header fields as policy by itself.">>
+            acpi_override_provenance(Root, DynamicTables)
     }.
 
 acpi_tables_map(Root, Base) ->
@@ -716,9 +640,7 @@ acpi_table_header("RSDP", Bin) ->
     dev_tpm_tcg:parse_acpi_rsdp(Bin);
 acpi_table_header("FACS", _Bin) ->
     #{
-        <<"table-signature">> => <<"FACS">>,
-        <<"table-signature-name">> => <<"Firmware ACPI Control Structure">>,
-        <<"note">> => <<"FACS does not use the common ACPI table header.">>
+        <<"table-signature">> => <<"FACS">>
     };
 acpi_table_header(_Name, Bin) ->
     dev_tpm_tcg:parse_acpi_table(Bin).
@@ -768,11 +690,7 @@ acpi_override_provenance(Root, DynamicTables) ->
                 ["CONFIG_ACPI_TABLE_UPGRADE",
                  "CONFIG_ACPI_TABLE_OVERRIDE_VIA_BUILTIN_INITRD",
                  "CONFIG_ACPI_CUSTOM_DSDT",
-                 "CONFIG_ACPI_CUSTOM_DSDT_FILE"]),
-        <<"notes">> =>
-            <<"Linux can accept ACPI table upgrades from initrd when built "
-              "for that path. LapEE policy should combine these fields with "
-              "the measured UKI/initrd/cmdline and firmware PCR evidence.">>
+                 "CONFIG_ACPI_CUSTOM_DSDT_FILE"])
     }.
 
 efi_report(Root) ->
@@ -832,8 +750,7 @@ boot_guard_report(Root) ->
                 <<"interface">> => to_bin(Path),
                 <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
                 <<"raw-hex">> => u64_hex(Raw),
-                <<"decoded">> => boot_guard_decode(Raw),
-                <<"notes">> => boot_guard_notes()
+                <<"decoded">> => boot_guard_decode(Raw)
             };
         {error, Reason} ->
             boot_guard_unavailable(Reason)
@@ -845,16 +762,8 @@ boot_guard_unavailable(Reason) ->
         <<"source">> => <<"dev-cpu-msr">>,
         <<"interface">> => <<"/dev/cpu/0/msr">>,
         <<"msr-offset">> => u64_hex(?MSR_BOOT_GUARD_SACM_INFO),
-        <<"error">> => to_bin(Reason),
-        <<"notes">> => boot_guard_notes()
+        <<"error">> => to_bin(Reason)
     }.
-
-boot_guard_notes() ->
-    <<"This probe reads MSR_BOOT_GUARD_SACM_INFO through /dev/cpu/0/msr "
-      "when the kernel exposes it. It is a neutral runtime observation of "
-      "the S-ACM-exported status register; "
-      "TPM/TCG event-log Boot Guard measurements remain separate firmware "
-      "evidence.">>.
 
 boot_guard_decode(Raw) ->
     #{
@@ -887,9 +796,7 @@ tpm_devices(Root) ->
         <<"version-major">> =>
             read_trim(Root, filename:join([Base, T, "tpm_version_major"])),
         <<"device-path">> =>
-            read_link_basename(Root, filename:join([Base, T, "device"])),
-        <<"description">> =>
-            read_trim(Root, filename:join([Base, T, "device", "description"]))
+            read_link_basename(Root, filename:join([Base, T, "device"]))
     } || T <- sorted_list_dir(Root, Base),
          is_tpm_name(T)].
 

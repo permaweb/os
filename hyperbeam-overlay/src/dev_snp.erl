@@ -12,7 +12,7 @@
 %%% encrypt admission material to it.
 -module(dev_snp).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
-         wrap_secret/3, unwrap_secret/3]).
+         unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
 
@@ -31,7 +31,6 @@ info(_) ->
             <<"subject">>,
             <<"measure">>,
             <<"verify">>,
-            <<"wrap-secret">>,
             <<"unwrap-secret">>
         ]
     }.
@@ -40,8 +39,6 @@ info(_Base, _Req, Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"AMD SEV-SNP measurement engine for ~measurement@1.0">>,
             <<"version">> => ?VERSION,
             <<"supported">> => snp_supported(Opts)
         }
@@ -104,14 +101,6 @@ verify(Base, Req, Opts) ->
                 case Verified of true -> <<"accepted">>; false -> <<"rejected">> end,
             <<"checks">> => Checks
         }
-    }}.
-
-wrap_secret(_Base, Req, Opts) ->
-    Subject = hb_maps:get(<<"subject">>, Req, undefined, Opts),
-    Secret = decode_secret(hb_maps:get(<<"secret">>, Req, <<>>, Opts)),
-    {ok, #{
-        <<"status">> => 200,
-        <<"body">> => wrap_secret_for_subject(Subject, Secret, Opts)
     }}.
 
 unwrap_secret(_Base, Req, Opts) ->
@@ -327,30 +316,19 @@ check_report_signature(Body, Evidence, Opts) ->
             assert_report_signature(Body, Evidence, Opts)
         end).
 
-assert_report_signature(_Body, Evidence, Opts) ->
-    case allow_test_signature(Evidence, Opts) of
-        true ->
-            ok;
-        false ->
-            Raw = decode_required(<<"report-raw">>, Evidence, Opts),
-            Report = decode_report(Raw),
-            assert_signature_algorithm(Report),
-            Certs = resolved_certificates(Report, _Body, Evidence, Opts),
-            assert_certificate_chain(Certs),
-            Signed = binary:part(Raw, 0, 672),
-            Signature = ecdsa_signature_der(report_get(<<"signature">>, Report, #{})),
-            case public_key:verify(
-                Signed, sha384, Signature, cert_public_key(maps:get(vcek, Certs))) of
-                true -> ok;
-                false -> throw(<<"SNP report signature rejected">>)
-            end
+assert_report_signature(Body, Evidence, Opts) ->
+    Raw = decode_required(<<"report-raw">>, Evidence, Opts),
+    Report = decode_report(Raw),
+    assert_signature_algorithm(Report),
+    Certs = resolved_certificates(Report, Body, Evidence, Opts),
+    assert_certificate_chain(Certs),
+    Signed = binary:part(Raw, 0, 672),
+    Signature = ecdsa_signature_der(report_get(<<"signature">>, Report, #{})),
+    case public_key:verify(
+        Signed, sha384, Signature, cert_public_key(maps:get(vcek, Certs))) of
+        true -> ok;
+        false -> throw(<<"SNP report signature rejected">>)
     end.
-
-allow_test_signature(Evidence, Opts) ->
-    hb_opts:get(<<"allow-test-snp-signature">>, false, Opts) =:= true
-        andalso
-        hb_maps:get(<<"signature-check">>, Evidence, #{}, Opts)
-            =:= #{<<"verified">> => true, <<"source">> => <<"test">>}.
 
 assert_signature_algorithm(Report) ->
     case report_get(<<"signature-algorithm">>, Report, undefined) of

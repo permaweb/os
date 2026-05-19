@@ -202,14 +202,53 @@ Remove historical/debug-only surfaces:
     pass. The admitted node reopened the same encrypted non-volatile volume
     after reboot, recovered the pre-reboot object, and produced current
     membership evidence.
+- Fourth cleanup checkpoint in validation:
+  - Removed the public measurement `subject` route. Peer verification now
+    derives the recipient subject from the peer's signed boot measurement,
+    eliminating an extra peer HTTP fetch and an extra public surface.
+  - Removed the test-only `dev_snp_mock` engine. Local QEMU exercises TPM
+    zones; the real SNP path is covered by the remote SNP harness.
+  - Removed old TPM verifier compatibility normalization. TPM verification now
+    accepts the normalized `~measurement@1.0` envelope shape.
+  - Removed duplicate prose/report mirrors from `~system@1.0`, narrow TCG
+    parsing to Secure Boot extraction plus ACPI headers, and shortened TPM EK
+    chain diagnostics without changing EK/AK, quote, PCR15, or credential
+    activation checks.
+  - Current strict production-overlay count: `9,430`.
+  - Current non-comment/non-blank overlay code count: `8,274`.
+  - Strict reduction from baseline: `31,443 -> 9,430`, `70.0%`.
+  - Code-line reduction from strict baseline: `31,443 -> 8,274`, `73.7%`.
+  - Direct Erlang syntax check for all overlay modules: pass.
+  - `make verify-config-invariants`: pass.
+  - `make hb-fetch`: pass; staged overlay and removed stale `dev_snp_mock`
+    from the disposable HyperBEAM checkout.
+  - `make runtime-image TME=0`: pass. Built signed image
+    `build/images/lapee-runtime-no-tme-signed.img` (`232M`).
+  - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
+    HyperBEAM answered `/~meta@1.0/info`, `/~measurement@1.0/boot`, and
+    `/~system@1.0/all`.
+  - `make qemu-operator-config IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. Config appears in the node message, PCR15 replay verifies through
+    `~measurement@1.0/verify`, and only the configured node can initialize the
+    signer-required zone.
+  - `make qemu-zone IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
+    Four TPM-backed nodes used `measurement-device=auto`; three admitted
+    nodes joined and produced ring-signed membership proofs, while the
+    inadmissible node was rejected.
+  - `make qemu-zone-nonvolatile IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. The rebooted node matched a partial zone-label prefix, could not
+    read the stored object before rejoining, then reopened the encrypted
+    volume after admission and recovered the pre-reboot object plus current
+    boot-attestation path.
+  - Next validation: remote real-SNP zone on `hb@dev-1.forward.computer`.
 
 ## Reviewer Notes For Next Pass
 
-- `dev_zone` still carries a custom admission authorization envelope. Replace
-  with a zone-signed AO-Core admission message if acceptance tests stay green.
 - `dev_measurement` and `dev_zone` duplicate payload normalization and stable
   ID code. Collapse toward one AO-Core boundary shape.
 - Public `unwrap-secret` is still named like a decryption endpoint even though
   it returns only activation proof. Consider renaming the protocol once the
   zone and peer scripts can migrate atomically.
-- Strict-line stretch remaining for 70%: target `9,433`, delta `744`.
+- The next major cleanup is packaging, not more in-place shrinking: turn the
+  overlay devices into normal HyperBEAM packageable/preloadable devices and
+  shrink the static preloaded-device config.

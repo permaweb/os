@@ -333,24 +333,13 @@ wait_all_nodes() {
     done
 }
 
-fetch_subjects() {
-    for n in 1 2 3 4; do
-        remote_get "$n" "/~measurement@1.0/subject" \
-            "$OUTDIR/responses/node$n-credential-subject.json"
-    done
-}
-
 assert_security_properties() {
     jq -n \
         --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
         --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
         --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
-        --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" \
-        --slurpfile c1 "$OUTDIR/responses/node1-credential-subject.json" \
-        --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
-        --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
-        --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
-        def props($node; $att; $cred): {
+        --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
+        def props($node; $att): {
             node: $node,
             cmdline: $att.body.body.system.kernel.cmdline,
             boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
@@ -362,11 +351,12 @@ assert_security_properties() {
             dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
             measurement_device: $att.body."measurement-device",
             evidence_type: $att.body.evidence.type,
-            recipient_key_id: $cred.body."key-id",
-            recipient_public: $cred.body."public-material"."x25519-public-key"
+            recipient_key_id: $att.body."secret-recipient"."key-id",
+            recipient_public:
+                $att.body."secret-recipient"."public-material"."x25519-public-key"
         };
-        [props(1; $n1[0]; $c1[0]), props(2; $n2[0]; $c2[0]),
-         props(3; $n3[0]; $c3[0]), props(4; $n4[0]; $c4[0])]
+        [props(1; $n1[0]), props(2; $n2[0]),
+         props(3; $n3[0]), props(4; $n4[0])]
         | {
             nodes: .,
             distinct_cmdlines: ([.[].cmdline] | unique | length),
@@ -563,7 +553,6 @@ time_step "install-remote-helper" install_remote_helper
 time_step "copy-images-to-remote" copy_images
 time_step "start-remote-snp-nodes" remote_start_nodes
 time_step "wait-measurement-boot" wait_all_nodes
-time_step "fetch-secret-subjects" fetch_subjects
 time_step "assert-security-properties" assert_security_properties
 time_step "generate-zone-requests" generate_requests
 time_step "zone-admission-flow" run_zone_flow

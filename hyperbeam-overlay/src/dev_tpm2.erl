@@ -23,8 +23,6 @@
 -define(TPM_CC_POLICY_PCR, 16#0000017F).
 -define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
-%%%============================================================================
-%%%============================================================================
 
 info(_) ->
     #{
@@ -43,14 +41,11 @@ info(_Base, _Req, _Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> => <<"TPM 2.0 measurement engine">>,
             <<"version">> => <<"2.0a">>,
             <<"exports">> => maps:get(exports, info(#{}), [])
         }
     }}.
 
-%%%============================================================================
-%%%============================================================================
 
 extend_with_tcg_event_log_tip() ->
     case read_tcg_event_log() of
@@ -62,18 +57,6 @@ extend_with_tcg_event_log_tip() ->
                         #{
                             <<"event-type">> =>
                                 <<"EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT">>,
-                            <<"description">> =>
-                                <<"TPM event log tip commitment "
-                                  "(paper P5-ext AO-Core hashpath "
-                                  "continuity: sha256 of firmware-"
-                                  "side TCG event log extended into "
-                                  "PCR 15, so every subsequent AO-"
-                                  "Core hashpath entry carries a "
-                                  "commitment to the full boot "
-                                  "measurement chain). Digest is "
-                                  "byte-for-byte sha256 of the "
-                                  "`tcg-event-log' field in this "
-                                  "envelope.">>,
                             <<"digest">> => hb_util:encode(Digest),
                             <<"subject">> =>
                                 hb_util:encode(
@@ -89,11 +72,9 @@ extend_with_tcg_event_log_tip() ->
             ok
     end.
 
-%%%============================================================================
-%%%============================================================================
 
 verify(Base, Req, Opts) ->
-    Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
+    Envelope = normalise_attestation(measurement_envelope(Base, Req, Opts), Opts),
     {TrustedCaPem, CaSource} = resolve_trusted_ca_with_source(Req, Opts),
     Checks = [
         safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem, Opts) end,
@@ -133,25 +114,15 @@ verify(Base, Req, Opts) ->
         }
     }}.
 
-normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
-    case measurement_attestation_body(Envelope, Opts) of
-        MeasurementBody when is_map(MeasurementBody) ->
-            normalise_attestation_body(MeasurementBody, Opts);
-        undefined ->
-            case hb_maps:get(<<"body">>, Envelope, undefined, #{}) of
-                Body when is_map(Body) ->
-                    case hb_maps:get(<<"tpm">>, Body, undefined, #{}) of
-                        Tpm when is_map(Tpm) ->
-                            normalise_attestation(Body, Opts);
-                        _ -> normalise_attestation_body(Envelope, Opts)
-                    end;
-                _ -> normalise_attestation_body(Envelope, Opts)
-            end
+measurement_envelope(Base, Req, Opts) when is_map(Base) ->
+    case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
+        E when is_map(E) -> E;
+        _ -> Base
     end;
-normalise_attestation(Other, _Opts) ->
-    Other.
+measurement_envelope(_Base, Req, Opts) ->
+    hb_maps:get(<<"envelope">>, Req, #{}, Opts).
 
-measurement_attestation_body(Envelope, Opts) ->
+normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
     case {
         hb_maps:get(<<"type">>, Envelope, undefined, Opts),
         hb_maps:get(<<"measurement-device">>, Envelope, undefined, Opts),
@@ -160,22 +131,15 @@ measurement_attestation_body(Envelope, Opts) ->
     } of
         {<<"lapee-measurement">>, <<"tpm@2.0a">>, Body, Evidence}
                 when is_map(Body), is_map(Evidence) ->
-            Body#{<<"tpm">> => Evidence};
-        _ ->
-            undefined
-    end.
-
-normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
-    case hb_maps:get(<<"tpm">>, Envelope, undefined, #{}) of
-        Tpm when is_map(Tpm) ->
             Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
+            Node1 = hb_maps:get(<<"node">>, Body, Node, #{}),
             ExtendedSubject =
-                hb_maps:get(<<"extended-subject">>, Tpm, undefined, #{}),
+                hb_maps:get(<<"extended-subject">>, Evidence, undefined, #{}),
             NodeID =
                 case ExtendedSubject of
                     B when is_binary(B), byte_size(B) > 0 -> B;
                     _ ->
-                        case Node of
+                        case Node1 of
                             M1 when is_map(M1) ->
                                 hb_util:human_id(
                                     hb_util:native_id(
@@ -183,23 +147,25 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
                             _ -> undefined
                         end
                 end,
-            Quote = hb_maps:get(<<"quote">>, Tpm, #{}, #{}),
-            Tpm#{
+            Quote = hb_maps:get(<<"quote">>, Evidence, #{}, #{}),
+            Evidence#{
                 <<"lapee-attestation-version">> =>
                     hb_maps:get(<<"lapee-attestation-version">>,
                                 Envelope, <<"1.0">>, #{}),
                 <<"tpm-quote">> => Quote,
-                <<"node-message">> => Node,
+                <<"node-message">> => Node1,
                 <<"node-message-id">> => NodeID,
                 <<"wallet-address">> =>
-                    case Node of
+                    case Node1 of
                         M2 when is_map(M2) ->
                             hb_maps:get(<<"address">>, M2, null, #{});
                         _ -> null
                     end
             };
         _ -> Envelope
-    end.
+    end;
+normalise_attestation(Other, _Opts) ->
+    Other.
 
 safely_run(F, Name, Severity) ->
     try F() of
@@ -219,29 +185,6 @@ safely_run(F, Name, Severity) ->
                <<"severity">> => Severity }
     end.
 
-resolve_envelope(Base, Req, Opts) when is_map(Base) ->
-    case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
-        E when is_map(E) -> E;
-        _ ->
-            case is_envelope(Base) of
-                true -> Base;
-                false ->
-                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                        Inner when is_map(Inner) -> Inner;
-                        _ -> Base
-                    end
-            end
-    end;
-resolve_envelope(_Base, _Req, _Opts) ->
-    #{}.
-
-is_envelope(M) when is_map(M) ->
-    hb_maps:get(<<"lapee-attestation-version">>, M, undefined, #{}) /=
-        undefined orelse
-    hb_maps:get(<<"type">>, M, undefined, #{}) =:= <<"lapee-measurement">>;
-is_envelope(_) ->
-    false.
-
 resolve_trusted_ca_with_source(Req, Opts) ->
     case {allow_request_trusted_ca(Opts),
           hb_maps:get(<<"trusted-ca">>, Req, undefined, Opts)} of
@@ -258,18 +201,7 @@ resolve_trusted_ca_with_source(Req, Opts) ->
     end.
 
 allow_request_trusted_ca(Opts) ->
-    truthy(first_defined([
-        opt_value(lapee_allow_request_trusted_ca, Opts),
-        opt_value(<<"lapee-allow-request-trusted-ca">>, Opts)
-    ])).
-
-truthy(true) -> true;
-truthy(1) -> true;
-truthy(<<"true">>) -> true;
-truthy(<<"1">>) -> true;
-truthy("true") -> true;
-truthy("1") -> true;
-truthy(_) -> false.
+    hb_opts:get(<<"lapee-allow-request-trusted-ca">>, false, Opts) =:= true.
 
 resolve_trusted_ca_from_config(Opts) ->
     case configured_trusted_ca_path(Opts) of
@@ -283,21 +215,7 @@ resolve_trusted_ca_from_config(Opts) ->
     end.
 
 configured_trusted_ca_path(Opts) ->
-    first_defined([
-        opt_value(lapee_tpm_ca_cert, Opts),
-        opt_value(<<"lapee-tpm-ca-cert">>, Opts)
-    ]).
-
-opt_value(Key, Opts) ->
-    case hb_opts:get(Key, undefined, Opts) of
-        undefined -> raw_opt_value(Key, Opts);
-        V -> V
-    end.
-
-raw_opt_value(Key, Opts) when is_map(Opts) ->
-    maps:get(Key, Opts, undefined);
-raw_opt_value(_Key, _Opts) ->
-    undefined.
+    hb_opts:get(<<"lapee-tpm-ca-cert">>, undefined, Opts).
 
 resolve_trusted_ca_from_internal_bundle(Opts) ->
     Roots = hb_maps:get(<<"cert-roots">>, hb_db_tpm:load(Opts), [], #{}),
@@ -488,8 +406,7 @@ validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
                 AnchorOtp,
                 EkDer,
                 candidate_intermediate_chains(
-                    PeerChainDers, TrustedDers, AnchorDer),
-                AnchorDer)
+                    PeerChainDers, TrustedDers, AnchorDer))
     catch
         Class:Reason ->
             {error,
@@ -519,7 +436,7 @@ unique_chains(Chains) ->
         [],
         Chains).
 
-validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
+validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains) ->
     Attempts =
         [
             {Intermediates, Path,
@@ -538,11 +455,8 @@ validate_ek_chain_paths(AnchorOtp, EkDer, IntermediateChains, AnchorDer) ->
                 "pkix_path_validation ok using ~B intermediate "
                 "candidate(s)", [length(Intermediates)]))};
         [] ->
-            Reasons = [
-                diagnose_chain_failure(Why, EkDer, AnchorDer)
-            ||
-                {_Intermediates, _Path, {error, Why}} <- Attempts
-            ],
+            Reasons = [reason_to_text(Why)
+                       || {_Intermediates, _Path, {error, Why}} <- Attempts],
             {error, iolist_to_binary(io_lib:format(
                 "chain invalid across ~B path candidate(s): ~p",
                 [length(Attempts), Reasons]))}
@@ -554,36 +468,6 @@ ek_cert_path_orders(EkDer, Intermediates) ->
         Intermediates ++ [EkDer],
         [EkDer | Intermediates]
     ]).
-
-diagnose_chain_failure(Why, EkDer, CaDer) ->
-    Generic = iolist_to_binary(io_lib:format("chain invalid: ~p", [Why])),
-    try
-        EkOtp = public_key:pkix_decode_cert(EkDer, otp),
-        CaOtp = public_key:pkix_decode_cert(CaDer, otp),
-        EkTbs = EkOtp#'OTPCertificate'.tbsCertificate,
-        CaTbs = CaOtp#'OTPCertificate'.tbsCertificate,
-        EkIssuer = EkTbs#'OTPTBSCertificate'.issuer,
-        CaSubject = CaTbs#'OTPTBSCertificate'.subject,
-        case {Why, public_key:pkix_normalize_name(EkIssuer)
-                 =:= public_key:pkix_normalize_name(CaSubject)} of
-            {{bad_cert, invalid_signature}, true} ->
-                <<"chain invalid: EK's issuer DN matches the trusted CA's "
-                  "subject DN, but the signature does not verify under that "
-                  "CA's public key. The trust anchor is from a different "
-                  "CA generation than the one that signed this EK (common "
-                  "when the peer rebooted and regenerated a per-boot test "
-                  "CA -- refresh the trust anchor from the peer's CURRENT "
-                  "boot), or a rogue CA with the same DN is being "
-                  "presented (investigate).">>;
-            {{bad_cert, invalid_issuer}, _} ->
-                <<"chain invalid: EK's issuer DN does not match any "
-                  "trusted CA's subject DN. The peer presented an EK "
-                  "signed by a different CA entirely.">>;
-            _ ->
-                Generic
-        end
-    catch _:_ -> Generic
-    end.
 
 ek_chain_verify_fun() ->
     {fun ek_chain_verify_fun/3, []}.
@@ -977,8 +861,6 @@ decode_pem_rsa_pub(Pem) when is_binary(Pem) ->
         _ -> {error, no_pem_entries}
     end.
 
-%%%============================================================================
-%%%============================================================================
 
 read_tcg_event_log() ->
     {Bin, _Source} = read_tcg_event_log_with_source(),
@@ -1018,8 +900,6 @@ infer_log_format(Bin) ->
         true                        -> <<"legacy-sha1">>
     end.
 
-%%%============================================================================
-%%%============================================================================
 
 supported(_Base, _Req, _Opts) ->
     case nif_startup() of
@@ -1073,7 +953,6 @@ credential_subject_body(Opts) ->
         <<"ek-cert-pem">> => ek_cert_pem(Opts),
         <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
         <<"ek-cert-source">> => ek_cert_source(),
-        <<"ek-cert-chain-diagnostics">> => ek_cert_chain_diagnostics(),
         <<"ek-pub-pem">> => ek_pub_pem(Opts),
         <<"ek-public">> => ek_public(Opts),
         <<"ek-name">> => ek_name(Opts),
@@ -1461,8 +1340,6 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                         <<"ek-cert-pem">> => ek_cert_pem(Opts),
                         <<"ek-cert-chain-pem">> => ek_cert_chain_pem(),
                         <<"ek-cert-source">> => ek_cert_source(),
-                        <<"ek-cert-chain-diagnostics">> =>
-                            ek_cert_chain_diagnostics(),
                         <<"tpm-properties">> => tpm_properties(),
                         <<"ek-pub-pem">> => ek_pub_pem(Opts),
                         <<"ek-public">> => ek_public(Opts),
@@ -1501,10 +1378,6 @@ extend_boot_subject(SubjectID, SubjectDigest) ->
                 #{
                     <<"event-type">> =>
                         <<"EV_HYPERBEAM_BOOT_ATTESTATION_SUBJECT">>,
-                    <<"description">> =>
-                        <<"AO-Core boot attestation subject extended into "
-                          "PCR 15. The subject ID commits to the nested "
-                          "`system' report and signed `node' message.">>,
                     <<"digest">> => hb_util:encode(SubjectDigest),
                     <<"subject-id">> => SubjectID,
                     <<"subject-is-message">> => true
@@ -1528,8 +1401,6 @@ quote_body(Pcrs, Nonce, Quoted, Signature, PcrMap) ->
                  || {I, V} <- maps:to_list(PcrMap)])
     }.
 
-%%%============================================================================
-%%%============================================================================
 
 event_log(_Opts) ->
     case persistent_term:get({dev_tpm2, event_log}, undefined) of
@@ -1550,8 +1421,6 @@ append_event(Pcr, Payload) ->
     persistent_term:put({dev_tpm2, event_seq}, NewSeq),
     ok.
 
-%%%============================================================================
-%%%============================================================================
 
 resolve_nonce(Req) when is_map(Req) ->
     case decoded_nonce(Req) of
@@ -1601,8 +1470,6 @@ error_resp(Status, Err, Reason) ->
         }
     }}.
 
-%%%============================================================================
-%%%============================================================================
 
 ensure_ak(Opts) ->
     ensure_ak(undefined, undefined, undefined, Opts).
@@ -1861,13 +1728,6 @@ tpm_properties() ->
 ek_cert_chain_pem() ->
     persistent_term:get({dev_tpm2, ek_cert_chain_pem}, <<>>).
 
-ek_cert_chain_diagnostics() ->
-    persistent_term:get(
-        {dev_tpm2, ek_cert_chain_diagnostics},
-        #{<<"available">> => false,
-          <<"reason">> =>
-              <<"ensure_ak/1 has not executed yet">>}).
-
 ek_cert_source() ->
     case persistent_term:get({dev_tpm2, ek_cert_source}, undefined) of
         undefined ->
@@ -1906,14 +1766,12 @@ fetch_ek_cert_from_nv(Opts) ->
             Pem = der_to_pem(Der),
             persistent_term:put({dev_tpm2, ek_cert_pem}, Pem),
             ChainHandle = Handle + 1,
-            {ChainDers, ChainSource, ChainHits, ChainDiagnostics} =
+            {ChainDers, ChainSource, ChainHits} =
                 fetch_ek_cert_chain(ChainHandle, Opts),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders},
                                 ChainDers),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem},
                                 ders_to_pem(ChainDers)),
-            persistent_term:put({dev_tpm2, ek_cert_chain_diagnostics},
-                                ChainDiagnostics),
             persistent_term:put(
                 {dev_tpm2, ek_cert_source},
                 #{kind => <<"tpm-nv">>,
@@ -1930,12 +1788,6 @@ fetch_ek_cert_from_nv(Opts) ->
             persistent_term:put({dev_tpm2, ek_cert_pem}, <<>>),
             persistent_term:put({dev_tpm2, ek_cert_chain_ders}, []),
             persistent_term:put({dev_tpm2, ek_cert_chain_pem}, <<>>),
-            persistent_term:put(
-                {dev_tpm2, ek_cert_chain_diagnostics},
-                #{<<"available">> => false,
-                  <<"reason">> =>
-                      <<"no EK certificate was found, so no EK-chain "
-                        "handles were probed">>}),
             persistent_term:put(
                 {dev_tpm2, ek_cert_source},
                 #{kind => <<"absent">>,
@@ -1992,7 +1844,7 @@ fetch_ek_cert_chain_handles(Handles) ->
             [] -> <<"probe-failed: ", (chain_attempts_text(Attempts))/binary>>;
             _ -> chain_hit_source(Hits)
         end,
-    {Ders, Source, Hits, chain_diagnostics(Ders, Hits, Attempts)}.
+    {Ders, Source, Hits}.
 
 read_chain_entry(Handle) ->
     case lapee_tpm_nif:nv_read(Handle) of
@@ -2053,17 +1905,6 @@ format_nv_handles(Handles) ->
 
 format_nv_handle(Handle) ->
     iolist_to_binary(io_lib:format("0x~8.16.0B", [Handle])).
-
-chain_diagnostics(Ders, Hits, Attempts) ->
-    #{
-        <<"available">> => true,
-        <<"cert-count">> => length(Ders),
-        <<"hit-handles">> => format_nv_handles(Hits),
-        <<"misses">> =>
-            [#{<<"handle">> => format_nv_handle(H),
-               <<"reason">> => reason_to_text(R)}
-             || {H, R} <- lists:reverse(Attempts)]
-    }.
 
 cert_extensions(#'OTPTBSCertificate'{extensions = Extensions})
         when is_list(Extensions) ->
@@ -2220,6 +2061,3 @@ nif_quote(AKTr, Pcrs, Nonce) ->
         not_loaded -> {error, nif_not_loaded};
         M -> catch M:quote(AKTr, Pcrs, Nonce)
     end.
-
-%%%============================================================================
-%%%============================================================================
