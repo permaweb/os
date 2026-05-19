@@ -431,11 +431,11 @@ pcr_read(_Base, Req, Opts) ->
 %% `Base' is the attestation envelope (same shape emitted by
 %% `attestation/3'). Options in `Req':
 %%   trusted-ca : base64url PEM bytes of TPM vendor root CAs to trust.
-%%                Ignored unless `lapee_allow_request_trusted_ca' is
+%%                Ignored unless `lapee-allow-request-trusted-ca' is
 %%                explicitly enabled in node config. Production LapEE
 %%                nodes default to the measured-in
 %%                `priv/tpm-interpret/root-cas/' bundle, or to
-%%                `lapee_tpm_ca_cert' in `Opts' if configured.
+%%                `lapee-tpm-ca-cert' in `Opts' if configured.
 %%
 %% Return shape (always 200 -- the `verified' bool is the real verdict):
 %%   verified : boolean
@@ -647,8 +647,7 @@ resolve_trusted_ca_with_source(Req, Opts) ->
 allow_request_trusted_ca(Opts) ->
     truthy(first_defined([
         opt_value(lapee_allow_request_trusted_ca, Opts),
-        opt_value(<<"lapee-allow-request-trusted-ca">>, Opts),
-        opt_value(<<"lapee_allow_request_trusted_ca">>, Opts)
+        opt_value(<<"lapee-allow-request-trusted-ca">>, Opts)
     ])).
 
 truthy(true) -> true;
@@ -673,8 +672,7 @@ resolve_trusted_ca_from_config(Opts) ->
 configured_trusted_ca_path(Opts) ->
     first_defined([
         opt_value(lapee_tpm_ca_cert, Opts),
-        opt_value(<<"lapee-tpm-ca-cert">>, Opts),
-        opt_value(<<"lapee_tpm_ca_cert">>, Opts)
+        opt_value(<<"lapee-tpm-ca-cert">>, Opts)
     ]).
 
 opt_value(Key, Opts) ->
@@ -737,9 +735,9 @@ chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
         {_, {error, _}} ->
             {error, <<"trusted CA missing or unparseable; ship "
                       "`priv/tpm-interpret/root-cas/' in the measured image, "
-                      "set `lapee_tpm_ca_cert' in node config, or pass "
+                      "set `lapee-tpm-ca-cert' in node config, or pass "
                       "`trusted-ca' with "
-                      "`lapee_allow_request_trusted_ca' enabled">>};
+                      "`lapee-allow-request-trusted-ca' enabled">>};
         {{error, Why}, _} ->
             {error, iolist_to_binary(io_lib:format("ek_cert_pem invalid: ~p",
                                                     [Why]))}
@@ -919,7 +917,7 @@ validate_ek_chain_attempt(EkDer, PeerChainDers, TrustedDers, AnchorDer) ->
                     "trusted CA bundle contains a structurally PEM-shaped "
                     "entry that is not a valid DER certificate (~p:~p); "
                     "refresh the measured-in root-cas bundle or configured "
-                    "`lapee_tpm_ca_cert'.",
+                    "`lapee-tpm-ca-cert'.",
                     [Class, Reason]))}
     end.
 

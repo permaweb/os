@@ -117,7 +117,7 @@ info(_Base, _Req, _Opts) ->
                               "TPM vendor root CA to trust for this "
                               "request. Honored only when the verifier "
                               "node explicitly enables "
-                              "`lapee_allow_request_trusted_ca'; production "
+                              "`lapee-allow-request-trusted-ca'; production "
                               "nodes use their measured-in root-cas bundle.">>
                     },
                     <<"response">> =>
@@ -581,7 +581,7 @@ verify_peer(_Base, Req, Opts) ->
         PeerUrl when is_binary(PeerUrl) ->
             %% Optional inline trust anchor for test/verifier tooling.
             %% dev_tpm2 ignores it unless this node explicitly enables
-            %% `lapee_allow_request_trusted_ca'; production nodes use
+            %% `lapee-allow-request-trusted-ca'; production nodes use
             %% their measured-in root-cas bundle.
             InlineCa = resolve_inline_ca(Req, Opts),
             fetch_and_verify_peer(PeerUrl, InlineCa, Opts);

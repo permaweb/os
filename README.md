@@ -113,18 +113,18 @@ A small example:
 
 ```json
 {
-  "load_remote_devices": false,
-  "trusted_device_signers": [
+  "load-remote-devices": false,
+  "trusted-device-signers": [
     "WjnS-s03HWsDSdMnyTdzB1eHZB2QheUWP_FVRVYxkXk"
   ]
 }
 ```
 
-HyperBEAM normalizes JSON config keys into AO message keys, so
-`trusted_device_signers` becomes `trusted-device-signers` in
-`/~meta@1.0/info` and in the attested node evidence. Signer values are
-AO/Arweave-style base64url addresses. If you do not intend to load
-remote devices, keep `load_remote_devices` false.
+Use HyperBEAM/AO-Core key spelling directly in `config.json`:
+hyphenated keys such as `trusted-device-signers` and
+`load-remote-devices`. Signer values are AO/Arweave-style base64url
+addresses. If you do not intend to load remote devices, keep
+`load-remote-devices` false.
 
 ## Verify A Running Node
 

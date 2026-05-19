@@ -2,7 +2,7 @@
 # qemu-operator-config-green-zone.sh -- prove USB config.json is attested.
 #
 # Boots two LapEE nodes under QEMU+OVMF+swtpm from the same signed image:
-#   * node 1 has ESP /EFI/boot/config.json with trusted_device_signers=[ADDR]
+#   * node 1 has ESP /EFI/boot/config.json with trusted-device-signers=[ADDR]
 #   * node 2 has no operator config.json
 #
 # Acceptance checked here:
@@ -86,7 +86,7 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 SOCK_DIR=$(mktemp -d /tmp/lapee-config-gz.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
-{"trusted_device_signers":["$SIGNER"]}
+{"trusted-device-signers":["$SIGNER"]}
 EOF
 cat > "$OUTDIR/with-signer-init.json" <<EOF
 {"name":"with-signer","template":{"node":{"trusted-device-signers":["$SIGNER"]}}}

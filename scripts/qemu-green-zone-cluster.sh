@@ -140,7 +140,7 @@ import json, pathlib, sys
 
 base = json.loads(pathlib.Path(sys.argv[1]).read_text())
 cfg = {
-    "lapee_allow_request_trusted_ca": True,
+    "lapee-allow-request-trusted-ca": True,
     "peer-http-connect-timeout-ms": 600000,
     "peer-http-timeout-ms": 600000,
 }
@@ -148,13 +148,13 @@ device = sys.argv[3]
 if device != "auto":
     cfg["measurement-device"] = device
 if device == "snp-mock@1.0":
-    preloaded = list(base["preloaded_devices"])
+    preloaded = list(base["preloaded-devices"])
     preloaded.append({
         "name": "snp-mock@1.0",
         "module": "dev_snp_mock",
         "ao-types": "module=\"atom\"",
     })
-    cfg["preloaded_devices"] = preloaded
+    cfg["preloaded-devices"] = preloaded
 pathlib.Path(sys.argv[2]).write_text(json.dumps(cfg))
 PY
     docker run --rm $DOCKER_PLATFORM \

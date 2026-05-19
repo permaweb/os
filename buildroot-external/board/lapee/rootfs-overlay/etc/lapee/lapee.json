@@ -3,7 +3,6 @@
     "initialized": "permanent",
     "access-remote-cache-for-client": false,
     "load-remote-devices": false,
-    "trusted-device-signers": [],
     "on": {
         "start": {
             "device": "measurement@1.0",
