@@ -3,16 +3,19 @@
 %%% The v1 product path only needs the measured-in TPM EK root CA bundle.
 %%% Historical interpretation catalogues are not loaded in production.
 -module(hb_db_tpm).
--export([load/1, priv_dir/0, read_cert_roots/1]).
+-export([load/1, load/2, priv_dir/0, priv_dir/1, read_cert_roots/1]).
 
 -define(APPNAME, hb).
 -define(DB_SUBDIR, "tpm-interpret").
 -define(CACHE_KEY, {hb_db_tpm, loaded}).
 
-load(_Opts) ->
+load(Opts) ->
+    load(undefined, Opts).
+
+load(DeviceModule, _Opts) ->
     case persistent_term:get(?CACHE_KEY, undefined) of
         undefined ->
-            Root = filename:join(priv_dir(), ?DB_SUBDIR),
+            Root = filename:join(priv_dir(DeviceModule), ?DB_SUBDIR),
             Db = #{<<"cert-roots">> =>
                        read_cert_roots(filename:join(Root, "root-cas"))},
             persistent_term:put(?CACHE_KEY, Db),
@@ -22,6 +25,22 @@ load(_Opts) ->
     end.
 
 priv_dir() ->
+    priv_dir(undefined).
+
+priv_dir(DeviceModule) when is_atom(DeviceModule) ->
+    case packaged_priv_dir(DeviceModule) of
+        undefined -> app_priv_dir();
+        Dir -> Dir
+    end;
+priv_dir(_) ->
+    app_priv_dir().
+
+packaged_priv_dir(DeviceModule) ->
+    try hb_device_archive:implementation_dir(DeviceModule)
+    catch _:_ -> undefined
+    end.
+
+app_priv_dir() ->
     case code:priv_dir(?APPNAME) of
         {error, _} ->
             filename:join(

@@ -102,6 +102,11 @@ node_guest_url() {
     printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + $1))"
 }
 
+json_path() {
+    local path=$1
+    printf '%s' "$path"
+}
+
 prepare_image() {
     local n=$1
     local dst="$OUTDIR/nodes/node$n/disk.img"
@@ -292,7 +297,7 @@ remote_get() {
     local path=$2
     local out=$3
     ssh "$HOST" \
-        "curl --max-time 300 -sSL -H 'accept: application/json' -H 'accept-bundle: true' '$(node_host_url "$n")$path'" \
+        "curl --max-time 300 -sSL -H 'accept: application/json' -H 'accept-bundle: true' '$(node_host_url "$n")$(json_path "$path")'" \
         > "$out"
 }
 
@@ -302,7 +307,7 @@ remote_post() {
     local req=$3
     local out=$4
     ssh "$HOST" \
-        "curl --max-time 300 -sSL -X POST -H 'content-type: application/json' -H 'accept: application/json' -H 'accept-bundle: true' --data-binary @- '$(node_host_url "$n")$path'" \
+        "curl --max-time 300 -sSL -X POST -H 'content-type: application/json' -H 'accept: application/json' -H 'accept-bundle: true' --data-binary @- '$(node_host_url "$n")$(json_path "$path")'" \
         < "$req" > "$out"
 }
 
@@ -339,21 +344,25 @@ assert_security_properties() {
         --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
         --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
         --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
+        def measurement($att):
+            if $att.body.type == "lapee-measurement" then $att.body
+            elif $att.type == "lapee-measurement" then $att
+            else $att end;
         def props($node; $att): {
             node: $node,
-            cmdline: $att.body.body.system.kernel.cmdline,
-            boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
-            node_initialized: $att.body.body.node.initialized,
+            cmdline: measurement($att).body.system.kernel.cmdline,
+            boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+            node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
-                $att.body.body.node."access-remote-cache-for-client",
-            load_remote_devices: $att.body.body.node."load-remote-devices",
-            memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
-            dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
-            measurement_device: $att.body."measurement-device",
-            evidence_type: $att.body.evidence.type,
-            recipient_key_id: $att.body."secret-recipient"."key-id",
+                measurement($att).body.node."access-remote-cache-for-client",
+            load_remote_devices: measurement($att).body.node."load-remote-devices",
+            memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
+            dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
+            measurement_device: measurement($att)."measurement-device",
+            evidence_type: measurement($att).evidence.type,
+            recipient_key_id: measurement($att)."secret-recipient"."key-id",
             recipient_public:
-                $att.body."secret-recipient"."public-material"."x25519-public-key"
+                measurement($att)."secret-recipient"."public-material"."x25519-public-key"
         };
         [props(1; $n1[0]), props(2; $n2[0]),
          props(3; $n3[0]), props(4; $n4[0])]
@@ -505,7 +514,13 @@ run_zone_flow() {
     echo ">> node 4 cannot produce a zone membership proof"
 
     for n in 1 2 3; do
-        member_addr=$(jq -r '.body.body.node.address' \
+        member_addr=$(jq -r '
+            def measurement:
+                if .body.type == "lapee-measurement" then .body
+                elif .type == "lapee-measurement" then .
+                else . end;
+            measurement.body.node.address
+        ' \
             "$OUTDIR/responses/node$n-boot-attestation.json")
         remote_get "$n" \
             "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=remote-snp-zone-index" \

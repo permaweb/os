@@ -286,6 +286,11 @@ node_guest_url() {
     printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + n))"
 }
 
+json_path() {
+    local path=$1
+    printf '%s' "$path"
+}
+
 node_memory_mib() {
     local n=$1
     case "$n" in
@@ -466,8 +471,10 @@ wait_node() {
         if curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
                 "$url/~measurement@1.0/info" -o "$info" 2>/dev/null &&
                 [[ -s "$info" ]]; then
+            scripts/materialize-hb-json.py "$url" "$info"
             curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
-                "$url/~measurement@1.0/boot" -o "$att"
+                "$url$(json_path "/~measurement@1.0/boot")" -o "$att"
+            scripts/materialize-hb-json.py "$url" "$att"
             echo ">> node $n ready"
             return 0
         fi
@@ -489,8 +496,9 @@ post_json() {
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         --data-binary "@$req" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 get_json() {
@@ -500,8 +508,9 @@ get_json() {
     curl -sSL \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 require_request() {
@@ -562,7 +571,13 @@ assert_nonvolatile_reused() {
 }
 
 boot_memtotal_kb() {
-    jq -r '(.body.body // .body).system.memory.meminfo.memtotal.value' "$1"
+    jq -r '
+        def measurement:
+            if .body.type == "lapee-measurement" then .body
+            elif .type == "lapee-measurement" then .
+            else . end;
+        measurement.body.system.memory.meminfo.memtotal.value
+    ' "$1"
 }
 
 assert_current_boot_attestation_after_join() {
@@ -680,20 +695,24 @@ jq -n \
     --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
     --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
     def falsy: . == false or . == "false";
+    def measurement($att):
+        if $att.body.type == "lapee-measurement" then $att.body
+        elif $att.type == "lapee-measurement" then $att
+        else $att end;
     def props($node; $att): {
         node: $node,
-        cmdline: $att.body.body.system.kernel.cmdline,
-        boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
-        node_initialized: $att.body.body.node.initialized,
+        cmdline: measurement($att).body.system.kernel.cmdline,
+        boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+        node_initialized: measurement($att).body.node.initialized,
         access_remote_cache_for_client:
-            $att.body.body.node."access-remote-cache-for-client",
-        load_remote_devices: $att.body.body.node."load-remote-devices",
-        memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
-        dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
-        measurement_device: $att.body."measurement-device",
-        ek_cert_source_kind: $att.body.evidence."ek-cert-source".kind,
-        ek_public: $att.body."secret-recipient"."ek-public",
-        ak_name: $att.body."secret-recipient"."ak-name"
+            measurement($att).body.node."access-remote-cache-for-client",
+        load_remote_devices: measurement($att).body.node."load-remote-devices",
+        memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
+        dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
+        measurement_device: measurement($att)."measurement-device",
+        ek_cert_source_kind: measurement($att).evidence."ek-cert-source".kind,
+        ek_public: measurement($att)."secret-recipient"."ek-public",
+        ak_name: measurement($att)."secret-recipient"."ak-name"
     };
     [props(1; $n1[0]), props(2; $n2[0]),
      props(3; $n3[0]), props(4; $n4[0])]
@@ -872,7 +891,9 @@ for n in 1 2 3; do
         assert_nonvolatile_status "$n" "$OUTDIR/responses/node$n-status.json"
     fi
     member_count=$(jq -r '.body."zone".members
-                          | with_entries(select(.key != "commitments"))
+                          | with_entries(
+                                select(.key != "commitments" and
+                                       .key != "device"))
                           | keys | length' \
         "$OUTDIR/responses/node$n-status.json")
     expected=$(expected_member_count "$n")
@@ -954,7 +975,13 @@ if [[ "$NONVOLATILE" = "1" ]]; then
 fi
 
 for n in 1 2 3; do
-    member_addr=$(jq -r '.body.body.node.address' \
+    member_addr=$(jq -r '
+        def measurement:
+            if .body.type == "lapee-measurement" then .body
+            elif .type == "lapee-measurement" then .
+            else . end;
+        measurement.body.node.address
+    ' \
         "$OUTDIR/responses/node$n-boot-attestation.json")
     get_json "$n" \
         "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=qemu-zone-index" \

@@ -46,4 +46,4 @@ fn binary_term<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
     bin.into()
 }
 
-rustler::init!("dev_snp_nif");
+rustler::init!("lapee_snp_nif");

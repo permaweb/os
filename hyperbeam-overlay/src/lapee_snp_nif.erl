@@ -1,4 +1,4 @@
--module(dev_snp_nif).
+-module(lapee_snp_nif).
 -export([supported/0, report/2]).
 
 -include("include/cargo.hrl").
@@ -13,7 +13,7 @@ report(_ReportData, _VMPL) ->
     ?NOT_LOADED.
 
 init() ->
-    ?load_nif_from_crate(dev_snp_nif, 0).
+    ?load_nif_from_crate(lapee_snp_nif, 0).
 
 not_loaded(Line) ->
     erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, Line}]}).

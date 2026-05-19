@@ -5,6 +5,7 @@
 %%% and parses facts from read-only kernel/userspace interfaces, but does not
 %%% assert policy or trust.
 -module(dev_system).
+-implements(<<"system@1.0">>).
 -export([info/1, info/3, all/3]).
 -export([report_from_root/1]).
 -include_lib("kernel/include/file.hrl").
@@ -637,13 +638,13 @@ acpi_base32_key(Name) ->
         binary:replace(base32:encode(to_bin(Name)), <<"=">>, <<>>, [global])).
 
 acpi_table_header("RSDP", Bin) ->
-    dev_tpm_tcg:parse_acpi_rsdp(Bin);
+    lapee_tpm_tcg:parse_acpi_rsdp(Bin);
 acpi_table_header("FACS", _Bin) ->
     #{
         <<"table-signature">> => <<"FACS">>
     };
 acpi_table_header(_Name, Bin) ->
-    dev_tpm_tcg:parse_acpi_table(Bin).
+    lapee_tpm_tcg:parse_acpi_table(Bin).
 
 acpi_table_validation(Header, Bin) ->
     Length = maps:get(<<"length">>, Header, null),

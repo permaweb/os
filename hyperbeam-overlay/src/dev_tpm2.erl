@@ -3,6 +3,7 @@
 %%% PCR-bound AK, verifies TPM evidence, and maps TPM
 %%% MakeCredential/ActivateCredential into `~measurement@1.0'.
 -module(dev_tpm2).
+-implements(<<"tpm@2.0a">>).
 -export([info/1, info/3, supported/3, subject/3, measure/3,
          unwrap_secret/3, activate_credential_secret/2]).
 -export([verify/3]).
@@ -218,7 +219,7 @@ configured_trusted_ca_path(Opts) ->
     hb_opts:get(<<"lapee-tpm-ca-cert">>, undefined, Opts).
 
 resolve_trusted_ca_from_internal_bundle(Opts) ->
-    Roots = hb_maps:get(<<"cert-roots">>, hb_db_tpm:load(Opts), [], #{}),
+    Roots = hb_maps:get(<<"cert-roots">>, hb_db_tpm:load(?MODULE, Opts), [], #{}),
     Pem = iolist_to_binary(
         [pem_with_trailing_newline(RootPem)
          || Root <- Roots,
@@ -1305,7 +1306,7 @@ boot_subject(Opts) ->
                 hb_util:native_id(SubjectID)),
             {Subject, SubjectID, SubjectDigest};
         undefined ->
-            Subject = dev_measurement:measurement_body(Opts),
+            Subject = measurement_body(Opts),
             SubjectID = subject_id(Subject, Opts),
             {Subject, SubjectID, hb_util:native_id(SubjectID)}
     end.
@@ -1360,7 +1361,7 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
                             infer_log_format(TcgLogBin),
-                        <<"signals">> => dev_tpm_tcg:boot_signals(TcgLogBin)
+                        <<"signals">> => lapee_tpm_tcg:boot_signals(TcgLogBin)
                     };
                 {error, Reason} ->
                     throw({boot_attestation_error,
@@ -1446,7 +1447,7 @@ decoded_nonce(_) ->
     undefined.
 
 subject_id(Subject, Opts) when is_map(Subject) ->
-    dev_measurement:measurement_body_id(Subject, Opts);
+    measurement_body_id(Subject, Opts);
 subject_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
 subject_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -1460,6 +1461,22 @@ subject_id(Bin, _Opts) when is_binary(Bin) ->
     hb_util:encode(hb_crypto:sha256(Bin));
 subject_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
+
+measurement_body(Opts) ->
+    case hb_device_load:reference(<<"measurement@1.0">>, Opts) of
+        {ok, Module} -> Module:measurement_body(Opts);
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"measurement-body">> => reason_to_text(Reason)}})
+    end.
+
+measurement_body_id(Subject, Opts) ->
+    case hb_device_load:reference(<<"measurement@1.0">>, Opts) of
+        {ok, Module} -> Module:measurement_body_id(Subject, Opts);
+        {error, Reason} ->
+            throw({boot_attestation_error,
+                   #{<<"measurement-body-id">> => reason_to_text(Reason)}})
+    end.
 
 error_resp(Status, Err, Reason) ->
     {error, #{

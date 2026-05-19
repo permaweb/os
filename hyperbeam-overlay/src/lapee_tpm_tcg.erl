@@ -5,7 +5,7 @@
 %%% the measured Secure Boot variable, and decode ACPI table headers for
 %%% `~system@1.0'.  Broader firmware interpretation belongs in external
 %%% analysis tools, not in the boot appliance.
--module(dev_tpm_tcg).
+-module(lapee_tpm_tcg).
 -export([boot_signals/1, parse_acpi_table/1, parse_acpi_rsdp/1]).
 
 %%%============================================================================

@@ -11,6 +11,7 @@
 %%% measured guest, bind that public key into SNP `report_data', and let peers
 %%% encrypt admission material to it.
 -module(dev_snp).
+-implements(<<"snp@1.0">>).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
@@ -61,7 +62,7 @@ measure(_Base, Req, Opts) ->
             <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
         Nonce = measurement_nonce(Req),
         ReportData = report_data(Body, Nonce, Recipient, Opts),
-        case dev_snp_nif:report(ReportData, vmpl(Opts)) of
+        case lapee_snp_nif:report(ReportData, vmpl(Opts)) of
             {ok, ReportRaw, Certs} ->
                 Report = decode_report(ReportRaw),
                 {ok, #{
@@ -119,7 +120,7 @@ unwrap_secret(_Base, Req, Opts) ->
     end.
 
 snp_supported(_Opts) ->
-    try dev_snp_nif:supported() of
+    try lapee_snp_nif:supported() of
         {ok, true} -> true;
         _ -> false
     catch _:_ ->
@@ -753,8 +754,6 @@ response_body({ok, Msg}, Opts) ->
     response_body(Msg, Opts);
 response_body({error, Reason}, _Opts) ->
     throw(Reason);
-response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
 response_body(#{<<"body">> := Body} = Msg, Opts) ->
     case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
         <<"lapee-measurement">> -> Msg;
@@ -767,9 +766,14 @@ resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
         E when is_map(E) -> E;
         _ ->
-            case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                Inner when is_map(Inner) -> Inner;
-                _ -> Base
+            case hb_maps:get(<<"type">>, Base, undefined, Opts) of
+                <<"lapee-measurement">> ->
+                    Base;
+                _ ->
+                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
+                        Inner when is_map(Inner) -> Inner;
+                        _ -> Base
+                    end
             end
     end;
 resolve_envelope(_Base, Req, Opts) ->

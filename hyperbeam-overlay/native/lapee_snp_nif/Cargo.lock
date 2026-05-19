@@ -70,7 +70,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12170080f3533d6f09a19f81596f836854d0fa4867dc32c8172b8474b4e9de61"
 
 [[package]]
-name = "dev_snp_nif"
+name = "lapee_snp_nif"
 version = "0.1.0"
 dependencies = [
  "rustler",

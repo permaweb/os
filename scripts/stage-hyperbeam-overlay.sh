@@ -28,32 +28,54 @@ find "$overlay/src" -type f | while IFS= read -r src; do
     rel=${src#"$overlay/src/"}
     rm -f "$repo/src/$rel"
     rm -f "$repo/src/preloaded/$rel"
+    rm -f "$repo/src/preloaded/lapee/$rel"
     rm -f "$repo/src/kernel/$rel"
+    rm -f "$repo/src/core/$rel"
+    rm -f "$repo/src/core/lapee/$rel"
 done
 # Remove overlay-owned files whose names changed across LapEE iterations.
 rm -f "$repo/src/dev_system_probe.erl"
 rm -f "$repo/src/preloaded/dev_system_probe.erl"
+rm -f "$repo/src/preloaded/lapee/dev_system_probe.erl"
 rm -f "$repo/src/kernel/dev_system_probe.erl"
+rm -f "$repo/src/core/lapee/dev_system_probe.erl"
+rm -f "$repo/src/preloaded/dev_snp_nif.erl" \
+      "$repo/src/preloaded/dev_tpm_tcg.erl" \
+      "$repo/src/preloaded/lapee/dev_snp_nif.erl" \
+      "$repo/src/preloaded/lapee/dev_tpm_tcg.erl"
 rm -rf "$repo/native/lapee_tpm_nif" \
-       "$repo/native/dev_snp_nif" \
-       "$repo/priv/tpm-interpret"
+       "$repo/native/lapee_snp_nif" \
+       "$repo/priv/tpm-interpret" \
+       "$repo/src/preloaded/lapee/priv/tpm-interpret" \
+       "$repo/src/preloaded/lapee/priv/dev_tpm2"
 
-if [ -d "$repo/src/preloaded" ] && [ -d "$repo/src/kernel" ]; then
+if [ -d "$repo/src/preloaded" ] && [ -d "$repo/src/core" ]; then
     find "$overlay/src" -type f | while IFS= read -r src; do
         rel=${src#"$overlay/src/"}
         base=${rel##*/}
         case "$base" in
-            dev_*.erl) dest="$repo/src/preloaded/$rel" ;;
-            *) dest="$repo/src/kernel/$rel" ;;
+            dev_*.erl) dest="$repo/src/preloaded/lapee/$rel" ;;
+            *) case "$rel" in
+                priv/*) dest="$repo/src/preloaded/lapee/$rel" ;;
+                *) dest="$repo/src/core/$rel" ;;
+            esac ;;
         esac
         mkdir -p "$(dirname "$dest")"
         cp "$src" "$dest"
+    done
+    for root_file in "$repo"/src/preloaded/lapee/dev_*.erl; do
+        [ -f "$root_file" ] || continue
+        root=${root_file##*/}
+        root=${root%.erl}
+        mkdir -p "$repo/src/preloaded/lapee/priv/$root"
     done
 else
 cp -R "$overlay/src/." "$repo/src/"
 fi
 cp -R "$overlay/native/." "$repo/native/"
-cp -R "$overlay/priv/." "$repo/priv/"
+if [ -d "$overlay/priv" ]; then
+    cp -R "$overlay/priv/." "$repo/priv/"
+fi
 
 python3 - "$repo/rebar.config" "$overlay/rebar.lapee.fragment" <<'PY'
 import pathlib
@@ -67,6 +89,39 @@ fragment = fragment_path.read_text().strip()
 
 begin = "%% BEGIN LAPEE OVERLAY PROFILE"
 end = "%% END LAPEE OVERLAY PROFILE"
+
+elmdb_hook = '''"cp _build/default/lib/elmdb/priv/crates/elmdb_nif/elmdb_nif.so "
+                "_build/default/lib/elmdb/priv/elmdb_nif.so 2>/dev/null || true"'''
+elmdb_host_restore_hook = '''"cp _build/default/lib/elmdb/priv/crates/elmdb_nif/elmdb_nif.so "
+                "_build/default/lib/elmdb/priv/elmdb_nif.so 2>/dev/null || true; "
+            "if [ -f _build/default/lib/elmdb/native/elmdb_nif/target/lapee-host/release/libelmdb_nif.so ]; then "
+                "rm -f _build/default/lib/elmdb/priv/elmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/libelmdb_nif.so; "
+                "cp -af _build/default/lib/elmdb/native/elmdb_nif/target/lapee-host/release/libelmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/libelmdb_nif.so; "
+                "ln -sf libelmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/elmdb_nif.so; "
+            "fi"'''
+host_nif_restore_hook = '''"cp _build/default/lib/elmdb/priv/crates/elmdb_nif/elmdb_nif.so "
+                "_build/default/lib/elmdb/priv/elmdb_nif.so 2>/dev/null || true; "
+            "if [ -f _build/default/lib/b64rs/native/b64rs/target/lapee-host/release/libb64rs.so ]; then "
+                "mkdir -p _build/default/lib/b64rs/priv; "
+                "cp -af _build/default/lib/b64rs/native/b64rs/target/lapee-host/release/libb64rs.so "
+                    "_build/default/lib/b64rs/priv/b64rs.so; "
+            "fi; "
+            "if [ -f _build/default/lib/elmdb/native/elmdb_nif/target/lapee-host/release/libelmdb_nif.so ]; then "
+                "rm -f _build/default/lib/elmdb/priv/elmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/libelmdb_nif.so; "
+                "cp -af _build/default/lib/elmdb/native/elmdb_nif/target/lapee-host/release/libelmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/libelmdb_nif.so; "
+                "ln -sf libelmdb_nif.so "
+                    "_build/default/lib/elmdb/priv/elmdb_nif.so; "
+            "fi"'''
+if "target/lapee-host/release/libb64rs.so" not in text:
+    if elmdb_host_restore_hook in text:
+        text = text.replace(elmdb_host_restore_hook, host_nif_restore_hook)
+    else:
+        text = text.replace(elmdb_hook, host_nif_restore_hook)
 
 text = re.sub(
     r"\n\s*,?\s*%% BEGIN LAPEE OVERLAY PROFILE\n.*?\n\s*%% END LAPEE OVERLAY PROFILE",

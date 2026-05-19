@@ -1,34 +1,35 @@
-%%% @doc Thin peer HTTP helper for LapEE devices.
+%%% @doc AO-Core peer HTTP helper for LapEE devices.
 %%%
-%%% Peer handshakes use HyperBEAM's raw HTTP client layer to request bundled
-%%% AO-Core JSON and then decode it with the normal JSON codec. Staying below
-%%% `hb_http' avoids client-side link expansion while preserving message
-%%% semantics at the device boundary.
+%%% Peer handshakes use ordinary HyperBEAM HTTP calls and ask the peer to encode
+%%% replies through HTTPSig with bundling enabled. This keeps device-to-device
+%%% verification in the signed AO-Core HTTP path without ad hoc JSON parsing or
+%%% link expansion.
 -module(lapee_peer_http).
--export([get/3, post/4]).
+-export([get/3, post/4, peer_opts/2]).
 
 
 get(BaseURL, Path, Opts) ->
-    request(BaseURL, <<"GET">>, accept_path(Path), <<>>, Opts).
+    request(BaseURL, <<"GET">>, Path, #{}, Opts).
 
 post(BaseURL, Path, Body, Opts) ->
-    {ok, Encoded} = dev_codec_json:to(Body, codec_req(), Opts),
-    request(BaseURL, <<"POST">>, accept_path(Path), Encoded, Opts).
+    request(BaseURL, <<"POST">>, Path, Body, Opts).
 
 request(BaseURL, Method, Path, Body, Opts) ->
     URL = strip_trailing_slash(BaseURL),
-    case hb_http_client:request(
-        #{
-            peer => URL,
-            path => Path,
-            method => Method,
-            headers => request_headers(Method),
-            body => Body
-        },
-        peer_opts(Opts))
-    of
-        {ok, Status, _Headers, ResponseBody} ->
-            decode_response(Status, ResponseBody, Opts);
+    Msg = request_message(Method, Path, Body),
+    PeerOpts = peer_opts(URL, Opts),
+    Res =
+        case Method of
+            <<"GET">> -> hb_http:get(URL, Msg, PeerOpts);
+            <<"POST">> -> hb_http:post(URL, Path, Msg, PeerOpts)
+        end,
+    case Res of
+        {ok, Response} ->
+            semantic_response(Response);
+        {error, Response = #{}} ->
+            response_with_status(
+                hb_maps:get(<<"status">>, Response, 500, Opts),
+                Response);
         {error, Reason} ->
             throw({lapee_peer_http_error, #{
                 <<"reason">> =>
@@ -36,128 +37,40 @@ request(BaseURL, Method, Path, Body, Opts) ->
             }})
     end.
 
-request_headers(<<"GET">>) ->
-    #{<<"accept">> => <<"application/json">>};
-request_headers(_) ->
+request_message(<<"GET">>, Path, _Body) ->
     #{
-        <<"accept">> => <<"application/json">>,
-        <<"content-type">> => <<"application/json">>
-    }.
+        <<"path">> => Path,
+        <<"require-codec">> => <<"httpsig@1.0">>,
+        <<"accept-bundle">> => true
+    };
+request_message(<<"POST">>, Path, Body) ->
+    hb_maps:merge(
+        request_message(<<"GET">>, Path, #{}),
+        Body,
+        #{}).
 
-decode_response(Status, <<>>, _Opts) ->
-    #{<<"status">> => Status, <<"body">> => #{}};
-decode_response(Status, Body, _Opts) ->
-    try decode_json_body(Body) of
-        Msg = #{<<"status">> := _} ->
-            Msg;
-        Msg ->
-            #{<<"status">> => Status, <<"body">> => Msg}
-    catch
-        Class:Reason ->
-            #{<<"status">> => Status, <<"body">> => #{
-                <<"error">> => <<"peer-json-decode-failed">>,
-                <<"class">> => hb_util:bin(Class),
-                <<"reason">> =>
-                    iolist_to_binary(io_lib:format("~0p", [Reason]))
-            }}
-    end.
-
-codec_req() ->
-    #{<<"bundle">> => true}.
-
-decode_json_body(Body) ->
-    restore_ao_scalar_types(json:decode(Body)).
-
-restore_ao_scalar_types(Map) when is_map(Map) ->
-    Types = ao_types(Map),
-    Restored = maps:from_list(
-        [
-            {Key, restore_ao_value(Key, Value, Types)}
-         || {Key, Value} <- maps:to_list(Map)
-        ]),
-    case maps:get(<<".">>, Types, undefined) of
-        <<"list">> -> restore_ao_list(Restored);
-        _ -> Restored
+response_with_status(Status, Response) when is_map(Response) ->
+    case hb_maps:get(<<"status">>, Response, undefined, #{}) of
+        S when is_integer(S) -> Response;
+        _ -> Response#{<<"status">> => Status}
     end;
-restore_ao_scalar_types(List) when is_list(List) ->
-    [restore_ao_scalar_types(Value) || Value <- List];
-restore_ao_scalar_types(Value) ->
-    Value.
+response_with_status(Status, Body) ->
+    #{<<"status">> => Status, <<"body">> => Body}.
 
-restore_ao_value(<<"ao-types">>, Value, _Types) ->
-    Value;
-restore_ao_value(Key, Value, Types) ->
-    restore_ao_typed_value(
-        maps:get(Key, Types, undefined),
-        restore_ao_scalar_types(Value)).
+semantic_response(Response = #{<<"type">> := _Type}) ->
+    Response;
+semantic_response(#{<<"status">> := Status, <<"body">> := Body})
+        when is_integer(Status), Status >= 200, Status < 300 ->
+    Body;
+semantic_response(Response) ->
+    Response.
 
-restore_ao_typed_value(<<"atom">>, Value) when is_binary(Value) ->
-    try hb_util:atom(Value)
-    catch _:_ -> Value
-    end;
-restore_ao_typed_value(<<"integer">>, Value) when is_binary(Value) ->
-    try binary_to_integer(Value)
-    catch _:_ -> Value
-    end;
-restore_ao_typed_value(_Type, Value) ->
-    Value.
-
-restore_ao_list(Map) ->
-    [
-        Value
-     || {_Index, Value} <-
-            lists:sort(
-                [
-                    {Index, Value}
-                 || {Key, Value} <- maps:to_list(Map),
-                    {ok, Index} <- [numeric_key(Key)]
-                ])
-    ].
-
-numeric_key(Key) when is_binary(Key) ->
-    try {ok, binary_to_integer(Key)}
-    catch _:_ -> error
-    end;
-numeric_key(_) ->
-    error.
-
-ao_types(Map) ->
-    case maps:get(<<"ao-types">>, Map, undefined) of
-        Types when is_binary(Types) ->
-            maps:from_list(
-                [Type || Part <- binary:split(Types, <<",">>, [global]),
-                         Type <- [parse_ao_type(Part)],
-                         Type =/= undefined]);
-        _ ->
-            #{}
-    end.
-
-parse_ao_type(Part0) ->
-    Part = trim(Part0),
-    case binary:split(Part, <<"=">>) of
-        [RawKey, RawType0] ->
-            RawType = trim(RawType0),
-            Type = trim_quotes(RawType),
-            {trim(RawKey), Type};
-        _ ->
-            undefined
-    end.
-
-trim(Bin) ->
-    iolist_to_binary(string:trim(binary_to_list(Bin))).
-
-trim_quotes(<<"\"", Rest/binary>>) ->
-    case Rest of
-        <<Inner:(byte_size(Rest) - 1)/binary, "\"">> -> Inner;
-        _ -> Rest
-    end;
-trim_quotes(Bin) ->
-    Bin.
-
-peer_opts(Opts) ->
-    Base = Opts#{
+peer_opts(BaseURL, Opts) ->
+    URL = strip_trailing_slash(BaseURL),
+    Base = (with_peer_store(URL, Opts))#{
         http_only_result => false,
         <<"http-only-result">> => false,
+        <<"linkify-mode">> => false,
         http_client =>
             hb_opts:get(
                 <<"peer-http-client">>,
@@ -192,18 +105,18 @@ with_timeout(From, To, Opts) ->
         _ -> Opts
     end.
 
-accept_path(Path) ->
-    case binary:match(Path, <<"accept=">>) of
-        nomatch ->
-            Sep = case binary:match(Path, <<"?">>) of
-                nomatch -> <<"?">>;
-                _ -> <<"&">>
-            end,
-            <<Path/binary, Sep/binary,
-              "accept=application/json&accept-bundle=true">>;
-        _ ->
-            Path
-    end.
+with_peer_store(URL, Opts) ->
+    Stores = store_list(hb_opts:get(<<"store">>, [], Opts)),
+    PeerStore = #{
+        <<"store-module">> => hb_store_remote_node,
+        <<"node">> => URL,
+        <<"only-ids">> => true
+    },
+    Opts#{<<"store">> => Stores ++ [PeerStore]}.
+
+store_list(undefined) -> [];
+store_list(Store) when is_list(Store) -> Store;
+store_list(Store) -> [Store].
 
 strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     case binary:last(B) of

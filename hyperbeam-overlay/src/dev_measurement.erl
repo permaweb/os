@@ -6,6 +6,7 @@
 %%% handling. Policy stays outside the device; measurements expose facts and
 %%% provenance as signed AO-Core messages.
 -module(dev_measurement).
+-implements(<<"measurement@1.0">>).
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
@@ -48,8 +49,7 @@ info(_Base, _Req, Opts) ->
 boot(_Base, _Req, Opts) ->
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
-            {ok, #{<<"status">> => 200,
-                   <<"body">> => materialized_response_body(Msg, Opts)}};
+            {ok, materialize_measurement(Msg, Opts)};
         _ ->
             global:trans(
                 {dev_measurement, boot},
@@ -60,17 +60,14 @@ boot(_Base, _Req, Opts) ->
 boot_locked(Opts) ->
     case hb_cache:read(?BOOT_PATH, Opts) of
         {ok, Msg} ->
-            {ok, #{<<"status">> => 200,
-                   <<"body">> => materialized_response_body(Msg, Opts)}};
+            {ok, materialize_measurement(Msg, Opts)};
         _ ->
             case generate_measurement(boot, #{}, Opts) of
                 {ok, Signed} ->
                     SignedID = hb_message:id(Signed, signed, Opts),
                     {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
                     ok = hb_cache:link(SignedID, ?BOOT_PATH, Opts),
-                    {ok, #{<<"status">> => 200,
-                           <<"body">> =>
-                               materialized_response_body(Signed, Opts)}};
+                    {ok, materialize_measurement(Signed, Opts)};
                 {error, Reason} ->
                     error_resp(500, <<"measurement-boot-failed">>, Reason)
             end
@@ -79,14 +76,15 @@ boot_locked(Opts) ->
 fresh(_Base, Req, Opts) ->
     case generate_measurement(fresh, Req, Opts) of
         {ok, Signed} ->
-            {ok, #{<<"status">> => 200,
-                   <<"body">> => materialized_response_body(Signed, Opts)}};
+            {ok, materialize_measurement(Signed, Opts)};
         {error, Reason} ->
             error_resp(500, <<"measurement-fresh-failed">>, Reason)
     end.
 
 verify(Base, Req, Opts) ->
-    Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),
+    Measurement = materialize_peer_measurement(
+        response_body(resolve_envelope(Base, Req, Opts), Opts),
+        Opts),
     Device = measurement_device(Measurement, Opts),
     resolve_device_response(
         Device,
@@ -115,10 +113,11 @@ verify_peer(_Base, Req, Opts) ->
 unwrap_secret(_Base, Req, Opts) ->
     with_ok(
         fun() ->
+            LoadedReq = materialize_peer_value(Req, Opts),
             Credential = first_defined([
-                hb_maps:get(<<"credential">>, Req, undefined, Opts),
-                hb_maps:get(<<"wrapped-secret">>, Req, undefined, Opts),
-                Req
+                hb_maps:get(<<"credential">>, LoadedReq, undefined, Opts),
+                hb_maps:get(<<"wrapped-secret">>, LoadedReq, undefined, Opts),
+                LoadedReq
             ]),
             Device = measurement_device(Credential, Opts),
             resolve_device_body(Device, <<"unwrap-secret">>, Credential, Opts)
@@ -207,9 +206,10 @@ measurement_body_id(Body, Opts) when is_map(Body) ->
 
 verify_peer_url(Url, Req, Opts) ->
     with_raw_ok(fun() ->
+        PeerOpts = lapee_peer_http:peer_opts(Url, Opts),
         Boot = peer_measurement_payload(response_body(
             lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
-            Opts), Opts),
+            PeerOpts), PeerOpts),
         FreshNonce = crypto:strong_rand_bytes(32),
         Fresh = peer_measurement_payload(response_body(
             lapee_peer_http:get(
@@ -217,15 +217,17 @@ verify_peer_url(Url, Req, Opts) ->
                 <<"/~measurement@1.0/fresh?nonce=",
                   (hb_util:encode(FreshNonce))/binary>>,
                 Opts),
-            Opts), Opts),
+            PeerOpts), PeerOpts),
         ok = ensure_measurement_shape(Boot),
         ok = ensure_measurement_shape(Fresh),
         Subject = secret_recipient(Boot, Opts),
         ok = ensure_same_subject(Boot, Fresh, Opts),
         ok = ensure_subject_matches_measurement(Subject, Boot, Opts),
         ok = ensure_subject_matches_measurement(Subject, Fresh, Opts),
-        BootVerify = verify_measurement_body(Boot, Req, Opts),
+        BootVerify = verify_measurement_body(
+            <<"boot-verification">>, Boot, Req, Opts),
         FreshVerify = verify_measurement_body(
+            <<"fresh-verification">>,
             Fresh,
             Req#{<<"nonce">> => hb_util:encode(FreshNonce)},
             Opts),
@@ -277,27 +279,23 @@ verify_peer_url(Url, Req, Opts) ->
 
 peer_measurement_payload(Msg, Opts) ->
     materialize_peer_measurement(
-        response_body(detached_peer_payload(Msg, Opts), Opts),
+        response_body(Msg, Opts),
         Opts).
 
 materialize_peer_measurement(Measurement, Opts) when is_map(Measurement) ->
-    Decoded = normalize_top_keys(Measurement),
-    lists:foldl(
-        fun(Key, Acc) ->
-            case hb_maps:get(Key, Acc, undefined, Opts) of
-                undefined -> Acc;
-                Value -> Acc#{Key => materialize_peer_value(Value, Opts)}
-            end
-        end,
-        Decoded,
-        [<<"body">>, <<"evidence">>, <<"secret-recipient">>]);
+    materialize_peer_value(Measurement, Opts);
 materialize_peer_measurement(Measurement, _Opts) ->
     Measurement.
 
-materialize_peer_value(Link, Opts) when ?IS_LINK(Link) ->
-    hb_cache:ensure_all_loaded(Link, Opts);
-materialize_peer_value(Value, _Opts) ->
-    Value.
+materialize_peer_value(Value, Opts) ->
+    materialize_peer_value(Value, Opts, 8).
+
+materialize_peer_value(Value, Opts, Remaining) ->
+    Loaded = hb_cache:ensure_all_loaded(decode_links_deep(Value), Opts),
+    case Remaining =< 0 orelse Loaded =:= Value of
+        true -> Loaded;
+        false -> materialize_peer_value(Loaded, Opts, Remaining - 1)
+    end.
 
 normalize_top_keys(Msg) when is_map(Msg) ->
     maps:from_list(
@@ -305,32 +303,47 @@ normalize_top_keys(Msg) when is_map(Msg) ->
 normalize_top_keys(Value) ->
     Value.
 
-normalize_key(Key) when is_binary(Key) -> Key;
 normalize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
 normalize_key(Key) -> Key.
 
-verify_measurement_body(Measurement, Req, Opts) ->
+verify_measurement_body(Label, Measurement, Req, Opts) ->
     {ok, #{<<"status">> := 200, <<"body">> := Body}} =
         verify(Measurement, Req#{<<"envelope">> => Measurement}, Opts),
     case hb_maps:get(<<"verified">>, Body, false, Opts) of
         true -> Body;
         false ->
             throw({measurement_error,
-                   #{<<"verification">> => Body}})
+                   #{Label => verification_failure(Measurement, Body, Opts)}})
     end.
+
+verification_failure(Measurement, Verification, Opts) ->
+    Evidence = hb_maps:get(<<"evidence">>, Measurement, #{}, Opts),
+    #{
+        <<"verification">> => Verification,
+        <<"measurement-type">> =>
+            hb_maps:get(<<"type">>, Measurement, undefined, Opts),
+        <<"measurement-keys">> => sorted_binary_keys(Measurement),
+        <<"evidence-keys">> => sorted_binary_keys(Evidence)
+    }.
+
+sorted_binary_keys(Msg) when is_map(Msg) ->
+    lists:sort([hb_util:bin(Key) || Key <- maps:keys(Msg)]);
+sorted_binary_keys(_Value) ->
+    [].
 
 wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
     Device = measurement_device(Subject, Opts),
+    {ok, Module} = hb_device_load:reference(Device, Opts),
     case Device of
         <<"tpm@2.0a">> ->
-            (dev_tpm2:make_credential_for_subject(Subject, Secret))#{
+            (Module:make_credential_for_subject(Subject, Secret))#{
                 <<"type">> => <<"lapee-wrapped-secret">>,
                 <<"measurement-device">> => Device,
                 <<"method">> => <<"tpm2-activate-credential">>,
                 <<"subject-id">> => stable_id(Subject, Opts)
             };
         <<"snp@1.0">> ->
-            dev_snp:wrap_secret_for_subject(Subject, Secret, Opts);
+            Module:wrap_secret_for_subject(Subject, Secret, Opts);
         _ ->
             resolve_device_body(
                 Device,
@@ -343,9 +356,11 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
     end.
 
 unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
-    case measurement_device(Credential, Opts) of
-        <<"tpm@2.0a">> -> dev_tpm2:activate_credential_secret(Credential, Opts);
-        <<"snp@1.0">> -> dev_snp:unwrap_secret_value(Credential, Opts);
+    Device = measurement_device(Credential, Opts),
+    {ok, Module} = hb_device_load:reference(Device, Opts),
+    case Device of
+        <<"tpm@2.0a">> -> Module:activate_credential_secret(Credential, Opts);
+        <<"snp@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
         Device ->
             throw({measurement_error,
                    #{<<"unwrap-secret">> =>
@@ -353,22 +368,24 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     end.
 
 activate_peer_secret(Url, Credential, Opts) ->
-    detached_peer_payload(response_body(
+    PeerOpts = lapee_peer_http:peer_opts(Url, Opts),
+    materialize_peer_value(response_body(
         lapee_peer_http:post(
             Url,
             <<"/~measurement@1.0/unwrap-secret">>,
             #{<<"credential">> => Credential},
             Opts),
-        Opts), Opts).
+        PeerOpts), PeerOpts).
 
 ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
     Device = measurement_device(Credential, Opts),
+    {ok, Module} = hb_device_load:reference(Device, Opts),
     case Device of
         <<"tpm@2.0a">> ->
-            dev_tpm2:ensure_activation_secret(
+            Module:ensure_activation_secret(
                 Activation, Credential, Expected, Subject, Opts);
         <<"snp@1.0">> ->
-            dev_snp:ensure_secret_activation(
+            Module:ensure_secret_activation(
                 Activation, Credential, Expected, Subject, Opts);
         _ ->
             ExpectedHash = hb_util:encode(crypto:hash(sha256, Expected)),
@@ -519,19 +536,22 @@ resolve_device_body(Device, Path, Req, Opts) ->
     response_body(resolve_device_response(Device, Path, Req, Opts), Opts).
 
 resolve_device_response(Device, Path, Req, Opts) ->
-    case {known_device_module(Device), measurement_export(Path)} of
-        {Module, Fun} when Module =/= undefined, Fun =/= undefined ->
-            apply(Module, Fun, [#{}, Req, Opts]);
+    case measurement_export(Path) of
+        Fun when Fun =/= undefined ->
+            case hb_device_load:reference(Device, Opts) of
+                {ok, Module} -> apply(Module, Fun, [#{}, Req, Opts]);
+                {error, _} ->
+                    hb_ao:resolve(
+                        #{<<"device">> => Device},
+                        Req#{<<"path">> => Path},
+                        Opts)
+            end;
         _ ->
             hb_ao:resolve(
                 #{<<"device">> => Device},
                 Req#{<<"path">> => Path},
                 Opts)
     end.
-
-known_device_module(<<"tpm@2.0a">>) -> dev_tpm2;
-known_device_module(<<"snp@1.0">>) -> dev_snp;
-known_device_module(_Device) -> undefined.
 
 measurement_export(<<"supported">>) -> supported;
 measurement_export(<<"subject">>) -> subject;
@@ -545,9 +565,14 @@ resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
         E when is_map(E) -> E;
         _ ->
-            case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                Inner when is_map(Inner) -> Inner;
-                _ -> Base
+            case hb_maps:get(<<"type">>, Base, undefined, Opts) of
+                ?TYPE ->
+                    Base;
+                _ ->
+                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
+                        Inner when is_map(Inner) -> Inner;
+                        _ -> Base
+                    end
             end
     end;
 resolve_envelope(_Base, Req, Opts) ->
@@ -599,17 +624,17 @@ response_body({ok, Msg}, Opts) ->
 response_body({error, Reason}, _Opts) ->
     throw({measurement_error, Reason});
 response_body(Msg, Opts) when is_map(Msg) ->
-    Normalized = normalize_top_keys(Msg),
-    Status = hb_maps:get(<<"status">>, Normalized, undefined, Opts),
-    Body = hb_maps:get(<<"body">>, Normalized, undefined, Opts),
-    Type = hb_maps:get(<<"type">>, Normalized, undefined, Opts),
+    Normalized = materialize_peer_value(normalize_top_keys(Msg), Opts),
+    Status = maps:get(<<"status">>, Normalized, undefined),
+    Body = maps:get(<<"body">>, Normalized, undefined),
+    Type = maps:get(<<"type">>, Normalized, undefined),
     case {Status, Body, Type} of
+        {_, Body, ?TYPE} when Body =/= undefined ->
+            Normalized;
         {Status, Body, _} when is_integer(Status), Status >= 400 ->
             throw({measurement_error, Body});
         {Status, Body, _} when is_integer(Status), Body =/= undefined ->
             response_body(Body, Opts);
-        {_, Body, ?TYPE} when Body =/= undefined ->
-            Normalized;
         {_, Body, _} when Body =/= undefined ->
             response_body(Body, Opts);
         _ ->
@@ -618,8 +643,12 @@ response_body(Msg, Opts) when is_map(Msg) ->
 response_body(Body, _Opts) ->
     Body.
 
-materialized_response_body(Msg, Opts) ->
-    hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts).
+materialize_measurement(Msg, Opts) when is_map(Msg) ->
+    materialize_peer_measurement(Msg, Opts);
+materialize_measurement(Link, Opts) when ?IS_LINK(Link) ->
+    materialize_measurement(hb_cache:ensure_loaded(Link, Opts), Opts);
+materialize_measurement({ok, Msg}, Opts) ->
+    materialize_measurement(Msg, Opts).
 
 nonce_for(boot, _Req, _Opts) ->
     crypto:strong_rand_bytes(32);
@@ -755,24 +784,35 @@ canonical_payload(Value, _Opts) ->
     Value.
 
 measurement_id(Measurement, Opts) ->
-    stable_id(response_body(Measurement, Opts), Opts).
+    case response_body(Measurement, Opts) of
+        Msg when is_map(Msg) ->
+            hb_message:id(
+                hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
+                all,
+                Opts);
+        Bin when is_binary(Bin), byte_size(Bin) =:= 32 ->
+            hb_util:human_id(Bin);
+        Bin when is_binary(Bin), byte_size(Bin) =:= 43 ->
+            Bin;
+        Bin when is_binary(Bin) ->
+            hb_util:encode(hb_crypto:sha256(Bin));
+        Other ->
+            hb_util:encode(crypto:hash(sha256, term_to_binary(Other)))
+    end.
 
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);
 first_defined([V | _]) -> V.
 
-detached_peer_payload(Link, Opts) when ?IS_LINK(Link) ->
-    detached_peer_payload(response_body(Link, Opts), Opts);
-detached_peer_payload(Msg, Opts) when is_map(Msg) ->
-    maps:from_list(
+decode_links_deep(Msg) when is_map(Msg) ->
+    hb_link:decode_all_links(maps:from_list(
         [
-            {normalize_key(Key), detached_peer_payload(Value, Opts)}
-         || {Key, Value} <- maps:to_list(Msg),
-            not detached_transport_key(Key)
-        ]);
-detached_peer_payload(List, Opts) when is_list(List) ->
-    [detached_peer_payload(Value, Opts) || Value <- List];
-detached_peer_payload(Value, _Opts) ->
+            {normalize_key(Key), decode_links_deep(Value)}
+         || {Key, Value} <- maps:to_list(Msg)
+        ]));
+decode_links_deep(List) when is_list(List) ->
+    [decode_links_deep(Value) || Value <- List];
+decode_links_deep(Value) ->
     Value.
 
 detached_transport_key(<<"commitments">>) -> true;

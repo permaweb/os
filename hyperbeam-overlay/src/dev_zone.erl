@@ -8,6 +8,7 @@
 %%% AES key locally, decrypts the wallet, and installs it as `zone/<name>'.
 %%% `member' returns only a narrow zone-signed membership proof.
 -module(dev_zone).
+-implements(<<"zone@1.0">>).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 
 -include("include/hb.hrl").
@@ -82,7 +83,7 @@ admit(_Base, Req, Opts) ->
         Subject = hb_maps:get(
             <<"peer-credential-subject">>, PeerAttestation, undefined, Opts),
         Credential = commit_unsigned_tree(
-            dev_measurement:wrap_secret_for_subject(Subject, AES, Opts),
+            measurement_wrap_secret(Subject, AES, Opts),
             Opts),
         EncryptedWallet = commit_unsigned_tree(encrypt_wallet(Wallet, AES), Opts),
         Members = add_member_to_members(
@@ -243,10 +244,8 @@ admission_authorization(Admission, Wallet, Opts) ->
             [
                 {AuthKey, stable_authorization_payload_id(
                     hb_maps:get(AdmissionKey, Admission, #{}, Opts),
-                    Opts,
-                    MetadataMode)}
-             || {AuthKey, AdmissionKey, MetadataMode} <-
-                    authorization_id_fields()
+                    Opts)}
+             || {AuthKey, AdmissionKey} <- authorization_id_fields()
             ])),
         #{<<"priv-wallet">> => Wallet}
     ).
@@ -262,17 +261,20 @@ authorization_scalar_fields() ->
 
 authorization_id_fields() ->
     [
-        {<<"validity-id">>, <<"validity">>, strip_json_metadata},
-        {<<"ring-reference-id">>, <<"ring-reference">>, strip_json_metadata},
-        {<<"zone-id">>, <<"zone">>, strip_json_metadata},
-        {<<"template-id">>, <<"template">>, strip_json_metadata},
-        {<<"peer-attestation-id">>, <<"peer-attestation">>, strip_json_metadata},
-        {<<"credential-id">>, <<"credential">>, strip_json_metadata},
-        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>, strip_json_metadata}
+        {<<"validity-id">>, <<"validity">>},
+        {<<"ring-reference-id">>, <<"ring-reference">>},
+        {<<"zone-id">>, <<"zone">>},
+        {<<"template-id">>, <<"template">>},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>},
+        {<<"credential-id">>, <<"credential">>},
+        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
     ].
 
 stable_authorization_payload_id(Msg, Opts) when is_map(Msg) ->
-    stable_authorization_payload_id(Msg, Opts, strip_json_metadata);
+    stable_uncommitted_id(
+        canonical_authorization_payload(
+            hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
+            Opts));
 stable_authorization_payload_id(Bin, _Opts)
         when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
@@ -284,47 +286,26 @@ stable_authorization_payload_id(Bin, _Opts) when is_binary(Bin) ->
 stable_authorization_payload_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
-stable_authorization_payload_id(Msg, Opts, MetadataMode) when is_map(Msg) ->
-    stable_uncommitted_id(
-        canonical_authorization_payload(
-            hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
-            Opts,
-            MetadataMode));
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
-        when is_binary(Bin), byte_size(Bin) =:= 32 ->
-    hb_util:human_id(Bin);
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
-        when is_binary(Bin), byte_size(Bin) =:= 43 ->
-    Bin;
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode) when is_binary(Bin) ->
-    hb_util:encode(hb_crypto:sha256(Bin));
-stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
-    hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
-
-canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
-    canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
-canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
+canonical_authorization_payload(Link, Opts) when ?IS_LINK(Link) ->
+    canonical_authorization_payload(response_body(Link, Opts), Opts);
+canonical_authorization_payload(Msg, Opts) when is_map(Msg) ->
     Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
     maps:from_list(
         [
-            {Key, canonical_authorization_payload(Value, Opts, MetadataMode)}
+            {Key, canonical_authorization_payload(Value, Opts)}
          || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
-            not authorization_meta_key(Key, MetadataMode)
+            not detached_meta_key(Key)
         ]);
-canonical_authorization_payload(List, Opts, MetadataMode) when is_list(List) ->
-    [
-        canonical_authorization_payload(Value, Opts, MetadataMode)
-     || Value <- List
-    ];
-canonical_authorization_payload(Value, _Opts, _MetadataMode)
-        when is_atom(Value) ->
+canonical_authorization_payload(List, Opts) when is_list(List) ->
+    [canonical_authorization_payload(Value, Opts) || Value <- List];
+canonical_authorization_payload(Value, _Opts) when is_atom(Value) ->
     hb_util:bin(Value);
-canonical_authorization_payload(Value, _Opts, _MetadataMode) ->
+canonical_authorization_payload(Value, _Opts) ->
     Value.
 
-authorization_meta_key(<<"commitments">>, _MetadataMode) -> true;
-authorization_meta_key(<<"ao-types">>, strip_json_metadata) -> true;
-authorization_meta_key(_Key, _MetadataMode) -> false.
+detached_meta_key(<<"commitments">>) -> true;
+detached_meta_key(<<"ao-types">>) -> true;
+detached_meta_key(_Key) -> false.
 
 stable_uncommitted_id(Msg) ->
     hb_message:id(
@@ -581,9 +562,14 @@ zone_identity(Name) ->
     <<?IDENTITY_PREFIX/binary, Name/binary>>.
 
 self_attestation_body(Template, Opts) ->
-    case dev_measurement:boot(#{}, #{}, Opts) of
+    case measurement_boot(Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
             measurement_template_target(Template, response_body(Body, Opts), Opts);
+        {ok, Measurement} ->
+            measurement_template_target(
+                Template,
+                response_body(Measurement, Opts),
+                Opts);
         _ ->
             throw({zone_error, #{
                 <<"error">> => <<"self-attestation-failed">>
@@ -660,7 +646,7 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
         <<"url">> => JoinerURL,
         <<"peer-attestation-scope">> => RingReference
     },
-    case dev_measurement:verify_peer(#{}, VerifyReq, Opts) of
+    case measurement_verify_peer(VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
         _ ->
             throw({zone_error, #{
@@ -826,7 +812,12 @@ assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
     end.
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
-    stable_authorization_payload_id(Attestation, Opts);
+    hb_message:id(
+        hb_cache:ensure_all_loaded(
+            hb_link:decode_all_links(Attestation),
+            Opts),
+        all,
+        Opts);
 attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
 attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -1048,10 +1039,9 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
 
 assert_authorization_ids(Authorization, Admission, Opts) ->
     lists:foreach(
-        fun({AuthKey, AdmissionKey, MetadataMode}) ->
+        fun({AuthKey, AdmissionKey}) ->
             Payload = hb_maps:get(AdmissionKey, Admission, undefined, Opts),
-            Expected =
-                stable_authorization_payload_id(Payload, Opts, MetadataMode),
+            Expected = stable_authorization_payload_id(Payload, Opts),
             case hb_maps:get(AuthKey, Authorization, undefined, Opts) of
                 Expected -> ok;
                 _ -> bad_admission(<<"authorization.", AuthKey/binary>>)
@@ -1086,7 +1076,7 @@ assert_expected_ring_address(Admission, Req, Opts) ->
     end.
 
 activate_local_credential(Credential, Opts) ->
-    case dev_measurement:unwrap_secret_value(Credential, Opts) of
+    case measurement_unwrap_secret_value(Credential, Opts) of
         {ok, Secret} when is_binary(Secret) ->
             Secret;
         _ ->
@@ -1095,15 +1085,41 @@ activate_local_credential(Credential, Opts) ->
             }})
     end.
 
+measurement_module(Opts) ->
+    case hb_device_load:reference(<<"measurement@1.0">>, Opts) of
+        {ok, Module} -> Module;
+        {error, Reason} ->
+            throw({zone_error, #{
+                <<"error">> => <<"measurement-device-unavailable">>,
+                <<"reason">> => hb_util:bin(Reason)
+            }})
+    end.
+
+measurement_boot(Opts) ->
+    Module = measurement_module(Opts),
+    Module:boot(#{}, #{}, Opts).
+
+measurement_verify_peer(Req, Opts) ->
+    Module = measurement_module(Opts),
+    Module:verify_peer(#{}, Req, Opts).
+
+measurement_wrap_secret(Subject, Secret, Opts) ->
+    Module = measurement_module(Opts),
+    Module:wrap_secret_for_subject(Subject, Secret, Opts).
+
+measurement_unwrap_secret_value(Credential, Opts) ->
+    Module = measurement_module(Opts),
+    Module:unwrap_secret_value(Credential, Opts).
+
 response_body(Link, Opts) when ?IS_LINK(Link) ->
     response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
-response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
 response_body(#{<<"body">> := Body} = Msg, Opts) ->
     case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
         <<"lapee-measurement">> -> Msg;
         _ -> response_body(Body, Opts)
     end;
+response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
+    response_body(Body, Opts);
 response_body(Body, _Opts) ->
     Body.
 

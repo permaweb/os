@@ -8,7 +8,7 @@
 # Acceptance checked here:
 #   * node 1 exposes ADDR at /~meta@1.0/info/trusted-device-signers
 #   * node 2 exposes the default empty trusted-device-signers list
-#   * both boot measurements contain the same values in body.body.node
+#   * both boot measurements contain the expected node-message values
 #   * verifier replay proves PCR15 commits to the attested node-message-id
 #   * zone init succeeds/fails according to signer-list templates
 
@@ -163,6 +163,11 @@ node_host_url() {
     printf 'http://127.0.0.1:%d' "$((BASE_PORT + $1))"
 }
 
+json_path() {
+    local path=$1
+    printf '%s' "$path"
+}
+
 manufacture_tpm() {
     local n=$1
     local dir="$OUTDIR/nodes/node$n/tpm"
@@ -235,8 +240,9 @@ get_json() {
     curl -sSL \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 post_json() {
@@ -250,8 +256,9 @@ post_json() {
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         --data-binary "@$req" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 wait_node() {
@@ -264,6 +271,8 @@ wait_node() {
                 "$url/~measurement@1.0/info" \
                 -o "$OUTDIR/responses/node$n-measurement-info.json" 2>/dev/null &&
            [[ -s "$OUTDIR/responses/node$n-measurement-info.json" ]]; then
+            scripts/materialize-hb-json.py "$url" \
+                "$OUTDIR/responses/node$n-measurement-info.json"
             get_json "$n" "/~measurement@1.0/boot" \
                 "$OUTDIR/responses/node$n-boot-attestation.json"
             get_json "$n" "/~meta@1.0/info" \
@@ -299,7 +308,9 @@ wait_node 2
 jq -e --arg signer "$SIGNER" \
     '."trusted-device-signers" == [$signer]' \
     "$OUTDIR/responses/node1-meta-info.json" >/dev/null
-jq -e '."trusted-device-signers" == []' \
+jq -e '
+    def empty_ao_list: . == [] or . == {"device":"json@1.0"};
+    ."trusted-device-signers" | empty_ao_list' \
     "$OUTDIR/responses/node2-meta-info.json" >/dev/null
 jq -e --arg signer "$SIGNER" \
     '([to_entries[] | select(.key | test("^[0-9]+$")) | .value] == [$signer])' \
@@ -309,15 +320,23 @@ jq -e '([to_entries[] | select(.key | test("^[0-9]+$")) | .value] == [])' \
 echo ">> /~meta@1.0/info exposes operator trusted-device-signers"
 
 jq -e --arg signer "$SIGNER" \
-    '.body.body.node."trusted-device-signers" == [$signer]' \
+    'def measurement:
+        if .body.type == "lapee-measurement" then .body
+        elif .type == "lapee-measurement" then .
+        else . end;
+     measurement.body.node."trusted-device-signers" == [$signer]' \
     "$OUTDIR/responses/node1-boot-attestation.json" >/dev/null
-jq -e '.body.body.node."trusted-device-signers" == []' \
+jq -e 'def measurement:
+        if .body.type == "lapee-measurement" then .body
+        elif .type == "lapee-measurement" then .
+        else . end;
+     def empty_ao_list: . == [] or . == {"device":"json@1.0"};
+     measurement.body.node."trusted-device-signers" | empty_ao_list' \
     "$OUTDIR/responses/node2-boot-attestation.json" >/dev/null
 echo ">> boot-attestation node-message contains expected signer lists"
 
 for n in 1 2; do
-    post_json "$n" "/~measurement@1.0/verify" \
-        "$OUTDIR/responses/node$n-boot-attestation.json" \
+    get_json "$n" "/~measurement@1.0/boot/~measurement@1.0/verify" \
         "$OUTDIR/responses/node$n-measurement-verify.json"
     jq -e '
         def ok: (.ok == true or .ok == "true");
