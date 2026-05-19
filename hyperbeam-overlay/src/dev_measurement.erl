@@ -1,31 +1,13 @@
 %%% @doc Common LapEE hardware-measurement protocol.
 %%%
-%%% `~measurement@1.0' is the normalized attestation surface consumed by
-%%% zone and external callers. It owns the public LapEE subject:
-%%%
-%%%     #{ <<"system">> => ~system@1.0/all,
-%%%        <<"node">>   => signed ~meta@1.0/info }
-%%%
-%%% Measurement-capable devices (`~tpm@2.0a', `~snp@1.0', later `~tdx@1.0')
-%%% provide only engine-native evidence and secret-recipient handling. This
-%%% keeps policy outside the device: callers receive signed AO-Core messages
-%%% containing provenance and facts, then decide what they trust.
-%%%
-%%% Public measurement messages have this shape:
-%%%
-%%%     #{ <<"type">>               => <<"lapee-measurement">>,
-%%%        <<"version">>            => <<"1.0">>,
-%%%        <<"issued-at-unix">>     => UnixSeconds,
-%%%        <<"measurement-device">> => Device,
-%%%        <<"body">>               => Subject,
-%%%        <<"evidence">>           => DeviceEvidence,
-%%%        <<"secret-recipient">>   => DeviceRecipient }
-%%%
-%%% The included `body' is an AO-Core message in its own right; no duplicate
-%%% `body-id' is exposed because consumers can compute the ID locally.
+%%% This device owns the standard measured subject:
+%%% `#{<<"system">> => ~system@1.0/all, <<"node">> => ~meta@1.0/info}'.
+%%% TPM, SNP, and later engines supply only native evidence and recipient
+%%% handling. Policy stays outside the device; measurements expose facts and
+%%% provenance as signed AO-Core messages.
 -module(dev_measurement).
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
-         subject/3, wrap_secret/3, unwrap_secret/3]).
+         subject/3, unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          measurement_body/1, measurement_body_id/2]).
 
@@ -48,7 +30,6 @@ info(_) ->
             <<"verify">>,
             <<"verify-peer">>,
             <<"subject">>,
-            <<"wrap-secret">>,
             <<"unwrap-secret">>
         ]
     }.
@@ -159,15 +140,6 @@ verify_peer(_Base, Req, Opts) ->
                                Reason)
             end
     end.
-
-wrap_secret(_Base, Req, Opts) ->
-    with_ok(
-        fun() ->
-            Subject = hb_maps:get(<<"subject">>, Req, undefined, Opts),
-            Secret = decode_secret(hb_maps:get(<<"secret">>, Req, <<>>, Opts)),
-            wrap_secret_for_subject(Subject, Secret, Opts)
-        end,
-        <<"wrap-secret-failed">>).
 
 unwrap_secret(_Base, Req, Opts) ->
     with_ok(
@@ -605,11 +577,7 @@ selected_device_or_reason(Opts) ->
     end.
 
 configured_device(Opts) ->
-    case first_defined([
-        hb_opts:get(<<"measurement-device">>, undefined, Opts),
-        hb_opts:get(<<"measurement_device">>, undefined, Opts),
-        hb_opts:get(measurement_device, undefined, Opts)
-    ]) of
+    case hb_opts:get(<<"measurement-device">>, undefined, Opts) of
         undefined -> auto;
         <<"auto">> -> auto;
         auto -> auto;
@@ -904,15 +872,6 @@ canonical_payload(Value, _Opts) ->
 
 measurement_id(Measurement, Opts) ->
     stable_id(response_body(Measurement, Opts), Opts).
-
-decode_secret(B) when is_binary(B) ->
-    try hb_util:decode(B)
-    catch _:_ -> B
-    end;
-decode_secret(Other) ->
-    throw({measurement_error,
-           #{<<"secret">> => <<"secret must be binary/base64url">>,
-             <<"value">> => hb_util:bin(Other)}}).
 
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);

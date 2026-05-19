@@ -1,74 +1,12 @@
-%%% @doc Measurement-backed zone rings.
+%%% @doc Measurement-backed shared-identity zones.
 %%%
-%%% A zone is a shared signing identity admitted by evidence rather than
-%%% by operator fiat. The device is intentionally small:
-%%%
-%%% * `init' creates a named ring wallet, a 256-bit AES ring secret, and a
-%%%   deeply-nested template after proving that the initializing node matches
-%%%   the template.
-%%% * `admit' verifies a candidate peer through `~measurement@1.0/verify-peer',
-%%%   matches the candidate's boot attestation against the template, then
-%%%   wraps the ring AES secret to the peer's measured secret recipient. The
-%%%   fresh measurement and secret-activation proof establish liveness and
-%%%   possession of the engine-native recipient named in that boot measurement.
-%%%   The ring wallet is encrypted under the wrapped AES key.
-%%% * `join' asks an existing member for a named ring admission, checks the
-%%%   envelope, unwraps the AES key through `~measurement@1.0/unwrap-secret',
-%%%   decrypts the wallet, verifies its advertised ring address, and installs
-%%%   it as a local zone identity.
-%%% * `member' returns a narrow membership proof signed by the installed
-%%%   zone identity. It proves that this node address is present in the
-%%%   local zone member set without exposing an arbitrary signing endpoint.
-%%%   A request can set `membership-codec-device' to choose the commitment
-%%%   codec used for that proof; otherwise the node's normal commitment
-%%%   device is used. A request can also set `target' to bind the proof to
-%%%   an index, scheduler, or process that should consume it.
-%%% The ring wallet is installed as an additional HyperBEAM identity
-%%% (`zone/<name>'). Signing with that identity is deliberately
-%%% handled by HyperBEAM's identity system, not by a zone-specific
-%%% arbitrary signing endpoint.
-%%%
-%%% Ring templates are normal HyperBEAM message match templates: AO metadata
-%%% keys are ignored, template keys must be present in the candidate, non-map
-%%% values match exactly, and the atom `_' is a wildcard. JSON callers can send
-%%% the string `"_"', which is normalized to that atom before matching.
-%%%
-%%% The admission protocol is:
-%%%
-%%% 1. The initializer calls `init' with a `name' and `template'. The node
-%%%    reads its own cached `~measurement@1.0/boot', verifies that the
-%%%    template matches it, then generates the ring AES key and wallet locally.
-%%%    Callers cannot provide those secrets.
-%%% 2. A joiner calls its local `join' with the zone `name', a member
-%%%    `peer-url', its own `self-url', and the expected `ring-address'.
-%%% 3. The joiner sends an admission request to the peer. The peer calls
-%%%    `~measurement@1.0/verify-peer' for the joiner's URL. That device verifies
-%%%    the joiner's boot measurement, verifies a fresh nonce-bound measurement,
-%%%    checks the secret recipient agrees, and performs the engine-native
-%%%    wrap/unwrap proof to prove the joiner controls the recipient inside that
-%%%    measured environment.
-%%%    It returns a signed `zone-peer-attestation'.
-%%% 4. The peer matches the ring template against the boot attestation inside
-%%%    that peer attestation. If it matches, the peer wraps the ring AES key to
-%%%    the joiner's TPM and encrypts the ring wallet under that AES key.
-%%% 5. The peer returns a `zone-admission'. The top-level HTTP/JSON
-%%%    envelope may acquire transport commitments, so the durable ring
-%%%    signature is over the nested `authorization' message. That authorization
-%%%    binds the scalar admission fields and locally recomputed stable IDs of
-%%%    the nested payloads: validity, ring-reference, zone definition,
-%%%    template, peer-attestation, credential, and encrypted-wallet. Nested
-%%%    transport commitments are ignored for this ID calculation so an attacker
-%%%    cannot smuggle a signed ID into a modified payload. JSON type metadata is
-%%%    transport metadata and is ignored for this authorization hash; scalar
-%%%    type checks happen in the peer-attestation and measurement verifiers.
-%%% 6. The joiner verifies the ring-signed authorization, checks every payload
-%%%    ID, activates the credential locally, decrypts the wallet, confirms
-%%%    the wallet address equals the expected ring address, and installs the
-%%%    identity as `zone/<name>'.
-%%% 7. A member can call `member' to receive a signed, narrow statement that
-%%%    its node address is a member of the named zone. The only signer is the
-%%%    ring identity. The caller may only choose the zone, commitment codec,
-%%%    and optional target/audience.
+%%% `init' creates a locally generated zone wallet/AES secret after the node's
+%%% own boot measurement matches the template. `admit' verifies a live peer via
+%%% `~measurement@1.0/verify-peer', matches the peer's boot measurement against
+%%% that template, wraps the AES secret to the peer's measured recipient, and
+%%% returns a ring-signed admission. `join' verifies the admission, unwraps the
+%%% AES key locally, decrypts the wallet, and installs it as `zone/<name>'.
+%%% `member' returns only a narrow zone-signed membership proof.
 -module(dev_zone).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 

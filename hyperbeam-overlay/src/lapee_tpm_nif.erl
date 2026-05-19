@@ -8,10 +8,9 @@
 
 -export([
     startup/0,
-    pcr_read/1,
     pcr_extend/2,
     create_primary_ek/0,
-    create_signing_key/1,
+    create_signing_key/0,
     activate_credential/4,
     quote/3,
     tpm_properties/0,
@@ -69,13 +68,11 @@ init() ->
 
 startup() -> erlang:nif_error(nif_not_loaded).
 
-pcr_read(_Idx) -> erlang:nif_error(nif_not_loaded).
-
 pcr_extend(_Idx, _Data) -> erlang:nif_error(nif_not_loaded).
 
 create_primary_ek() -> erlang:nif_error(nif_not_loaded).
 
-create_signing_key(_ParentHandle) -> erlang:nif_error(nif_not_loaded).
+create_signing_key() -> erlang:nif_error(nif_not_loaded).
 
 %% Recover a MakeCredential secret using the loaded AK and EK handles.
 %% The recovered certInfo is the verifier's original secret iff the AK

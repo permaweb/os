@@ -6,34 +6,26 @@
 %%% `~system@1.0'.  Broader firmware interpretation belongs in external
 %%% analysis tools, not in the boot appliance.
 -module(dev_tpm_tcg).
--export([parse/1, parse/2, event_type_name/1, event_type_name/2,
-         decode_event/1, decode_events/1, boot_signals/1,
-         parse_device_path/1, parse_smbios/1, parse_smbios_structure/1,
-         parse_acpi_table/1, parse_acpi_rsdp/1,
-         systemd_stub_pe_section_pcr/1, is_systemd_stub_pe_section/1,
-         parse_kernel_cmdline/1]).
+-export([boot_signals/1, parse_acpi_table/1, parse_acpi_rsdp/1]).
 
 %%%============================================================================
 %%% Event-log parsing
 %%%============================================================================
 
-parse(Bin) ->
-    parse(Bin, #{}).
-
-parse(Bin, Opts) when is_binary(Bin) ->
+parse(Bin) when is_binary(Bin) ->
     case parse_first_record(Bin) of
         {ok, First, Algs, Rest} ->
             {Events, _Tail} = parse_crypto_agile(Rest, Algs, 2, [First]),
-            index_map([with_event_type(Ev, Opts) || Ev <- Events]);
+            index_map([with_event_type(Ev) || Ev <- Events]);
         {error, _} = Err ->
             case parse_legacy(Bin, 1, []) of
                 {ok, Events} ->
-                    index_map([with_event_type(Ev, Opts) || Ev <- Events]);
+                    index_map([with_event_type(Ev) || Ev <- Events]);
                 _ ->
                     #{<<"error">> => fmt_error(Err)}
             end
     end;
-parse(_, _) ->
+parse(_) ->
     #{<<"error">> => <<"input is not a binary">>}.
 
 parse_first_record(
@@ -346,78 +338,14 @@ parse_acpi_rsdp(<<"RSD PTR ", Checksum:8, OemId:6/binary,
 parse_acpi_rsdp(_) ->
     #{<<"error">> => <<"not an ACPI RSDP">>}.
 
-parse_device_path(Bin) when is_binary(Bin) ->
-    {[], Bin};
-parse_device_path(_) ->
-    {[], <<>>}.
-
-parse_smbios(Bin) when is_binary(Bin) ->
-    #{<<"raw-sha256">> => hb_util:encode(crypto:hash(sha256, Bin)),
-      <<"raw-length">> => byte_size(Bin)};
-parse_smbios(_) ->
-    #{<<"error">> => <<"not binary">>}.
-
-parse_smbios_structure(Bin) when is_binary(Bin) ->
-    #{<<"raw-sha256">> => hb_util:encode(crypto:hash(sha256, Bin)),
-      <<"raw-length">> => byte_size(Bin)};
-parse_smbios_structure(_) ->
-    #{<<"error">> => <<"not binary">>}.
-
-is_systemd_stub_pe_section(Key) ->
-    maps:is_key(Key, systemd_stub_sections()).
-
-systemd_stub_pe_section_pcr(Key) ->
-    maps:get(Key, systemd_stub_sections(), undefined).
-
-systemd_stub_sections() ->
-    #{
-        <<".linux">> => 11,
-        <<".osrel">> => 12,
-        <<".cmdline">> => 12,
-        <<".initrd">> => 11,
-        <<".ucode">> => 11,
-        <<".splash">> => 12,
-        <<".dtb">> => 12,
-        <<".uname">> => 12
-    }.
-
-parse_kernel_cmdline(Bin) when is_binary(Bin) ->
-    Tokens = [T || T <- binary:split(Bin, <<" ">>, [global, trim_all]),
-                   T =/= <<>>],
-    #{
-        <<"raw">> => Bin,
-        <<"tokens">> => Tokens,
-        <<"values">> => maps:from_list(
-            [case binary:split(T, <<"=">>) of
-                 [K, V] -> {K, V};
-                 [K] -> {K, true}
-             end || T <- Tokens])
-    };
-parse_kernel_cmdline(_) ->
-    #{}.
-
 %%%============================================================================
 %%% Names + small utilities
 %%%============================================================================
 
-event_type_name(Code) ->
-    event_type_name(Code, #{}).
-
-event_type_name(Code, Opts) ->
-    case maps:get(integer_to_binary(Code), event_types_registry(Opts), undefined) of
-        #{<<"name">> := Name} when is_binary(Name) -> Name;
-        _ -> static_event_type_name(Code)
-    end.
-
-with_event_type(Ev = #{<<"event-type-code">> := Code}, Opts) ->
-    Ev#{<<"event-type">> => event_type_name(Code, Opts)};
-with_event_type(Ev, _) ->
+with_event_type(Ev = #{<<"event-type-code">> := Code}) ->
+    Ev#{<<"event-type">> => static_event_type_name(Code)};
+with_event_type(Ev) ->
     Ev.
-
-event_types_registry(#{event_types := R}) when is_map(R) ->
-    R;
-event_types_registry(_Opts) ->
-    #{}.
 
 static_event_type_name(16#1) -> <<"EV_POST_CODE">>;
 static_event_type_name(16#3) -> <<"EV_NO_ACTION">>;

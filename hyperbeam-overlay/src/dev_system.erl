@@ -9,7 +9,6 @@
 -export([report_from_root/1]).
 -include_lib("kernel/include/file.hrl").
 -define(EFI_GLOBAL_VARIABLE_GUID, "8be4df61-93ca-11d2-aa0d-00e098032b8c").
--define(MTL_MEM_SS_INFO_GLOBAL, 16#45700).
 -define(MSR_BOOT_GUARD_SACM_INFO, 16#13a).
 %%%============================================================================
 %%% Device surface
@@ -81,7 +80,6 @@ evidence_model() ->
             <<"firmware/boot-guard/msr">>,
             <<"firmware/acpi/sysfs-table-hashes">>,
             <<"memory-controller/intel-drm-kernel-dram-info/sysfs">>,
-            <<"memory-controller/intel-mtl-mem-ss-info-global/resource0-read">>,
             <<"memory-controller/sysfs-edac">>,
             <<"generic-proc-sysfs">>
         ]
@@ -406,10 +404,8 @@ memory_controller_probe_report(Root, Edac) ->
         <<"notes">> =>
             <<"The Intel DRM probe prefers the kernel's DRAM decode export. "
               "That export is populated by the same controller-backed driver "
-              "logic used for display bandwidth decisions. If the kernel "
-              "export is absent, the report may include the older read-only "
-              "Meteor Lake MMIO fallback. Generic EDAC is included as "
-              "additional parsed evidence.">>
+              "logic used for display bandwidth decisions. Generic EDAC is "
+              "included as additional parsed evidence.">>
     }.
 
 intel_drm_memory_probe(Root) ->
@@ -448,26 +444,29 @@ intel_drm_memory_card_probe(Root, Base, Card) ->
             ["vendor", "device", "class", "subsystem_vendor",
              "subsystem_device", "revision"])
     },
-    case intel_drm_kernel_dram_card_probe(Root, DevicePath, Common) of
-        {ok, Report} -> Report;
-        unavailable -> intel_mtl_resource0_memory_card_probe(Root, DevicePath, Common)
-    end.
+    intel_drm_kernel_dram_card_probe(Root, DevicePath, Common).
 
 intel_drm_kernel_dram_card_probe(Root, DevicePath, Common) ->
     Raw = intel_drm_kernel_dram_raw(Root, DevicePath),
     case maps:get(<<"dram-type">>, Raw, null) of
         null ->
-            unavailable;
+            Common#{
+                <<"available">> => false,
+                <<"status">> => <<"unavailable">>,
+                <<"source">> => <<"drm-device-sysfs">>,
+                <<"method">> => <<"intel-drm-kernel-dram-info">>,
+                <<"raw">> => Raw
+            };
         _ ->
             Decoded = intel_drm_kernel_dram_decode(Raw),
-            {ok, Common#{
+            Common#{
                 <<"available">> => true,
                 <<"status">> => intel_drm_kernel_dram_status(Decoded),
                 <<"source">> => <<"drm-device-sysfs">>,
                 <<"method">> => <<"intel-drm-kernel-dram-info">>,
                 <<"raw">> => Raw,
                 <<"decoded">> => Decoded
-            }}
+            }
     end.
 
 intel_drm_kernel_dram_raw(Root, DevicePath) ->
@@ -505,65 +504,6 @@ intel_drm_kernel_lpddr_value(_Raw, <<"unknown">>) ->
 intel_drm_kernel_lpddr_value(Raw, Type) ->
     parse_bool_01(maps:get(<<"dram-lpddr-class">>, Raw, null),
                   lpddr_type(Type)).
-
-intel_mtl_resource0_memory_card_probe(Root, DevicePath, Common) ->
-    Resource0 = filename:join(DevicePath, "resource0"),
-    Resource0Info = #{
-        <<"method">> => <<"intel-mtl-mem-ss-info-global">>,
-        <<"register">> => #{
-            <<"name">> => <<"MTL_MEM_SS_INFO_GLOBAL">>,
-            <<"offset">> => u32_hex(?MTL_MEM_SS_INFO_GLOBAL)
-        }
-    },
-    case read_uint_le_at(Root, Resource0, ?MTL_MEM_SS_INFO_GLOBAL, 4) of
-        {ok, Raw} ->
-            Status = intel_mtl_dram_status(Raw),
-            (maps:merge(Common, Resource0Info))#{
-                <<"available">> => true,
-                <<"status">> => Status,
-                <<"source">> => <<"resource0-read">>,
-                <<"raw-hex">> => u32_hex(Raw),
-                <<"decoded">> => intel_mtl_dram_decode(Raw)
-            };
-        {error, Reason} ->
-            (maps:merge(Common, Resource0Info))#{
-                <<"available">> => false,
-                <<"status">> => <<"unavailable">>,
-                <<"source">> => <<"resource0-read">>,
-                <<"error">> => to_bin(Reason)
-            }
-    end.
-
-intel_mtl_dram_decode(Raw) ->
-    TypeCode = Raw band 16#f,
-    Type = intel_dram_type_from_mtl_code(TypeCode),
-    #{
-        <<"dram-type-code">> => TypeCode,
-        <<"dram-type">> => Type,
-        <<"lpddr-class">> => lpddr_type(Type),
-        <<"populated-channels">> => (Raw bsr 4) band 16#f,
-        <<"enabled-qgv-points">> => (Raw bsr 8) band 16#f,
-        <<"ecc-impacting-display-bandwidth">> => bit_set(Raw, 12)
-    }.
-
-intel_mtl_dram_status(Raw) ->
-    Decoded = intel_mtl_dram_decode(Raw),
-    case {maps:get(<<"dram-type">>, Decoded),
-          maps:get(<<"populated-channels">>, Decoded)} of
-        {<<"unknown">>, _} -> <<"invalid-decode">>;
-        {_, 0} -> <<"invalid-decode">>;
-        _ -> <<"observed">>
-    end.
-
-intel_dram_type_from_mtl_code(0) -> <<"DDR4">>;
-intel_dram_type_from_mtl_code(1) -> <<"DDR5">>;
-intel_dram_type_from_mtl_code(2) -> <<"LPDDR5">>;
-intel_dram_type_from_mtl_code(3) -> <<"LPDDR4">>;
-intel_dram_type_from_mtl_code(4) -> <<"DDR3">>;
-intel_dram_type_from_mtl_code(5) -> <<"LPDDR3">>;
-intel_dram_type_from_mtl_code(8) -> <<"GDDR">>;
-intel_dram_type_from_mtl_code(9) -> <<"GDDR-ECC">>;
-intel_dram_type_from_mtl_code(_) -> <<"unknown">>.
 
 normalise_dram_type(Type) when is_binary(Type) ->
     case string:uppercase(trim(Type)) of

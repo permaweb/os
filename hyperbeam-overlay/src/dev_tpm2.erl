@@ -3,15 +3,11 @@
 %%% PCR-bound AK, verifies TPM evidence, and maps TPM
 %%% MakeCredential/ActivateCredential into `~measurement@1.0'.
 -module(dev_tpm2).
--export([info/1, info/3, extend/3, quote/3, pcr_read/3,
-         supported/3, subject/3, measure/3, unwrap_secret/3,
-         activate_credential/3, activate_credential_secret/2]).
+-export([info/1, info/3, supported/3, subject/3, measure/3,
+         unwrap_secret/3, activate_credential_secret/2]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
 -export([ensure_activation_secret/5]).
--export([event_log/1]).
-%% Exposed for tests + auditors that want to drive chain validation
--export([validate_ek_chain/3, validate_ek_chain/4]).
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
@@ -35,14 +31,10 @@ info(_) ->
         exports =>
             [
                 <<"info">>,
-                <<"extend">>,
-                <<"quote">>,
-                <<"pcr-read">>,
                 <<"supported">>,
                 <<"subject">>,
                 <<"measure">>,
                 <<"unwrap-secret">>,
-                <<"activate-credential">>,
                 <<"verify">>
             ]
     }.
@@ -59,74 +51,6 @@ info(_Base, _Req, _Opts) ->
 
 %%%============================================================================
 %%%============================================================================
-
-extend(Base, Req, Opts) ->
-    Subject = resolve_subject(Base, Req, Opts),
-    Pcr = resolve_pcr(Req, ?NODE_IDENTITY_PCR, Opts),
-    Digest = digest_of(Subject, Opts),
-    case pcr_extend_allowed(Pcr) of
-        ok ->
-            case nif_pcr_extend(Pcr, Digest) of
-                ok ->
-                    case Subject of
-                        S when is_map(S), Pcr =:= ?NODE_IDENTITY_PCR ->
-                            persistent_term:put(
-                                {dev_tpm2, attested_node_msg}, S);
-                        _ -> ok
-                    end,
-                    EventDescription =
-                        case Subject of
-                            S0 when is_map(S0) ->
-                                iolist_to_binary(
-                                    io_lib:format(
-                                        "measurement subject ID over "
-                                        "~B-key message",
-                                        [maps:size(S0)]));
-                            _ -> <<"binary subject (non-message)">>
-                        end,
-                    _ = append_event(Pcr,
-                        #{
-                            <<"event-type">> =>
-                                <<"EV_HYPERBEAM_NODE_IDENTITY_EXTEND">>,
-                            <<"description">> => EventDescription,
-                            <<"digest">> => hb_util:encode(Digest),
-                            <<"subject-is-message">> =>
-                                is_map(Subject)
-                        }
-                    ),
-                    After = case nif_pcr_read(Pcr) of
-                        {ok, V} -> hb_util:encode(V);
-                        _ -> <<"?">>
-                    end,
-                    {ok, #{
-                        <<"status">> => 200,
-                        <<"body">> => #{
-                            <<"pcr">> => Pcr,
-                            <<"digest">> => hb_util:encode(Digest),
-                            <<"pcr-after">> => After
-                        }
-                    }};
-                {error, Reason} ->
-                    {error, #{
-                        <<"status">> => 500,
-                        <<"body">> => #{
-                            <<"error">> => <<"pcr_extend_failed">>,
-                            <<"reason">> => hb_util:bin(Reason)
-                        }
-                    }}
-            end;
-        {error, Reason} ->
-            error_resp(403, <<"pcr_extend_forbidden">>, Reason)
-    end.
-
-pcr_extend_allowed(?NODE_IDENTITY_PCR) ->
-    case persistent_term:get({dev_tpm2, initial_pcr15_extended}, false) of
-        true ->
-            {error, <<"PCR 15 is already sealed into the AK policy">>};
-        false -> ok
-    end;
-pcr_extend_allowed(_Pcr) ->
-    ok.
 
 extend_with_tcg_event_log_tip() ->
     case read_tcg_event_log() of
@@ -168,48 +92,6 @@ extend_with_tcg_event_log_tip() ->
 %%%============================================================================
 %%%============================================================================
 
-quote(_Base, Req, Opts) ->
-    Pcrs = resolve_pcr_list(Req, ?DEFAULT_QUOTE_PCRS, Opts),
-    Nonce = resolve_nonce(Req),
-    case ensure_ak(Opts) of
-        {ok, AkTr} ->
-            case nif_quote(AkTr, Pcrs, Nonce) of
-                {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
-                    QuoteBody = quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
-                    {ok, #{
-                        <<"status">> => 200,
-                        <<"body">> => QuoteBody#{
-                            <<"ak-pub-pem">> => ak_pub_pem(Opts)
-                        }
-                    }};
-                {error, Reason} ->
-                    error_resp(500, <<"quote_failed">>, Reason)
-            end;
-        {error, Reason} ->
-            error_resp(500, <<"ak_unavailable">>, Reason)
-    end.
-
-%%%============================================================================
-%%%============================================================================
-
-pcr_read(_Base, Req, Opts) ->
-    Pcr = resolve_pcr(Req, 0, Opts),
-    case nif_pcr_read(Pcr) of
-        {ok, V} ->
-            {ok, #{
-                <<"status">> => 200,
-                <<"body">> => #{
-                    <<"pcr">> => Pcr,
-                    <<"value">> => hb_util:encode(V)
-                }
-            }};
-        {error, Reason} ->
-            error_resp(500, <<"pcr_read_failed">>, Reason)
-    end.
-
-%%%============================================================================
-%%%============================================================================
-
 verify(Base, Req, Opts) ->
     Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
     {TrustedCaPem, CaSource} = resolve_trusted_ca_with_source(Req, Opts),
@@ -231,10 +113,7 @@ verify(Base, Req, Opts) ->
                    <<"core">>),
         safely_run(fun() -> chk_node_msg_shape(Envelope) end,
                    <<"Embedded node_message + id present and correct shape">>,
-                   <<"core">>),
-        safely_run(fun() -> chk_tcg_event_log_replay(Envelope) end,
-                   <<"Firmware TCG event log replays to quoted PCRs 0-14">>,
-                   <<"informational">>)
+                   <<"core">>)
     ],
     AllOk = lists:all(
         fun(#{<<"ok">> := Ok, <<"severity">> := Sev}) ->
@@ -465,8 +344,6 @@ chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
                                                     [Why]))}
     end.
 
-validate_ek_chain(EkDer, PeerChainDers, TrustedDers) ->
-    validate_ek_chain(EkDer, PeerChainDers, TrustedDers, #{}).
 validate_ek_chain(_EkDer, _PeerChainDers, [], _Opts) ->
     {error, <<"trusted CA missing or unparseable">>};
 validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
@@ -1047,101 +924,6 @@ chk_binding(Envelope) ->
             end
     end.
 
-chk_tcg_event_log_replay(Envelope) ->
-    LogB64 = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, #{}),
-    LogBin = case LogB64 of
-                 <<>> -> <<>>;
-                 B when is_binary(B) ->
-                     try hb_util:decode(B) catch _:_ -> <<>> end
-             end,
-    case byte_size(LogBin) of
-        0 -> {ok, <<"no firmware log present (accepted)">>};
-        _ ->
-            Parsed = dev_tpm_tcg:parse(LogBin),
-            Events = [V || {_, V} <- maps:to_list(Parsed),
-                           is_map(V), not maps:is_key(<<"error">>, V)],
-            Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
-            QuotedPcrs = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
-            replay_and_compare(Events, QuotedPcrs, 0, [])
-    end.
-
-replay_and_compare([], _QuotedPcrs, Count, Mismatches) ->
-    case Mismatches of
-        [] ->
-            {ok, iolist_to_binary(io_lib:format(
-                "replayed ~B TCG event(s) into PCRs; all match the "
-                "quoted values",
-                [Count]))};
-        _ ->
-            {error, iolist_to_binary(io_lib:format(
-                "TCG event log replay diverges from quoted PCR(s): ~p",
-                [Mismatches]))}
-    end;
-replay_and_compare([Ev | Rest], QuotedPcrs, Count, Mismatches) ->
-    case maps:get(<<"event-type-code">>, Ev, 0) of
-        3 ->  %% EV_NO_ACTION
-            replay_and_compare(Rest, QuotedPcrs, Count, Mismatches);
-        _ ->
-            Pcr = maps:get(<<"pcr">>, Ev, -1),
-            case in_range(Pcr) of
-                false ->
-                    replay_and_compare(Rest, QuotedPcrs,
-                                       Count + 1, Mismatches);
-                true ->
-                    Digests = maps:get(<<"digests">>, Ev, #{}),
-                    case maps:get(<<"sha256">>, Digests, undefined) of
-                        D when is_binary(D), byte_size(D) =:= 32 ->
-                            Prev = case get({replay_pcr, Pcr}) of
-                                       undefined -> <<0:256>>;
-                                       V -> V
-                                   end,
-                            Next = crypto:hash(sha256,
-                                               <<Prev/binary, D/binary>>),
-                            put({replay_pcr, Pcr}, Next),
-                            case Rest of
-                                [] ->
-                                    MoreMismatches =
-                                        collect_mismatches(QuotedPcrs,
-                                                           Mismatches),
-                                    replay_and_compare([], QuotedPcrs,
-                                                       Count + 1,
-                                                       MoreMismatches);
-                                _ ->
-                                    replay_and_compare(Rest, QuotedPcrs,
-                                                       Count + 1,
-                                                       Mismatches)
-                            end;
-                        _ ->
-                            replay_and_compare(Rest, QuotedPcrs,
-                                               Count + 1, Mismatches)
-                    end
-            end
-    end.
-
-in_range(P) when is_integer(P), P >= 0, P =< 14 -> true;
-in_range(_) -> false.
-
-collect_mismatches(QuotedPcrs, InitMismatches) ->
-    lists:foldl(
-        fun(P, Acc) ->
-            case erase({replay_pcr, P}) of
-                undefined -> Acc;
-                Reconstructed ->
-                    Key = integer_to_binary(P),
-                    case hb_maps:get(Key, QuotedPcrs, undefined, #{}) of
-                        undefined -> Acc;
-                        QB64 ->
-                            Quoted = hb_util:decode(QB64),
-                            case Quoted of
-                                Reconstructed -> Acc;
-                                _ -> [{P, mismatch} | Acc]
-                            end
-                    end
-            end
-        end,
-        InitMismatches,
-        lists:seq(0, 14)).
-
 chk_node_msg_shape(Envelope) ->
     Nm = hb_maps:get(<<"node-message">>, Envelope, undefined, #{}),
     Id = hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
@@ -1310,10 +1092,7 @@ credential_subject_body(Opts) ->
         <<"tpm-properties">> => tpm_properties()
     }.
 
-unwrap_secret(Base, Req, Opts) ->
-    activate_credential(Base, Req, Opts).
-
-activate_credential(_Base, Req, Opts) ->
+unwrap_secret(_Base, Req, Opts) ->
     with_ok(
         fun() ->
             {ok, CertInfo} = activate_credential_secret(Req, Opts),
@@ -1774,41 +1553,6 @@ append_event(Pcr, Payload) ->
 %%%============================================================================
 %%%============================================================================
 
-resolve_subject(Base, Req, Opts) ->
-    case hb_maps:get(<<"subject">>, Req, undefined, Opts) of
-        undefined ->
-            case hb_maps:get(<<"body">>, Req, undefined, Opts) of
-                undefined -> Base;
-                Body -> Body
-            end;
-        Subject -> Subject
-    end.
-
-resolve_pcr(Req, Default, Opts) ->
-    case hb_maps:get(<<"pcr">>, Req, undefined, Opts) of
-        undefined -> Default;
-        I when is_integer(I) -> I;
-        B when is_binary(B) ->
-            try binary_to_integer(B)
-            catch _:_ -> Default end
-    end.
-
-resolve_pcr_list(Req, Default, Opts) ->
-    case hb_maps:get(<<"pcrs">>, Req, undefined, Opts) of
-        undefined -> Default;
-        L when is_list(L) ->
-            [pcr_int(I) || I <- L];
-        B when is_binary(B) ->
-            [pcr_int(X) || X <- binary:split(B, <<",">>, [global]), X =/= <<>>];
-        _ -> Default
-    end.
-
-pcr_int(I) when is_integer(I) -> I;
-pcr_int(B) when is_binary(B) ->
-    try binary_to_integer(B)
-    catch _:_ -> 0
-    end.
-
 resolve_nonce(Req) when is_map(Req) ->
     case decoded_nonce(Req) of
         undefined -> crypto:strong_rand_bytes(32);
@@ -1831,16 +1575,6 @@ decoded_nonce(Req) when is_map(Req) ->
     end;
 decoded_nonce(_) ->
     undefined.
-
-digest_of(Subject, Opts) when is_map(Subject) ->
-    hb_util:native_id(subject_id(Subject, Opts));
-digest_of(B, _Opts) when is_binary(B), byte_size(B) =:= 32 ->
-    B;
-digest_of(B, _Opts) when is_binary(B) ->
-    crypto:hash(sha256, B);
-digest_of(Other, _Opts) ->
-    crypto:hash(sha256,
-        iolist_to_binary(io_lib:format("~0p", [Other]))).
 
 subject_id(Subject, Opts) when is_map(Subject) ->
     dev_measurement:measurement_body_id(Subject, Opts);
@@ -1916,7 +1650,7 @@ init_chain(Subject, SubjectID, SubjectDigest, Opts) ->
                     case extend_initial_pcr15(
                             Subject, SubjectID, SubjectDigest) of
                         ok ->
-                            case nif_create_signing_key(EKTr) of
+                            case nif_create_signing_key() of
                                 {ok, #{esys_tr := AKTr,
                                        public_pem := AKPem} = AKInfo} ->
                                     persistent_term:put({dev_tpm2, ak_tr},
@@ -2229,11 +1963,7 @@ fetch_ek_cert_chain(ChainHandles, _Opts) when is_list(ChainHandles) ->
     fetch_ek_cert_chain_handles(ChainHandles).
 
 configured_chain_handles(Opts) ->
-    case first_defined([
-        hb_opts:get(lapee_tpm_ek_chain_nv_handles, undefined, Opts),
-        hb_opts:get(<<"lapee-tpm-ek-chain-nv-handles">>, undefined, Opts),
-        hb_opts:get(<<"lapee_tpm_ek_chain_nv_handles">>, undefined, Opts)
-    ]) of
+    case hb_opts:get(<<"lapee-tpm-ek-chain-nv-handles">>, undefined, Opts) of
         undefined -> undefined;
         Handles when is_list(Handles) -> [parse_nv_handle(H) || H <- Handles];
         Other -> [parse_nv_handle(Other)]
@@ -2467,22 +2197,16 @@ nif_pcr_extend(Pcr, Digest) ->
         M -> catch M:pcr_extend(Pcr, Digest)
     end.
 
-nif_pcr_read(Pcr) ->
-    case nif_module() of
-        not_loaded -> {error, nif_not_loaded};
-        M -> catch M:pcr_read(Pcr)
-    end.
-
 nif_create_ek() ->
     case nif_module() of
         not_loaded -> {error, nif_not_loaded};
         M -> catch M:create_primary_ek()
     end.
 
-nif_create_signing_key(EKTr) ->
+nif_create_signing_key() ->
     case nif_module() of
         not_loaded -> {error, nif_not_loaded};
-        M -> catch M:create_signing_key(EKTr)
+        M -> catch M:create_signing_key()
     end.
 
 nif_activate_credential(AKTr, EKTr, CredentialBlob, Secret) ->

@@ -57,14 +57,11 @@ Remove historical/debug-only surfaces:
 
 ## Next Steps
 
-1. Keep cutting from the device contracts, not from comments: measurement,
-   zone, nonvolatile, then package layout.
-2. Remove remaining public secret unwrap surfaces from HTTP paths by moving
-   admission activation behind zone-internal calls.
-3. Collapse duplicated measurement/zone canonicalization into one AO-Core
-   boundary shape.
-4. Package the devices for the HyperBEAM rc/0.10 device repository shape.
-5. After each round: run tests, count LoC, update this file, commit, push.
+1. Rebuild and run the QEMU acceptance matrix for the current reduced surface.
+2. Collapse duplicated measurement/zone canonicalization only if the AO-Core
+   admission shape can stay identical under QEMU/remote SNP tests.
+3. Package the devices for the HyperBEAM rc/0.10 device repository shape.
+4. After each round: run tests, count LoC, update this file, commit, push.
 
 ## Validation Log
 
@@ -165,6 +162,46 @@ Remove historical/debug-only surfaces:
       `build/splash-previews/compression-check/`.
   - Tracked text count after this cut: `26,078` lines outside `.git` and
     `build/`.
+- TPM/system/measurement cleanup checkpoint in progress:
+  - Removed raw public TPM `extend`, `quote`, `pcr-read`, and direct
+    `activate-credential` surfaces; TPM remains available only as a
+    measurement engine plus `info`/`supported` diagnostics.
+  - Removed unused TPM NIF `pcr_read`, unused NIF handle echoes, and the dead
+    AK parent-handle argument.
+  - Removed the userspace Intel Meteor Lake `resource0` DRAM fallback. LPDDR
+    evidence now comes from the read-only kernel DRM DRAM export plus EDAC
+    evidence rather than userspace MMIO.
+  - Removed unused TCG helper exports/stubs for SMBIOS, device paths, systemd
+    PE sections, and cmdline parsing; the appliance uses only Secure Boot
+    signal extraction and ACPI table headers.
+  - Removed the public measurement `wrap-secret` endpoint. The public
+    `unwrap-secret` endpoint remains intentionally narrow: it returns a signed
+    challenge activation proof for peer liveness and never returns plaintext
+    secrets.
+  - Current strict production-overlay count: `10,177`.
+  - Current non-comment/non-blank overlay code count: `8,939`.
+  - Strict reduction from baseline: `31,443 -> 10,177`, `67.6%`.
+  - Code-line reduction from strict baseline: `31,443 -> 8,939`, `71.6%`.
+  - Direct Erlang syntax check for all overlay modules: pass.
+  - `make verify-config-invariants`: pass.
+  - `make hb-fetch`: pass; staged the reduced overlay into the disposable
+    HyperBEAM checkout.
+  - `make runtime-image TME=0`: pass. Built signed image
+    `build/images/lapee-runtime-no-tme-signed.img` (`232M`).
+  - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
+    HyperBEAM answered `/~meta@1.0/info`, `/~measurement@1.0/boot`, and
+    `/~system@1.0/all` under QEMU+swtpm.
+  - `make qemu-operator-config IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. Operator config was included in the boot measurement, PCR15 replay
+    verified through `~measurement@1.0/verify`, and only the configured node
+    could initialize the signer-required zone.
+  - `make qemu-zone IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
+    Four TPM-backed nodes formed a zone; the inadmissible node was rejected
+    and could not produce a membership proof.
+  - `make qemu-zone-nonvolatile IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. The admitted node reopened the same encrypted non-volatile volume
+    after reboot, recovered the pre-reboot object, and produced current
+    membership evidence.
 
 ## Reviewer Notes For Next Pass
 
@@ -172,7 +209,7 @@ Remove historical/debug-only surfaces:
   with a zone-signed AO-Core admission message if acceptance tests stay green.
 - `dev_measurement` and `dev_zone` duplicate payload normalization and stable
   ID code. Collapse toward one AO-Core boundary shape.
-- Public `unwrap-secret` remains as a compatibility surface in the checkpoint.
-  The specs now mark secret activation as internal-only; remove or hide this in
-  the next round by moving activation behind zone-owned calls.
-- Strict-line stretch remaining for 70%: target `9,433`, delta `1,350`.
+- Public `unwrap-secret` is still named like a decryption endpoint even though
+  it returns only activation proof. Consider renaming the protocol once the
+  zone and peer scripts can migrate atomically.
+- Strict-line stretch remaining for 70%: target `9,433`, delta `744`.

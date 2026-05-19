@@ -51,10 +51,12 @@ nonce with at least 128 bits of entropy.
 - `verify`: return an AO-Core result message with `verified = true | false`.
 - `verify-peer`: fetch peer `boot` and fresh measurement; verify them; return
   a signed `zone-peer-attestation`.
+- `subject`: return the backend recipient object used for challenge wrapping.
+- `unwrap-secret`: recover a locally addressed challenge and return only a
+  signed activation proof. It must never return the plaintext secret.
 
-Secret wrapping and unwrapping are internal operations used by `~zone@1.0`.
-They are not public HTTP exports: plaintext unwrapped material must never leave
-the local process through a request.
+Secret wrapping is an internal operation used by `~zone@1.0`. Plaintext
+unwrapped material must never leave the local process through a request.
 
 ## Backend Engine Contract
 

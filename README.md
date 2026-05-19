@@ -153,7 +153,6 @@ Useful live endpoints:
 
 ```text
 http://<node-ip>:8734/~tpm@2.0a/info
-http://<node-ip>:8734/~tpm@2.0a/pcr-read&pcr=0
 http://<node-ip>:8734/~measurement@1.0/info
 http://<node-ip>:8734/~measurement@1.0/boot
 http://<node-ip>:8734/~system@1.0/all
@@ -499,9 +498,9 @@ are built from source.
   `make operator-config-apply IMAGE=build/images/lapee-usb.img`, and
   confirm the laptop's wireless hardware is covered by the release
   firmware set.
-- `~measurement@1.0/boot` fails but `~tpm@2.0a/pcr-read&pcr=0` works:
-  the TPM is alive; the failure is likely in quote/key policy, EK material,
-  measurement backend selection, or verifier policy, not basic TPM discovery.
+- `~measurement@1.0/boot` fails: inspect `~measurement@1.0/info` and
+  `~system@1.0/all` to confirm backend selection and hardware discovery, then
+  check quote/key policy, EK material, and verifier policy.
 - Use `~measurement@1.0/boot` for live measurement inspection. The old
   TPM interpretation helper is not part of the v1 runtime surface.
 - macOS asks for a password while writing: the write path uses `sudo dd`

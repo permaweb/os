@@ -1,8 +1,8 @@
 # `~tpm@2.0a` Engine Specification
 
 `~tpm@2.0a` is a measurement backend for TPM 2.0 hardware. Public product
-flows consume it through `~measurement@1.0`; TPM-specific endpoints are
-diagnostic only.
+flows consume it through `~measurement@1.0`; direct TPM command surfaces are
+kept out of the v1 API.
 
 ## Engine Behavior
 
@@ -27,11 +27,6 @@ or salted session cannot be established.
 
 ## Minimal Diagnostics
 
-Keep only diagnostics needed by operators:
-
-- `supported`
-- `pcr-read`
-- `info`
-
-Do not keep a separate TPM peer verification protocol when
+Keep only `info` and `supported` as direct diagnostics. Do not keep raw PCR,
+quote, extend, or a separate TPM peer verification protocol when
 `~measurement@1.0/verify-peer` covers the product flow.

@@ -557,12 +557,7 @@ device_context_digest(Context) ->
     stable_id(Context, #{}).
 
 vmpl(Opts) ->
-    parse_integer(
-        first_defined([
-            hb_opts:get(<<"snp-vmpl">>, undefined, Opts),
-            hb_opts:get(snp_vmpl, undefined, Opts)
-        ]),
-        0).
+    parse_integer(hb_opts:get(<<"snp-vmpl">>, undefined, Opts), 0).
 
 measurement_nonce(Req) ->
     case expected_nonce(Req) of

@@ -463,56 +463,6 @@ nif_startup(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     return enif_make_atom(env, "ok");
 }
 
-/*-------------------------------- pcr_read/1 --------------------------------*/
-
-static ERL_NIF_TERM
-nif_pcr_read(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
-{
-    (void)argc;
-    int idx;
-    if (!enif_get_int(env, argv[0], &idx) || idx < 0 || idx > 23) {
-        return enif_make_badarg(env);
-    }
-
-    TPML_PCR_SELECTION sel = {
-        .count = 1,
-        .pcrSelections = {
-            {
-                .hash = TPM2_ALG_SHA256,
-                .sizeofSelect = 3,
-                .pcrSelect = {0, 0, 0},
-            }
-        }
-    };
-    sel.pcrSelections[0].pcrSelect[idx / 8] = 1 << (idx % 8);
-
-    UINT32 update_counter = 0;
-    TPML_PCR_SELECTION *out_sel = NULL;
-    TPML_DIGEST *digests = NULL;
-    /* PCR_Read returns TPML_DIGEST (list-struct, not TPM2B),
-     * so parameter encryption + decrypt attrs are TPM-rejected
-     * here -- see lapee_ensure_auth_session header. Read-only,
-     * public values, no auth session. */
-    TSS2_RC rc = Esys_PCR_Read(g_esys_ctx,
-                               ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
-                               &sel, &update_counter, &out_sel, &digests);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_PCR_Read", rc);
-    }
-    if (!digests || digests->count < 1) {
-        if (out_sel) Esys_Free(out_sel);
-        if (digests) Esys_Free(digests);
-        return lapee_make_error(env, "no_digest");
-    }
-    ERL_NIF_TERM result;
-    unsigned char *bin = enif_make_new_binary(env, digests->digests[0].size, &result);
-    memcpy(bin, digests->digests[0].buffer, digests->digests[0].size);
-
-    Esys_Free(out_sel);
-    Esys_Free(digests);
-    return enif_make_tuple2(env, enif_make_atom(env, "ok"), result);
-}
-
 /*-------------------------------- pcr_extend/2 ------------------------------*/
 
 static ERL_NIF_TERM
@@ -630,17 +580,6 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_CreatePrimary(EK)", rc);
     }
 
-    TPM2_HANDLE tpm_handle = 0;
-    rc = Esys_TR_GetTpmHandle(g_esys_ctx, ek_tr, &tpm_handle);
-    if (rc != TSS2_RC_SUCCESS) {
-        Esys_FlushContext(g_esys_ctx, ek_tr);
-        if (out_public) Esys_Free(out_public);
-        if (creation_data) Esys_Free(creation_data);
-        if (creation_hash) Esys_Free(creation_hash);
-        if (creation_ticket) Esys_Free(creation_ticket);
-        return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle", rc);
-    }
-
     ERL_NIF_TERM pem_term, tpm2b_term, name_term, qname_term, err_term;
     if (lapee_public_to_terms(env, out_public, &pem_term, &tpm2b_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ek_tr);
@@ -659,12 +598,7 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return err_term;
     }
 
-    /* We deliberately store ESYS_TR in the map too under 'esys_tr' so the
-     * caller can re-use it for Esys_* calls without a re-load. */
     ERL_NIF_TERM map = enif_make_new_map(env);
-    enif_make_map_put(env, map,
-                      enif_make_atom(env, "handle"),
-                      enif_make_uint(env, tpm_handle), &map);
     enif_make_map_put(env, map,
                       enif_make_atom(env, "esys_tr"),
                       enif_make_uint(env, ek_tr), &map);
@@ -689,16 +623,12 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
 }
 
-/*-------------------------------- create_signing_key/1 ----------------------*/
+/*-------------------------------- create_signing_key/0 ----------------------*/
 
 static ERL_NIF_TERM
 nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    (void)argc;
-    unsigned parent_handle;
-    if (!enif_get_uint(env, argv[0], &parent_handle)) {
-        return enif_make_badarg(env);
-    }
+    (void)argc; (void)argv;
 
     TPM2B_DIGEST ak_policy = { .size = 0 };
     ESYS_TR trial_session = ESYS_TR_NONE;
@@ -764,17 +694,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return lapee_make_tss_error(env, "Esys_CreatePrimary(AK)", rc);
     }
 
-    TPM2_HANDLE tpm_handle = 0;
-    rc = Esys_TR_GetTpmHandle(g_esys_ctx, ak_tr, &tpm_handle);
-    if (rc != TSS2_RC_SUCCESS) {
-        Esys_FlushContext(g_esys_ctx, ak_tr);
-        if (out_public) Esys_Free(out_public);
-        if (creation_data) Esys_Free(creation_data);
-        if (creation_hash) Esys_Free(creation_hash);
-        if (creation_ticket) Esys_Free(creation_ticket);
-        return lapee_make_tss_error(env, "Esys_TR_GetTpmHandle(AK)", rc);
-    }
-
     ERL_NIF_TERM pem_term, mb_term, name_term, qname_term, err_term;
     if (lapee_public_to_terms(env, out_public, &pem_term, &mb_term) != 0) {
         Esys_FlushContext(g_esys_ctx, ak_tr);
@@ -794,9 +713,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     }
 
     ERL_NIF_TERM map = enif_make_new_map(env);
-    enif_make_map_put(env, map,
-                      enif_make_atom(env, "handle"),
-                      enif_make_uint(env, tpm_handle), &map);
     enif_make_map_put(env, map,
                       enif_make_atom(env, "esys_tr"),
                       enif_make_uint(env, ak_tr), &map);
@@ -818,7 +734,6 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     if (creation_hash) Esys_Free(creation_hash);
     if (creation_ticket) Esys_Free(creation_ticket);
 
-    (void)parent_handle;
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
 }
 
@@ -1349,7 +1264,6 @@ nif_nv_read(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
  *   Esys_Quote (RSA-PSS sign + PCR read) : 200-400 ms
  *   Esys_NV_Read (chunked 512 B/round)   :  30-80 ms for a 1.5 KB cert
  *   Esys_PCR_Extend                      :   5-15 ms
- *   Esys_PCR_Read                        :   2- 8 ms
  *   Esys_GetCapability                   :   2-10 ms (tpm_properties)
  *
  * `startup' is technically borderline (~50-200 ms on first call) but
@@ -1362,11 +1276,10 @@ nif_nv_read(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
  */
 static ErlNifFunc nif_funcs[] = {
     {"startup", 0, nif_startup, 0},
-    {"pcr_read", 1, nif_pcr_read, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"pcr_extend", 2, nif_pcr_extend, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"create_primary_ek", 0, nif_create_primary_ek,
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"create_signing_key", 1, nif_create_signing_key,
+    {"create_signing_key", 0, nif_create_signing_key,
                               ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"activate_credential", 4, nif_activate_credential,
                                 ERL_NIF_DIRTY_JOB_IO_BOUND},
