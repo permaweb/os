@@ -241,6 +241,15 @@ Remove historical/debug-only surfaces:
     volume after admission and recovered the pre-reboot object plus current
     boot-attestation path.
   - Next validation: remote real-SNP zone on `hb@dev-1.forward.computer`.
+  - `make qemu-zone-remote-snp IMAGE=build/images/lapee-runtime-no-tme-signed.img`:
+    pass. Four real SNP-backed QEMU nodes booted on
+    `hb@dev-1.forward.computer`; all exposed `measurement-device =
+    "snp@1.0"` and common safe-boot properties, three admissible nodes joined
+    the zone and produced ring-signed membership proofs, while the DMI-mismatched
+    node was rejected and could not produce a membership proof. Remote timing:
+    image prep/copy `32s`, SNP boot readiness `43s`, admission flow `26s`,
+    total `104s`. Ring address:
+    `xGzEfEK2X8Ej3936jTqkV-pJSHZAe3sAFAcVbsxtWSE`.
 
 ## Reviewer Notes For Next Pass
 
