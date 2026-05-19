@@ -120,11 +120,7 @@ memory_report(Root, Edac, ControllerProbes) ->
     #{
         <<"meminfo">> => meminfo_report(Root),
         <<"edac">> => Edac,
-        <<"controller-probes">> => ControllerProbes,
-        <<"topology">> => #{
-            <<"generic-edac">> => Edac,
-            <<"controller-probes">> => ControllerProbes
-        }
+        <<"controller-probes">> => ControllerProbes
     }.
 
 firmware_report(Root, BootGuard) ->

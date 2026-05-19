@@ -261,3 +261,104 @@ Remove historical/debug-only surfaces:
 - The next major cleanup is packaging, not more in-place shrinking: turn the
   overlay devices into normal HyperBEAM packageable/preloadable devices and
   shrink the static preloaded-device config.
+
+## Production Validation Pass
+
+Checkpoint: `7c1c28e` (`Normalize measurement and zone protocol`).
+
+Purpose: prove the current signed no-TME runtime image is production-ready
+before a final real-hardware loop, while continuing to simplify rather than
+paper over AO-Core/codec issues.
+
+Rules for this pass:
+
+- Bind protocol facts to AO-Core message IDs, not JSON renderings.
+- Treat JSON as an operator/test-harness representation only.
+- For any source patch that adds or changes lines, remove at least twice as
+  many real lines without dropping product features or useful comments.
+- Prefer HyperBEAM primitives over local protocol helpers when the semantics
+  match.
+
+Validation matrix to complete:
+
+1. Re-run local TPM QEMU zone formation against the current signed image.
+2. Re-run remote real-SNP single-node measurement verification.
+3. Run remote real-SNP zone formation with at least one accept/reject
+   configuration split.
+4. Inspect boot measurements in depth: node message, UKI hash, command line,
+   Secure Boot/TCG, TPM/SNP evidence, memory, EDAC, DRM DRAM, ACPI, IOMMU,
+   and TME command-line state.
+5. Audit memory/TME/LPDDR collection paths statically and against generated
+   boot-attestation artefacts.
+6. Leave the repo in a committed state with all generated crash/build junk
+   removed from git.
+
+Completed validation:
+
+- Rebuilt signed no-TME runtime image after the `~system@1.0` memory-shape
+  simplification:
+  - `build/images/lapee-runtime-no-tme-signed.img`
+  - SHA-256:
+    `f223fdcc2d5f3ab816c922f0d638183b62bd980342ddbf9ab4a99371f571e766`
+  - Boot-attested UKI SHA-256:
+    `JU54qbhUs0iAIVbYt0F0XJ6qHuI4sP8XAlJPkeDZlBs`
+- `IMG=build/images/lapee-runtime-no-tme-signed.img make qemu-zone`:
+  pass. Four TPM-backed nodes booted the same prod no-TME image; three
+  template-matching nodes joined and produced ring-signed membership proofs;
+  the DMI-mismatched node was rejected and could not produce one.
+- `IMG=build/images/lapee-runtime-no-tme-signed.img make qemu-zone-nonvolatile`:
+  pass. The admitted node wrote a pre-reboot sentinel, rebooted with changed
+  boot evidence, matched a partial zone-label prefix, could not read the
+  object before rejoining, then reopened the encrypted volume and recovered
+  both the old object and the current boot-attestation path after admission.
+- `IMG=build/images/lapee-runtime-no-tme-signed.img make qemu-operator-config`:
+  pass. USB `config.json` appeared in the node message, PCR15 replay verified
+  through `~measurement@1.0/verify`, and only the configured node could
+  initialize the signer-required zone.
+- `OUTDIR=build/qemu-single-validation HOST_PORT=18737
+  ./scripts/boot-usb-image.sh --img build/images/lapee-runtime-no-tme-signed.img
+  --oracle-url https://example.com/`: pass. A single QEMU+swtpm appliance
+  served `~measurement@1.0/boot`, `~system@1.0/all`, and a relay/oracle
+  response signed by the node key.
+- `TARGET=ssh://hb@dev-1.forward.computer
+  IMAGE=build/images/lapee-runtime-no-tme-signed.img
+  ./scripts/qemu-measurement-remote.sh`: pass. Real SEV-SNP guest selected
+  `snp@1.0`, returned boot and fresh measurements, and self `verify-peer`
+  verified boot, fresh evidence, and credential activation.
+- `IMAGE=build/images/lapee-runtime-no-tme-signed.img
+  ./scripts/qemu-zone-remote-snp.sh`: pass after the harness cleanup. Four
+  real SNP-backed guests booted on `hb@dev-1.forward.computer`; all exposed
+  `measurement-device = "snp@1.0"`, evidence type `lapee-snp-evidence`, the
+  same prod no-TME command line, the same UKI hash, and distinct X25519
+  recipient keys. Three DMI-matching nodes joined the zone and produced
+  membership proofs; the DMI-mismatched node was rejected. Timing: prepare
+  `8s`, install helper `4s`, copy image `46s`, start SNP nodes `3s`, boot
+  readiness `45s`, admission flow `39s`, total `145s`.
+- Remote cleanup verified:
+  `/home/hb/lapee-measurement-tests/zone-snp/run-snp-cluster.sh status`
+  reports `node1` through `node4` stopped.
+- Static checks:
+  - `make verify-config-invariants`: pass.
+  - Direct overlay Erlang syntax check with staged HyperBEAM include paths:
+    pass.
+  - `git diff --check`: pass.
+- Boot-attestation evidence audit:
+  - `body` contains only AO-Core `system` and signed `node` subjects.
+  - Node config is `initialized = permanent`, `load-remote-devices = false`,
+    and `access-remote-cache-for-client = false`.
+  - Kernel command line includes `LAPEE_NO_TME=1`; this is the expected
+    measured no-TME runtime policy for the test image.
+  - Memory evidence now has one canonical shape: `meminfo`, `edac`, and
+    `controller-probes`; the duplicate `topology` alias was removed.
+  - EDAC reports `available = false` in QEMU/SNP guests, as expected.
+  - Intel DRM DRAM evidence remains exposed through `controller-probes` when
+    hardware provides the read-only i915/xe sysfs attributes.
+  - ACPI and Boot Guard reports remain linked AO-Core submessages from
+    `firmware.acpi` and `firmware.boot-guard`.
+  - TPM boot measurements include PCRs `[0,1,7,10,11,14,15]`, runtime event
+    log entries for the boot subject and TCG tip commitment, and encrypted
+    HMAC TPM session mode `hmac-aes128cfb`.
+  - SNP boot/fresh measurements include `lapee-snp-evidence`, SNP report-data,
+    and a boot-local X25519 recipient bound to the measurement.
+- Source cleanup accounting for this pass: current source diff is `25`
+  inserted lines and `55` removed lines, before this status-only log.
