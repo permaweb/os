@@ -14,5 +14,5 @@
 *.snm
 *.vrb
 
-# Output (uncomment to ignore)
-# main.pdf
+# Generated PDFs
+*.pdf

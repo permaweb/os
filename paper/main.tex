@@ -17,7 +17,7 @@
 \title{\vspace{-3em}\textbf{LapEE: (Secure-ish) Laptop Execution Environments\\for Decentralized Compute on Untrusted Commodity Hardware}}
 
 \author{%
-  Claude Opus 4.7[1m]\\\small{Anthropic}
+  Claude Opus 4.7\\\small{Anthropic}
   \and
   Sam Williams\\\small{\texttt{sam@arweave.org}}
 }
@@ -194,7 +194,7 @@ correct.
   \node[layer, above=of uefi]      (sb)   {\texttt{systemd-boot} (signed)};
   \node[layer, above=of sb]        (uki)  {UKI: kernel $+$ initramfs $+$ cmdline (one signed PE)};
   \node[layer, above=of uki]       (fs)   {Initramfs rootfs (in RAM) $+$ HyperBEAM as sole userspace service};
-  \node[layer, above=of fs, fill=green!12] (dev) {Devices, \texttt{trusted\_signers}-verified at first load};
+  \node[layer, above=of fs, fill=green!12] (dev) {Devices, \texttt{trusted-device-signers}-verified at first load};
   \node[pcr, right=of hw.east]   {PCR 0};
   \node[pcr, right=of bg.east]   {PCR 0--1};
   \node[pcr, right=of uefi.east] {PCR 1, 7};
@@ -358,14 +358,14 @@ Arweave~\cite{arweave}, a recipient has all the evidence needed to evaluate
 trust: CPU architecture, motherboard, firmware version, microcode level,
 TPM manufacturer, and memory-encryption state, through the bootloader,
 kernel, initramfs, cmdline, rootfs, and HyperBEAM binary measurements,
-through the operator's \texttt{trusted\_signers} set, through the
+through the operator's \texttt{trusted-device-signers} set, through the
 initiation of the computation and every input, and finally to the result.
-The ``LapEE'' label in a higher-layer predicate (e.g.,
-\texttt{green-zone@1.0}'s \texttt{is-admissible}) is not a vague tier
-marker but the conjunction of every concretely-verifiable property in the
-attestation. The chain binds the transcript to the boot conditional on A1
---- the same conditional under which TDX or SEV-SNP guest attestations
-bind their guest transcripts.
+The ``LapEE'' label in a higher-layer predicate (for example a
+\texttt{zone@1.0} membership template) is not a vague tier marker but
+the conjunction of every concretely-verifiable property in the
+measurement. The chain binds the transcript to the boot conditional on
+A1 --- the same conditional under which TDX or SEV-SNP guest
+attestations bind their guest transcripts.
 
 \paragraph{Worked example.} A live boot of the implementation
 (\S\ref{sec:implementation}) on a Framework 13 produces an envelope
@@ -444,17 +444,15 @@ corresponding policy.}
 
 \paragraph{Verifier policy as a configuration, not a binary.} Every
 \emph{detected-in-attestation} row above resolves at the verifier, not
-the appliance. A verifier policy is a small open data structure: an
-allow-list of expected PCR values per layer, a minimum OS version
-floor, an EK-chain trust set, a set of warn-vs-critical labels, and a
-score weighting. The reference implementation's
-\texttt{\~{}tpm-interpret@1.0} device renders this as an
-\texttt{attested-with-warnings (score)} verdict, with named warnings
-the consumer can policy-filter; the same envelope can yield
-\emph{accepted} under a permissive policy and \emph{rejected} under a
-strict one without re-attestation. Importantly, verifier policy is
-public and consumer-chosen, not appliance-chosen --- the appliance
-just produces honest evidence.
+the appliance. A verifier policy is a small open data structure: expected
+PCR values per layer, required Secure Boot or SNP policy bits, accepted
+EK-chain anchors, required node-message fields, and any device-specific
+hardware predicates. The reference implementation exposes named facts
+and provenance rather than a global score. The same measurement can
+therefore be accepted by one zone template and rejected by another
+without re-attestation. Importantly, verifier policy is public and
+consumer-chosen, not appliance-chosen --- the appliance just produces
+signed evidence.
 
 \subsection{Memory encryption, integrity, and replay}
 \label{sec:memenc}
@@ -584,25 +582,22 @@ prints the URL when HyperBEAM answers \texttt{/info}, and stays
 running as PID 2.
 
 \paragraph{Demonstrated boot.} A Framework 13 (13th Gen Intel Core,
-Nuvoton dTPM, INSYDE H2O 03.04) boots from a 1 GB USB stick to
-attestation-serving in roughly 25 seconds on a cold cache. The
-envelope returned at \texttt{/\~{}tpm@2.0a/attestation} is 105 KB
-and contains the EK certificate read from TPM NV at handle
-\texttt{0x01C00002} (1.2 KB; chain-validated against the Nuvoton
-ECC521 root via the ECC384 Leaf CA), the AK public PEM
-(endorsement-hierarchy primary, RSA 2048), a \texttt{TPM2\_Quote}
-over PCRs $\{0,1,7,10,11,14,15\}$, the firmware TCG event log (3.1
-KB, kernel-sourced via \texttt{securityfs}), the HyperBEAM runtime
-event log (the three PCR-15 extensions), the running node
-configuration with its \texttt{hb\_message:id} hash, and inline
-platform probes from DMI, \texttt{/proc/cpuinfo}, and the kernel's
-lockdown / Secure-Boot variables. The signing wallet is the AK;
-results signed by it carry the full trust chain of
-Figure~\ref{fig:chain} as a single transcript.
+Nuvoton dTPM, INSYDE H2O firmware) boots from a USB stick to
+measurement-serving. The envelope returned at
+\texttt{/\~{}measurement@1.0/boot} contains the signed HyperBEAM node
+message, the \texttt{\~{}system@1.0/all} machine report, and
+device-native evidence. In the TPM path this evidence includes the EK
+certificate read from TPM NV at handle \texttt{0x01C00002}, the AK
+public key, a \texttt{TPM2\_Quote} over the boot PCR set, the firmware
+TCG event log, the HyperBEAM runtime event log, PCR-15 replay tying the
+boot subject to the quoted PCR state, and platform probes from DMI,
+ACPI, \texttt{/proc/cpuinfo}, and kernel security state. The HyperBEAM
+node wallet signs AO-Core results; the TPM AK signs the boot quote that
+binds that node wallet and configuration to the measured boot.
 
-\paragraph{Verifier output.} An external Python verifier (separate
-codebase, separate language, no shared state with the producer) runs
-offline against the envelope and reports six checks:
+\paragraph{Verifier output.} An external verifier can run offline
+against the TPM portion of the envelope and report the load-bearing
+cryptographic checks:
 \begin{quote}\footnotesize\ttfamily
 [PASS] EK cert chains to NUVOTON ECC521 RootCA via ECC384 LeafCA\\
 {}[PASS] TPM2\_Quote signature + pcrDigest + nonce all valid\\
@@ -612,15 +607,11 @@ offline against the envelope and reports six checks:
 {}[PASS] Embedded node-message + id present and 32-byte b64url\\
 VERDICT: ATTESTATION ACCEPTED
 \end{quote}
-The in-tree \texttt{\~{}tpm-interpret@1.0} device runs the same checks
-plus a wider tier-graded policy and produces an
-\emph{attested-with-warnings} dashboard verdict at score 92/100; the
-sole warning is \texttt{tpm-safe=false} (cross-boot counter-
-monotonicity weak under the appliance power-cycle model), which
-default LapEE policy accepts because every attestation is already
-nonce-fresh per \S\ref{sec:architecture}. Strict policies that
-mandate counter-monotonicity may reject; verdict surface is the
-operator/consumer's policy lever, not the appliance's.
+The in-tree \texttt{\~{}measurement@1.0} and
+\texttt{\~{}tpm-interpret@1.0} devices expose the same checks as
+structured AO-Core messages plus a wider set of neutral facts. Zone
+templates and external callers decide which facts are required; the
+appliance does not collapse them into a universal score.
 
 \paragraph{Related work.} Apple PCC~\cite{apple-pcc} is architectural
 precedent but assumes Apple-owned hardware and facility.

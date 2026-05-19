@@ -1,6 +1,6 @@
 # LapEE Agent Guide
 
-LapEE is a TPM-attested HyperBEAM appliance OS for commodity laptops. The
+LapEE is a measurement-backed HyperBEAM appliance OS for commodity laptops. The
 repository owns the Buildroot/image tooling, the appliance init flow, and
 LapEE-specific HyperBEAM devices staged through `hyperbeam-overlay/`.
 
@@ -63,7 +63,7 @@ LapEE-specific HyperBEAM devices staged through `hyperbeam-overlay/`.
 - Done means maintainable and externally verified, not merely "the first
   happy path worked." For image/security changes, prefer QEMU+swtpm tests and
   real hardware validation when hardware is available.
-- When touching green-zone, TPM, boot-attestation, operator config, or init,
+- When touching zone, TPM, boot measurement, operator config, or init,
   expect to run the relevant QEMU acceptance harness before declaring success.
 
 ## Documentation Standard

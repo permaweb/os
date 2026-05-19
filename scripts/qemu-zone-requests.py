@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate JSON requests for the QEMU green-zone cluster harness."""
+"""Generate JSON requests for the QEMU zone cluster harness."""
 
 import base64
 import json
@@ -32,7 +32,7 @@ def main() -> int:
     else:
         evidence_template = {}
 
-    template_mode = os.environ.get("GREEN_ZONE_TEMPLATE_MODE", "device")
+    template_mode = os.environ.get("ZONE_TEMPLATE_MODE", "device")
     template = {
         "body": {
             "system": {
@@ -108,7 +108,7 @@ def main() -> int:
     # Node 3 joins via node 2 -- not via node 1 -- so the harness
     # exercises the multi-hop members propagation path that the
     # `add_member_to_members` bug used to silently break (the
-    # admission's `green-zone.members` would have lost the new
+    # admission's `zone.members` would have lost the new
     # joiner's wallet through stale-commitment cache linkification).
     join_via = {2: 1, 3: 2, 4: 1}
     for n in (2, 3, 4):

@@ -4,7 +4,7 @@
 # Boots the Secure Boot provisioner image under QEMU with one sacrificial extra
 # disk, types the real confirmation strings through QMP keyboard events, and
 # verifies that the extra disk receives a GPT partition named
-# GREENZONE_test-zone. OVMF is not expected to be in real firmware Setup Mode
+# ZONE_test-zone. OVMF is not expected to be in real firmware Setup Mode
 # in this harness; the Secure Boot enrollment may fail after the storage step.
 
 set -euo pipefail
@@ -147,7 +147,7 @@ wait_log "Found provisioning bundle"
 type_qemu $'I UNDERSTAND.\n'
 wait_log "Non-volatile storage selection is ready"
 type_qemu $'DESTROY 1 -> test-zone\n'
-wait_log "Prepared /dev/vdb1 as GREENZONE_test-zone"
+wait_log "Prepared /dev/vdb1 as ZONE_test-zone"
 
 python3 - "$OUTDIR/nonvolatile.img" <<'PY'
 import struct, sys
@@ -168,14 +168,14 @@ with open(sys.argv[1], "rb") as f:
         if entry[:16] == b"\0" * 16:
             continue
         name = entry[56:128].decode("utf-16le").rstrip("\0")
-        if name == "GREENZONE_test-zone":
+        if name == "ZONE_test-zone":
             first_lba = struct.unpack_from("<Q", entry, 32)[0]
             f.seek(first_lba * 512)
             if f.read(len(marker)) != marker:
                 raise SystemExit("missing LapEE nonvolatile marker")
-            print("found GREENZONE_test-zone partition")
+            print("found ZONE_test-zone partition")
             raise SystemExit(0)
-raise SystemExit("GREENZONE_test-zone partition not found")
+raise SystemExit("ZONE_test-zone partition not found")
 PY
 
 echo "=== provisioner non-volatile QEMU smoke PASSED ==="

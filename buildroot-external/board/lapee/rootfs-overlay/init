@@ -362,7 +362,7 @@ sbp_disk_prompt_lines() {
 sbp_nonvolatile_label() {
     _prefix="$1"
     if [ -z "$_prefix" ]; then
-        printf '%s' "GREENZONE_PRIMARY"
+        printf '%s' "ZONE_PRIMARY"
         return 0
     fi
     case "$_prefix" in
@@ -372,16 +372,16 @@ sbp_nonvolatile_label() {
     esac
     _prefix=$(printf '%.26s' "$_prefix")
     [ -n "$_prefix" ] || return 1
-    printf 'GREENZONE_%s' "$_prefix"
+    printf 'ZONE_%s' "$_prefix"
 }
 
 sbp_valid_nonvolatile_label() {
     _label="$1"
     [ ${#_label} -le 36 ] || return 1
     case "$_label" in
-        GREENZONE_PRIMARY) return 0 ;;
-        GREENZONE_*)
-            _prefix=${_label#GREENZONE_}
+        ZONE_PRIMARY) return 0 ;;
+        ZONE_*)
+            _prefix=${_label#ZONE_}
             [ -n "$_prefix" ] || return 1
             case "$_prefix" in
                 *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
@@ -493,7 +493,7 @@ sbp_format_nonvolatile_disk() {
     _label="$3"
     [ -b "$_dev" ] || return 1
     if ! sbp_valid_nonvolatile_label "$_label"; then
-        sbp_log "ERROR: invalid green-zone partition label."
+        sbp_log "ERROR: invalid zone partition label."
         return 1
     fi
     if ! command -v parted >/dev/null 2>&1; then
@@ -988,9 +988,8 @@ check_tme_sme() {
 }
 check_tme_sme
 
-# Splash already launched right after mounts -- it's been polling
-# and rendering since boot. Re-emit a trace here so the boot log
-# shows the splash status at this milestone.
+# Splash starts right after mounts and polls boot state in parallel. Re-emit
+# a trace here so the boot log includes its current status.
 if [ -n "${SPLASH_PID:-}" ]; then
     if kill -0 "$SPLASH_PID" 2>/dev/null; then
         trace "splash: alive (PID=$SPLASH_PID)"

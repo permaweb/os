@@ -1,7 +1,7 @@
 # LapEE bare-metal — build orchestration.
 #
 # Goal: one UEFI-bootable USB image that boots a real laptop and
-# serves a TPM-attested HyperBEAM node. Buildroot bootstraps gcc /
+# serves a measurement-backed HyperBEAM node. Buildroot bootstraps gcc /
 # glibc / binutils, then cross-compiles the kernel, target
 # userspace, and the LapEE custom HyperBEAM package. The UKI uses
 # Debian's x64 systemd EFI stub, and vendor firmware blobs remain
@@ -37,17 +37,17 @@
 #   make qemu               - boot the selected image under QEMU+OVMF+swtpm.
 #   make qemu-oracle        - boot one node and verify a signed HTTPS relay.
 #   make qemu-gui           - boot the selected image with a QEMU window.
-#   make qemu-green-zone    - run the four-node green-zone acceptance test.
-#   make qemu-green-zone-nonvolatile
-#                           - run green-zone plus encrypted storage reuse.
+#   make qemu-zone          - run the four-node zone acceptance test.
+#   make qemu-zone-nonvolatile
+#                           - run zone plus encrypted storage reuse.
 #   make qemu-provisioner-nonvolatile
 #                           - test provisioner destructive disk selection.
 #   make qemu-operator-config
 #                           - run the operator-config attestation test.
 #   make qemu-measurement-remote
 #                           - run one measurement node on TARGET=ssh://...
-#   make qemu-green-zone-remote-snp
-#                           - run a four-node real SNP green-zone remotely.
+#   make qemu-zone-remote-snp
+#                           - run a four-node real SNP zone remotely.
 #   make verify-config-invariants
 #                           - check shipped config security invariants.
 #
@@ -130,20 +130,20 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 
 .PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
-        qemu qemu-oracle qemu-gui qemu-green-zone qemu-green-zone-nonvolatile \
+        qemu qemu-oracle qemu-gui qemu-zone qemu-zone-nonvolatile \
         qemu-provisioner-nonvolatile qemu-operator-config \
-        qemu-measurement-remote qemu-green-zone-remote-snp \
+        qemu-measurement-remote qemu-zone-remote-snp \
         verify-config-invariants \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
-        _operator-config-apply _qemu-green-zone-cluster \
-        _qemu-green-zone-nonvolatile \
+        _operator-config-apply _qemu-zone-cluster \
+        _qemu-zone-nonvolatile \
         _qemu-provisioner-nonvolatile \
-        _qemu-operator-config-green-zone \
-        _qemu-measurement-remote _qemu-green-zone-remote-snp \
-        all build native-build toolchain \
-        kernel buildroot buildroot-shell buildroot-clean \
+        _qemu-operator-config-zone \
+        _qemu-measurement-remote _qemu-zone-remote-snp \
+        all build toolchain \
+        kernel buildroot \
         hb-fetch paper clean
 
 help:
@@ -225,23 +225,23 @@ qemu-gui:
 	    exit 1; }
 	./scripts/boot-usb-image.sh --img "$(WRITE_IMAGE)" --gui
 
-qemu-green-zone:
-	$(MAKE) _qemu-green-zone-cluster
+qemu-zone:
+	$(MAKE) _qemu-zone-cluster
 
-qemu-green-zone-nonvolatile:
-	$(MAKE) _qemu-green-zone-nonvolatile
+qemu-zone-nonvolatile:
+	$(MAKE) _qemu-zone-nonvolatile
 
 qemu-provisioner-nonvolatile:
 	$(MAKE) _qemu-provisioner-nonvolatile
 
 qemu-operator-config:
-	$(MAKE) _qemu-operator-config-green-zone
+	$(MAKE) _qemu-operator-config-zone
 
 qemu-measurement-remote:
 	$(MAKE) _qemu-measurement-remote
 
-qemu-green-zone-remote-snp:
-	$(MAKE) _qemu-green-zone-remote-snp
+qemu-zone-remote-snp:
+	$(MAKE) _qemu-zone-remote-snp
 
 _check-runtime-flags:
 	@case "$(TME)" in 0|1) ;; \
@@ -293,33 +293,6 @@ all: runtime-image
 paper:
 	$(MAKE) -C paper
 
-native-build:
-	@if [ "$(HOST_OS)" != "Linux" ]; then \
-	    echo "native-build requires a Linux host (Buildroot doesn't run on $(HOST_OS))." >&2; \
-	    echo "Use 'make runtime-image' instead." >&2; \
-	    exit 1; \
-	fi
-	@$(MAKE) _check-native-deps
-	NATIVE_BUILD=1 $(MAKE) kernel
-	NATIVE_BUILD=1 $(MAKE) _usb-image
-	@echo ">> done. $(OUT) is the bootable artefact."
-
-# Precondition check for native-build: required host packages
-# must be on PATH. Errors with the exact apt-install line if
-# anything's missing.
-_check-native-deps:
-	@missing=""; \
-	for cmd in bc bison flex gcc make perl python3 rsync wget cpio xz \
-	           parted mtools mkfs.vfat sbsign cargo rustc; do \
-	    command -v $$cmd >/dev/null 2>&1 || missing="$$missing $$cmd"; \
-	done; \
-	if [ -n "$$missing" ]; then \
-	    echo "native-build: missing host commands:$$missing" >&2; \
-	    echo "On Debian/Ubuntu install:" >&2; \
-	    echo "  sudo apt install build-essential bc bison flex libssl-dev libelf-dev libncurses-dev rsync wget cpio xz-utils python3 perl parted mtools dosfstools sbsigntool efitools cargo rustc cmake" >&2; \
-	    exit 1; \
-	fi
-
 # ------------------------------------------------------------
 # Toolchain — pulls pinned upstream base + builds local image.
 # ------------------------------------------------------------
@@ -337,16 +310,6 @@ kernel: buildroot
 
 buildroot:
 	./scripts/build-buildroot.sh
-
-buildroot-shell:
-	docker run --rm -it $(DOCKER_PLATFORM) \
-	    -v lapee-buildroot:/build \
-	    -v $(LAPEE_ROOT)/buildroot-external:/src-external:ro \
-	    $(BUILD_IMAGE) bash
-
-buildroot-clean:
-	docker run --rm $(DOCKER_PLATFORM) -v lapee-buildroot:/build \
-	    $(BUILD_IMAGE) bash -c "rm -rf /build/out /build/buildroot-external"
 
 # ------------------------------------------------------------
 # UKI + USB image assembly.
@@ -431,25 +394,25 @@ _provisioner-write:
 	$(MAKE) _provisioner-image
 	$(MAKE) _image-write OUT="$(SB_PROVISION_OUT)" DEV="$(DEV)"
 
-_qemu-green-zone-cluster: toolchain
-	./scripts/qemu-green-zone-cluster.sh
+_qemu-zone-cluster: toolchain
+	./scripts/qemu-zone-cluster.sh
 
-_qemu-green-zone-nonvolatile: toolchain
-	NONVOLATILE=1 OUTDIR="$(BUILD_DIR)/qemu-green-zone-nonvolatile" \
-	    ./scripts/qemu-green-zone-cluster.sh
+_qemu-zone-nonvolatile: toolchain
+	NONVOLATILE=1 OUTDIR="$(BUILD_DIR)/qemu-zone-nonvolatile" \
+	    ./scripts/qemu-zone-cluster.sh
 
 _qemu-provisioner-nonvolatile: toolchain
 	OUTDIR="$(BUILD_DIR)/qemu-provisioner-nonvolatile" \
 	    ./scripts/qemu-provisioner-nonvolatile.sh
 
-_qemu-operator-config-green-zone: toolchain
-	./scripts/qemu-operator-config-green-zone.sh
+_qemu-operator-config-zone: toolchain
+	./scripts/qemu-operator-config-zone.sh
 
 _qemu-measurement-remote: toolchain
 	./scripts/qemu-measurement-remote.sh
 
-_qemu-green-zone-remote-snp: toolchain
-	./scripts/qemu-green-zone-remote-snp.sh
+_qemu-zone-remote-snp: toolchain
+	./scripts/qemu-zone-remote-snp.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \

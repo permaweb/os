@@ -149,7 +149,7 @@ decode_event(E) -> E.
 
 %% @doc Derive a small map of policy-actionable signals from a raw TCG
 %% event-log binary. Embedded directly in the boot-attestation envelope
-%% so green-zone templates and external auditors can match against
+%% so zone templates and external auditors can match against
 %% interpreter-derived facts without re-walking the whole log.
 %%
 %% Currently emits one signal:
@@ -3467,7 +3467,7 @@ secure_boot_variable_record_parses_test() ->
     ?assert(byte_size(Data) > 40).
 
 %% Regression: `boot_signals/1' must surface secure-boot.enabled=true
-%% from the firmware-side TCG event log so that green-zone templates
+%% from the firmware-side TCG event log so that zone templates
 %% (and external auditors) can pin a real Secure-Boot enforcement
 %% gate against the signed boot-attestation envelope -- not just the
 %% efivarfs-state probe, which reads `not-readable' on every recent

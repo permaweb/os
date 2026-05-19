@@ -1,6 +1,6 @@
-%%% @doc Measurement-backed green-zone rings.
+%%% @doc Measurement-backed zone rings.
 %%%
-%%% A green-zone is a shared signing identity admitted by evidence rather than
+%%% A zone is a shared signing identity admitted by evidence rather than
 %%% by operator fiat. The device is intentionally small:
 %%%
 %%% * `init' creates a named ring wallet, a 256-bit AES ring secret, and a
@@ -15,17 +15,17 @@
 %%% * `join' asks an existing member for a named ring admission, checks the
 %%%   envelope, unwraps the AES key through `~measurement@1.0/unwrap-secret',
 %%%   decrypts the wallet, verifies its advertised ring address, and installs
-%%%   it as a local green-zone identity.
+%%%   it as a local zone identity.
 %%% * `member' returns a narrow membership proof signed by the installed
-%%%   green-zone identity. It proves that this node address is present in the
+%%%   zone identity. It proves that this node address is present in the
 %%%   local zone member set without exposing an arbitrary signing endpoint.
 %%%   A request can set `membership-codec-device' to choose the commitment
 %%%   codec used for that proof; otherwise the node's normal commitment
 %%%   device is used. A request can also set `target' to bind the proof to
 %%%   an index, scheduler, or process that should consume it.
 %%% The ring wallet is installed as an additional HyperBEAM identity
-%%% (`green-zone/<name>'). Signing with that identity is deliberately
-%%% handled by HyperBEAM's identity system, not by a green-zone-specific
+%%% (`zone/<name>'). Signing with that identity is deliberately
+%%% handled by HyperBEAM's identity system, not by a zone-specific
 %%% arbitrary signing endpoint.
 %%%
 %%% Ring templates are normal HyperBEAM message match templates: AO metadata
@@ -39,7 +39,7 @@
 %%%    reads its own cached `~measurement@1.0/boot', verifies that the
 %%%    template matches it, then generates the ring AES key and wallet locally.
 %%%    Callers cannot provide those secrets.
-%%% 2. A joiner calls its local `join' with the green-zone `name', a member
+%%% 2. A joiner calls its local `join' with the zone `name', a member
 %%%    `peer-url', its own `self-url', and the expected `ring-address'.
 %%% 3. The joiner sends an admission request to the peer. The peer calls
 %%%    `~measurement@1.0/verify-peer' for the joiner's URL. That device verifies
@@ -47,15 +47,15 @@
 %%%    checks the secret recipient agrees, and performs the engine-native
 %%%    wrap/unwrap proof to prove the joiner controls the recipient inside that
 %%%    measured environment.
-%%%    It returns a signed `green-zone-peer-attestation'.
+%%%    It returns a signed `zone-peer-attestation'.
 %%% 4. The peer matches the ring template against the boot attestation inside
 %%%    that peer attestation. If it matches, the peer wraps the ring AES key to
 %%%    the joiner's TPM and encrypts the ring wallet under that AES key.
-%%% 5. The peer returns a `green-zone-admission'. The top-level HTTP/JSON
+%%% 5. The peer returns a `zone-admission'. The top-level HTTP/JSON
 %%%    envelope may acquire transport commitments, so the durable ring
 %%%    signature is over the nested `authorization' message. That authorization
 %%%    binds the scalar admission fields and locally recomputed stable IDs of
-%%%    the nested payloads: validity, ring-reference, green-zone definition,
+%%%    the nested payloads: validity, ring-reference, zone definition,
 %%%    template, peer-attestation, credential, and encrypted-wallet. Nested
 %%%    transport commitments are ignored for this ID calculation so an attacker
 %%%    cannot smuggle a signed ID into a modified payload. JSON type metadata is
@@ -64,19 +64,19 @@
 %%% 6. The joiner verifies the ring-signed authorization, checks every payload
 %%%    ID, activates the credential locally, decrypts the wallet, confirms
 %%%    the wallet address equals the expected ring address, and installs the
-%%%    identity as `green-zone/<name>'.
+%%%    identity as `zone/<name>'.
 %%% 7. A member can call `member' to receive a signed, narrow statement that
 %%%    its node address is a member of the named zone. The only signer is the
 %%%    ring identity. The caller may only choose the zone, commitment codec,
 %%%    and optional target/audience.
--module(dev_green_zone).
+-module(dev_zone).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3,
          member/3, match/3]).
 
 -include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--define(IDENTITY_PREFIX, <<"green-zone/">>).
+-define(IDENTITY_PREFIX, <<"zone/">>).
 -define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
 
 info(_) ->
@@ -97,14 +97,14 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"description">> =>
-                <<"Measurement-backed green-zone ring admission and shared "
+                <<"Measurement-backed zone ring admission and shared "
                   "identity">>,
             <<"version">> => <<"1.0">>,
             <<"template-semantics">> =>
                 <<"HyperBEAM message primary match; non-map values exact; "
                   "'_' wildcard">>,
             <<"peer-attestation-trust">> =>
-                <<"Green-zone admission verifies live peers through "
+                <<"Zone admission verifies live peers through "
                   "~measurement@1.0/verify-peer. Reusable/transitive "
                   "peer-attestation publisher trust is a measurement-device "
                   "concern, not ring state.">>
@@ -187,7 +187,7 @@ admit(_Base, Req, Opts) ->
             Opts),
         Validity = commit_unsigned_tree(admission_validity(Opts), Opts),
         Admission0 = #{
-            <<"type">> => <<"green-zone-admission">>,
+            <<"type">> => <<"zone-admission">>,
             <<"version">> => <<"1.0">>,
             <<"name">> => Name,
             <<"issued-at-unix">> => erlang:system_time(second),
@@ -195,7 +195,7 @@ admit(_Base, Req, Opts) ->
             <<"admission-nonce">> =>
                 hb_maps:get(<<"admission-nonce">>, Req, null, Opts),
             <<"ring-reference">> => commit_unsigned_tree(RingReference, Opts),
-            <<"green-zone">> => Definition,
+            <<"zone">> => Definition,
             <<"joiner-url">> => JoinerURL,
             <<"template">> => commit_unsigned_tree(Template, Opts),
             <<"peer-attestation">> => PeerAttestation,
@@ -228,7 +228,7 @@ join(_Base, Req, Opts) ->
         ),
         assert_wallet_matches_admission(Wallet, Admission, Opts),
         Template = hb_maps:get(<<"template">>, Admission, #{}, Opts),
-        Definition = hb_maps:get(<<"green-zone">>, Admission, #{}, Opts),
+        Definition = hb_maps:get(<<"zone">>, Admission, #{}, Opts),
         Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
         NewMembers = add_member_to_members(
             Members, SelfURL, peer_boot_attestation_body(Template,
@@ -254,7 +254,7 @@ member(_Base, Req, Opts) ->
         Member = require_local_member(Name, Zone, Address, Opts),
         Identity = zone_identity(Name),
         Proof0 = #{
-            <<"type">> => <<"green-zone-membership-proof">>,
+            <<"type">> => <<"zone-membership-proof">>,
             <<"version">> => <<"1.0">>,
             <<"address">> => Address,
             <<"member-of">> => Name,
@@ -271,7 +271,7 @@ member(_Base, Req, Opts) ->
                     ZoneOpts,
                     membership_codec_device(Req, ZoneOpts)
                 );
-            {error, not_found} -> green_zone_not_initialized(Name)
+            {error, not_found} -> zone_not_initialized(Name)
         end
     end, Opts).
 
@@ -280,13 +280,13 @@ with_result(Fun, Opts) ->
         ResultBody = ensure_committed(Fun(), Opts),
         {ok, #{<<"status">> => 200, <<"body">> => ResultBody}}
     catch
-        throw:{green_zone_error, ErrorBody} ->
+        throw:{zone_error, ErrorBody} ->
             {ok, #{<<"status">> => 400, <<"body">> => ErrorBody}};
         _:_ ->
             {ok, #{
                 <<"status">> => 500,
                 <<"body">> => #{
-                    <<"error">> => <<"green-zone-failed">>
+                    <<"error">> => <<"zone-failed">>
                 }
             }}
     end.
@@ -319,7 +319,7 @@ commit_unsigned_tree(Value, _Opts) ->
 admission_authorization(Admission, Wallet, Opts) ->
     hb_message:commit(
         maps:merge(#{
-            <<"type">> => <<"green-zone-admission-authorization">>,
+            <<"type">> => <<"zone-admission-authorization">>,
             <<"version">> => <<"1.0">>,
             <<"template-matched">> => <<"true">>
         }, maps:from_list(
@@ -351,7 +351,7 @@ authorization_id_fields() ->
     [
         {<<"validity-id">>, <<"validity">>, strip_json_metadata},
         {<<"ring-reference-id">>, <<"ring-reference">>, strip_json_metadata},
-        {<<"green-zone-id">>, <<"green-zone">>, strip_json_metadata},
+        {<<"zone-id">>, <<"zone">>, strip_json_metadata},
         {<<"template-id">>, <<"template">>, strip_json_metadata},
         {<<"peer-attestation-id">>, <<"peer-attestation">>, strip_json_metadata},
         {<<"credential-id">>, <<"credential">>, strip_json_metadata},
@@ -474,12 +474,12 @@ reject_supplied_secret_material(Req, Opts) ->
     case first_defined([
         hb_maps:get(<<"aes-key">>, Req, undefined, Opts),
         hb_maps:get(<<"wallet">>, Req, undefined, Opts),
-        hb_maps:get(<<"priv-green-zone-aes">>, Req, undefined, Opts),
-        hb_maps:get(<<"priv-green-zone-wallet">>, Req, undefined, Opts)
+        hb_maps:get(<<"priv-zone-aes">>, Req, undefined, Opts),
+        hb_maps:get(<<"priv-zone-wallet">>, Req, undefined, Opts)
     ]) of
         undefined -> ok;
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"secret-material-forbidden">>
             }})
     end.
@@ -488,13 +488,13 @@ install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
     Template = clean_template(Template0, Opts),
     ok = ensure_nonempty_template(Template),
     Identities = hb_opts:get(identities, #{}, Opts),
-    GreenZones = hb_opts:get(<<"green-zones">>, #{}, Opts),
-    PrivGreenZones = hb_opts:get(<<"priv-green-zones">>, #{}, Opts),
+    Zones = hb_opts:get(<<"zones">>, #{}, Opts),
+    PrivZones = hb_opts:get(<<"priv-zones">>, #{}, Opts),
     Definition = zone_definition(Name, Template, Wallet, Members, Opts),
     Identity = zone_identity(Name),
     Opts#{
-        <<"green-zones">> => GreenZones#{Name => Definition},
-        <<"priv-green-zones">> => PrivGreenZones#{
+        <<"zones">> => Zones#{Name => Definition},
+        <<"priv-zones">> => PrivZones#{
             Name => #{
                 <<"aes">> => AES,
                 <<"wallet">> => Wallet
@@ -513,14 +513,14 @@ install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts) ->
     end.
 
 require_ring(Name, Opts) ->
-    Priv = hb_opts:get(<<"priv-green-zones">>, #{}, Opts),
-    Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
+    Priv = hb_opts:get(<<"priv-zones">>, #{}, Opts),
+    Zones = hb_opts:get(<<"zones">>, #{}, Opts),
     case {hb_maps:get(Name, Priv, undefined, Opts),
           hb_maps:get(Name, Zones, undefined, Opts)} of
         {#{<<"aes">> := AES, <<"wallet">> := Wallet}, Zone}
                 when is_binary(AES), tuple_size(Wallet) > 0, is_map(Zone) ->
             {AES, Wallet, Zone};
-        _ -> green_zone_not_initialized(Name)
+        _ -> zone_not_initialized(Name)
     end.
 
 node_address(Opts) ->
@@ -529,7 +529,7 @@ node_address(Opts) ->
             case hb_opts:get(<<"address">>, undefined, Opts) of
                 B when is_binary(B), byte_size(B) > 0 -> B;
                 _ ->
-                    throw({green_zone_error, #{
+                    throw({zone_error, #{
                         <<"error">> => <<"node-address-unavailable">>
                     }})
             end;
@@ -544,8 +544,8 @@ require_local_member(Name, Zone, Address, Opts) ->
         Member when is_map(Member) ->
             Member;
         _ ->
-            throw({green_zone_error, #{
-                <<"error">> => <<"green-zone-not-member">>,
+            throw({zone_error, #{
+                <<"error">> => <<"zone-not-member">>,
                 <<"name">> => Name,
                 <<"address">> => Address
             }})
@@ -567,38 +567,38 @@ maybe_add_target(Proof, Req, Opts) ->
         undefined -> Proof;
         B when is_binary(B), byte_size(B) > 0 -> Proof#{<<"target">> => B};
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"invalid-target">>
             }})
     end.
 
-green_zone_not_initialized(Name) ->
-    throw({green_zone_error, #{
-        <<"error">> => <<"green-zone-not-initialized">>,
+zone_not_initialized(Name) ->
+    throw({zone_error, #{
+        <<"error">> => <<"zone-not-initialized">>,
         <<"name">> => Name
     }}).
 
 all_status_body(Opts) ->
-    Zones = hb_opts:get(<<"green-zones">>, #{}, Opts),
+    Zones = hb_opts:get(<<"zones">>, #{}, Opts),
     maybe_add_nonvolatile_status(#{
-        <<"type">> => <<"green-zone-status">>,
+        <<"type">> => <<"zone-status">>,
         <<"version">> => <<"1.0">>,
         <<"initialized">> => map_size(Zones) > 0,
-        <<"green-zones">> => Zones
+        <<"zones">> => Zones
     }, Opts).
 
 status_body(Name, Opts) ->
-    case hb_maps:get(Name, hb_opts:get(<<"green-zones">>, #{}, Opts),
+    case hb_maps:get(Name, hb_opts:get(<<"zones">>, #{}, Opts),
                      undefined, Opts) of
-        undefined -> green_zone_not_initialized(Name);
+        undefined -> zone_not_initialized(Name);
         Zone ->
             maybe_add_nonvolatile_status(#{
-                <<"type">> => <<"green-zone-status">>,
+                <<"type">> => <<"zone-status">>,
                 <<"version">> => <<"1.0">>,
                 <<"initialized">> => true,
                 <<"name">> => Name,
                 <<"identity">> => zone_identity(Name),
-                <<"green-zone">> => Zone
+                <<"zone">> => Zone
             }, Opts)
     end.
 
@@ -612,7 +612,7 @@ maybe_add_nonvolatile_status(Body, Opts) ->
 
 zone_definition(Name, Template, Wallet, Members, Opts) ->
     #{
-        <<"type">> => <<"green-zone-definition">>,
+        <<"type">> => <<"zone-definition">>,
         <<"version">> => <<"1.0">>,
         <<"name">> => Name,
         <<"identity">> => zone_identity(Name),
@@ -625,7 +625,7 @@ zone_definition(Name, Template, Wallet, Members, Opts) ->
 
 ring_reference(Name, Template, Wallet, Opts) ->
     #{
-        <<"type">> => <<"green-zone-ring-reference">>,
+        <<"type">> => <<"zone-ring-reference">>,
         <<"version">> => <<"1.0">>,
         <<"name">> => Name,
         <<"ring-address">> => wallet_address(Wallet),
@@ -634,7 +634,7 @@ ring_reference(Name, Template, Wallet, Opts) ->
 
 template_id(Name, Template, Opts) ->
     hb_message:id(
-        #{<<"type">> => <<"green-zone-template">>,
+        #{<<"type">> => <<"zone-template">>,
           <<"name">> => Name,
           <<"template">> => clean_template(Template, Opts)},
         all,
@@ -643,7 +643,7 @@ template_id(Name, Template, Opts) ->
 admission_validity(Opts) ->
     Now = erlang:system_time(second),
     TTL = parse_positive_integer(
-        hb_opts:get(<<"green-zone-admission-ttl-seconds">>, 300, Opts),
+        hb_opts:get(<<"zone-admission-ttl-seconds">>, 300, Opts),
         300),
     #{
         <<"not-before-unix">> => Now,
@@ -653,7 +653,7 @@ admission_validity(Opts) ->
 required_url(Req, Opts) ->
     case hb_maps:get(<<"joiner-url">>, Req, undefined, Opts) of
         undefined ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"missing-joiner-url">>
             }});
         URL -> strip_trailing_slash(URL)
@@ -663,11 +663,11 @@ required_peer(Req, Opts) ->
     case first_defined(
         [
             hb_maps:get(<<"peer-url">>, Req, undefined, Opts),
-            hb_opts:get(<<"green-zone-peer-url">>, undefined, Opts)
+            hb_opts:get(<<"zone-peer-url">>, undefined, Opts)
         ]
     ) of
         undefined ->
-            throw({green_zone_error, #{<<"error">> => <<"missing-peer-url">>}});
+            throw({zone_error, #{<<"error">> => <<"missing-peer-url">>}});
         URL -> strip_trailing_slash(URL)
     end.
 
@@ -675,26 +675,26 @@ required_self(Req, Opts) ->
     case first_defined(
         [
             hb_maps:get(<<"self-url">>, Req, undefined, Opts),
-            hb_opts:get(<<"green-zone-self-url">>, undefined, Opts),
+            hb_opts:get(<<"zone-self-url">>, undefined, Opts),
             hb_opts:get(<<"public-url">>, undefined, Opts)
         ]
     ) of
         undefined ->
-            throw({green_zone_error, #{<<"error">> => <<"missing-self-url">>}});
+            throw({zone_error, #{<<"error">> => <<"missing-self-url">>}});
         URL -> strip_trailing_slash(URL)
     end.
 
 required_name(Req, Opts) ->
     case optional_name(Req, Opts) of
         undefined ->
-            throw({green_zone_error, #{<<"error">> => <<"missing-name">>}});
+            throw({zone_error, #{<<"error">> => <<"missing-name">>}});
         Name -> Name
     end.
 
 optional_name(Req, Opts) ->
     case first_defined([
         hb_maps:get(<<"name">>, Req, undefined, Opts),
-        hb_opts:get(<<"green-zone-name">>, undefined, Opts)
+        hb_opts:get(<<"zone-name">>, undefined, Opts)
     ]) of
         B when is_binary(B), byte_size(B) > 0 -> B;
         _ -> undefined
@@ -705,11 +705,11 @@ required_zone(Req, Opts) ->
         hb_maps:get(<<"member">>, Req, undefined, Opts),
         hb_maps:get(<<"zone">>, Req, undefined, Opts),
         hb_maps:get(<<"name">>, Req, undefined, Opts),
-        hb_opts:get(<<"green-zone-name">>, undefined, Opts)
+        hb_opts:get(<<"zone-name">>, undefined, Opts)
     ]) of
         B when is_binary(B), byte_size(B) > 0 -> B;
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"missing-zone">>
             }})
     end.
@@ -722,7 +722,7 @@ self_attestation_body(Template, Opts) ->
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
             measurement_template_target(Template, response_body(Body, Opts), Opts);
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"self-attestation-failed">>
             }})
     end.
@@ -731,13 +731,13 @@ assert_template_match(Template, Candidate, Subject, Opts) ->
     case hb_message:match(Template, Candidate, primary, Opts) of
         true -> ok;
         {mismatch, _Type, Path, _Expected, _Actual} ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"template-mismatch">>,
                 <<"mismatch-path">> => canonical_mismatch_path(Path),
                 <<"subject">> => Subject
             }});
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"template-mismatch">>,
                 <<"subject">> => Subject
             }})
@@ -800,7 +800,7 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
     case dev_measurement:verify_peer(#{}, VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"peer-verification-failed">>
             }})
     end.
@@ -813,7 +813,7 @@ peer_attestation_from_req(Req, RingReference, Opts) ->
 
 clock_skew_seconds(Opts) ->
     parse_positive_integer(
-        hb_opts:get(<<"green-zone-clock-skew-seconds">>, 300, Opts),
+        hb_opts:get(<<"zone-clock-skew-seconds">>, 300, Opts),
         300).
 
 parse_positive_integer(N, _Default) when is_integer(N), N > 0 ->
@@ -835,7 +835,7 @@ encoded_field_sha256(Key, Msg, Opts) ->
 
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     Required = [
-        {eq, <<"type">>, <<"green-zone-peer-attestation">>},
+        {eq, <<"type">>, <<"zone-peer-attestation">>},
         {field_integer, <<"issued-at-unix">>},
         {nested_true, <<"boot-verification">>, <<"verified">>},
         {nested_true, <<"verification">>, <<"verified">>},
@@ -852,7 +852,7 @@ assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     assert_peer_attestation_scope(PeerAttestation, RingReference, Opts).
 
 bad_peer_attestation(Key) ->
-    throw({green_zone_error, #{
+    throw({zone_error, #{
         <<"error">> => <<"peer-attestation-invalid">>,
         <<"field">> => Key
     }}).
@@ -901,7 +901,7 @@ assert_peer_attestation_validity(PeerAttestation, Opts) ->
     Now = erlang:system_time(second),
     Skew = clock_skew_seconds(Opts),
     MaxAge = parse_positive_integer(
-        hb_opts:get(<<"green-zone-peer-attestation-max-age-seconds">>,
+        hb_opts:get(<<"zone-peer-attestation-max-age-seconds">>,
                     3600, Opts),
         3600),
     IssuedAt = hb_maps:get(<<"issued-at-unix">>, PeerAttestation, 0, Opts),
@@ -1075,16 +1075,16 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
         admission_response_body(
             lapee_peer_http:post(
                 PeerURL,
-                <<"/~green-zone@1.0/admit">>,
+                <<"/~zone@1.0/admit">>,
                 AdmitReq,
                 Opts),
             Opts
         )
     catch
-        throw:{green_zone_error, ErrorBody} ->
-            throw({green_zone_error, ErrorBody});
+        throw:{zone_error, ErrorBody} ->
+            throw({zone_error, ErrorBody});
         Class:Reason:_Stack ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"admission-request-failed">>,
                 <<"class">> => hb_util:bin(Class),
                 <<"reason">> =>
@@ -1100,7 +1100,7 @@ admission_response_body(#{<<"status">> := 200, <<"body">> := Body}, Opts) ->
     admission_or_error_body(response_body(Body, Opts), Opts);
 admission_response_body(#{<<"status">> := Status, <<"body">> := Body}, _Opts)
         when is_integer(Status), Status >= 400, is_map(Body) ->
-    throw({green_zone_error, Body});
+    throw({zone_error, Body});
 admission_response_body(#{<<"body">> := Body}, Opts) when is_map(Body) ->
     admission_response_body(Body, Opts);
 admission_response_body(Other, Opts) ->
@@ -1112,7 +1112,7 @@ admission_or_error_body(Body, Opts) when is_map(Body) ->
         hb_maps:get(<<"error">>, Body, undefined, Opts)
     } of
         {undefined, Error} when is_binary(Error) ->
-            throw({green_zone_error, Body});
+            throw({zone_error, Body});
         _ ->
             Body
     end;
@@ -1122,7 +1122,7 @@ admission_or_error_body(Body, _Opts) ->
 assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
     Self = strip_trailing_slash(SelfURL),
     Checks = [
-        {eq, <<"type">>, <<"green-zone-admission">>},
+        {eq, <<"type">>, <<"zone-admission">>},
         {eq, <<"name">>, required_name(Req, Opts)},
         {eq_normalized, <<"joiner-url">>, Self, fun strip_trailing_slash/1},
         {eq, <<"admission-nonce">>, AdmissionNonce},
@@ -1159,7 +1159,7 @@ assert_admission_body(Admission, SelfURL, AdmissionNonce, Req, Opts) ->
     end.
 
 bad_admission(Key) ->
-    throw({green_zone_error, #{
+    throw({zone_error, #{
         <<"error">> => <<"admission-invalid">>,
         <<"field">> => Key
     }}).
@@ -1227,7 +1227,7 @@ assert_admission_validity(Admission, Opts) ->
 assert_expected_ring_address(Admission, Req, Opts) ->
     case first_defined([
         hb_maps:get(<<"expected-ring-address">>, Req, undefined, Opts),
-        hb_opts:get(<<"green-zone-ring-address">>, undefined, Opts)
+        hb_opts:get(<<"zone-ring-address">>, undefined, Opts)
     ]) of
         undefined -> bad_admission(<<"expected-ring-address">>);
         Expected ->
@@ -1242,7 +1242,7 @@ activate_local_credential(Credential, Opts) ->
         {ok, Secret} when is_binary(Secret) ->
             Secret;
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"credential-activation-failed">>
             }})
     end.
@@ -1263,7 +1263,7 @@ decode_required(Key, Msg, Opts) ->
     case hb_maps:get(Key, Msg, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 -> hb_util:decode(B);
         _ ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"missing-field">>,
                 <<"field">> => Key
             }})
@@ -1277,7 +1277,7 @@ safe_decode(_) ->
 encrypt_wallet(Wallet, AES) ->
     IV = crypto:strong_rand_bytes(12),
     Plain = ar_wallet:to_json(Wallet),
-    AAD = <<"green-zone-wallet-v1">>,
+    AAD = <<"zone-wallet-v1">>,
     {Cipher, Tag} =
         crypto:crypto_one_time_aead(
             aes_256_gcm, AES, IV, Plain, AAD, true),
@@ -1289,7 +1289,7 @@ encrypt_wallet(Wallet, AES) ->
     }.
 
 decrypt_wallet(Enc, AES, Opts) when is_map(Enc) ->
-    AAD = <<"green-zone-wallet-v1">>,
+    AAD = <<"zone-wallet-v1">>,
     Plain =
         crypto:crypto_one_time_aead(
             aes_256_gcm,
@@ -1302,20 +1302,20 @@ decrypt_wallet(Enc, AES, Opts) when is_map(Enc) ->
         ),
     case Plain of
         error ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"wallet-decryption-failed">>
             }});
         _ -> ar_wallet:from_json(Plain)
     end;
 decrypt_wallet(_, _AES, _Opts) ->
-    throw({green_zone_error, #{<<"error">> => <<"bad-encrypted-wallet">>}}).
+    throw({zone_error, #{<<"error">> => <<"bad-encrypted-wallet">>}}).
 
 assert_wallet_matches_admission(Wallet, Admission, Opts) ->
     Expected = hb_maps:get(<<"ring-address">>, Admission, undefined, Opts),
     case wallet_address(Wallet) of
         Expected -> ok;
         Actual ->
-            throw({green_zone_error, #{
+            throw({zone_error, #{
                 <<"error">> => <<"ring-wallet-address-mismatch">>,
                 <<"expected">> => Expected,
                 <<"actual">> => Actual
@@ -1352,7 +1352,7 @@ ensure_nonempty_template(Template) when is_map(Template),
                                        map_size(Template) > 0 ->
     ok;
 ensure_nonempty_template(_Template) ->
-    throw({green_zone_error, #{<<"error">> => <<"empty-template">>}}).
+    throw({zone_error, #{<<"error">> => <<"empty-template">>}}).
 
 canonical_mismatch_path(<<"/", _/binary>> = Path) ->
     Path;
@@ -1441,18 +1441,18 @@ admission_response_body_preserves_policy_rejection_test() ->
         <<"body">> => Rejection
     },
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
         admission_response_body(Rejection, #{})),
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
         admission_response_body(WrappedRejection, #{})),
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
         admission_response_body(
             #{<<"error">> => <<"template-mismatch">>},
             #{})).
 
-stored_peer_attestation_is_not_green_zone_trust_input_test() ->
+stored_peer_attestation_is_not_zone_trust_input_test() ->
     PublisherWallet = ar_wallet:new(),
     RingReference = test_ring_reference(),
     Attestation = signed_peer_attestation(PublisherWallet, #{
@@ -1460,10 +1460,10 @@ stored_peer_attestation_is_not_green_zone_trust_input_test() ->
     }, RingReference),
     Req = #{<<"peer-attestation">> => Attestation},
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"missing-joiner-url">>}},
+        {zone_error, #{<<"error">> := <<"missing-joiner-url">>}},
         peer_attestation_from_req(Req, RingReference, #{})).
 
-green_zone_policy_uses_boot_attestation_test() ->
+zone_policy_uses_boot_attestation_test() ->
     PublisherWallet = ar_wallet:new(),
     RingReference = test_ring_reference(),
     Boot = #{
@@ -1542,7 +1542,7 @@ expired_peer_attestation_rejected_test() ->
         <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
     }, RingReference, Old),
     ?assertThrow(
-        {green_zone_error, #{
+        {zone_error, #{
             <<"error">> := <<"peer-attestation-invalid">>,
             <<"field">> := <<"issued-at-unix">>
         }},
@@ -1554,7 +1554,7 @@ admission_body_requires_joiner_binding_test() ->
         <<"joiner-url">> => <<"http://other.example">>
     },
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"admission-invalid">>}},
+        {zone_error, #{<<"error">> := <<"admission-invalid">>}},
         assert_admission_body(
             Admission,
             <<"http://self.example">>,
@@ -1565,7 +1565,7 @@ admission_body_requires_joiner_binding_test() ->
 admission_body_requires_expected_ring_test() ->
     Wallet = ar_wallet:new(),
     ?assertThrow(
-        {green_zone_error, #{
+        {zone_error, #{
             <<"error">> := <<"admission-invalid">>,
             <<"field">> := <<"expected-ring-address">>
         }},
@@ -1628,7 +1628,7 @@ admission_body_rejects_invalid_validity_window_test() ->
         <<"authorization">> => admission_authorization(Admission1, Wallet, #{})
     },
     ?assertThrow(
-        {green_zone_error, #{
+        {zone_error, #{
             <<"error">> := <<"admission-invalid">>,
             <<"field">> := <<"validity">>
         }},
@@ -1655,7 +1655,7 @@ admission_rejects_payload_commitment_id_substitution_test() ->
     },
     Admission = Admission0#{<<"template">> => TamperedTemplate},
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"admission-invalid">>}},
+        {zone_error, #{<<"error">> := <<"admission-invalid">>}},
         assert_admission_body(
             Admission,
             <<"http://self.example">>,
@@ -1749,7 +1749,7 @@ ring_wallet_address_mismatch_rejected_test() ->
     Wallet = ar_wallet:new(),
     Admission = test_admission(ar_wallet:new()),
     ?assertThrow(
-        {green_zone_error, #{
+        {zone_error, #{
             <<"error">> := <<"ring-wallet-address-mismatch">>
         }},
         assert_wallet_matches_admission(Wallet, Admission, #{})).
@@ -1767,7 +1767,7 @@ metadata_keys_are_stripped_recursively_test() ->
 
 metadata_only_template_rejected_test() ->
     ?assertThrow(
-        {green_zone_error, #{<<"error">> := <<"empty-template">>}},
+        {zone_error, #{<<"error">> := <<"empty-template">>}},
         install_ring(
             test_name(),
             #{<<"commitments">> => #{<<"only-metadata">> => true}},
@@ -1777,7 +1777,7 @@ metadata_only_template_rejected_test() ->
             #{})).
 
 %% Regression: a third-hop admission must carry the new joiner in
-%% green-zone.members. The previous implementation did `Members#{...}'
+%% zone.members. The previous implementation did `Members#{...}'
 %% on a Members map that arrived from a prior admission with a stale
 %% `commitments' key; the next `commit_unsigned_tree' linkified the
 %% inner map, the cache write honoured the existing signature's
@@ -1793,7 +1793,7 @@ member_survives_admission_commit_tree_test() ->
         <<"commitment-device">> => <<"httpsig@1.0">>
     },
     %% Existing committed Members snapshot the way it leaves a prior
-    %% admission's green-zone.members.
+    %% admission's zone.members.
     M0 = #{<<"existing">> =>
             hb_message:commit(
                 #{<<"address">> => <<"existing">>,
@@ -1814,7 +1814,7 @@ member_survives_admission_commit_tree_test() ->
     %% Drive through commit_unsigned_tree -- the same path that loses
     %% keys on a stale-commitment Erlang `#{=>}' update.
     Definition = commit_unsigned_tree(
-        #{<<"type">> => <<"green-zone-definition">>,
+        #{<<"type">> => <<"zone-definition">>,
           <<"name">> => <<"book-shelf">>,
           <<"members">> => NewMembers},
         Opts),
@@ -1851,7 +1851,7 @@ member_proof_is_signed_by_ring_identity_test() ->
         Opts0),
     {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
         member(#{}, #{<<"zone">> => Name}, Opts),
-    ?assertEqual(<<"green-zone-membership-proof">>, maps:get(<<"type">>, Proof)),
+    ?assertEqual(<<"zone-membership-proof">>, maps:get(<<"type">>, Proof)),
     ?assertEqual(Address, maps:get(<<"address">>, Proof)),
     ?assertEqual(Name, maps:get(<<"member-of">>, Proof)),
     ?assertEqual(zone_identity(Name), maps:get(<<"identity">>, Proof)),
@@ -1875,7 +1875,7 @@ member_proof_requires_local_member_entry_test() ->
         Opts0),
     {ok, #{<<"status">> := 400, <<"body">> := Body}} =
         member(#{}, #{<<"zone">> => Name}, Opts),
-    ?assertEqual(<<"green-zone-not-member">>, maps:get(<<"error">>, Body)).
+    ?assertEqual(<<"zone-not-member">>, maps:get(<<"error">>, Body)).
 
 member_proof_uses_membership_codec_device_test() ->
     Name = test_name(),
@@ -1954,14 +1954,14 @@ member_proof_accepts_member_key_and_target_test() ->
 test_admission(Wallet) ->
     RingReference = test_ring_reference(Wallet),
     Admission = #{
-        <<"type">> => <<"green-zone-admission">>,
+        <<"type">> => <<"zone-admission">>,
         <<"version">> => <<"1.0">>,
         <<"name">> => test_name(),
         <<"issued-at-unix">> => erlang:system_time(second),
         <<"validity">> => admission_validity(#{}),
         <<"admission-nonce">> => <<"nonce">>,
         <<"ring-reference">> => RingReference,
-        <<"green-zone">> => #{
+        <<"zone">> => #{
             <<"name">> => test_name(),
             <<"members">> => #{}
         },
@@ -1992,7 +1992,7 @@ signed_peer_attestation(Wallet, BootAttestation, RingReference, Now,
     PeerURL = <<"http://peer.example">>,
     hb_message:commit(
         #{
-            <<"type">> => <<"green-zone-peer-attestation">>,
+            <<"type">> => <<"zone-peer-attestation">>,
             <<"version">> => <<"1.0">>,
             <<"issued-at-unix">> => Now,
             <<"validity">> => #{<<"not-before-unix">> => Now},
@@ -2021,7 +2021,7 @@ signed_peer_attestation(Wallet, BootAttestation, RingReference, Now,
 
 test_ring_reference() ->
     #{
-        <<"type">> => <<"green-zone-ring-reference">>,
+        <<"type">> => <<"zone-ring-reference">>,
         <<"version">> => <<"1.0">>,
         <<"name">> => test_name(),
         <<"ring-address">> => <<"ring-address">>,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qemu-green-zone-cluster.sh -- four-node measurement/green-zone harness.
+# qemu-zone-cluster.sh -- four-node measurement/zone harness.
 #
 # The harness boots three admissible LapEE nodes and one inadmissible node
 # under QEMU+OVMF+swtpm. The nodes intentionally vary observable system
@@ -11,15 +11,15 @@
 #
 # Acceptance checked here:
 #   * all four nodes answer `~measurement@1.0/boot'
-#   * node 1 initializes a named green-zone template from its system report
+#   * node 1 initializes a named zone template from its system report
 #   * nodes 2 and 3 join through node 1 and receive the shared ring wallet
 #   * node 4 has a different DMI product and is rejected by the same template
-#   * nodes 1-3 install the same green-zone identity
+#   * nodes 1-3 install the same zone identity
 #   * node 4 never receives that identity
 #
 # With NONVOLATILE=1, each node also receives a second virtio disk containing
-# a single GPT partition named GREENZONE_PRIMARY. Nodes 1-3 must format/open
-# it with the green-zone key, mount it as the primary HB store, and node 2 is
+# a single GPT partition named ZONE_PRIMARY. Nodes 1-3 must format/open
+# it with the zone key, mount it as the primary HB store, and node 2 is
 # rebooted and rejoined to prove the existing encrypted volume is reused.
 
 set -euo pipefail
@@ -29,7 +29,7 @@ BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMG=${IMG:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
-OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone}
+OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-zone}
 BASE_PORT=${BASE_PORT:-19080}
 TIMEOUT=${TIMEOUT:-480}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
@@ -39,10 +39,10 @@ NODE1_MEMORY_MIB=${NODE1_MEMORY_MIB:-2048}
 NODE2_MEMORY_MIB=${NODE2_MEMORY_MIB:-2304}
 NODE3_MEMORY_MIB=${NODE3_MEMORY_MIB:-2560}
 NODE4_MEMORY_MIB=${NODE4_MEMORY_MIB:-2816}
-NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-GZ-admit}
-NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-GZ-admit}
-NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-GZ-admit}
-NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-GZ-reject-4}
+NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-Zone-admit}
+NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-Zone-admit}
+NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-Zone-admit}
+NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-Zone-reject-4}
 SWTPM_CTRL=${SWTPM_CTRL:-unix}
 SWTPM_CTRL_BASE_PORT=${SWTPM_CTRL_BASE_PORT:-$((BASE_PORT + 1000))}
 NONVOLATILE=${NONVOLATILE:-0}
@@ -52,7 +52,7 @@ NODE1_MEASUREMENT_DEVICE=${NODE1_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 NODE2_MEASUREMENT_DEVICE=${NODE2_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 NODE3_MEASUREMENT_DEVICE=${NODE3_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 NODE4_MEASUREMENT_DEVICE=${NODE4_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
-GREEN_ZONE_TEMPLATE_MODE=${GREEN_ZONE_TEMPLATE_MODE:-device}
+ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
 
 while (($# > 0)); do
     case "$1" in
@@ -182,9 +182,9 @@ PY
 # OUTDIRs blow that limit, so swtpm's `--ctrl type=unixio,path=...' fails
 # opaquely with "Path for UnioIO socket is too long". Stage the sockets
 # in a short /tmp dir and keep state/logs/certs in OUTDIR.
-SOCK_DIR=$(mktemp -d /tmp/lapee-gz.XXXXXX)
+SOCK_DIR=$(mktemp -d /tmp/lapee-zone.XXXXXX)
 
-echo "=== green-zone QEMU cluster ==="
+echo "=== zone QEMU cluster ==="
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 git status --short 2>/dev/null || true
 echo "qemu: $(qemu-system-x86_64 --version | head -n 1)"
@@ -194,7 +194,7 @@ echo "base-port: $BASE_PORT"
 echo "outdir: $OUTDIR"
 echo "qemu image: $IMG"
 echo "measurement devices: $(node_measurement_device 1), $(node_measurement_device 2), $(node_measurement_device 3), $(node_measurement_device 4)"
-echo "green-zone template mode: $GREEN_ZONE_TEMPLATE_MODE"
+echo "zone template mode: $ZONE_TEMPLATE_MODE"
 echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
@@ -312,7 +312,7 @@ node_dmi_product() {
         2) echo "$NODE2_DMI_PRODUCT";;
         3) echo "$NODE3_DMI_PRODUCT";;
         4) echo "$NODE4_DMI_PRODUCT";;
-        *) echo "LapEE-GZ-node-$n";;
+        *) echo "LapEE-Zone-node-$n";;
     esac
 }
 
@@ -343,7 +343,7 @@ prepare_nonvolatile_disk() {
         "$BUILD_IMAGE" \
         bash -euo pipefail -c '
             parted -s /work/nonvolatile.img mklabel gpt \
-                mkpart GREENZONE_PRIMARY 1MiB 100%
+                mkpart ZONE_PRIMARY 1MiB 100%
         '
     python3 - "$disk" <<'PY'
 import struct, sys
@@ -362,12 +362,12 @@ with open(sys.argv[1], "r+b") as f:
         entry = f.read(entry_size)
         if entry[:16] == b"\0" * 16:
             continue
-        if entry[56:128].decode("utf-16le").rstrip("\0") == "GREENZONE_PRIMARY":
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "ZONE_PRIMARY":
             first_lba = struct.unpack_from("<Q", entry, 32)[0]
             f.seek(first_lba * 512)
             f.write(marker)
             raise SystemExit(0)
-raise SystemExit("GREENZONE_PRIMARY partition not found")
+raise SystemExit("ZONE_PRIMARY partition not found")
 PY
 }
 
@@ -531,9 +531,9 @@ assert_nonvolatile_status() {
         (.body."nonvolatile-storage".mounted == true or
          .body."nonvolatile-storage".mounted == "true") and
         (.body."nonvolatile-storage".partition | test("/dev/")) and
-        .body."nonvolatile-storage"."partition-label" == "GREENZONE_PRIMARY" and
-        .body."nonvolatile-storage"."primary-partition-label" == "GREENZONE_PRIMARY" and
-        (.body."nonvolatile-storage"."zone-partition-label" | startswith("GREENZONE_")) and
+        .body."nonvolatile-storage"."partition-label" == "ZONE_PRIMARY" and
+        .body."nonvolatile-storage"."primary-partition-label" == "ZONE_PRIMARY" and
+        (.body."nonvolatile-storage"."zone-partition-label" | startswith("ZONE_")) and
         .body."nonvolatile-storage".mapper == "lapee-nonvolatile" and
         .body."nonvolatile-storage"."mount-point" == "/var/lib/lapee/nonvolatile" and
         .body."nonvolatile-storage".store == "/var/lib/lapee/nonvolatile/store/cache-mainnet/lmdb" and
@@ -662,7 +662,7 @@ with open(disk, "rb") as f:
         entry = f.read(entry_size)
         if entry[:16] == b"\0" * 16:
             continue
-        if entry[56:128].decode("utf-16le").rstrip("\0") == "GREENZONE_PRIMARY":
+        if entry[56:128].decode("utf-16le").rstrip("\0") == "ZONE_PRIMARY":
             first_lba = struct.unpack_from("<Q", entry, 32)[0]
             f.seek(first_lba * 512)
             first = f.read(max(len(marker), 6))
@@ -671,7 +671,7 @@ with open(disk, "rb") as f:
             if not first.startswith(marker):
                 raise SystemExit("missing provisioning marker")
             raise SystemExit(0)
-raise SystemExit("GREENZONE_PRIMARY partition not found")
+raise SystemExit("ZONE_PRIMARY partition not found")
 PY
 }
 
@@ -770,20 +770,20 @@ fi
 echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
-GREEN_ZONE_TEMPLATE_MODE="$GREEN_ZONE_TEMPLATE_MODE" \
-    python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+    python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
     require_request "$req"
 done
 
-post_json 1 "/~green-zone@1.0/init" \
+post_json 1 "/~zone@1.0/init" \
     "$OUTDIR/requests/init.json" \
     "$OUTDIR/responses/node1-init.json"
 jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true") and
-       (.body."green-zone"."ring-address" | type == "string" and length > 0)' \
+       (.body."zone"."ring-address" | type == "string" and length > 0)' \
     "$OUTDIR/responses/node1-init.json" >/dev/null
-ring_addr=$(jq -r '.body."green-zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
-ring_reference=$(jq -c '.body."green-zone"."ring-reference"' "$OUTDIR/responses/node1-init.json")
+ring_addr=$(jq -r '.body."zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
+ring_reference=$(jq -c '.body."zone"."ring-reference"' "$OUTDIR/responses/node1-init.json")
 jq --argjson reference "$ring_reference" \
     '. + {"peer-attestation-scope": $reference}' \
     "$OUTDIR/requests/verify2.json" \
@@ -796,12 +796,12 @@ for n in 2 3 4; do
         > "$OUTDIR/requests/join$n.pinned.json"
     mv "$OUTDIR/requests/join$n.pinned.json" "$OUTDIR/requests/join$n.json"
 done
-echo ">> node 1 initialized green-zone $ring_addr"
+echo ">> node 1 initialized zone $ring_addr"
 
 post_json 1 "/~measurement@1.0/verify-peer" \
     "$OUTDIR/requests/verify2.json" \
     "$OUTDIR/responses/node1-verify2.json"
-jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
+jq -e '.status == 200 and .body.type == "zone-peer-attestation" and
        (.body.verification.verified == true or
         .body.verification.verified == "true") and
        (.body.freshness.verified == true or
@@ -810,7 +810,7 @@ jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
        (.body."credential-activation".verified == true or
         .body."credential-activation".verified == "true")' \
     "$OUTDIR/responses/node1-verify2.json" >/dev/null
-post_json 1 "/~green-zone@1.0/admit" \
+post_json 1 "/~zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
     "$OUTDIR/responses/node1-admit2.json"
 jq -e '.status == 200 and
@@ -820,16 +820,16 @@ jq -e '.status == 200 and
 echo ">> node 1 can admit node 2"
 
 for n in 2 3; do
-    post_json "$n" "/~green-zone@1.0/join" \
+    post_json "$n" "/~zone@1.0/join" \
         "$OUTDIR/requests/join$n.json" \
         "$OUTDIR/responses/node$n-join.json"
     jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
         "$OUTDIR/responses/node$n-join.json" >/dev/null
-    echo ">> node $n joined green-zone"
+    echo ">> node $n joined zone"
 done
 
 set +e
-post_json 4 "/~green-zone@1.0/join" \
+post_json 4 "/~zone@1.0/join" \
     "$OUTDIR/requests/join4.json" \
     "$OUTDIR/responses/node4-join.json"
 join4_rc=$?
@@ -847,24 +847,24 @@ if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
 fi
 echo ">> node 4 rejected as expected"
 
-get_json 4 "/~green-zone@1.0/status" \
+get_json 4 "/~zone@1.0/status" \
     "$OUTDIR/responses/node4-status.json"
 jq -e \
     '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
-     (.body."green-zones" | has("book-shelf") | not)' \
+     (.body."zones" | has("book-shelf") | not)' \
     "$OUTDIR/responses/node4-status.json" >/dev/null
-echo ">> node 4 status has no green-zone identity"
+echo ">> node 4 status has no zone identity"
 
-get_json 4 "/~green-zone@1.0/member=book-shelf" \
+get_json 4 "/~zone@1.0/member=book-shelf" \
     "$OUTDIR/responses/node4-member.json"
-jq -e '.status == 400 and .body.error == "green-zone-not-initialized"' \
+jq -e '.status == 400 and .body.error == "zone-not-initialized"' \
     "$OUTDIR/responses/node4-member.json" >/dev/null
-echo ">> node 4 cannot produce a green-zone membership proof"
+echo ">> node 4 cannot produce a zone membership proof"
 
 # Multi-hop members propagation. Node 3 joined via node 2, so node 2
 # (the admitter) and node 3 (the joiner) must both see all three
 # wallets in their `/status'. Node 1 was not involved in node 3's
-# admit and the green-zone protocol does not propagate membership
+# admit and the zone protocol does not propagate membership
 # upstream, so node 1's view legitimately stops at two -- itself and
 # node 2. This is a regression for the `add_member_to_members' bug
 # that silently dropped joiners through a stale-commitment cache
@@ -877,24 +877,24 @@ expected_member_count() {
     esac
 }
 for n in 1 2 3; do
-    get_json "$n" "/~green-zone@1.0/status?name=book-shelf" \
+    get_json "$n" "/~zone@1.0/status?name=book-shelf" \
         "$OUTDIR/responses/node$n-status.json"
     jq -e --arg addr "$ring_addr" \
         '.status == 200 and
-         .body.identity == "green-zone/book-shelf" and
-         .body."green-zone"."ring-address" == $addr' \
+         .body.identity == "zone/book-shelf" and
+         .body."zone"."ring-address" == $addr' \
         "$OUTDIR/responses/node$n-status.json" >/dev/null
     if [[ "$NONVOLATILE" = "1" ]]; then
         assert_nonvolatile_status "$n" "$OUTDIR/responses/node$n-status.json"
     fi
-    member_count=$(jq -r '.body."green-zone".members
+    member_count=$(jq -r '.body."zone".members
                           | with_entries(select(.key != "commitments"))
                           | keys | length' \
         "$OUTDIR/responses/node$n-status.json")
     expected=$(expected_member_count "$n")
     if [[ "$member_count" != "$expected" ]]; then
         echo "!! node $n status shows $member_count member wallet(s); expected $expected" >&2
-        jq '.body."green-zone".members | keys' \
+        jq '.body."zone".members | keys' \
             "$OUTDIR/responses/node$n-status.json" >&2
         exit 1
     fi
@@ -918,7 +918,7 @@ if [[ "$NONVOLATILE" = "1" ]]; then
         "$OUTDIR/responses/node2-first-boot-attestation.json"
     echo ">> rebooting node 2 with changed boot evidence to verify non-volatile store reuse"
     stop_node 2
-    partial_ring_label="GREENZONE_${ring_addr:0:4}"
+    partial_ring_label="ZONE_${ring_addr:0:4}"
     rename_nonvolatile_disk_label 2 "$partial_ring_label"
     echo ">> node 2 non-volatile disk renamed to partial zone label $partial_ring_label"
     NODE2_MEMORY_MIB=$((NODE2_MEMORY_MIB + 512))
@@ -933,18 +933,18 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
     get_json 2 "/~measurement@1.0/subject" \
         "$OUTDIR/responses/node2-reboot-credential-subject.json"
-    python3 scripts/qemu-green-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+    python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     jq --arg addr "$ring_addr" \
         '. + {"expected-ring-address": $addr}' \
         "$OUTDIR/requests/join2.json" \
         > "$OUTDIR/requests/join2.reboot-pinned.json"
     mv "$OUTDIR/requests/join2.reboot-pinned.json" "$OUTDIR/requests/join2.json"
-    post_json 2 "/~green-zone@1.0/join" \
+    post_json 2 "/~zone@1.0/join" \
         "$OUTDIR/requests/join2.json" \
         "$OUTDIR/responses/node2-reboot-join.json"
     jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
         "$OUTDIR/responses/node2-reboot-join.json" >/dev/null
-    get_json 2 "/~green-zone@1.0/status?name=book-shelf" \
+    get_json 2 "/~zone@1.0/status?name=book-shelf" \
         "$OUTDIR/responses/node2-reboot-status.json"
     assert_nonvolatile_reused 2 "$OUTDIR/responses/node2-reboot-status.json" \
         "$node2_volume_id"
@@ -975,15 +975,15 @@ for n in 1 2 3; do
     member_addr=$(jq -r '.body.body.node.address' \
         "$OUTDIR/responses/node$n-boot-attestation.json")
     get_json "$n" \
-        "/~green-zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=qemu-green-zone-index" \
+        "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=qemu-zone-index" \
         "$OUTDIR/responses/node$n-member.json"
     jq -e --arg zone "book-shelf" \
-          --arg identity "green-zone/book-shelf" \
+          --arg identity "zone/book-shelf" \
           --arg ring "$ring_addr" \
           --arg addr "$member_addr" \
-          --arg target "qemu-green-zone-index" '
+          --arg target "qemu-zone-index" '
         .status == 200 and
-        .body.type == "green-zone-membership-proof" and
+        .body.type == "zone-membership-proof" and
         .body.address == $addr and
         .body."member-of" == $zone and
         .body.identity == $identity and
@@ -1002,6 +1002,6 @@ for n in 1 2 3; do
 done
 
 echo ""
-echo "=== green-zone QEMU cluster PASSED ==="
+echo "=== zone QEMU cluster PASSED ==="
 echo "out: $OUTDIR"
 echo "ring-address: $ring_addr"

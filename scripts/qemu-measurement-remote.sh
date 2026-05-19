@@ -3,8 +3,8 @@
 #
 # The remote SNP path is intentionally single-node: it proves the signed LapEE
 # image boots as an SNP guest, `~measurement@1.0' selects the requested device,
-# and boot/fresh/verify can be queried from outside the guest. Green-zone
-# multi-node behavior is covered by qemu-green-zone-cluster.sh.
+# and boot/fresh/verify can be queried from outside the guest. Zone
+# multi-node behavior is covered by qemu-zone-cluster.sh.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

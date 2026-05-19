@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# qemu-green-zone-remote-snp.sh -- four real SEV-SNP nodes on a remote host.
+# qemu-zone-remote-snp.sh -- four real SEV-SNP nodes on a remote host.
 #
-# This is the real-SNP companion to qemu-green-zone-cluster.sh. The local
+# This is the real-SNP companion to qemu-zone-cluster.sh. The local
 # harness prepares four signed LapEE disk images, copies them to a remote SNP
-# host, boots them as SEV-SNP guests, and runs the same green-zone admission
+# host, boots them as SEV-SNP guests, and runs the same zone admission
 # flow over guest-visible URLs.
 
 set -euo pipefail
@@ -13,9 +13,9 @@ BUILD_DIR=${LAPEE_BUILD_DIR:-build}
 BUILD_IMAGE=${BUILD_IMAGE:-lapee-build:local}
 DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
-OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-green-zone-remote-snp}
+OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-zone-remote-snp}
 TARGET=${TARGET:-ssh://hb@dev-1.forward.computer}
-REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests/green-zone-snp}
+REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests/zone-snp}
 REMOTE_QEMU=${REMOTE_QEMU:-/home/hb/hb-os/build/snp-release/usr/local/bin/qemu-system-x86_64}
 REMOTE_OVMF=${REMOTE_OVMF:-/home/hb/hb-os/release/DIRECT_BOOT_OVMF.fd}
 REMOTE_CBITPOS=${REMOTE_CBITPOS:-51}
@@ -26,18 +26,18 @@ GUEST_HOST=${GUEST_HOST:-10.0.2.2}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
 MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-30000}
 MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
-GREEN_ZONE_TEMPLATE_MODE=${GREEN_ZONE_TEMPLATE_MODE:-device}
-NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-SNP-GZ-admit}
-NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-SNP-GZ-admit}
-NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-SNP-GZ-admit}
-NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-SNP-GZ-reject-4}
+ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
+NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
+NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
+NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
+NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-SNP-Zone-reject-4}
 
 usage() {
     cat >&2 <<EOF
 usage:
   TARGET=ssh://hb@dev-1.forward.computer \\
   IMAGE=build/images/lapee-runtime-no-tme-signed.img \\
-  ./scripts/qemu-green-zone-remote-snp.sh
+  ./scripts/qemu-zone-remote-snp.sh
 EOF
 }
 
@@ -90,7 +90,7 @@ node_dmi_product() {
         2) echo "$NODE2_DMI_PRODUCT";;
         3) echo "$NODE3_DMI_PRODUCT";;
         4) echo "$NODE4_DMI_PRODUCT";;
-        *) echo "LapEE-SNP-GZ-node-$1";;
+        *) echo "LapEE-SNP-Zone-node-$1";;
     esac
 }
 
@@ -409,8 +409,8 @@ require_request() {
 }
 
 generate_requests() {
-    GREEN_ZONE_TEMPLATE_MODE="$GREEN_ZONE_TEMPLATE_MODE" \
-        python3 scripts/qemu-green-zone-requests.py \
+    ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+        python3 scripts/qemu-zone-requests.py \
             "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
         require_request "$req"
@@ -434,23 +434,23 @@ pin_ring_address() {
     done
 }
 
-run_green_zone_flow() {
-    remote_post 1 "/~green-zone@1.0/init" \
+run_zone_flow() {
+    remote_post 1 "/~zone@1.0/init" \
         "$OUTDIR/requests/init.json" \
         "$OUTDIR/responses/node1-init.json"
     jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true") and
-           (.body."green-zone"."ring-address" | type == "string" and length > 0)' \
+           (.body."zone"."ring-address" | type == "string" and length > 0)' \
         "$OUTDIR/responses/node1-init.json" >/dev/null
     local ring_addr ring_reference
-    ring_addr=$(jq -r '.body."green-zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
-    ring_reference=$(jq -c '.body."green-zone"."ring-reference"' "$OUTDIR/responses/node1-init.json")
+    ring_addr=$(jq -r '.body."zone"."ring-address"' "$OUTDIR/responses/node1-init.json")
+    ring_reference=$(jq -c '.body."zone"."ring-reference"' "$OUTDIR/responses/node1-init.json")
     pin_ring_address "$ring_addr" "$ring_reference"
-    echo ">> node 1 initialized green-zone $ring_addr"
+    echo ">> node 1 initialized zone $ring_addr"
 
     remote_post 1 "/~measurement@1.0/verify-peer" \
         "$OUTDIR/requests/verify2.json" \
         "$OUTDIR/responses/node1-verify2.json"
-    jq -e '.status == 200 and .body.type == "green-zone-peer-attestation" and
+    jq -e '.status == 200 and .body.type == "zone-peer-attestation" and
            (.body.verification.verified == true or
             .body.verification.verified == "true") and
            (.body.freshness.verified == true or
@@ -460,7 +460,7 @@ run_green_zone_flow() {
             .body."credential-activation".verified == "true")' \
         "$OUTDIR/responses/node1-verify2.json" >/dev/null
 
-    remote_post 1 "/~green-zone@1.0/admit" \
+    remote_post 1 "/~zone@1.0/admit" \
         "$OUTDIR/requests/admit2.json" \
         "$OUTDIR/responses/node1-admit2.json"
     jq -e '.status == 200 and
@@ -471,15 +471,15 @@ run_green_zone_flow() {
     echo ">> node 1 can admit node 2"
 
     for n in 2 3; do
-        remote_post "$n" "/~green-zone@1.0/join" \
+        remote_post "$n" "/~zone@1.0/join" \
             "$OUTDIR/requests/join$n.json" \
             "$OUTDIR/responses/node$n-join.json"
         jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "true")' \
             "$OUTDIR/responses/node$n-join.json" >/dev/null
-        echo ">> node $n joined green-zone"
+        echo ">> node $n joined zone"
     done
 
-    remote_post 4 "/~green-zone@1.0/join" \
+    remote_post 4 "/~zone@1.0/join" \
         "$OUTDIR/requests/join4.json" \
         "$OUTDIR/responses/node4-join.json"
     if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
@@ -492,41 +492,41 @@ run_green_zone_flow() {
     echo ">> node 4 rejected as expected"
 
     for n in 1 2 3; do
-        remote_get "$n" "/~green-zone@1.0/status?name=book-shelf" \
+        remote_get "$n" "/~zone@1.0/status?name=book-shelf" \
             "$OUTDIR/responses/node$n-status.json"
         jq -e --arg addr "$ring_addr" \
             '.status == 200 and
-             .body.identity == "green-zone/book-shelf" and
-             .body."green-zone"."ring-address" == $addr' \
+             .body.identity == "zone/book-shelf" and
+             .body."zone"."ring-address" == $addr' \
             "$OUTDIR/responses/node$n-status.json" >/dev/null
     done
-    remote_get 4 "/~green-zone@1.0/status" \
+    remote_get 4 "/~zone@1.0/status" \
         "$OUTDIR/responses/node4-status.json"
     jq -e \
         '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
-         (.body."green-zones" | has("book-shelf") | not)' \
+         (.body."zones" | has("book-shelf") | not)' \
         "$OUTDIR/responses/node4-status.json" >/dev/null
-    echo ">> node 4 status has no green-zone identity"
+    echo ">> node 4 status has no zone identity"
 
-    remote_get 4 "/~green-zone@1.0/member=book-shelf" \
+    remote_get 4 "/~zone@1.0/member=book-shelf" \
         "$OUTDIR/responses/node4-member.json"
-    jq -e '.status == 400 and .body.error == "green-zone-not-initialized"' \
+    jq -e '.status == 400 and .body.error == "zone-not-initialized"' \
         "$OUTDIR/responses/node4-member.json" >/dev/null
-    echo ">> node 4 cannot produce a green-zone membership proof"
+    echo ">> node 4 cannot produce a zone membership proof"
 
     for n in 1 2 3; do
         member_addr=$(jq -r '.body.body.node.address' \
             "$OUTDIR/responses/node$n-boot-attestation.json")
         remote_get "$n" \
-            "/~green-zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=remote-snp-green-zone-index" \
+            "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=remote-snp-zone-index" \
             "$OUTDIR/responses/node$n-member.json"
         jq -e --arg zone "book-shelf" \
-              --arg identity "green-zone/book-shelf" \
+              --arg identity "zone/book-shelf" \
               --arg ring "$ring_addr" \
               --arg addr "$member_addr" \
-              --arg target "remote-snp-green-zone-index" '
+              --arg target "remote-snp-zone-index" '
             .status == 200 and
-            .body.type == "green-zone-membership-proof" and
+            .body.type == "zone-membership-proof" and
             .body.address == $addr and
             .body."member-of" == $zone and
             .body.identity == $identity and
@@ -547,7 +547,7 @@ run_green_zone_flow() {
     printf '%s\n' "$ring_addr" > "$OUTDIR/ring-address.txt"
 }
 
-echo "=== remote SNP green-zone QEMU cluster ==="
+echo "=== remote SNP zone QEMU cluster ==="
 echo "git: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 git status --short 2>/dev/null || true
 echo "target: $TARGET"
@@ -565,14 +565,14 @@ time_step "start-remote-snp-nodes" remote_start_nodes
 time_step "wait-measurement-boot" wait_all_nodes
 time_step "fetch-secret-subjects" fetch_subjects
 time_step "assert-security-properties" assert_security_properties
-time_step "generate-green-zone-requests" generate_requests
-time_step "green-zone-admission-flow" run_green_zone_flow
+time_step "generate-zone-requests" generate_requests
+time_step "zone-admission-flow" run_zone_flow
 total_end=$(date +%s)
 printf '%s\t%s\t%s\t%s\n' "total" "$total_start" "$total_end" \
     "$((total_end - total_start))" >> "$TIMINGS"
 
 echo ""
-echo "=== remote SNP green-zone QEMU cluster PASSED ==="
+echo "=== remote SNP zone QEMU cluster PASSED ==="
 echo "target: $TARGET"
 echo "out: $OUTDIR"
 echo "ring-address: $(cat "$OUTDIR/ring-address.txt")"
