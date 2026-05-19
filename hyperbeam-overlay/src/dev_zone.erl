@@ -70,8 +70,7 @@
 %%%    ring identity. The caller may only choose the zone, commitment codec,
 %%%    and optional target/audience.
 -module(dev_zone).
--export([info/1, info/3, init/3, status/3, admit/3, join/3,
-         member/3, match/3]).
+-export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 
 -include("include/hb.hrl").
 
@@ -86,8 +85,7 @@ info(_) ->
             <<"status">>,
             <<"admit">>,
             <<"join">>,
-            <<"member">>,
-            <<"match">>
+            <<"member">>
         ]
     }.
 
@@ -140,18 +138,6 @@ status(_Base, Req, Opts) ->
             undefined -> all_status_body(Opts);
             Name -> status_body(Name, Opts)
         end
-    end, Opts).
-
-match(_Base, Req, Opts) ->
-    with_result(fun() ->
-        Template = clean_template(
-            hb_maps:get(<<"template">>, Req, #{}, Opts),
-            Opts),
-        Candidate = hb_maps:get(<<"candidate">>, Req, undefined, Opts),
-        #{
-            <<"matched">> => match_template(Template, Candidate, Opts),
-            <<"template">> => Template
-        }
     end, Opts).
 
 admit(_Base, Req, Opts) ->
@@ -386,9 +372,6 @@ stable_authorization_payload_id(Bin, _Opts, _MetadataMode) when is_binary(Bin) -
     hb_util:encode(hb_crypto:sha256(Bin));
 stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
-
-canonical_authorization_payload(Value, Opts) ->
-    canonical_authorization_payload(Value, Opts, strip_json_metadata).
 
 canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
     canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
@@ -826,12 +809,6 @@ parse_positive_integer(B, Default) when is_binary(B) ->
 parse_positive_integer(_, Default) ->
     Default.
 
-encoded_field_sha256(Key, Msg, Opts) ->
-    hb_util:encode(
-        crypto:hash(
-            sha256,
-            safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
-
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     Required = [
         {eq, <<"type">>, <<"zone-peer-attestation">>},
@@ -984,15 +961,6 @@ assert_scope_field(Key, Scope, RingReference, Opts) ->
         Expected when Expected =/= undefined -> ok;
         _ -> bad_peer_attestation(<<"peer-scope.consumer-scope">>)
     end.
-
-peer_boot_attestation_body(PeerAttestation, Opts) ->
-    measurement_template_target(
-        #{},
-        response_body(
-            hb_maps:get(
-                <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
-            Opts),
-        Opts).
 
 peer_boot_attestation_body(Template, PeerAttestation, Opts) ->
     measurement_template_target(
@@ -1268,11 +1236,6 @@ decode_required(Key, Msg, Opts) ->
             }})
     end.
 
-safe_decode(B) when is_binary(B) ->
-    try hb_util:decode(B) catch _:_ -> <<>> end;
-safe_decode(_) ->
-    <<>>.
-
 encrypt_wallet(Wallet, AES) ->
     IV = crypto:strong_rand_bytes(12),
     Plain = ar_wallet:to_json(Wallet),
@@ -1323,9 +1286,6 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
 
 wallet_address(Wallet) ->
     hb_util:human_id(ar_wallet:to_address(Wallet)).
-
-match_template(Template, Candidate, Opts) ->
-    hb_message:match(Template, Candidate, primary, Opts) =:= true.
 
 clean_template(Template, Opts) when is_map(Template) ->
     clean_template_map(Template, Opts);

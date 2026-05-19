@@ -1,10 +1,10 @@
 %%% @doc TPM 2.0 measurement engine for LapEE.
 %%% The engine extends PCR 15 with the measured boot subject, creates a
-%%% maps TPM MakeCredential/ActivateCredential into the measurement protocol.
+%%% PCR-bound AK, verifies TPM evidence, and maps TPM
+%%% MakeCredential/ActivateCredential into `~measurement@1.0'.
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
-         attestation/3, boot_attestation/3, credential_subject/3,
-         supported/3, subject/3, measure/3, wrap_secret/3, unwrap_secret/3,
+         supported/3, subject/3, measure/3, unwrap_secret/3,
          activate_credential/3, activate_credential_secret/2]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
@@ -25,7 +25,6 @@
 -define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
 -define(TPM_CC_POLICY_OR, 16#00000171).
 -define(TPM_CC_POLICY_PCR, 16#0000017F).
--define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
 -define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
 %%%============================================================================
@@ -39,13 +38,9 @@ info(_) ->
                 <<"extend">>,
                 <<"quote">>,
                 <<"pcr-read">>,
-                <<"attestation">>,
-                <<"boot-attestation">>,
-                <<"credential-subject">>,
                 <<"supported">>,
                 <<"subject">>,
                 <<"measure">>,
-                <<"wrap-secret">>,
                 <<"unwrap-secret">>,
                 <<"activate-credential">>,
                 <<"verify">>
@@ -1244,33 +1239,6 @@ infer_log_format(Bin) ->
 %%%============================================================================
 %%%============================================================================
 
-boot_attestation(_Base, _Req, Opts) ->
-    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
-        {ok, Msg} ->
-            {ok, #{<<"status">> => 200, <<"body">> => Msg}};
-        _ ->
-            global:trans(
-                {dev_tpm2, boot_attestation},
-                fun() -> boot_attestation_locked(Opts) end,
-                [node()])
-    end.
-
-boot_attestation_locked(Opts) ->
-    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
-        {ok, Msg} ->
-            {ok, #{<<"status">> => 200, <<"body">> => Msg}};
-        _ ->
-            case generate_boot_attestation(Opts) of
-                {ok, Signed} ->
-                    SignedID = hb_message:id(Signed, signed, Opts),
-                    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
-                    ok = hb_cache:link(SignedID, ?BOOT_ATTESTATION_PATH, Opts),
-                    {ok, #{<<"status">> => 200, <<"body">> => Signed}};
-                {error, Reason} ->
-                    error_resp(500, <<"boot_attestation_failed">>, Reason)
-            end
-    end.
-
 supported(_Base, _Req, _Opts) ->
     case nif_startup() of
         ok -> {ok, true};
@@ -1307,18 +1275,6 @@ measure(_Base, Req, Opts) ->
                          <<"stack">> => reason_to_text(Stack)})
     end.
 
-credential_subject(_Base, _Req, Opts) ->
-    case ensure_ak(Opts) of
-        {ok, _AkTr} ->
-            Subject = credential_subject_body(Opts),
-            {ok, #{
-                <<"status">> => 200,
-                <<"body">> => hb_message:commit(Subject, Opts)
-            }};
-        {error, Reason} ->
-            error_resp(500, <<"credential_subject_failed">>, Reason)
-    end.
-
 credential_subject_body(Opts) ->
     AkName = ak_name(Opts),
     #{
@@ -1353,21 +1309,6 @@ credential_subject_body(Opts) ->
         },
         <<"tpm-properties">> => tpm_properties()
     }.
-
-wrap_secret(_Base, Req, _Opts) ->
-    with_ok(
-        fun() ->
-            Subject = hb_maps:get(<<"subject">>, Req, undefined, #{}),
-            Secret = decode_optional_secret(Req),
-            #{
-                <<"status">> => 200,
-                <<"body">> =>
-                    (make_credential_for_subject(Subject, Secret))#{
-                        <<"measurement-device">> => <<"tpm@2.0a">>,
-                        <<"method">> => <<"tpm2-activate-credential">>
-                    }
-            }
-        end).
 
 unwrap_secret(Base, Req, Opts) ->
     activate_credential(Base, Req, Opts).
@@ -1416,18 +1357,7 @@ make_credential_for_subject(Subject, Secret) ->
         hb_maps:get(<<"ek-public">>, Subject, <<>>, #{})),
     AkName = hb_util:decode(
         hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
-    case nif_make_credential(EkPublic, AkName, Secret) of
-        {ok, #{credential_blob := Blob, secret := EncSecret}} ->
-            #{
-                <<"credential-blob">> => hb_util:encode(Blob),
-                <<"secret">> => hb_util:encode(EncSecret)
-            };
-        {'EXIT', {nif_not_loaded, _}} ->
-            software_make_credential(EkPublic, AkName, Secret);
-        {error, Reason} ->
-            throw({boot_attestation_error,
-                   #{<<"make-credential">> => reason_to_text(Reason)}})
-    end.
+    software_make_credential(EkPublic, AkName, Secret).
 
 software_make_credential(EkPublic, AkName, Secret) ->
     try
@@ -1550,18 +1480,6 @@ kdfa_blocks(Hash, Key, Label, ContextU, ContextV, Bits, Counter, Acc) ->
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);
 first_defined([V | _]) -> V.
-
-uniq_preserve_order(List) ->
-    lists:reverse(
-        element(2, lists:foldl(
-            fun(V, {Seen, Acc}) ->
-                case maps:is_key(V, Seen) of
-                    true -> {Seen, Acc};
-                    false -> {Seen#{V => true}, [V | Acc]}
-                end
-            end,
-            {#{}, []},
-            List))).
 
 ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
     ok = ensure_activation_envelope(Activation, Subject, Opts),
@@ -1699,36 +1617,10 @@ decode_required(Key, Req, Opts) ->
                    #{Key => <<"missing required base64url field">>}})
     end.
 
-decode_optional_secret(Req) ->
-    case hb_maps:get(<<"secret">>, Req, undefined, #{}) of
-        B when is_binary(B), byte_size(B) > 0 ->
-            try hb_util:decode(B)
-            catch _:_ -> B
-            end;
-        _ ->
-            throw({boot_attestation_error,
-                   #{<<"secret">> =>
-                        <<"missing required base64url/binary secret">>}})
-    end.
-
 safe_decode(B) when is_binary(B) ->
     try hb_util:decode(B) catch _:_ -> <<>> end;
 safe_decode(_) ->
     <<>>.
-
-generate_boot_attestation(Opts) ->
-    with_ok(
-        fun() ->
-            {Subject, SubjectID, SubjectDigest} = boot_subject(Opts),
-            Tpm = boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts),
-            hb_message:commit(
-                Subject#{
-                    <<"version">> => <<"1.0">>,
-                    <<"issued-at-unix">> => erlang:system_time(second),
-                    <<"tpm">> => Tpm
-                },
-                Opts)
-        end).
 
 with_ok(Fun) ->
     try
@@ -1773,10 +1665,6 @@ prepare_measurement_subject(Req, Opts) ->
         {ok, _AkTr} -> {ok, Subject, SubjectID, SubjectDigest};
         {error, _} = E -> E
     end.
-
-boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Opts) ->
-    boot_tpm_evidence(
-        Subject, SubjectID, SubjectDigest, crypto:strong_rand_bytes(32), Opts).
 
 boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
     Pcrs = ?DEFAULT_QUOTE_PCRS,
@@ -1848,85 +1736,6 @@ extend_boot_subject(SubjectID, SubjectDigest) ->
                    #{<<"pcr-extend">> => reason_to_text(Reason)}})
     end.
 
-
-attestation(_Base, Req, Opts) ->
-    Pcrs = resolve_pcr_list(Req, ?DEFAULT_QUOTE_PCRS, Opts),
-    Nonce = resolve_nonce(Req),
-    case ensure_ak(Opts) of
-        {ok, AkTr} ->
-            case nif_quote(AkTr, Pcrs, Nonce) of
-                {ok, #{quoted := Q, signature := Sig, pcr_values := PcrMap}} ->
-                    {EKCertPem, AKPubPem} =
-                        {ek_cert_pem(Opts), ak_pub_pem(Opts)},
-                    EventLog = event_log(Opts),
-                    {TcgLogBin, TcgLogSource} =
-                        read_tcg_event_log_with_source(),
-                    TcgLogFormat = infer_log_format(TcgLogBin),
-                    {NodeMsg, NodeMsgId} = attested_subject(Opts),
-                    Envelope = #{
-                        <<"lapee-attestation-version">> => <<"0.4">>,
-                        <<"issued-at-unix">> =>
-                            erlang:system_time(second),
-                        <<"ek-cert-pem">> => EKCertPem,
-                        <<"ek-cert-chain-pem">> =>
-                            ek_cert_chain_pem(),
-                        <<"ek-cert-source">> =>
-                            ek_cert_source(),
-                        <<"ek-cert-chain-diagnostics">> =>
-                            ek_cert_chain_diagnostics(),
-                        <<"tpm-properties">> =>
-                            tpm_properties(),
-                        <<"ek-pub-pem">> => ek_pub_pem(Opts),
-                        <<"ek-public">> => ek_public(Opts),
-                        <<"ek-name">> => ek_name(Opts),
-                        <<"ek-qualified-name">> => ek_qualified_name(Opts),
-                        <<"platform-probes">> =>
-                            platform_probes(),
-                        <<"ak-pub-pem">> => AKPubPem,
-                        <<"ak-public">> => ak_public(Opts),
-                        <<"ak-name">> => ak_name(Opts),
-                        <<"ak-qualified-name">> => ak_qualified_name(Opts),
-                        <<"ak-hierarchy">> => <<"endorsement">>,
-                        %; session now attaches only to ops with
-                        %; TPM2B first-params (Quote + CreatePrimary
-                        %; x2) where ENCRYPT + DECRYPT attrs are
-                        %; spec-valid. Ops with list-struct first-
-                        %; params (PCR_Read/Extend, GetCapability)
-                        %; run without the session -- their payload
-                        %; is public per TCG, so bus-level
-                        %; confidentiality buys nothing. Value
-                        %; `hmac-aes128cfb' (prefix `hmac-' keeps
-                        %; the verifier's paper-P4 check clean).
-                        <<"tpm-session-mode">> =>
-                            <<"hmac-aes128cfb">>,
-                        <<"tpm-quote">> =>
-                            quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
-                        <<"runtime-event-log">> => EventLog,
-                        <<"tcg-event-log">> =>
-                            hb_util:encode(TcgLogBin),
-                        <<"tcg-event-log-source-path">>  =>
-                            TcgLogSource,
-                        <<"tcg-event-log-length-bytes">> =>
-                            byte_size(TcgLogBin),
-                        <<"tcg-event-log-format">>       =>
-                            TcgLogFormat,
-                        <<"node-message">> => NodeMsg,
-                        <<"node-message-id">> => NodeMsgId,
-                        <<"wallet-address">> =>
-                            case hb_opts:get(priv_wallet, undefined, Opts) of
-                                undefined -> null;
-                                W ->
-                                    hb_util:human_id(
-                                        ar_wallet:to_address(W))
-                            end
-                    },
-                    {ok, #{<<"status">> => 200, <<"body">> => Envelope}};
-                {error, Reason} ->
-                    error_resp(500, <<"quote_failed">>, Reason)
-            end;
-        {error, Reason} ->
-            error_resp(500, <<"ak_unavailable">>, Reason)
-    end.
 
 quote_body(Pcrs, Nonce, Quoted, Signature, PcrMap) ->
     #{
@@ -2058,55 +1867,6 @@ error_resp(Status, Err, Reason) ->
         }
     }}.
 
-get_node_msg(Opts) ->
-    case persistent_term:get({dev_tpm2, attested_node_msg}, undefined) of
-        undefined -> hb_opts:get(lapee_attested_node_msg, undefined, Opts);
-        Msg -> Msg
-    end.
-
-attested_subject(Opts) ->
-    case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
-        {ok, Boot} ->
-            case subject_from_boot_attestation(Boot, Opts) of
-                {Subject, SubjectID} -> {Subject, SubjectID};
-                undefined -> legacy_attested_subject(Opts)
-            end;
-        _ ->
-            legacy_attested_subject(Opts)
-    end.
-
-subject_from_boot_attestation(Boot, Opts) when is_map(Boot) ->
-    System = hb_maps:get(<<"system">>, Boot, undefined, Opts),
-    Node = hb_maps:get(<<"node">>, Boot, undefined, Opts),
-    Tpm = hb_maps:get(<<"tpm">>, Boot, #{}, Opts),
-    SubjectID = hb_maps:get(<<"extended-subject">>, Tpm, undefined, Opts),
-    case {System, Node, SubjectID} of
-        {S, N, ID}
-                when is_map(S), is_map(N), is_binary(ID),
-                     byte_size(ID) =:= 43 ->
-            {#{<<"system">> => S, <<"node">> => N}, ID};
-        _ ->
-            undefined
-    end;
-subject_from_boot_attestation(_Boot, _Opts) ->
-    undefined.
-
-legacy_attested_subject(Opts) ->
-    case persistent_term:get({dev_tpm2, attested_boot_subject}, undefined) of
-        Subject when is_map(Subject) ->
-            SubjectID = persistent_term:get(
-                {dev_tpm2, attested_boot_subject_id},
-                subject_id(Subject, Opts)),
-            {Subject, SubjectID};
-        undefined ->
-            case get_node_msg(Opts) of
-                undefined ->
-                    {null, null};
-                Msg ->
-                    {Msg, subject_id(Msg, Opts)}
-            end
-    end.
-
 %%%============================================================================
 %%%============================================================================
 
@@ -2147,7 +1907,6 @@ init_chain(Subject, SubjectID, SubjectDigest, Opts) ->
     case nif_startup() of
         ok ->
             capture_tpm_properties(),
-            capture_platform_probes(),
             case nif_create_ek() of
                 {ok, #{esys_tr := EKTr, public_pem := EKPem} = EKInfo} ->
                     persistent_term:put({dev_tpm2, ek_tr}, EKTr),
@@ -2329,89 +2088,6 @@ to_bin(L) when is_list(L) -> iolist_to_binary(L);
 to_bin(A) when is_atom(A) -> atom_to_binary(A);
 to_bin(T) -> iolist_to_binary(io_lib:format("~p", [T])).
 
-capture_platform_probes() ->
-    Probes = live_platform_probes(),
-    persistent_term:put({dev_tpm2, platform_probes}, Probes),
-    ok.
-
-live_platform_probes() ->
-    #{
-        cpuinfo          => read_cpuinfo_stanza(),
-        lockdown         => read_trim(
-            <<"/sys/kernel/security/lockdown">>),
-        iommu_groups     => count_iommu_groups(),
-        dmi_sys_vendor   => read_trim(
-            <<"/sys/class/dmi/id/sys_vendor">>),
-        dmi_product_name => read_trim(
-            <<"/sys/class/dmi/id/product_name">>),
-        dmi_board_name   => read_trim(
-            <<"/sys/class/dmi/id/board_name">>),
-        dmi_bios_vendor  => read_trim(
-            <<"/sys/class/dmi/id/bios_vendor">>),
-        dmi_bios_version => read_trim(
-            <<"/sys/class/dmi/id/bios_version">>),
-        dmi_bios_release => read_trim(
-            <<"/sys/class/dmi/id/bios_release">>),
-        kernel_cmdline     => read_trim(<<"/proc/cmdline">>),
-        secure_boot        => read_secure_boot_state(),
-        tpm_version_major  => read_trim(
-            <<"/sys/class/tpm/tpm0/tpm_version_major">>),
-        ima_count          => read_trim(
-            <<"/sys/kernel/security/integrity/ima/"
-              "runtime_measurements_count">>),
-        probed_at_unix     => erlang:system_time(second)
-    }.
-
-read_secure_boot_state() ->
-    Path = <<"/sys/firmware/efi/efivars/"
-             "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c">>,
-    case file:read_file(Path) of
-        {ok, <<_Attrs:4/binary, 1:8>>} -> enabled;
-        {ok, <<_Attrs:4/binary, 0:8>>} -> disabled;
-        {ok, _}                         -> unknown;
-        _                               -> not_readable
-    end.
-
-read_cpuinfo_stanza() ->
-    case file:read_file(<<"/proc/cpuinfo">>) of
-        {ok, Bin} ->
-            [First | _] = binary:split(Bin, <<"\n\n">>, [global]),
-            Lines = binary:split(First, <<"\n">>, [global]),
-            lists:foldl(fun line_to_kv/2, #{}, Lines);
-        _ -> #{}
-    end.
-
-line_to_kv(Line, Acc) ->
-    case binary:split(Line, <<":">>, []) of
-        [Key, Val] ->
-            K = binary:replace(
-                string:lowercase(string:trim(Key)),
-                <<" ">>,
-                <<"-">>,
-                [global]),
-            maps:merge(#{K => string:trim(Val)}, Acc);
-        _ -> Acc
-    end.
-
-count_iommu_groups() ->
-    case file:list_dir(<<"/sys/kernel/iommu_groups">>) of
-        {ok, Entries} ->
-            length([E || E <- Entries, is_group_dir(E)]);
-        _ -> null
-    end.
-
-is_group_dir(E) ->
-    case string:to_integer(E) of
-        {N, Rest} when is_integer(N) -> Rest =:= <<>> orelse Rest =:= "";
-        _                            -> false
-    end.
-
-read_trim(Path) ->
-    case file:read_file(Path) of
-        {ok, Bin} -> string:trim(Bin, trailing, "\r\n \t");
-        _ -> null
-    end.
-
 tpm_properties() ->
     case persistent_term:get({dev_tpm2, tpm_properties}, undefined) of
         undefined ->
@@ -2457,62 +2133,6 @@ ek_cert_chain_diagnostics() ->
         #{<<"available">> => false,
           <<"reason">> =>
               <<"ensure_ak/1 has not executed yet">>}).
-
-platform_probes() ->
-    case persistent_term:get({dev_tpm2, platform_probes}, undefined) of
-        undefined ->
-            #{<<"available">> => false,
-              <<"reason">>    =>
-                  <<"init_chain has not executed yet">>};
-        #{} = P ->
-            CpuInfo = maps:get(cpuinfo, P, #{}),
-            CpuMap = maps:fold(
-                fun(K, V, Acc) when is_binary(K) ->
-                       Acc#{K => V};
-                   (_, _, Acc) -> Acc
-                end, #{}, CpuInfo),
-            #{
-                <<"available">>          => true,
-                <<"cpuinfo">>            => CpuMap,
-                <<"lockdown">>           =>
-                    or_bin_null(maps:get(lockdown, P, null)),
-                <<"iommu-groups-count">> =>
-                    maps:get(iommu_groups, P, null),
-                <<"dmi-sys-vendor">>     =>
-                    or_bin_null(maps:get(dmi_sys_vendor, P, null)),
-                <<"dmi-product-name">>   =>
-                    or_bin_null(maps:get(dmi_product_name, P, null)),
-                <<"dmi-board-name">>     =>
-                    or_bin_null(maps:get(dmi_board_name, P, null)),
-                <<"dmi-bios-vendor">>    =>
-                    or_bin_null(maps:get(dmi_bios_vendor, P, null)),
-                <<"dmi-bios-version">>   =>
-                    or_bin_null(maps:get(dmi_bios_version, P, null)),
-                <<"dmi-bios-release">>   =>
-                    or_bin_null(maps:get(dmi_bios_release, P, null)),
-                <<"kernel-cmdline">>     =>
-                    or_bin_null(maps:get(kernel_cmdline, P, null)),
-                <<"secure-boot">>        =>
-                    atom_or_bin_null(maps:get(secure_boot, P, null)),
-                <<"tpm-version-major">>  =>
-                    or_bin_null(maps:get(tpm_version_major, P, null)),
-                <<"ima-measurement-count">> =>
-                    or_bin_null(maps:get(ima_count, P, null)),
-                <<"probed-at-unix">>     =>
-                    maps:get(probed_at_unix, P, 0)
-             }
-    end.
-
-atom_or_bin_null(null) -> null;
-atom_or_bin_null(A) when is_atom(A) -> atom_to_binary(A, utf8);
-atom_or_bin_null(B) when is_binary(B) -> B;
-atom_or_bin_null(_) -> null.
-
-or_bin_null(null) -> null;
-or_bin_null(<<>>) -> null;
-or_bin_null(B) when is_binary(B) -> B;
-or_bin_null(L) when is_list(L) -> iolist_to_binary(L);
-or_bin_null(_) -> null.
 
 ek_cert_source() ->
     case persistent_term:get({dev_tpm2, ek_cert_source}, undefined) of
@@ -2594,20 +2214,19 @@ fetch_ek_cert_from_nv(Opts) ->
     end.
 
 fetch_ek_cert_chain(ChainHandle, Opts) when is_integer(ChainHandle) ->
-    case configured_chain_handles(Opts) of
-        Handles when is_list(Handles) ->
-            fetch_ek_cert_chain_handles(Handles);
-        undefined ->
-            fetch_default_ek_cert_chain(ChainHandle)
-    end;
+    Handles =
+        case configured_chain_handles(Opts) of
+            Hs when is_list(Hs) ->
+                Hs;
+            undefined ->
+                [ChainHandle |
+                 lists:seq(
+                    ?EK_NV_CHAIN_FIRST,
+                    ?EK_NV_CHAIN_FIRST + ?EK_NV_CHAIN_PREFIX_LIMIT - 1)]
+        end,
+    fetch_ek_cert_chain_handles(Handles);
 fetch_ek_cert_chain(ChainHandles, _Opts) when is_list(ChainHandles) ->
     fetch_ek_cert_chain_handles(ChainHandles).
-
-fetch_default_ek_cert_chain(ChainHandle) ->
-    merge_chain_results(
-        [fetch_ek_cert_chain_handles([ChainHandle]),
-         fetch_ek_cert_chain_prefix(?EK_NV_CHAIN_FIRST,
-                                    ?EK_NV_CHAIN_PREFIX_LIMIT)]).
 
 configured_chain_handles(Opts) ->
     case first_defined([
@@ -2631,146 +2250,56 @@ parse_nv_handle(Bin) when is_binary(Bin) ->
 parse_nv_handle(Other) ->
     parse_nv_handle(hb_util:bin(Other)).
 
-fetch_ek_cert_chain_handles(ChainHandles) ->
-    fetch_ek_cert_chain(ChainHandles, [], [], [], []).
+fetch_ek_cert_chain_handles(Handles) ->
+    Groups = chain_groups([read_chain_entry(H) || H <- Handles]),
+    {Ders, Hits, Attempts} =
+        lists:foldl(
+            fun collect_chain_group/2,
+            {[], [], []},
+            Groups),
+    Source =
+        case Hits of
+            [] -> <<"probe-failed: ", (chain_attempts_text(Attempts))/binary>>;
+            _ -> chain_hit_source(Hits)
+        end,
+    {Ders, Source, Hits, chain_diagnostics(Ders, Hits, Attempts)}.
 
-fetch_ek_cert_chain([], Ders, Hits, Attempts, Diagnostics) ->
-    finalize_chain_result(Ders, Hits, Attempts, Diagnostics);
-fetch_ek_cert_chain([ChainHandle | Rest], Ders, Hits, Attempts,
-                    Diagnostics) ->
-    case read_chain_handle(ChainHandle) of
-        {ok, ChainDers, Diagnostic} ->
-            fetch_ek_cert_chain(
-                Rest, lists:reverse(ChainDers) ++ Ders,
-                [ChainHandle | Hits], Attempts,
-                [Diagnostic | Diagnostics]);
-        {error, Reason, Diagnostic} ->
-            fetch_ek_cert_chain(
-                Rest, Ders, Hits, [{ChainHandle, Reason} | Attempts],
-                [Diagnostic | Diagnostics])
-    end.
-
-fetch_ek_cert_chain_prefix(First, Limit) ->
-    Entries = read_chain_prefix_entries(First, Limit),
-    parse_chain_range_entries(Entries).
-
-read_chain_prefix_entries(First, Limit) ->
-    read_chain_prefix_entries(First, Limit, []).
-
-read_chain_prefix_entries(_Handle, 0, Acc) ->
-    lists:reverse(Acc);
-read_chain_prefix_entries(Handle, Remaining, Acc) ->
-    Entry = read_chain_range_entry(Handle),
-    case Entry of
-        {ok, _Handle, _Bin} ->
-            read_chain_prefix_entries(
-                Handle + 1, Remaining - 1, [Entry | Acc]);
-        {error, _Handle, _Reason} ->
-            lists:reverse([Entry | Acc])
-    end.
-
-read_chain_range_entry(Handle) ->
+read_chain_entry(Handle) ->
     case lapee_tpm_nif:nv_read(Handle) of
         {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
             {ok, Handle, Bin};
-        {ok, Bin} when is_binary(Bin) ->
+        {ok, _} ->
             {error, Handle, <<"nv-content-empty">>};
         {error, Reason} ->
             {error, Handle, Reason}
     end.
 
-parse_chain_range_entries(Entries) ->
-    Groups = consecutive_chain_groups(Entries),
-    ParsedGroups = [parse_chain_group(Group) || Group <- Groups],
-    Ders = lists:append([Ds || {Ds, _Hits, _Diag} <- ParsedGroups]),
-    Hits0 = lists:append([Hs || {_Ds, Hs, _Diag} <- ParsedGroups]),
-    Hits = uniq_preserve_order(Hits0),
-    Diagnostics = [D || {_Ds, _Hs, D} <- ParsedGroups]
-        ++ [chain_error_diagnostic(Handle, Reason)
-            || {error, Handle, Reason} <- Entries],
-    Attempts = [{Handle, Reason}
-                || {error, Handle, Reason} <- Entries],
-    finalize_chain_result(Ders, Hits, Attempts, lists:reverse(Diagnostics)).
+chain_groups(Entries) ->
+    chain_groups(Entries, [], []).
 
-consecutive_chain_groups(Entries) ->
-    consecutive_chain_groups(Entries, [], []).
-
-consecutive_chain_groups([], [], Acc) ->
+chain_groups([], [], Acc) ->
     lists:reverse(Acc);
-consecutive_chain_groups([], Current, Acc) ->
+chain_groups([], Current, Acc) ->
     lists:reverse([lists:reverse(Current) | Acc]);
-consecutive_chain_groups([{ok, Handle, Bin} | Rest], Current, Acc) ->
-    consecutive_chain_groups(Rest, [{Handle, Bin} | Current], Acc);
-consecutive_chain_groups([{error, _Handle, _Reason} | Rest], [], Acc) ->
-    consecutive_chain_groups(Rest, [], Acc);
-consecutive_chain_groups([{error, _Handle, _Reason} | Rest], Current, Acc) ->
-    consecutive_chain_groups(Rest, [], [lists:reverse(Current) | Acc]).
+chain_groups([{ok, _, _} = Entry | Rest], Current, Acc) ->
+    chain_groups(Rest, [Entry | Current], Acc);
+chain_groups([{error, _, _} = Entry | Rest], [], Acc) ->
+    chain_groups(Rest, [], [[Entry] | Acc]);
+chain_groups([{error, _, _} = Entry | Rest], Current, Acc) ->
+    chain_groups(Rest, [], [[Entry], lists:reverse(Current) | Acc]).
 
-parse_chain_group(Chunks) ->
-    Bin = iolist_to_binary([Chunk || {_Handle, Chunk} <- Chunks]),
-    Certs = split_concatenated_ders_with_offsets(Bin),
-    Ders = [Der || {_Offset, Der} <- Certs],
-    Hits = case Ders of
-        [] -> [];
-        _ -> [Handle || {Handle, _Chunk} <- Chunks]
-    end,
-    {Ders, Hits, chain_group_diagnostic(Chunks, Bin, Certs)}.
-
-read_chain_handle(ChainHandle) ->
-    case lapee_tpm_nif:nv_read(ChainHandle) of
-        {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
-            Certs = split_concatenated_ders_with_offsets(Bin),
-            Diagnostic = chain_handle_diagnostic(ChainHandle, Bin, Certs),
-            case [Der || {_Offset, Der} <- Certs] of
-                [] -> {error, <<"nv-content-empty-or-non-der">>,
-                       Diagnostic};
-                ChainDers -> {ok, ChainDers, Diagnostic}
-            end;
-        {error, Reason} ->
-            {error, Reason,
-             chain_error_diagnostic(ChainHandle, Reason)}
-    end.
-
-merge_chain_results(Results) ->
-    Ders = lists:append([Ds || {Ds, _Source, _Hits, _Diag} <- Results]),
-    Hits = lists:append([Hs || {_Ds, _Source, Hs, _Diag} <- Results]),
-    Diagnostics = [D || {_Ds, _Source, _Hs, D} <- Results],
-    case Hits of
+collect_chain_group([{error, Handle, Reason}], {Ders, Hits, Attempts}) ->
+    {Ders, Hits, [{Handle, Reason} | Attempts]};
+collect_chain_group(Entries, {Ders, Hits, Attempts}) ->
+    Bin = iolist_to_binary([Chunk || {ok, _Handle, Chunk} <- Entries]),
+    ChainDers = split_concatenated_ders(Bin),
+    Handles = [Handle || {ok, Handle, _Chunk} <- Entries],
+    case ChainDers of
         [] ->
-            Sources =
-                [S || {_Ds, S, _Hs, _Diag} <- Results,
-                      S =/= <<"not-probed">>],
-            {Ders, iolist_to_binary(
-                [<<"probe-failed: ">>,
-                 string:join([binary_to_list(S) || S <- Sources], "; ")]),
-             [], chain_diagnostics(Diagnostics, Ders, Hits)};
+            {Ders, Hits,
+             [{hd(Handles), <<"nv-content-empty-or-non-der">>} | Attempts]};
         _ ->
-            {Ders, chain_hit_source(Hits), Hits,
-             chain_diagnostics(Diagnostics, Ders, Hits)}
-    end.
-
-finalize_chain_result(Ders, Hits, Attempts, Diagnostics) ->
-    case Hits of
-        [] ->
-            Source = case Attempts of
-                [] -> <<"not-probed">>;
-                _ ->
-                    iolist_to_binary(
-                        io_lib:format("probe-failed: ~s",
-                                      [chain_attempts_text(Attempts)]))
-            end,
-            OrderedDers = lists:reverse(Ders),
-            {OrderedDers, Source, [],
-             chain_diagnostics([#{
-                 <<"probes">> => lists:reverse(Diagnostics)
-             }], OrderedDers, [])};
-        _ ->
-            OrderedHits = lists:reverse(Hits),
-            OrderedDers = lists:reverse(Ders),
-            {OrderedDers, chain_hit_source(OrderedHits), OrderedHits,
-             chain_diagnostics([#{
-                 <<"probes">> => lists:reverse(Diagnostics)
-             }], OrderedDers, OrderedHits)}
+            {Ders ++ ChainDers, Hits ++ Handles, Attempts}
     end.
 
 chain_hit_source(Hits) ->
@@ -2779,11 +2308,15 @@ chain_hit_source(Hits) ->
          string:join([binary_to_list(format_nv_handle(H)) || H <- Hits],
                      ",")]).
 
+chain_attempts_text([]) ->
+    <<"not-probed">>;
 chain_attempts_text(Attempts) ->
-    string:join(
-        [binary_to_list(format_nv_handle(H)) ++ "="
-         ++ binary_to_list(reason_to_text(Reason))
-         || {H, Reason} <- lists:reverse(Attempts)], ",").
+    iolist_to_binary(
+        string:join(
+            [binary_to_list(format_nv_handle(H)) ++ "="
+             ++ binary_to_list(reason_to_text(Reason))
+             || {H, Reason} <- lists:reverse(Attempts)],
+            ",")).
 
 format_nv_handles(Handles) ->
     [format_nv_handle(H) || H <- Handles].
@@ -2791,114 +2324,16 @@ format_nv_handles(Handles) ->
 format_nv_handle(Handle) ->
     iolist_to_binary(io_lib:format("0x~8.16.0B", [Handle])).
 
-chain_diagnostics(Groups, Ders, Hits) ->
-    Probes = lists:append([maps:get(<<"probes">>, G, []) || G <- Groups]),
+chain_diagnostics(Ders, Hits, Attempts) ->
     #{
         <<"available">> => true,
-        <<"description">> =>
-            <<"Public TPM NV EK-chain diagnostics. Contains only handle "
-              "numbers, byte counts, parsed X.509 metadata, and TPM read "
-              "statuses; no private TPM material is exposed.">>,
         <<"cert-count">> => length(Ders),
         <<"hit-handles">> => format_nv_handles(Hits),
-        <<"probe-count">> => length(Probes),
-        <<"probes">> => Probes
+        <<"misses">> =>
+            [#{<<"handle">> => format_nv_handle(H),
+               <<"reason">> => reason_to_text(R)}
+             || {H, R} <- lists:reverse(Attempts)]
     }.
-
-chain_handle_diagnostic(Handle, Bin, Certs) ->
-    #{
-        <<"handle">> => format_nv_handle(Handle),
-        <<"status">> => case Certs of [] -> <<"no-x509-der">>; _ -> <<"ok">> end,
-        <<"bytes">> => byte_size(Bin),
-        <<"cert-count">> => length(Certs),
-        <<"certs">> => [cert_diagnostic(Offset, Der)
-                         || {Offset, Der} <- Certs]
-    }.
-
-chain_group_diagnostic(Chunks, Bin, Certs) ->
-    Ranges = chunk_ranges(Chunks),
-    Handles = [Handle || {Handle, _Chunk} <- Chunks],
-    #{
-        <<"handle">> => chain_group_handle_text(Handles),
-        <<"handles">> => format_nv_handles(Handles),
-        <<"status">> =>
-            case Certs of [] -> <<"no-x509-der">>; _ -> <<"ok">> end,
-        <<"bytes">> => byte_size(Bin),
-        <<"cert-count">> => length(Certs),
-        <<"certs">> =>
-            [(cert_diagnostic(Offset, Der))#{
-                <<"span-handles">> =>
-                    format_nv_handles(
-                      handles_for_range(Offset, byte_size(Der), Ranges))
-             }
-             || {Offset, Der} <- Certs]
-    }.
-
-chain_error_diagnostic(Handle, Reason) ->
-    #{
-        <<"handle">> => format_nv_handle(Handle),
-        <<"status">> => <<"error">>,
-        <<"reason">> => reason_to_text(Reason),
-        <<"bytes">> => 0,
-        <<"cert-count">> => 0
-    }.
-
-chain_group_handle_text([]) ->
-    <<"">>;
-chain_group_handle_text([Handle]) ->
-    format_nv_handle(Handle);
-chain_group_handle_text(Handles) ->
-    First = hd(Handles),
-    Last = lists:last(Handles),
-    <<(format_nv_handle(First))/binary, "..",
-      (format_nv_handle(Last))/binary>>.
-
-chunk_ranges(Chunks) ->
-    element(2,
-        lists:foldl(
-            fun({Handle, Bin}, {Offset, Acc}) ->
-                Next = Offset + byte_size(Bin),
-                {Next, [{Handle, Offset, Next} | Acc]}
-            end,
-            {0, []},
-            Chunks)).
-
-handles_for_range(Offset, Len, Ranges) ->
-    End = Offset + Len,
-    [Handle || {Handle, Start, Stop} <- lists:reverse(Ranges),
-               Start < End,
-               Stop > Offset].
-
-cert_diagnostic(Offset, Der) ->
-    Base = #{
-        <<"offset">> => Offset,
-        <<"bytes">> => byte_size(Der),
-        <<"sha256">> => hb_util:encode(crypto:hash(sha256, Der))
-    },
-    try
-        Cert = public_key:pkix_decode_cert(Der, otp),
-        Tbs = Cert#'OTPCertificate'.tbsCertificate,
-        Extensions = cert_extensions(Tbs),
-        Base#{
-            <<"subject">> =>
-                cert_name_text(Tbs#'OTPTBSCertificate'.subject),
-            <<"issuer">> =>
-                cert_name_text(Tbs#'OTPTBSCertificate'.issuer),
-            <<"subject-key-identifier">> =>
-                key_identifier_text(
-                  extension_value(
-                    ?'id-ce-subjectKeyIdentifier', Extensions)),
-            <<"authority-key-identifier">> =>
-                authority_key_identifier_text(
-                  extension_value(
-                    ?'id-ce-authorityKeyIdentifier', Extensions))
-        }
-    catch Class:Reason ->
-        Base#{
-            <<"decode-error">> =>
-                iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))
-        }
-    end.
 
 cert_extensions(#'OTPTBSCertificate'{extensions = Extensions})
         when is_list(Extensions) ->
@@ -2914,28 +2349,12 @@ extension_value(Oid, Extensions) ->
         [] -> null
     end.
 
-cert_name_text(Name) ->
-    iolist_to_binary(
-        io_lib:format("~p", [public_key:pkix_normalize_name(Name)])).
+split_concatenated_ders(Bin) ->
+    split_concatenated_ders(Bin, []).
 
-key_identifier_text(Identifier) when is_binary(Identifier) ->
-    hb_util:encode(Identifier);
-key_identifier_text(_) ->
-    null.
-
-authority_key_identifier_text(
-  #'AuthorityKeyIdentifier'{keyIdentifier = Identifier}) ->
-    key_identifier_text(Identifier);
-authority_key_identifier_text(Identifier) ->
-    key_identifier_text(Identifier).
-
-split_concatenated_ders_with_offsets(Bin) ->
-    split_concatenated_ders_with_offsets(Bin, 0, []).
-
-split_concatenated_ders_with_offsets(<<>>, _Offset, Acc) ->
+split_concatenated_ders(<<>>, Acc) ->
     lists:reverse(Acc);
-split_concatenated_ders_with_offsets(<<16#30, Rest/binary>> = Full,
-                                     Offset, Acc) ->
+split_concatenated_ders(<<16#30, Rest/binary>> = Full, Acc) ->
     case der_seq_total_len(Rest) of
         {ok, TotalInner, HeaderLen} ->
             CertLen = 1 + HeaderLen + TotalInner,
@@ -2943,24 +2362,20 @@ split_concatenated_ders_with_offsets(<<16#30, Rest/binary>> = Full,
                 <<Cert:CertLen/binary, Tail/binary>> ->
                     case is_x509_der(Cert) of
                         true ->
-                            split_concatenated_ders_with_offsets(
-                                Tail, Offset + CertLen,
-                                [{Offset, Cert} | Acc]);
+                            split_concatenated_ders(Tail, [Cert | Acc]);
                         false ->
                             <<_Skip, Tail2/binary>> = Full,
-                            split_concatenated_ders_with_offsets(
-                                Tail2, Offset + 1, Acc)
+                            split_concatenated_ders(Tail2, Acc)
                     end;
                 _ ->
                     lists:reverse(Acc)
             end;
         error ->
             <<_Skip, Tail/binary>> = Full,
-            split_concatenated_ders_with_offsets(
-                Tail, Offset + 1, Acc)
+            split_concatenated_ders(Tail, Acc)
     end;
-split_concatenated_ders_with_offsets(<<_Skip, Tail/binary>>, Offset, Acc) ->
-    split_concatenated_ders_with_offsets(Tail, Offset + 1, Acc).
+split_concatenated_ders(<<_Skip, Tail/binary>>, Acc) ->
+    split_concatenated_ders(Tail, Acc).
 
 is_x509_der(Der) ->
     try
@@ -3068,12 +2483,6 @@ nif_create_signing_key(EKTr) ->
     case nif_module() of
         not_loaded -> {error, nif_not_loaded};
         M -> catch M:create_signing_key(EKTr)
-    end.
-
-nif_make_credential(EKPublic, AKName, Secret) ->
-    case nif_module() of
-        not_loaded -> {error, nif_not_loaded};
-        M -> catch M:make_credential(EKPublic, AKName, Secret)
     end.
 
 nif_activate_credential(AKTr, EKTr, CredentialBlob, Secret) ->

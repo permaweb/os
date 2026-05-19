@@ -57,11 +57,12 @@ Remove historical/debug-only surfaces:
 
 ## Next Steps
 
-1. Re-run acceptance harnesses after the first compression checkpoint.
-2. Continue clean-room rewrites in order: measurement, zone, nonvolatile,
-   TPM/SNP edge APIs, then package layout.
-3. Remove remaining public secret unwrap surfaces from HTTP paths by moving
+1. Keep cutting from the device contracts, not from comments: measurement,
+   zone, nonvolatile, then package layout.
+2. Remove remaining public secret unwrap surfaces from HTTP paths by moving
    admission activation behind zone-internal calls.
+3. Collapse duplicated measurement/zone canonicalization into one AO-Core
+   boundary shape.
 4. Package the devices for the HyperBEAM rc/0.10 device repository shape.
 5. After each round: run tests, count LoC, update this file, commit, push.
 
@@ -88,11 +89,10 @@ Remove historical/debug-only surfaces:
   - Removed the old TPM-specific `verify-peer` HTTP path. Peer verification is
     now owned by `~measurement@1.0`.
   - Simplified `hb_db_tpm` to load measured EK root CAs only.
-- Current production-overlay count:
+- First checkpoint production-overlay count:
   - `12,056` lines across `hyperbeam-overlay/src`, native NIF sources, and
     `rebar.lapee.fragment`.
   - Reduction from strict baseline `31,443 -> 12,056`: `61.7%`.
-  - Stretch remaining for 70%: target `9,433`, delta `2,623`.
 - Static validation:
   - `make verify-config-invariants`: pass.
   - Direct Erlang syntax checks for `dev_tpm2`, `dev_tpm_tcg`, `dev_system`,
@@ -102,21 +102,49 @@ Remove historical/debug-only surfaces:
     and fails on this macOS host because `tss2/tss2_esys.h` is unavailable.
     Erlang compilation reached the staged LapEE modules before that native
     host-header failure; full image validation still needs Buildroot/Docker.
-+- QEMU runtime validation:
-+  - `make runtime-image TME=0`: pass. Built signed image
-+    `build/images/lapee-runtime-no-tme-signed.img`.
-+  - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
-+    HyperBEAM `/~meta@1.0/info`, `/~measurement@1.0/boot`, and
-+    `/~system@1.0/all` answered under QEMU+swtpm.
-+
+- Second compression checkpoint:
+  - Removed old direct TPM public attestation paths; `~measurement@1.0` is the
+    only public boot/fresh measurement API.
+  - Removed public TPM `credential-subject` / `wrap-secret`; TPM secret
+    wrapping now lives behind the measurement/zone flow. The public
+    `unwrap-secret` compatibility path still remains for the generic
+    measurement implementation and is the next internalization target.
+  - Dropped NIF operations that duplicated Erlang or no longer served v1:
+    TPM MakeCredential, NV public-read diagnostics, context flush, TCTI
+    mutation, and marshalled quote-signature echoing.
+  - Removed duplicate TPM platform probes from `dev_tpm2`; `~system@1.0` owns
+    policy-neutral system evidence.
+  - Pruned `~system@1.0` broad inventory crawls for PCI, DRM, block, network,
+    module, vulnerability, mount, and per-memory-block listings while keeping
+    boot, kernel, CPU, memory, firmware, TPM, IOMMU, ACPI, EDAC, Boot Guard,
+    and controller-backed hardware evidence.
+  - Removed unused `~zone@1.0/match`; zone matching remains internal to init
+    and admission.
+- Current production-overlay count:
+  - Strict line count: `10,783`.
+  - Non-comment/non-blank code count: `9,410`.
+  - Strict reduction from baseline: `31,443 -> 10,783`, `65.7%`.
+  - Code-line reduction from strict baseline: `31,443 -> 9,410`, `70.1%`.
+- Validation after second checkpoint edits:
+  - Direct Erlang syntax check for all overlay modules: pass.
+  - `make verify-config-invariants`: pass.
+  - `make hb-fetch`: pass; overlay stages into disposable HyperBEAM checkout.
+  - `make runtime-image TME=0`: pass. Built signed image
+    `build/images/lapee-runtime-no-tme-signed.img` (`215M`).
+  - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
+    HyperBEAM `/~meta@1.0/info`, `/~measurement@1.0/boot`, and
+    `/~system@1.0/all` answered under QEMU+swtpm.
+  - QEMU artefacts:
+    `build/qemu-network-test/boot-attestation.json` (`156K`) and
+    `build/qemu-network-test/system.json` (`60K`).
+
 ## Reviewer Notes For Next Pass
-+
+
 - `dev_zone` still carries a custom admission authorization envelope. Replace
-+  with a zone-signed AO-Core admission message if acceptance tests stay green.
-+- `dev_measurement` and `dev_zone` duplicate payload normalization and stable
-+  ID code. Collapse toward one AO-Core boundary shape.
-+- Public `wrap-secret` / `unwrap-secret` endpoints remain as compatibility
-+  surfaces in the checkpoint. The specs now mark secret activation as
-+  internal-only; remove or hide these in the next round by moving activation
-+  behind zone-owned calls.
-+- Stretch target needs another `2,623` production-overlay lines removed.
+  with a zone-signed AO-Core admission message if acceptance tests stay green.
+- `dev_measurement` and `dev_zone` duplicate payload normalization and stable
+  ID code. Collapse toward one AO-Core boundary shape.
+- Public `unwrap-secret` remains as a compatibility surface in the checkpoint.
+  The specs now mark secret activation as internal-only; remove or hide this in
+  the next round by moving activation behind zone-owned calls.
+- Strict-line stretch remaining for 70%: target `9,433`, delta `1,350`.

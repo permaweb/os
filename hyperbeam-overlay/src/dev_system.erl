@@ -65,9 +65,7 @@ report_from_root(Root0) ->
         <<"hardware-probes">> => hardware_probes_report(BootGuard, MemoryController),
         <<"tpm">> => tpm_report(Root),
         <<"iommu">> => iommu_report(Root),
-        <<"integrity">> => integrity_report(Root),
-        <<"devices">> => devices_report(Root),
-        <<"filesystems">> => filesystems_report(Root)
+        <<"integrity">> => integrity_report(Root)
     }.
 
 evidence_model() ->
@@ -86,13 +84,6 @@ evidence_model() ->
             <<"memory-controller/intel-mtl-mem-ss-info-global/resource0-read">>,
             <<"memory-controller/sysfs-edac">>,
             <<"generic-proc-sysfs">>
-        ],
-        <<"redactions">> => [
-            <<"dmi/product-uuid">>,
-            <<"dmi/product-serial">>,
-            <<"dmi/board-serial">>,
-            <<"dmi/chassis-serial">>,
-            <<"network/hardware-address">>
         ]
     }.
 
@@ -136,8 +127,7 @@ kernel_report(Root) ->
         <<"osrelease">> => read_trim(Root, "/proc/sys/kernel/osrelease"),
         <<"version">> => read_trim(Root, "/proc/version"),
         <<"hostname">> => read_trim(Root, "/proc/sys/kernel/hostname"),
-        <<"cmdline">> => read_trim(Root, "/proc/cmdline"),
-        <<"modules">> => modules_report(Root)
+        <<"cmdline">> => read_trim(Root, "/proc/cmdline")
     }.
 
 cpu_report(Root) ->
@@ -159,15 +149,13 @@ cpu_report(Root) ->
                     read_trim(Root, "/sys/devices/system/cpu/smt/active"),
                 <<"control">> =>
                     read_trim(Root, "/sys/devices/system/cpu/smt/control")
-            },
-            <<"vulnerabilities">> => vulnerabilities_report(Root)
+            }
         }
     }.
 
 memory_report(Root, Edac, ControllerProbes) ->
     #{
         <<"meminfo">> => meminfo_report(Root),
-        <<"sysfs-memory">> => sysfs_memory_report(Root),
         <<"edac">> => Edac,
         <<"controller-probes">> => ControllerProbes,
         <<"topology">> => #{
@@ -214,15 +202,7 @@ iommu_report(Root) ->
     Groups = digit_dirs(Root, Base),
     #{
         <<"available">> => dir_exists(Root, Base),
-        <<"group-count">> => length(Groups),
-        <<"groups">> =>
-            [#{
-                <<"id">> => to_bin(G),
-                <<"devices">> =>
-                    [to_bin(D) ||
-                        D <- sorted_list_dir(
-                            Root, filename:join([Base, G, "devices"]))]
-            } || G <- Groups]
+        <<"group-count">> => length(Groups)
     }.
 
 integrity_report(Root) ->
@@ -242,45 +222,9 @@ integrity_report(Root) ->
         }
     }.
 
-devices_report(Root) ->
-    #{
-        <<"pci">> => pci_report(Root),
-        <<"drm">> => drm_report(Root),
-        <<"block">> => block_report(Root),
-        <<"network">> => network_report(Root)
-    }.
-
-filesystems_report(Root) ->
-    Mounts = mountinfo_report(Root),
-    #{
-        <<"mounts">> => Mounts,
-        <<"mount-count">> => length(Mounts),
-        <<"filesystem-types">> =>
-            lists:usort(
-                [maps:get(<<"filesystem-type">>, M)
-                 || M <- Mounts,
-                    maps:get(<<"filesystem-type">>, M, null) =/= null])
-    }.
-
 %%%============================================================================
 %%% Individual probes
 %%%============================================================================
-
-modules_report(Root) ->
-    case read_file(Root, "/proc/modules") of
-        {ok, Bin} ->
-            Names =
-                [Name ||
-                    Line <- binary:split(Bin, <<"\n">>, [global]),
-                    Line =/= <<>>,
-                    [Name | _] <- [binary:split(Line, <<" ">>, [])]],
-            #{
-                <<"count">> => length(Names),
-                <<"names">> => Names
-            };
-        error ->
-            #{<<"count">> => null, <<"names">> => []}
-    end.
 
 cpuinfo_report(Root) ->
     case read_file(Root, "/proc/cpuinfo") of
@@ -410,31 +354,6 @@ meminfo_line(Line, Acc) ->
         _ ->
             Acc
     end.
-
-sysfs_memory_report(Root) ->
-    Base = "/sys/devices/system/memory",
-    Blocks = [B || B <- sorted_list_dir(Root, Base),
-                   string:prefix(B, "memory") =/= nomatch,
-                   dir_exists(Root, filename:join(Base, B))],
-    BlockReports =
-        [#{
-            <<"name">> => to_bin(B),
-            <<"state">> =>
-                read_trim(Root, filename:join([Base, B, "state"])),
-            <<"online">> =>
-                read_trim(Root, filename:join([Base, B, "online"])),
-            <<"removable">> =>
-                read_trim(Root, filename:join([Base, B, "removable"])),
-            <<"valid-zones">> =>
-                read_trim(Root, filename:join([Base, B, "valid_zones"]))
-        } || B <- Blocks],
-    #{
-        <<"available">> => dir_exists(Root, Base),
-        <<"block-size-bytes">> =>
-            read_trim(Root, filename:join(Base, "block_size_bytes")),
-        <<"block-count">> => length(BlockReports),
-        <<"blocks">> => BlockReports
-    }.
 
 edac_report(Root) ->
     Base = "/sys/devices/system/edac/mc",
@@ -1034,249 +953,6 @@ tpm_devices(Root) ->
     } || T <- sorted_list_dir(Root, Base),
          is_tpm_name(T)].
 
-pci_report(Root) ->
-    Base = "/sys/bus/pci/devices",
-    Devices =
-        [pci_device_report(Root, Base, D)
-         || D <- sorted_list_dir(Root, Base),
-            dir_exists(Root, filename:join(Base, D))],
-    #{
-        <<"available">> => Devices =/= [],
-        <<"device-count">> => length(Devices),
-        <<"devices">> => Devices
-    }.
-
-pci_device_report(Root, Base, Dev) ->
-    Path = filename:join(Base, Dev),
-    #{
-        <<"bdf">> => to_bin(Dev),
-        <<"class">> => read_trim(Root, filename:join(Path, "class")),
-        <<"vendor">> => read_trim(Root, filename:join(Path, "vendor")),
-        <<"device">> => read_trim(Root, filename:join(Path, "device")),
-        <<"subsystem-vendor">> =>
-            read_trim(Root, filename:join(Path, "subsystem_vendor")),
-        <<"subsystem-device">> =>
-            read_trim(Root, filename:join(Path, "subsystem_device")),
-        <<"revision">> => read_trim(Root, filename:join(Path, "revision")),
-        <<"driver">> => read_link_basename(Root, filename:join(Path, "driver")),
-        <<"modalias">> => read_trim(Root, filename:join(Path, "modalias"))
-    }.
-
-drm_report(Root) ->
-    Base = "/sys/class/drm",
-    Cards =
-        [C || C <- sorted_list_dir(Root, Base),
-              is_drm_card_name(C),
-              dir_exists(Root, filename:join(Base, C))],
-    Reports = [drm_card_report(Root, Base, C) || C <- Cards],
-    #{
-        <<"available">> => Reports =/= [],
-        <<"source">> => <<"sysfs-drm">>,
-        <<"card-count">> => length(Reports),
-        <<"cards">> => Reports
-    }.
-
-drm_card_report(Root, Base, Card) ->
-    Path = filename:join(Base, Card),
-    DevicePath = filename:join(Path, "device"),
-    #{
-        <<"name">> => to_bin(Card),
-        <<"dev">> => read_trim(Root, filename:join(Path, "dev")),
-        <<"device">> => read_link_basename(Root, filename:join(Path, "device")),
-        <<"driver">> =>
-            read_link_basename(Root, filename:join([Path, "device", "driver"])),
-        <<"pci">> => read_attr_map(
-            Root,
-            DevicePath,
-            ["class", "vendor", "device", "subsystem_vendor",
-             "subsystem_device", "revision", "boot_vga", "modalias"]),
-        <<"driver-sysfs">> => drm_driver_sysfs_report(Root, DevicePath),
-        <<"connectors">> => drm_connectors_report(Root, Base, Card),
-        <<"tiles">> => drm_tiles_report(Root, DevicePath)
-    }.
-
-drm_driver_sysfs_report(Root, DevicePath) ->
-    #{
-        <<"device-attributes">> => read_attr_map(
-            Root,
-            DevicePath,
-            ["vram_d3cold_threshold", "lb_fan_control_version",
-             "lb_voltage_regulator_version",
-             "auto_link_downgrade_capable", "auto_link_downgrade_status"]),
-        <<"notes">> =>
-            <<"This is a conservative read-only snapshot of stable DRM sysfs "
-              "files. Intel xe/i915 currently keep their decoded system DRAM "
-              "type in driver memory for display bandwidth logic; this report "
-              "records the exposed fields without assigning policy meaning.">>
-    }.
-
-drm_connectors_report(Root, Base, Card) ->
-    Prefix = Card ++ "-",
-    [drm_connector_report(Root, Base, Connector)
-     || Connector <- sorted_list_dir(Root, Base),
-        string:prefix(Connector, Prefix) =/= nomatch,
-        dir_exists(Root, filename:join(Base, Connector))].
-
-drm_connector_report(Root, Base, Connector) ->
-    Path = filename:join(Base, Connector),
-    #{
-        <<"name">> => to_bin(Connector),
-        <<"status">> => read_trim(Root, filename:join(Path, "status")),
-        <<"enabled">> => read_trim(Root, filename:join(Path, "enabled")),
-        <<"dpms">> => read_trim(Root, filename:join(Path, "dpms")),
-        <<"modes">> => read_lines(Root, filename:join(Path, "modes"))
-    }.
-
-drm_tiles_report(Root, DevicePath) ->
-    [drm_tile_report(Root, DevicePath, Tile)
-     || Tile <- sorted_list_dir(Root, DevicePath),
-        string:prefix(Tile, "tile") =/= nomatch,
-        dir_exists(Root, filename:join(DevicePath, Tile))].
-
-drm_tile_report(Root, DevicePath, Tile) ->
-    Path = filename:join(DevicePath, Tile),
-    #{
-        <<"name">> => to_bin(Tile),
-        <<"memory">> => #{
-            <<"freq0">> =>
-                read_attr_map(
-                    Root,
-                    filename:join([Path, "memory", "freq0"]),
-                    ["min_freq", "max_freq"])
-        },
-        <<"gts">> =>
-            [drm_gt_report(Root, Path, Gt)
-             || Gt <- sorted_list_dir(Root, Path),
-                string:prefix(Gt, "gt") =/= nomatch,
-                dir_exists(Root, filename:join(Path, Gt))]
-    }.
-
-drm_gt_report(Root, TilePath, Gt) ->
-    Path = filename:join(TilePath, Gt),
-    #{
-        <<"name">> => to_bin(Gt),
-        <<"engines">> =>
-            [to_bin(E)
-             || E <- sorted_list_dir(Root, filename:join(Path, "engines")),
-                dir_exists(Root, filename:join([Path, "engines", E]))]
-    }.
-
-block_report(Root) ->
-    Base = "/sys/block",
-    Devices =
-        [block_device_report(Root, Base, D)
-         || D <- sorted_list_dir(Root, Base),
-            dir_exists(Root, filename:join(Base, D))],
-    #{
-        <<"available">> => Devices =/= [],
-        <<"device-count">> => length(Devices),
-        <<"devices">> => Devices
-    }.
-
-block_device_report(Root, Base, Dev) ->
-    Path = filename:join(Base, Dev),
-    Sectors = parse_int(read_trim(Root, filename:join(Path, "size"))),
-    #{
-        <<"name">> => to_bin(Dev),
-        <<"dev">> => read_trim(Root, filename:join(Path, "dev")),
-        <<"size-sectors">> => Sectors,
-        <<"size-bytes">> => sectors_to_bytes(Sectors),
-        <<"removable">> => read_trim(Root, filename:join(Path, "removable")),
-        <<"read-only">> => read_trim(Root, filename:join(Path, "ro")),
-        <<"model">> => read_trim(Root, filename:join([Path, "device", "model"])),
-        <<"vendor">> =>
-            read_trim(Root, filename:join([Path, "device", "vendor"])),
-        <<"rotational">> =>
-            read_trim(Root, filename:join([Path, "queue", "rotational"])),
-        <<"driver">> =>
-            read_link_basename(Root, filename:join([Path, "device", "driver"])),
-        <<"partitions">> => block_partitions(Root, Path, Dev)
-    }.
-
-block_partitions(Root, Path, Dev) ->
-    [#{
-        <<"name">> => to_bin(P),
-        <<"dev">> => read_trim(Root, filename:join([Path, P, "dev"])),
-        <<"start">> => read_trim(Root, filename:join([Path, P, "start"])),
-        <<"size-sectors">> =>
-            parse_int(read_trim(Root, filename:join([Path, P, "size"]))),
-        <<"read-only">> => read_trim(Root, filename:join([Path, P, "ro"]))
-    } || P <- sorted_list_dir(Root, Path),
-         string:prefix(P, Dev) =/= nomatch,
-         file_exists(Root, filename:join([Path, P, "partition"]))].
-
-network_report(Root) ->
-    Base = "/sys/class/net",
-    Interfaces =
-        [network_interface_report(Root, Base, Iface)
-         || Iface <- sorted_list_dir(Root, Base),
-            dir_exists(Root, filename:join(Base, Iface))],
-    #{
-        <<"available">> => Interfaces =/= [],
-        <<"interface-count">> => length(Interfaces),
-        <<"interfaces">> => Interfaces
-    }.
-
-network_interface_report(Root, Base, Iface) ->
-    Path = filename:join(Base, Iface),
-    Address = read_trim(Root, filename:join(Path, "address")),
-    #{
-        <<"name">> => to_bin(Iface),
-        <<"type">> => read_trim(Root, filename:join(Path, "type")),
-        <<"operstate">> => read_trim(Root, filename:join(Path, "operstate")),
-        <<"carrier">> => read_trim(Root, filename:join(Path, "carrier")),
-        <<"mtu">> => read_trim(Root, filename:join(Path, "mtu")),
-        <<"wireless">> => dir_exists(Root, filename:join(Path, "wireless")),
-        <<"device">> => read_link_basename(Root, filename:join(Path, "device")),
-        <<"driver">> =>
-            read_link_basename(Root, filename:join([Path, "device", "driver"])),
-        <<"hardware-address">> => redact(Address)
-    }.
-
-vulnerabilities_report(Root) ->
-    Base = "/sys/devices/system/cpu/vulnerabilities",
-    maps:from_list(
-        [{normalise_key(to_bin(Name)),
-          read_trim(Root, filename:join(Base, Name))}
-         || Name <- sorted_list_dir(Root, Base)]).
-
-mountinfo_report(Root) ->
-    case read_file(Root, "/proc/self/mountinfo") of
-        {ok, Bin} ->
-            [M || Line <- binary:split(Bin, <<"\n">>, [global]),
-                  Line =/= <<>>,
-                  M <- [mountinfo_line(Line)],
-                  M =/= null];
-        error ->
-            []
-    end.
-
-mountinfo_line(Line) ->
-    case binary:split(Line, <<" - ">>, []) of
-        [Before, After] ->
-            BFields = binary:split(Before, <<" ">>, [global]),
-            AFields = binary:split(After, <<" ">>, [global]),
-            case {BFields, AFields} of
-                {[Id, Parent, MajorMinor, Root, MountPoint, Options | _],
-                 [FsType, Source, SuperOptions | _]} ->
-                    #{
-                        <<"id">> => Id,
-                        <<"parent">> => Parent,
-                        <<"major-minor">> => MajorMinor,
-                        <<"root">> => Root,
-                        <<"mount-point">> => MountPoint,
-                        <<"options">> => Options,
-                        <<"filesystem-type">> => FsType,
-                        <<"source">> => Source,
-                        <<"super-options">> => SuperOptions
-                    };
-                _ ->
-                    null
-            end;
-        _ ->
-            null
-    end.
-
 %%%============================================================================
 %%% Small filesystem/parsing helpers
 %%%============================================================================
@@ -1313,15 +989,6 @@ read_trim(Root, Abs) ->
     case read_file(Root, Abs) of
         {ok, Bin} -> trim(Bin);
         error -> null
-    end.
-
-read_lines(Root, Abs) ->
-    case read_file(Root, Abs) of
-        {ok, Bin} ->
-            [Line || Line <- binary:split(Bin, <<"\n">>, [global]),
-                     trim(Line) =/= <<>>];
-        error ->
-            []
     end.
 
 read_kernel_config(Root) ->
@@ -1577,11 +1244,6 @@ parse_bool_01(<<"1">>, _Default) -> true;
 parse_bool_01(<<"0">>, _Default) -> false;
 parse_bool_01(_, Default) -> Default.
 
-sectors_to_bytes(N) when is_integer(N) ->
-    N * 512;
-sectors_to_bytes(_) ->
-    null.
-
 u32_hex(N) when is_integer(N), N >= 0 ->
     hex(N, 8).
 
@@ -1595,10 +1257,6 @@ hex(N, Width) ->
 
 bit_range(Raw, First, Last) ->
     (Raw bsr First) band ((1 bsl (Last - First + 1)) - 1).
-
-redact(null) -> null;
-redact(<<>>) -> null;
-redact(_) -> <<"redacted">>.
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);
