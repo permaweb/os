@@ -166,6 +166,10 @@ HYPERBEAM_C_NATIVE_COMPAT_FLAGS = \
 
 HYPERBEAM_BUILD_ENV = \
 	PATH=$(@D)/.lapee-build:$(HOST_DIR)/bin:/home/builder/.cargo/bin:$(BR_PATH) \
+	__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS="nightly" \
+	CARGO_UNSTABLE_HOST_CONFIG="true" \
+	CARGO_UNSTABLE_TARGET_APPLIES_TO_HOST="true" \
+	CARGO_TARGET_APPLIES_TO_HOST="false" \
 	LAPEE_REAL_CC="$(TARGET_CC)" \
 	LAPEE_REAL_CXX="$(TARGET_CXX)" \
 	CC="$(@D)/.lapee-build/cc-filter" \
@@ -198,6 +202,18 @@ endef
 define HYPERBEAM_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam
 	cp -a $(@D)/_build/lapee/rel/hb/. $(TARGET_DIR)/usr/lib/hyperbeam/
+	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/scripts
+	cp -a $(@D)/scripts/schema.gql \
+		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/schema.gql
+	cp -a $(@D)/scripts/hyper-token.lua \
+		$(@D)/scripts/hyper-token-p4.lua \
+		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/
+	for hb_app in $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*; do \
+	    mkdir -p "$$hb_app/priv/lapee-p4"; \
+	    cp -a $(@D)/scripts/hyper-token.lua \
+	        $(@D)/scripts/hyper-token-p4.lua \
+	        "$$hb_app/priv/lapee-p4/"; \
+	done
 	# relx runs under host-erlang, so OTP app priv/ binaries in
 	# the release can be host-arch. Replace OTP apps with the
 	# Buildroot target copies before target-finalize validates ELF

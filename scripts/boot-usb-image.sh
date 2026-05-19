@@ -14,6 +14,8 @@
 #   ./scripts/boot-usb-image.sh
 #   ./scripts/boot-usb-image.sh --img build/images/lapee-usb.img
 #   ./scripts/boot-usb-image.sh --timeout 600   (seconds)
+#   ./scripts/boot-usb-image.sh --host-port 28734
+#   QEMU_MEMORY=12288 ./scripts/boot-usb-image.sh
 #   ./scripts/boot-usb-image.sh --oracle-url https://example.com/
 
 set -euo pipefail
@@ -25,6 +27,11 @@ TIMEOUT=${TIMEOUT:-420}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-network-test}
 LOGFILE=${LOGFILE:-$OUTDIR/serial.log}
 ORACLE_URL=${ORACLE_URL:-}
+HOST_PORT=${HOST_PORT:-18734}
+QEMU_MEMORY=${QEMU_MEMORY:-12288}
+CURL_CONNECT_TIMEOUT=${CURL_CONNECT_TIMEOUT:-2}
+CURL_READY_MAX_TIME=${CURL_READY_MAX_TIME:-5}
+CURL_FETCH_MAX_TIME=${CURL_FETCH_MAX_TIME:-60}
 # `--gui' opens a QEMU window so the operator can see the framebuffer
 # console -- splash daemon, kernel banners, init traces. Default stays
 # headless (`-nographic') for non-interactive attestation testing.
@@ -35,6 +42,7 @@ while (($# > 0)); do
         --img)     IMG=$2; shift 2;;
         --timeout) TIMEOUT=$2; shift 2;;
         --log)     LOGFILE=$2; shift 2;;
+        --host-port) HOST_PORT=$2; shift 2;;
         --oracle-url) ORACLE_URL=$2; shift 2;;
         --gui)     GUI=1; shift;;
         *) echo "unknown arg: $1" >&2; exit 2;;
@@ -115,14 +123,16 @@ echo "    log: $LOGFILE  (timeout: ${TIMEOUT}s)"
 COMMON_ARGS=(
     -machine q35,accel=tcg
     -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx
-    -m 2048 -smp 4
+    -m "$QEMU_MEMORY" -smp 4
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
     -drive "if=pflash,format=raw,file=${SCRATCH_VARS}"
-    -drive "file=${SCRATCH_IMG},format=raw,if=virtio"
+    -device qemu-xhci,id=xhci
+    -drive "if=none,id=usbdisk,file=${SCRATCH_IMG},format=raw"
+    -device usb-storage,drive=usbdisk,removable=on,bootindex=0
     -chardev "socket,id=chrtpm,path=$TPM_SOCK"
     -tpmdev emulator,id=tpm0,chardev=chrtpm
     -device tpm-tis,tpmdev=tpm0
-    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:18734-:8734"
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${HOST_PORT}-:8734"
     -device virtio-net-pci,netdev=net0
 )
 
@@ -159,7 +169,7 @@ fi
 
 # Poll the forwarded HTTP port until HB answers. The cheap /info
     # endpoint is readiness; /boot is the end-to-end proof.
-BASE_URL=http://127.0.0.1:18734
+BASE_URL=http://127.0.0.1:${HOST_PORT}
 INFO_OUT="$OUTDIR/info.json"
 ATT_OUT="$OUTDIR/boot-attestation.json"
 PROBE_OUT="$OUTDIR/system.json"
@@ -170,6 +180,8 @@ rm -f "$INFO_OUT" "$ATT_OUT" "$PROBE_OUT" "$ORACLE_OUT" "$ORACLE_HEADERS"
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
     if curl -fsSL \
+            --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_READY_MAX_TIME" \
             -H "accept: application/json" \
             -H "accept-bundle: true" \
             "$BASE_URL/~measurement@1.0/info" \
@@ -194,6 +206,8 @@ fi
 
 echo ">> fetching boot attestation"
 if ! curl -fsSL \
+        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_FETCH_MAX_TIME" \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         "$BASE_URL/~measurement@1.0/boot" \
@@ -210,6 +224,8 @@ fi
 
 echo ">> fetching system report"
 if ! curl -fsSL \
+        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_FETCH_MAX_TIME" \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         "$BASE_URL/~system@1.0/all" \
@@ -235,6 +251,8 @@ print(urllib.parse.quote(sys.argv[1], safe=""))
 PY
     )
     if ! curl -fsSL \
+            --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_FETCH_MAX_TIME" \
             -H "accept-bundle: true" \
             -D "$ORACLE_HEADERS" \
             "$BASE_URL/~relay@1.0/call?method=GET&accept-bundle=true&relay-path=$ORACLE_QUERY" \

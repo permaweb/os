@@ -37,6 +37,26 @@ primary_iface() {
     sed -n 's/^iface=//p' "$PRIMARY" 2>/dev/null | sed -n '1p'
 }
 
+write_primary() {
+    _status="$1"
+    for gw in ${router:-}; do
+        ip -4 route replace default via "$gw" \
+            dev "$interface" 2>/dev/null || true
+    done
+    if [ -n "${dns:-}" ]; then
+        : > /etc/resolv.conf || true
+        for n in $dns; do
+            echo "nameserver $n" >> /etc/resolv.conf
+        done
+    fi
+    printf "iface=%s\nip=%s\ngw=%s\ndns=%s\n" \
+        "$interface" "$ip" "${router:-}" \
+        "${dns:-}" > "$PRIMARY"
+    status "Network is up on $interface."
+    log_net "[net] $interface: $_status ip=$ip" \
+            "gw=${router:-} dns=${dns:-none}  (primary)"
+}
+
 status_if_no_primary() {
     if [ ! -s "$PRIMARY" ]; then
         status "$@"
@@ -49,8 +69,15 @@ case "${1:-unknown}" in
     deconfig)
         ip -4 addr flush dev "$interface" 2>/dev/null || true
         ip link set "$interface" up 2>/dev/null || true
-        status_if_no_primary "Requesting a network address on $interface."
-        log_net "[net] $interface: deconfig"
+        if [ "$(primary_iface)" = "$interface" ]; then
+            rm -f "$PRIMARY"
+            ip -4 route del default dev "$interface" 2>/dev/null || true
+            status "Network address lost on $interface."
+            log_net "[net] $interface: deconfig (primary cleared)"
+        else
+            status_if_no_primary "Requesting a network address on $interface."
+            log_net "[net] $interface: deconfig"
+        fi
         ;;
 
     bound|renew)
@@ -64,7 +91,8 @@ case "${1:-unknown}" in
             2>/dev/null || true
         ip link set "$interface" up 2>/dev/null || true
 
-        if [ ! -s "$PRIMARY" ]; then
+        CurrentPrimary=$(primary_iface)
+        if [ ! -s "$PRIMARY" ] || [ "$CurrentPrimary" = "$interface" ]; then
             # Only claim the primary slot if DHCP actually gave us
             # a default gateway. Some networks (hotel captive
             # portals, 802.1x walled gardens) hand out an IP with
@@ -78,22 +106,11 @@ case "${1:-unknown}" in
                 log_net "[net] $interface: bound ip=$ip" \
                         "NO-GATEWAY (ip-only; not promoting to primary)"
             else
-                for gw in ${router:-}; do
-                    ip -4 route replace default via "$gw" \
-                        dev "$interface" 2>/dev/null || true
-                done
-                if [ -n "${dns:-}" ]; then
-                    : > /etc/resolv.conf || true
-                    for n in $dns; do
-                        echo "nameserver $n" >> /etc/resolv.conf
-                    done
+                if [ "$CurrentPrimary" = "$interface" ]; then
+                    write_primary "renew"
+                else
+                    write_primary "bound"
                 fi
-                printf "iface=%s\nip=%s\ngw=%s\ndns=%s\n" \
-                    "$interface" "$ip" "${router:-}" \
-                    "${dns:-}" > "$PRIMARY"
-                status "Network is up on $interface."
-                log_net "[net] $interface: bound ip=$ip" \
-                        "gw=${router:-} dns=${dns:-none}  (primary)"
                 # No console-side banner. The BEAM splash polls
                 # /run/lapee/primary-net for the IP and the dev_tpm2
                 # /info endpoint for HB readiness; it owns the

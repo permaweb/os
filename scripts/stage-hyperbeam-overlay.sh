@@ -27,14 +27,31 @@ mkdir -p "$repo/src" "$repo/native" "$repo/priv"
 find "$overlay/src" -type f | while IFS= read -r src; do
     rel=${src#"$overlay/src/"}
     rm -f "$repo/src/$rel"
+    rm -f "$repo/src/preloaded/$rel"
+    rm -f "$repo/src/kernel/$rel"
 done
 # Remove overlay-owned files whose names changed across LapEE iterations.
 rm -f "$repo/src/dev_system_probe.erl"
+rm -f "$repo/src/preloaded/dev_system_probe.erl"
+rm -f "$repo/src/kernel/dev_system_probe.erl"
 rm -rf "$repo/native/lapee_tpm_nif" \
        "$repo/native/dev_snp_nif" \
        "$repo/priv/tpm-interpret"
 
+if [ -d "$repo/src/preloaded" ] && [ -d "$repo/src/kernel" ]; then
+    find "$overlay/src" -type f | while IFS= read -r src; do
+        rel=${src#"$overlay/src/"}
+        base=${rel##*/}
+        case "$base" in
+            dev_*.erl) dest="$repo/src/preloaded/$rel" ;;
+            *) dest="$repo/src/kernel/$rel" ;;
+        esac
+        mkdir -p "$(dirname "$dest")"
+        cp "$src" "$dest"
+    done
+else
 cp -R "$overlay/src/." "$repo/src/"
+fi
 cp -R "$overlay/native/." "$repo/native/"
 cp -R "$overlay/priv/." "$repo/priv/"
 
