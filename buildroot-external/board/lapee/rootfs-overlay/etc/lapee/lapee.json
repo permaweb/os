@@ -77,7 +77,6 @@
         {"name": "wasm-64@1.0", "module": "dev_wasm", "ao-types": "module=\"atom\""},
         {"name": "whois@1.0", "module": "dev_whois", "ao-types": "module=\"atom\""},
         {"name": "tpm@2.0a", "module": "dev_tpm2", "ao-types": "module=\"atom\""},
-        {"name": "tpm-interpret@1.0", "module": "dev_tpm_interpret", "ao-types": "module=\"atom\""},
         {"name": "system@1.0", "module": "dev_system", "ao-types": "module=\"atom\""}
     ]
 }

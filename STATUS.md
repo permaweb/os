@@ -1,69 +1,104 @@
-# LapEE v1 Release Status
+# LapEE Clean-Room Compression Status
 
-Branch: `agent/v1-cleanup`
+Branch: `agent/lapee-cleanroom-compression`
 
-This branch is the v1 cleanup pass. It standardizes the admission device as
-`~zone@1.0`, removes generated/stale documentation artifacts, and keeps the
-release surface focused on signed runtime images, the Secure Boot provisioner,
-operator config injection, and QEMU/remote validation.
+Mission: rebuild the LapEE device layer from protocol specs, reduce production
+device/runtime LoC by at least 60%, stretch beyond 70%, preserve the v1 product
+flows, and move toward normal HyperBEAM rc/0.10 packageable devices.
 
-## Current System
+## Baseline
 
-- `~measurement@1.0` is the primary hardware-measurement API.
-- `~tpm@2.0a` and `~snp@1.0` are measurement-capable backends.
-- `~zone@1.0` creates named shared identities from verified measurements.
-- Production runtime images are signed UKIs and may be built with `TME=1`
-  or the measured no-TME flag `TME=0`.
-- Optional non-volatile storage is provisioned by the Secure Boot
-  provisioner and opened only after a node joins the matching zone.
+- Starting commit: `34c08f1` (`main`, v1 cleanup merge).
+- Tracked text baseline: `51,184` lines.
+- Production overlay baseline, strict: `31,443` lines
+  (`hyperbeam-overlay/src`, NIF source excluding lockfile, overlay fragment).
+- Production overlay baseline, repo-counted: `32,123` lines
+  (same, including native lockfile).
+- 40% strict target: `18,866` lines.
+- 50% strict target: `15,721` lines.
+- 60% strict target: `12,577` lines.
+- 70% strict stretch: `9,433` lines.
 
-## Verified In This Pass
+## Product Specs
 
-- Static checks:
-  - `git grep` found no tracked old admission-device names.
-  - `git grep` found no tracked deferred-work markers.
-  - `make verify-config-invariants` passed.
-  - `bash -n` passed for the release QEMU/provisioner scripts.
-  - `python3 -m py_compile` passed for the QEMU request generator and
-    config invariant checker.
-  - `git diff --check` passed.
-- Staged HyperBEAM overlay eunit:
-  - `dev_zone`: 28 tests passed.
-  - `dev_measurement`: 12 tests passed.
-  - `dev_tpm2`: 43 tests passed.
-  - `lapee_nonvolatile`: 5 tests passed.
-  - `dev_snp`: 9 tests passed.
-  - `dev_snp_mock`: loaded; no tests to run.
-- Built images:
-  - `build/images/lapee-runtime-no-tme-signed.img`
-    SHA-256 `11f36a5aeb036917710f2b78c76e5f09cb2e71adf46134e689fd235ae9085f7d`.
-  - `build/images/lapee-sb-provisioner.img`
-    SHA-256 `66d717e3cbc28bec79103fde9e7ad702e251022fa1004548e9ab149333a39090`.
-  - Both UKIs were signed and verified by `sbverify` during image build.
-- Local QEMU:
-  - Signed no-TME runtime boot plus signed HTTPS relay oracle passed.
-  - Operator config measurement/PCR15 replay passed.
-  - Four-node TPM/swtpm zone admission passed:
-    three admitted nodes, one rejected node, and three ring-signed
-    membership proofs.
-  - Four-node TPM/swtpm zone plus non-volatile store reuse passed:
-    partial `ZONE_` label matching, reboot, rejoin, old object recovery,
-    and current boot-measurement refresh.
-  - Signed provisioner non-volatile disk preparation passed and created
-    `ZONE_test-zone`.
-- Remote SNP:
-  - Four real SEV-SNP QEMU nodes on `hb@dev-1.forward.computer` passed.
-  - All nodes measured as `snp@1.0` with `lapee-snp-evidence`.
-  - Three matching nodes joined the zone and produced ring-signed
-    membership proofs; the mismatched DMI node was rejected.
-  - Total remote SNP run time: 148 seconds.
+The working spec wiki is under `wiki/`:
 
-## Not Revalidated
+- `wiki/features.md`
+- `wiki/protocols/measurement.md`
+- `wiki/protocols/zone.md`
+- `wiki/protocols/provisioning.md`
+- `wiki/devices/system.md`
+- `wiki/devices/tpm.md`
+- `wiki/devices/snp.md`
+- `wiki/devices/measurement.md`
+- `wiki/devices/zone.md`
+- `wiki/testing.md`
+- `wiki/cut-ledger.md`
 
-- `make -C paper quick` could not run because `pdflatex` is not installed
-  on this host. Generated PDFs are removed from git; the paper source is
-  now the maintained artefact.
+## Current Intent
 
-## Open Questions For Review
+Keep only the public product:
 
-None yet.
+- signed appliance boot,
+- policy-neutral system report,
+- common measurement API,
+- TPM and SNP measurement engines,
+- named zones and membership proofs,
+- Secure Boot and storage provisioner,
+- encrypted zone storage after verified admission.
+
+Remove historical/debug-only surfaces:
+
+- public `~tpm-interpret@1.0`,
+- TPM-specific peer verification flows superseded by `~measurement@1.0`,
+- pre-v1 compatibility branches,
+- trust scoring,
+- broad catalogue interpretation not used by the product tests.
+
+## Next Steps
+
+1. Re-run acceptance harnesses after the first compression checkpoint.
+2. Continue clean-room rewrites in order: measurement, zone, nonvolatile,
+   TPM/SNP edge APIs, then package layout.
+3. Remove remaining public secret unwrap surfaces from HTTP paths by moving
+   admission activation behind zone-internal calls.
+4. Package the devices for the HyperBEAM rc/0.10 device repository shape.
+5. After each round: run tests, count LoC, update this file, commit, push.
+
+## Validation Log
+
+- Sub-agent review complete:
+  - `Helmholtz`: found spec/package ambiguity and confirmed
+    `~tpm-interpret@1.0` + catalogue removal as a valid product cut.
+  - `Carson`: found the public unwrap-secret/decryption-oracle issue and
+    tightened the measurement/zone specs around internal-only secret
+    activation.
+  - `Gauss`: confirmed the overlay reduction path and recommended compacting
+    TCG/TPM before device packaging.
+- First compression checkpoint:
+  - Deleted public `~tpm-interpret@1.0`, its local-capture helper, and the
+    historical firmware/OS/catalogue corpus. Kept EK root CAs and Intel ODCA
+    fixtures needed by TPM verification.
+  - Removed in-module test blocks from production overlay modules; acceptance
+    coverage must now live in QEMU/integration harnesses or package tests.
+  - Rewrote `dev_tpm_tcg` from broad firmware archaeology to the runtime
+    contract LapEE actually needs: TCG event parsing for PCR replay,
+    measured Secure Boot extraction, ACPI header helpers, and small
+    compatibility stubs.
+  - Removed the old TPM-specific `verify-peer` HTTP path. Peer verification is
+    now owned by `~measurement@1.0`.
+  - Simplified `hb_db_tpm` to load measured EK root CAs only.
+- Current production-overlay count:
+  - `12,056` lines across `hyperbeam-overlay/src`, native NIF sources, and
+    `rebar.lapee.fragment`.
+  - Reduction from strict baseline `31,443 -> 12,056`: `61.7%`.
+  - Stretch remaining for 70%: target `9,433`, delta `2,623`.
+- Static validation:
+  - `make verify-config-invariants`: pass.
+  - Direct Erlang syntax checks for `dev_tpm2`, `dev_tpm_tcg`, `dev_system`,
+    and `hb_db_tpm`: pass.
+  - `make hb-fetch`: pass, overlay stages into disposable HyperBEAM checkout.
+  - `rebar3 as lapee compile` in the staged checkout: reaches native compile
+    and fails on this macOS host because `tss2/tss2_esys.h` is unavailable.
+    Erlang compilation reached the staged LapEE modules before that native
+    host-header failure; full image validation still needs Buildroot/Docker.

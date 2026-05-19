@@ -2,8 +2,8 @@
 
 This directory holds an **external, non-HyperBEAM** verifier for LapEE
 TPM evidence. It exists to let a third party check TPM envelopes without
-running a HyperBEAM node, and as an independent implementation that can be
-compared against `~tpm-interpret@1.0`.
+running a HyperBEAM node, and as an independent implementation of the TPM
+checks used by `~tpm@2.0a`.
 
 This is the *secondary* verifier. Normal LapEE peer flows use
 `~measurement@1.0` and device-native verification inside HyperBEAM. The
@@ -46,7 +46,7 @@ Eight checks, in order:
   validates cryptographic evidence in the envelope itself.
 - Trust anchor selection: by default the verifier reads from the LapEE
   runtime trust corpus at `../hyperbeam-overlay/priv/tpm-interpret/root-cas/`,
-  the same directory `~tpm-interpret@1.0` loads on the node and that
+  the same directory `~tpm@2.0a` loads on the node and that
   `scripts/fetch-ek-root-cas.sh` populates from keylime's
   `tpm_cert_store`. Both verifiers share one corpus so a single refresh
   updates them in lockstep. Override with `--roots-dir` for an

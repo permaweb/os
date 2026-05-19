@@ -140,13 +140,10 @@ brew install erlang rebar3 python@3
 
 ```sh
 make hb-fetch
-./scripts/interpret-local-capture.sh \
-  --url http://<node-ip>:8734 \
-  --label "Framework 13"
+curl -fsS http://<node-ip>:8734/~measurement@1.0/boot
 ```
 
-The verifier fetches the node's measurement evidence, interprets it,
-and writes an HTML dashboard under:
+The measurement endpoint returns the node's signed boot evidence.
 
 ```text
 build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
@@ -505,8 +502,8 @@ are built from source.
 - `~measurement@1.0/boot` fails but `~tpm@2.0a/pcr-read&pcr=0` works:
   the TPM is alive; the failure is likely in quote/key policy, EK material,
   measurement backend selection, or verifier policy, not basic TPM discovery.
-- `interpret-local-capture.sh` says no HyperBEAM checkout: run
-  `make hb-fetch`, or set `REPO=/path/to/HyperBEAM`.
+- Use `~measurement@1.0/boot` for live measurement inspection. The old
+  TPM interpretation helper is not part of the v1 runtime surface.
 - macOS asks for a password while writing: the write path uses `sudo dd`
   against `/dev/rdiskN`.
 - USB tethering is not expected in production builds because production

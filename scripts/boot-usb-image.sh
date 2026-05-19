@@ -320,4 +320,4 @@ if [[ -n "$ORACLE_URL" ]]; then
 fi
 echo ""
 echo "For physical hardware, prefer the live network path:"
-echo "  ./scripts/interpret-local-capture.sh --url http://NODE-IP:8734 --label LABEL"
+echo "  curl -fsS http://NODE-IP:8734/~measurement@1.0/boot"

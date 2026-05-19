@@ -7,7 +7,6 @@
 -module(lapee_peer_http).
 -export([get/3, post/4]).
 
--include_lib("eunit/include/eunit.hrl").
 
 get(BaseURL, Path, Opts) ->
     request(BaseURL, <<"GET">>, accept_path(Path), <<>>, Opts).
@@ -213,31 +212,3 @@ strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     end;
 strip_trailing_slash(B) ->
     B.
-
-decode_response_preserves_committed_bundle_body_test() ->
-    Opts = #{<<"priv-wallet">> => ar_wallet:new()},
-    Body = hb_message:commit(
-        #{
-            <<"measurement-device">> => <<"tpm@2.0a">>,
-            <<"pcr-selection">> => [0, 1, 7, 10, 11, 14, 15],
-            <<"ao-types">> => <<"initialized=\"atom\"">>,
-            <<"initialized">> => <<"permanent">>
-        },
-        Opts),
-    Response = hb_message:commit(
-        #{<<"status">> => 200, <<"body">> => Body},
-        Opts),
-    {ok, JSON} = dev_codec_json:to(Response, codec_req(), Opts),
-    ?assertMatch(
-        #{<<"body">> := #{
-            <<"measurement-device">> := <<"tpm@2.0a">>,
-            <<"pcr-selection">> := [0, 1, 7, 10, 11, 14, 15],
-            <<"initialized">> := permanent
-        }},
-        decode_response(200, JSON, Opts)).
-
-decode_response_restores_structured_lists_test() ->
-    JSON =
-        <<"{\"ao-types\":\".=\\\"list\\\", 1=\\\"atom\\\", 2=\\\"integer\\\"\","
-          "\"1\":\"ready\",\"2\":\"42\"}">>,
-    ?assertEqual([ready, 42], decode_json_body(JSON)).

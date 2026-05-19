@@ -1,53 +1,23 @@
-%%% @doc The TPM 2.0 device -- binds HyperBEAM's identity to a real
-%%% hardware TPM via `libtss2-esys'.
-%%%
-%%% This device is the software-layer of the LapEE (Laptop Execution
-%%% Environment) appliance architecture. At node startup, the `on.start'
-%%% hook invokes `boot-attestation'. The device gathers the neutral
-%%% `~system@1.0/all' report and the public `~meta@1.0/info' node
-%%% message, extends PCR 15 with that combined subject's AO-Core ID,
-%%% creates an AK whose authPolicy includes PCR 15 at that value, quotes
-%%% the selected PCR set, signs the resulting boot-attestation message,
-%%% and caches it under a stable pseudo-path.
-%%%
-%%% Any party can then request `attestation', which returns a signed
-%%% envelope containing:
-%%%   1. EK certificate (chains to TPM vendor root CA)
-%%%   2. Attestation Key public key
-%%%   3. TPM2_Quote over a PCR set, signed by the AK
-%%%   4. The full runtime event log so a verifier can replay the PCR 15
-%%%      extend and confirm it matches the quoted value
-%%%   5. The node message itself, so the verifier can recompute
-%%%      `hb_message:id(NodeMsg, all, Opts)' and confirm equality with
-%%%      the extend digest -- closing the loop from quote back to the
-%%%      specific software stack running.
-%%%
-%%% The device delegates all TPM operations to the `lapee_tpm_nif' NIF
-%%% (a small C layer over libtss2-esys). This module is the HyperBEAM-
-%%% shaped interface over that NIF: HB device conventions (`info',
-%%% `(Base, Req, Opts)', exports map), standard error returns, and
-%%% integration with AO-Core hook dispatch.
+%%% @doc TPM 2.0 measurement engine for LapEE.
+%%% The engine extends PCR 15 with the measured boot subject, creates a
+%%% maps TPM MakeCredential/ActivateCredential into the measurement protocol.
 -module(dev_tpm2).
 -export([info/1, info/3, extend/3, quote/3, pcr_read/3,
          attestation/3, boot_attestation/3, credential_subject/3,
          supported/3, subject/3, measure/3, wrap_secret/3, unwrap_secret/3,
-         activate_credential/3, activate_credential_secret/2,
-         verify_peer/3]).
+         activate_credential/3, activate_credential_secret/2]).
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
 -export([ensure_activation_secret/5]).
 -export([event_log/1]).
 %% Exposed for tests + auditors that want to drive chain validation
-%% (including the AIA fallback) directly without going through verify/3.
 -export([validate_ek_chain/3, validate_ek_chain/4]).
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
--include_lib("eunit/include/eunit.hrl").
 
 %% Default PCR that HyperBEAM extends with the node-message identity.
 -define(NODE_IDENTITY_PCR, 15).
 %% PCRs that gate the AK. PCR 15 carries the LapEE boot subject, so the
-%% AK is only usable by the TPM after the measured node config is present.
 -define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14, 15]).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
@@ -56,14 +26,11 @@
 -define(TPM_CC_POLICY_OR, 16#00000171).
 -define(TPM_CC_POLICY_PCR, 16#0000017F).
 -define(BOOT_ATTESTATION_PATH, <<"~tpm@2.0a/boot-attestation">>).
--define(PEER_ATTESTATION_PREFIX, <<"~tpm@2.0a/peer-attestations">>).
 -define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
 %%%============================================================================
-%%% Device API information
 %%%============================================================================
 
-%% @doc Declare the device's public surface.
 info(_) ->
     #{
         exports =>
@@ -81,158 +48,23 @@ info(_) ->
                 <<"wrap-secret">>,
                 <<"unwrap-secret">>,
                 <<"activate-credential">>,
-                <<"verify-peer">>,
                 <<"verify">>
             ]
     }.
 
-%% @doc Human-readable documentation for the TPM 2.0 device.
 info(_Base, _Req, _Opts) ->
-    InfoBody = #{
-        <<"description">> =>
-            <<"TPM 2.0 device: bind a HyperBEAM node's identity to a real "
-              "hardware TPM via libtss2-esys, and produce signed attestations "
-              "that chain through quote -> PCR extend -> event log -> node message, "
-              "linking a running node's software state to TPM-rooted hardware "
-              "attestation.">>,
-        <<"version">> => <<"0.1">>,
-        <<"specification">> => <<"TPM 2.0 (TCG)">>,
-        <<"api">> => #{
-            <<"info">> => #{
-                <<"description">> => <<"This message.">>
-            },
-            <<"extend">> => #{
-                <<"description">> =>
-                    <<"Extend a PCR with the hash of a subject message. "
-                      "Default PCR is 15 (LapEE node-identity binding).">>,
-                <<"request">> => #{
-                    <<"subject">> =>
-                        <<"The message (or binary) whose identity should be "
-                          "bound to the PCR. If absent, falls back to the "
-                          "hook's `body' key, and then to the Base message.">>,
-                    <<"pcr">> =>
-                        <<"Integer PCR index (0-23). Defaults to 15.">>
-                },
-                <<"response">> =>
-                    <<"`#{<<\"status\">> => 200, <<\"body\">> => "
-                      "#{<<\"pcr\">> => N, "
-                      "<<\"digest\">>    => base64url(bytes), "
-                      "<<\"pcr_after\">> => base64url(bytes)}}'">>
-            },
-            <<"quote">> => #{
-                <<"description">> =>
-                    <<"Produce a TPM2_Quote signed by the node's Attestation "
-                      "Key over the selected PCR set. Nonce comes from "
-                      "`Req/nonce' if present.">>,
-                <<"request">> => #{
-                    <<"pcrs">> =>
-                        <<"List of PCR indices to include (defaults to "
-                          "[0, 1, 7, 10, 11, 14, 15]).">>,
-                    <<"nonce">> =>
-                        <<"base64url-encoded binary nonce (any length). If "
-                          "absent, a fresh random 32-byte value is generated. "
-                          "Hex input is NOT accepted - HyperBEAM wire is "
-                          "base64url everywhere.">>
-                }
-            },
-            <<"pcr-read">> => #{
-                <<"description">> =>
-                    <<"Read the current value of a PCR via `Esys_PCR_Read'.">>,
-                <<"request">> => #{
-                    <<"pcr">> => <<"Integer PCR index (required).">>
-                }
-            },
-            <<"attestation">> => #{
-                <<"description">> =>
-                    <<"Produce a complete LapEE attestation envelope. Contains "
-                      "EK cert chain, AK pubkey, TPM2_Quote, runtime event "
-                      "log, node message, and the attested chain of trust the "
-                      "LapEE verifier checks.">>,
-                <<"request">> => #{
-                    <<"pcrs">> => <<"Optional PCR selection.">>,
-                    <<"nonce">> =>
-                        <<"Optional nonce. Typical usage: consumer provides "
-                          "a random nonce to prove freshness.">>
-                }
-            },
-            <<"boot-attestation">> => #{
-                <<"description">> =>
-                    <<"Produce or return the singleton boot attestation. "
-                      "The first call gathers ~system@1.0/all and "
-                      "~meta@1.0/info, extends PCR 15 with their combined "
-                      "subject ID before AK creation, creates an AK whose "
-                      "authPolicy includes PCR 15, quotes the selected PCRs, "
-                      "signs the full message, stores it by signed ID, and "
-                      "links the stable boot-attestation path to that "
-                      "signed ID.">>
-            },
-            <<"credential-subject">> => #{
-                <<"description">> =>
-                    <<"Return the public TPM material needed for "
-                      "TPM2_MakeCredential: EK certificate and public area, "
-                      "AK public area, and the AK Name.">>
-            },
-            <<"activate-credential">> => #{
-                <<"description">> =>
-                    <<"Run TPM2_ActivateCredential with the node's loaded AK "
-                      "and EK. Used by verifiers and zone admission to "
-                      "prove the AK and EK are resident in the same TPM. The "
-                      "HTTP endpoint returns a MAC proof, not the recovered "
-                      "secret; local callers that need the secret use the "
-                      "Erlang activate_credential_secret/2 API.">>,
-                <<"request">> => #{
-                    <<"credential-blob">> =>
-                        <<"base64url TPM2B_ID_OBJECT from MakeCredential">>,
-                    <<"secret">> =>
-                        <<"base64url TPM2B_ENCRYPTED_SECRET from "
-                          "MakeCredential">>
-                }
-            },
-            <<"verify-peer">> => #{
-                <<"description">> =>
-                    <<"Fetch a peer boot-attestation and credential subject, "
-                      "verify both the cached boot evidence and a fresh "
-                      "nonce-bound attestation, check EK certificate/public "
-                      "consistency, complete MakeCredential/ActivateCredential, "
-                      "then sign and cache a public peer-attestation "
-                      "containing the verified peer material, freshness proof, "
-                      "scope, validity, and activation transcript.">>,
-                <<"request">> => #{
-                    <<"url">> => <<"Peer base URL, e.g. http://HOST:8734">>,
-                    <<"peer-attestation-ttl-seconds">> =>
-                        <<"Optional positive integer validity window. If "
-                          "absent, the signed attestation has no upper expiry.">>
-                }
-            }
+    {ok, #{
+        <<"status">> => 200,
+        <<"body">> => #{
+            <<"description">> => <<"TPM 2.0 measurement engine">>,
+            <<"version">> => <<"2.0a">>,
+            <<"exports">> => maps:get(exports, info(#{}), [])
         }
-    },
-    {ok, #{<<"status">> => 200, <<"body">> => InfoBody}}.
+    }}.
 
 %%%============================================================================
-%%% extend/3 -- the load-bearing hook entry point
 %%%============================================================================
 
-%% @doc Extend a PCR with the hash of a subject.
-%%
-%% Subject resolution order (highest precedence first):
-%%   1. `Req/subject' -- if set, use that value.
-%%   2. `Req/body'   -- the standard hook-payload location.
-%%   3. `Base'       -- fallback when neither is set.
-%%
-%% Digest derivation:
-%%   * If the resolved subject is a binary of exactly 32 bytes, it is
-%%     used as the SHA-256 digest directly.
-%%   * If it is any other binary, SHA-256 is applied.
-%%   * If it is a map (HyperBEAM message), the transport-independent
-%%     measurement subject ID is used. This commits to the semantic subject
-%%     while excluding nested commitment transport metadata.
-%%
-%% The PCR is taken from `Req/pcr' (integer or integer-binary), defaulting
-%% to 15 -- the LapEE node-identity PCR.
-%%
-%% On success, also records a named event in the runtime event log via
-%% `lapee_tpm_nif:append_event/2'. The event log is flushed into every
-%% subsequent attestation envelope so a verifier can replay the chain.
 extend(Base, Req, Opts) ->
     Subject = resolve_subject(Base, Req, Opts),
     Pcr = resolve_pcr(Req, ?NODE_IDENTITY_PCR, Opts),
@@ -241,11 +73,6 @@ extend(Base, Req, Opts) ->
         ok ->
             case nif_pcr_extend(Pcr, Digest) of
                 ok ->
-                    %% Remember the subject (and its id) so that a later
-                    %% `attestation' call can embed the same node message the
-                    %% TPM committed to. The hook-dispatch path does not thread
-                    %% the extended subject through `Opts', so we use
-                    %% `persistent_term' -- same pattern as the event log.
                     case Subject of
                         S when is_map(S), Pcr =:= ?NODE_IDENTITY_PCR ->
                             persistent_term:put(
@@ -306,24 +133,6 @@ pcr_extend_allowed(?NODE_IDENTITY_PCR) ->
 pcr_extend_allowed(_Pcr) ->
     ok.
 
-%% @doc Extend PCR 15 with sha256(TCG event log) and record an
-%% `EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT' runtime event.
-%%
-%% The paper's section AO-Core Continuity says:
-%%
-%% Mechanism: read `/sys/kernel/security/tpm0/binary_bios_measurements'
-%% (the firmware-side TCG log), hash it with SHA-256, extend PCR 15
-%% with that digest, and record a runtime event describing the
-%% extension. This runs before AK creation when the log is available, so
-%% the AK authPolicy can bind the same PCR 15 trajectory the verifier
-%% later replays. The runtime-event-log entry carries the same digest so
-%% the verifier can recompute sha256(envelope.tcg-event-log) and confirm
-%% byte-for-byte match.
-%%
-%% If the log is not available from /sys (e.g. QEMU TCG without
-%% vTPM event-log passthrough), the extension is SKIPPED cleanly:
-%% paper P5-ext is a real-hardware property. Returns ok either
-%% way so init_chain continues.
 extend_with_tcg_event_log_tip() ->
     case read_tcg_event_log() of
         Bin when is_binary(Bin), byte_size(Bin) > 0 ->
@@ -358,25 +167,12 @@ extend_with_tcg_event_log_tip() ->
                 {error, _} = E -> E
             end;
         _ ->
-            %% Log not readable -- firmware doesn't expose it
-            %% (QEMU without vTPM event-log passthrough is the
-            %% typical case). Skip cleanly; a verifier will see
-            %% absent EV_HYPERBEAM_TCG_LOG_TIP_COMMITMENT on the
-            %% runtime log and grade accordingly (info on stub
-            %% boots, warn on real-hardware envelopes).
             ok
     end.
 
 %%%============================================================================
-%%% quote/3
 %%%============================================================================
 
-%% @doc Request a TPM2_Quote over the given PCR selection.
-%%
-%% Returns the raw TPMS_ATTEST bytes (`quoted'), the AK signature,
-%% the current PCR values, and the AK public key. All binary-valued
-%% fields are base64url-encoded per AO-Core convention
-%% (`hb_util:encode/1' / `hb_util:human_id/1').
 quote(_Base, Req, Opts) ->
     Pcrs = resolve_pcr_list(Req, ?DEFAULT_QUOTE_PCRS, Opts),
     Nonce = resolve_nonce(Req),
@@ -399,7 +195,6 @@ quote(_Base, Req, Opts) ->
     end.
 
 %%%============================================================================
-%%% pcr-read/3
 %%%============================================================================
 
 pcr_read(_Base, Req, Opts) ->
@@ -418,30 +213,8 @@ pcr_read(_Base, Req, Opts) ->
     end.
 
 %%%============================================================================
-%%% verify/3 -- HB-side attestation verifier
 %%%============================================================================
 
-%% @doc Verify an attestation envelope end-to-end in-process. This is
-%% what one HyperBEAM node uses to verify a peer, intended to be
-%% reached via:
-%%
-%%   ~relay@1.0/call&relay-path="http://PEER:PORT/~tpm@2.0a/attestation"
-%%       /verify~tpm@2.0a
-%%
-%% `Base' is the attestation envelope (same shape emitted by
-%% `attestation/3'). Options in `Req':
-%%   trusted-ca : base64url PEM bytes of TPM vendor root CAs to trust.
-%%                Ignored unless `lapee-allow-request-trusted-ca' is
-%%                explicitly enabled in node config. Production LapEE
-%%                nodes default to the measured-in
-%%                `priv/tpm-interpret/root-cas/' bundle, or to
-%%                `lapee-tpm-ca-cert' in `Opts' if configured.
-%%
-%% Return shape (always 200 -- the `verified' bool is the real verdict):
-%%   verified : boolean
-%%   verdict  : "accepted" | "rejected"
-%%   checks   : list of per-check reports in stable order
-%%   Each check: #{ name, ok, detail }
 verify(Base, Req, Opts) ->
     Envelope = normalise_attestation(resolve_envelope(Base, Req, Opts), Opts),
     {TrustedCaPem, CaSource} = resolve_trusted_ca_with_source(Req, Opts),
@@ -464,15 +237,6 @@ verify(Base, Req, Opts) ->
         safely_run(fun() -> chk_node_msg_shape(Envelope) end,
                    <<"Embedded node_message + id present and correct shape">>,
                    <<"core">>),
-        %% `firmware TCG event log replay' is INFORMATIONAL: the
-        %% paper's trust anchor is PCR 15 (the LapEE node identity),
-        %% not the firmware-emitted PCRs 0-14. SeaBIOS under QEMU
-        %% legitimately emits an incomplete log that does not
-        %% fully replay into the quoted PCR 1; that's a SeaBIOS
-        %% quirk, not a LapEE security problem. The check runs,
-        %% surfaces its result in `checks', but does NOT gate
-        %% `verified' -- policy engines that want strict firmware-
-        %% log consistency can key off the severity field.
         safely_run(fun() -> chk_tcg_event_log_replay(Envelope) end,
                    <<"Firmware TCG event log replays to quoted PCRs 0-14">>,
                    <<"informational">>)
@@ -491,10 +255,6 @@ verify(Base, Req, Opts) ->
             <<"verified">> => AllOk,
             <<"verdict">> => Verdict,
             <<"checks">> => Checks,
-            %% Tells callers which trust anchor was actually used.
-            %% Helpful when debugging trust-anchor provenance.
-            %% Production nodes should normally report
-            %% `internal-bundle'.
             <<"trust-anchor-source">> => CaSource
         }
     }}.
@@ -567,9 +327,6 @@ normalise_attestation_body(Envelope, Opts) when is_map(Envelope) ->
         _ -> Envelope
     end.
 
-%% Wrap any check in a try/catch so one malformed field doesn't take
-%% down the whole verifier -- the relevant check just becomes `ok=false,
-%% detail=exception.
 safely_run(F, Name, Severity) ->
     try F() of
         {ok, Detail}    -> #{ <<"name">> => Name,
@@ -588,20 +345,6 @@ safely_run(F, Name, Severity) ->
                <<"severity">> => Severity }
     end.
 
-%% Find the attestation envelope in the resolution chain we were
-%% handed. In order:
-%%   1. Req/envelope, if explicitly provided by the caller
-%%   2. If Base itself carries `lapee_attestation_version', it IS the
-%%      envelope (direct call)
-%%   3. If Base has a `body' key whose value has
-%%      `lapee_attestation_version', unwrap it (the common case:
-%%      verify is invoked as the second segment of
-%%      `.../attestation/verify~tpm@2.0a' and Base is the response
-%%      message produced by `attestation/3').
-%% Reviewer pass 10 fuzzer: guard on `is_map(Base)' so a
-%% non-map Base (list, binary, atom) does not crash
-%% `hb_maps:get(<<"body">>, Base, ...)' with `{badmap, Base}'.
-%% Kept in lock-step with `dev_tpm_interpret:resolve_envelope/3'.
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
         E when is_map(E) -> E;
@@ -624,10 +367,6 @@ is_envelope(M) when is_map(M) ->
     hb_maps:get(<<"type">>, M, undefined, #{}) =:= <<"lapee-measurement">>;
 is_envelope(_) ->
     false.
-
-resolve_trusted_ca(Req, Opts) ->
-    {Pem, _Source} = resolve_trusted_ca_with_source(Req, Opts),
-    Pem.
 
 resolve_trusted_ca_with_source(Req, Opts) ->
     case {allow_request_trusted_ca(Opts),
@@ -708,18 +447,6 @@ pem_with_trailing_newline(Pem) ->
         _ -> <<Pem/binary, "\n">>
     end.
 
-%%---- check 1: EK cert chain --------------------------------------------
-%%
-%% pkix_path_validation drives a verify_fun when it encounters events
-%% it can't resolve unilaterally -- most legitimately, unknown TCG
-%% extensions on EK certs (tpmManufacturer / tpmModel / tpmVersion /
-%% tpmSpecification OIDs, which stock OTP doesn't know). We allow
-%% ONLY those extension events through; every {bad_cert, _} event
-%% (unknown_ca, self-signed, expired, name-mismatch, etc.) is a hard
-%% reject. Returning {valid, State} for everything -- the original
-%% implementation -- was a rubber stamp: pkix would surface
-%% `{bad_cert, selfsigned_peer}` for a rogue EK and the callback
-%% would tell it "that's fine", defeating the whole chain check.
 chk_ek_chain(Envelope, TrustedCaPem, Opts) ->
     EkPem = hb_maps:get(<<"ek-cert-pem">>, Envelope, <<>>, Opts),
     ChainPem = hb_maps:get(<<"ek-cert-chain-pem">>, Envelope, <<>>, Opts),
@@ -751,12 +478,6 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
     case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
         {ok, _} = Ok -> Ok;
         {error, Reasons} ->
-            %% Local roots + envelope-supplied intermediates didn't
-            %% close the chain. Try AIA caIssuers walking from the
-            %% leaf upward (e.g. Intel ODCA's per-SoC issuing CAs are
-            %% only published at tsci.intel.com and are not part of
-            %% the keylime corpus). Disabled-by-config short-circuits
-            %% to the original error.
             case lapee_aia:enabled(Opts) of
                 false ->
                     {error, render_chain_failure(Reasons, TrustedDers,
@@ -805,12 +526,6 @@ render_chain_failure(Reasons, TrustedDers, AiaNote) ->
         "chain invalid for all ~B trusted anchor candidate(s) (~s): ~p",
         [length(TrustedDers), AiaNote, Reasons])).
 
-%% Walk the leaf -> known-intermediates list from the bottom up,
-%% asking each cert's AIA extension for its issuer URL and fetching
-%% any cert that isn't already in the candidate set. Stops when the
-%% next cert's issuer matches a TrustedDer subject, when AIA returns
-%% nothing fetchable, or after `?AIA_MAX_DEPTH' hops -- whichever
-%% comes first.
 -define(AIA_MAX_DEPTH, 5).
 
 extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
@@ -820,8 +535,6 @@ extend_chain_via_aia(EkDer, PeerChainDers, TrustedDers, Opts) ->
 aia_walk(_Trail, AccChain, _Trusted, _Opts, 0, Fetches) ->
     summarise_aia_walk(AccChain, Fetches, <<"max-depth reached">>);
 aia_walk(Trail, AccChain, Trusted, Opts, Budget, Fetches) ->
-    %% Use the most-recently-added cert in the trail as the "current"
-    %% subject whose issuer we'd like to find next.
     Tip = hd(lists:reverse(Trail)),
     case aia_fetch_for(Tip, AccChain, Trusted, Opts) of
         skip ->
@@ -846,11 +559,6 @@ summarise_aia_walk(AccChain, Fetches, _Why) ->
         "fetched ~B intermediate(s)", [length(Fetches)])),
     {extended, AccChain, Summary}.
 
-%% For a given subject DER, decide whether AIA fetch is needed and, if
-%% so, fetch and return the issuer. Returns:
-%%   skip                         - issuer matches a known trusted root
-%%   {fetched, IssuerDer, Url}    - fetched a new intermediate
-%%   {error, Why}                 - AIA had no URL or fetch failed.
 aia_fetch_for(Der, AccChain, Trusted, Opts) ->
     try public_key:pkix_decode_cert(Der, otp) of
         Otp ->
@@ -975,16 +683,6 @@ ek_cert_path_orders(EkDer, Intermediates) ->
         [EkDer | Intermediates]
     ]).
 
-%% Produce a targeted error message for common pkix_path_validation
-%% failures. The most confusing one in practice is `{bad_cert,
-%% invalid_signature}' when the trusted CA's *subject* matches the
-%% EK's *issuer* (same CN, same DN) but the CA's public key is from
-%% a different generation (e.g. per-boot test CA that got out of
-%% sync with the peer's current boot). That case is indistinguishable
-%% from a rogue-CA attack at the pkix level, but we can make it
-%% diagnosable by comparing the RDNs and flagging "name match, key
-%% mismatch" so an operator knows whether to refresh their trust
-%% anchor vs. investigate tampering.
 diagnose_chain_failure(Why, EkDer, CaDer) ->
     Generic = iolist_to_binary(io_lib:format("chain invalid: ~p", [Why])),
     try
@@ -1015,21 +713,6 @@ diagnose_chain_failure(Why, EkDer, CaDer) ->
     catch _:_ -> Generic
     end.
 
-%% Verify-fun for the EK cert chain validation. Pulled out so it can
-%% be unit-tested in isolation -- the previous implementation
-%% returned `{valid, State}' for every event and that rubber-stamped
-%% `{bad_cert, selfsigned_peer}', `{bad_cert, unknown_ca}' et al.
-%%
-%% Mirrors `dev_tpm_interpret:ek_verify_fun/3' semantics (kept in
-%% sync deliberately; a divergence here would mean `dev_tpm2:verify/3'
-%% accepts a chain the parser-side `validate_ek_chain/3' rejects, or
-%% vice-versa). TCG EK-profile OIDs are metadata, so unknown critical
-%% and non-critical extensions under `2.23.133.*' are accepted while
-%% the cryptographic issuer/signature/path checks still run normally.
-%% TPM EK leaf certificates also legitimately carry keyEncipherment
-%% key usage plus the TCG EK EKU rather than the generic TLS leaf
-%% usages OTP expects; accept `invalid_key_usage' only for that exact
-%% EK-leaf shape.
 ek_chain_verify_fun() ->
     {fun ek_chain_verify_fun/3, []}.
 
@@ -1052,8 +735,6 @@ ek_chain_verify_fun(_, {bad_cert, Reason}, _UserState) ->
     {fail, Reason};
 ek_chain_verify_fun(_, {extension, #'Extension'{extnID = ExtId}},
                     UserState) ->
-    %% Called for each non-critical unknown extension. Accept any
-    %% OID under the TCG arc 2.23.133.x (EK metadata attributes).
     case is_tcg_oid(ExtId) of
         true -> {valid, UserState};
         false -> {unknown, UserState}
@@ -1083,7 +764,6 @@ is_tcg_oid(Oid) when is_tuple(Oid) ->
 is_tcg_oid(_) ->
     false.
 
-%%---- check 2: quote signature + extraData + pcrDigest -----------------
 chk_quote(Envelope, ExpectedNonce) ->
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
     AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
@@ -1099,7 +779,6 @@ chk_quote(Envelope, ExpectedNonce) ->
         true ->
             {error, <<"quote nonce does not match verifier challenge">>};
         false ->
-            %% Signature: RSA-PSS with SHA-256, salt 32 (matches the NIF).
             case decode_pem_rsa_pub(AkPem) of
                 {ok, RSAPub} ->
                     case rsa_pss:verify(Quoted, sha256, Sig, RSAPub) of
@@ -1117,9 +796,6 @@ chk_quote(Envelope, ExpectedNonce) ->
             end
     end.
 
-%% Parse TPMS_ATTEST: magic(4) + type(2) + qualifiedSigner(TPM2B) +
-%% extraData(TPM2B) + clockInfo(17) + firmwareVersion(8) +
-%% attested(TPMS_QUOTE_INFO = TPML_PCR_SELECTION + TPM2B_DIGEST).
 chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
                 ExpectedQualifiedSigner) ->
     try
@@ -1127,7 +803,6 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
           Rest0/binary>> = Quoted,
         {QualifiedSigner, Rest1} = tpm2b(Rest0),
         {ExtraData, Rest2}       = tpm2b(Rest1),
-        %% clockInfo (17) + firmwareVersion (8) = 25 bytes
         <<_ClockFwInfo:25/binary, NSel:32/unsigned-big,
           SelAndDigest/binary>> = Rest2,
         {SignedSelections, RestAfterSel} =
@@ -1145,8 +820,6 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
                                <<"TPMS_ATTEST PCR selection does not match "
                                  "reported pcr-selection">>})
                 end,
-                %% Verify pcrDigest = sha256(pcr_values concatenated in
-                %% the signed TPM PCR selection order.
                 Computed = compute_pcr_digest(SignedIndices, PcrMap),
                 case Computed of
                     PcrDigest ->
@@ -1231,7 +904,6 @@ compute_pcr_digest(Indices, PcrMap) ->
             <<>>, Indices),
     crypto:hash(sha256, Concat).
 
-%%---- check 3: AK authPolicy binds the AK to quoted PCRs ---------------
 chk_ak_policy_bound(Envelope) ->
     AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, #{})),
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
@@ -1301,16 +973,6 @@ ak_policy_digest_result(Pcrs, PcrMap) ->
         _:_ -> invalid
     end.
 
-%%---- check 3: event-log replay matches quoted PCR 15 ------------------
-%%
-%% Require at least one PCR-15 event. With zero events, `Replayed'
-%% would be the all-zero sentinel; if an attestation also reported
-%% PCR 15 as all-zero, the check would vacuously pass. `chk_binding'
-%% separately catches that shape, but we make the intent explicit
-%% here too: a LapEE node MUST have extended PCR 15 at least once
-%% (via the enforced `on.start' hook), so an envelope with zero
-%% PCR-15 events is not a valid LapEE attestation regardless of the
-%% quoted PCR value.
 chk_event_log_replay(Envelope) ->
     Events = [E || E <- hb_maps:get(<<"runtime-event-log">>, Envelope, [],
                                     #{}),
@@ -1351,7 +1013,6 @@ chk_event_log_replay(Envelope) ->
 int_pcr(V) when is_integer(V) -> V;
 int_pcr(V) when is_binary(V)  -> binary_to_integer(V).
 
-%%---- check 4: PCR 15 event commits to node_message_id -----------------
 chk_binding(Envelope) ->
     ExpectedId =
         hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
@@ -1363,17 +1024,12 @@ chk_binding(Envelope) ->
         {undefined, _} -> {error, <<"no node_message_id in envelope">>};
         {_, []}        -> {error, <<"no PCR-15 events">>};
         {Id, _} ->
-            %% node_message_id is a base64url human_id (43 chars).
-            %% Each event digest is also base64url. Compare the decoded
-            %% raw bytes so encoding quirks don't matter.
             IdRaw =
                 try hb_util:decode(Id)
                 catch _:_ -> <<>>
                 end,
             case byte_size(IdRaw) of
                 32 ->
-                    %% Real 32-byte id; look for an event whose raw
-                    %% digest matches byte-for-byte.
                     Match = [E || E <- Events,
                                   hb_util:decode(
                                     hb_maps:get(<<"digest">>, E, <<>>, #{}))
@@ -1390,42 +1046,12 @@ chk_binding(Envelope) ->
                                 "match at seq=~p", [Seq]))}
                     end;
                 Size ->
-                    %% Empty / short / unparseable id. Refuse to
-                    %% consider any event a match -- otherwise an
-                    %% envelope with `node_message_id = ""' and an
-                    %% event with `digest = ""' would match the empty
-                    %% binary trivially.
                     {error, iolist_to_binary(io_lib:format(
                         "node_message_id decodes to ~B bytes, expected 32",
                         [Size]))}
             end
     end.
 
-%%---- check 6: TCG event log replays to quoted PCRs 0-14 --------------
-%%
-%% The firmware-side TCG event log (tcg_event_log in the envelope) is
-%% the source of truth for PCR 0-14 state. Every event declares which
-%% PCR it was extended into + the digest it extended with. Replaying
-%% from zero should reconstruct exactly the PCR values the TPM
-%% reported in the quote.
-%%
-%% If an attacker presented an altered envelope (e.g. swapped in a
-%% different firmware measurement but kept the quote), the replay
-%% would diverge from the quoted value, rejecting.
-%%
-%% Permissive cases (not hard-rejects):
-%%   - Envelope has no tcg_event_log (byte_size 0) -- can happen with
-%%     QEMU SeaBIOS test guests where SeaBIOS emits only a minimal
-%%     log. In this case there are no per-PCR events to replay, so
-%%     the check is skipped with {ok, <<"no firmware log">>}. Callers
-%%     who require a firmware log should refuse this verdict.
-%%   - Event log parses but produces an error marker -- replay what
-%%     we got anyway, but flag partial.
-%%
-%% Hard rejects:
-%%   - For any PCR in 0-14 where the event log DOES have events,
-%%     the reconstructed value MUST match the quoted value. Mismatch
-%%     = fail.
 chk_tcg_event_log_replay(Envelope) ->
     LogB64 = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, #{}),
     LogBin = case LogB64 of
@@ -1457,17 +1083,10 @@ replay_and_compare([], _QuotedPcrs, Count, Mismatches) ->
                 [Mismatches]))}
     end;
 replay_and_compare([Ev | Rest], QuotedPcrs, Count, Mismatches) ->
-    %% EV_NO_ACTION is explicitly NOT extended (the spec says so).
     case maps:get(<<"event-type-code">>, Ev, 0) of
         3 ->  %% EV_NO_ACTION
             replay_and_compare(Rest, QuotedPcrs, Count, Mismatches);
         _ ->
-            %% Fold this event's SHA-256 digest into the running
-            %% reconstruction for its PCR, then (lazily) check at
-            %% the end by asking whether the reconstructed PCR
-            %% matches the quoted PCR. Accumulate per-PCR state
-            %% in the process dictionary keyed by the PCR number;
-            %% this avoids threading yet another state map.
             Pcr = maps:get(<<"pcr">>, Ev, -1),
             case in_range(Pcr) of
                 false ->
@@ -1498,11 +1117,6 @@ replay_and_compare([Ev | Rest], QuotedPcrs, Count, Mismatches) ->
                                                        Mismatches)
                             end;
                         _ ->
-                            %% No SHA-256 digest on this event --
-                            %% rare in modern logs. Skip without
-                            %% counting as a mismatch; the overall
-                            %% PCR reconstruction will reveal any
-                            %% problem at the end.
                             replay_and_compare(Rest, QuotedPcrs,
                                                Count + 1, Mismatches)
                     end
@@ -1512,10 +1126,6 @@ replay_and_compare([Ev | Rest], QuotedPcrs, Count, Mismatches) ->
 in_range(P) when is_integer(P), P >= 0, P =< 14 -> true;
 in_range(_) -> false.
 
-%% After replaying every event, compare each per-PCR
-%% reconstruction against the quoted value. Only PCRs that
-%% actually saw an event are compared -- an all-zero PCR with no
-%% events is consistent.
 collect_mismatches(QuotedPcrs, InitMismatches) ->
     lists:foldl(
         fun(P, Acc) ->
@@ -1537,7 +1147,6 @@ collect_mismatches(QuotedPcrs, InitMismatches) ->
         InitMismatches,
         lists:seq(0, 14)).
 
-%%---- check 5: node_message is present + id shape is right ------------
 chk_node_msg_shape(Envelope) ->
     Nm = hb_maps:get(<<"node-message">>, Envelope, undefined, #{}),
     Id = hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
@@ -1578,13 +1187,6 @@ decode_pem_certs(Pem) when is_binary(Pem) ->
 
 decode_pem_rsa_pub(<<>>) -> {error, empty};
 decode_pem_rsa_pub(Pem) when is_binary(Pem) ->
-    %% Reviewer pass 13 (crypto primitives): removed a dead
-    %% `#'SubjectPublicKeyInfo'{}' fallback that called
-    %% `public_key:pkix_decode_cert(Spki, otp)' on a record --
-    %% `pkix_decode_cert' expects DER bytes, so that clause was
-    %% broken as well as unreachable (the NIF always emits SPKI
-    %% PEM which OTP's `pem_entry_decode/1' renders directly as
-    %% `#'RSAPublicKey'{}').
     case public_key:pem_decode(Pem) of
         [Entry | _] ->
             try
@@ -1599,58 +1201,12 @@ decode_pem_rsa_pub(Pem) when is_binary(Pem) ->
     end.
 
 %%%============================================================================
-%%% attestation/3 -- the full envelope
 %%%============================================================================
 
-%% @doc Produce a full LapEE attestation envelope.
-%%
-%% The envelope is a plain AO-Core message. Binary-like fields are
-%% base64url-encoded via `hb_util:encode/1' (same convention as every
-%% other hash/id in AO-Core -- `hb_message:id/3' returns a base64url
-%% binary, `hb_util:human_id/1' does the same, etc.). To receive the
-%% envelope inline over HTTP, pass `accept: application/json@1.0' +
-%% `accept-bundle: true' (or the equivalent content-negotiation via
-%% the `accept' query-string key); the normal codec dispatch in
-%% `hb_http' then uses `dev_codec_json' with `bundle => true' and
-%% the entire envelope arrives as one JSON body.
-%%
-%% Envelope shape (v0.3, base64url convention):
-%%   lapee_attestation_version : <<"0.3">>
-%%   issued_at_unix            : integer
-%%   ek_cert_pem               : binary (PEM text)
-%%   ak_pub_pem                : binary (PEM text)
-%%   tpm_quote                 :
-%%     pcr_selection  : [integer]         % PCR indices the quote covers
-%%     nonce          : base64url(raw_nonce_bytes)
-%%     quoted         : base64url(TPMS_ATTEST bytes)
-%%     signature      : base64url(TPMT_SIGNATURE bytes)
-%%     pcr_values     : #{ integer_pcr_as_binary => base64url(raw_pcr) }
-%%   runtime_event_log         : [ #{ pcr :: integer,
-%%                                    digest :: base64url(raw_hash),
-%%                                    event_type :: binary, ... } ]
-%%   node_message              : the AO-Core message that was extended
-%%                               into PCR 15 at boot
-%%   node_message_id           : base64url(hb_util:native_id/1 of
-%%                               hb_message:id(node_message, all, Opts))
-%%   wallet_address            : base64url human id of the operator
-%% Read the kernel's binary TCG event log. Canonical location is
-%% `/sys/kernel/security/tpm0/binary_bios_measurements' (requires
-%% securityfs mounted, kernel TPM driver loaded). Falls back to
-%% `/sys/kernel/security/tpm1/...' (some Linux configs index their
-%% TPM at tpm1). Returns empty binary when the log isn't
-%% accessible -- either (a) no TPM driver, (b) securityfs not
-%% mounted, or (c) host has no firmware-measured boot (which is
-%% true for QEMU SeaBIOS test guests running under swtpm, where
-%% SeaBIOS emits only a minimal log). An empty TCG log doesn't
-%% break the attestation -- interpretation callers just see no
-%% firmware events to reason about.
 read_tcg_event_log() ->
     {Bin, _Source} = read_tcg_event_log_with_source(),
     Bin.
 
-%% Variant that also returns the path we read from (or
-%% `<<"unavailable">>`). Used by `tcg_event_log/3` so the
-%% client can see which /sys path served the bytes.
 read_tcg_event_log_with_source() ->
     Paths = [
         <<"/sys/kernel/security/tpm0/binary_bios_measurements">>,
@@ -1668,23 +1224,10 @@ read_first_available_with_source([Path | Rest]) ->
             read_first_available_with_source(Rest)
     end.
 
-%% Classify the raw TCG event log bytes without a full parse.
-%% Used to stamp `tcg-event-log-format' on the attestation
-%% envelope so a verifier can branch without re-walking the
-%% whole log. The same heuristic is mirrored in
-%% `dev_tpm_interpret:detect_log_format/1' for the post-parse
-%% path.
 infer_log_format(<<>>) -> <<"empty">>;
 infer_log_format(Bin) when byte_size(Bin) < 32 ->
     <<"unknown">>;
 infer_log_format(Bin) ->
-    %% Crypto-agile logs begin with a TCG_PCR_EVENT (legacy
-    %% 1.2 shape: pcr u32 + event-type u32 + 20-byte SHA-1 +
-    %% 4-byte event-data-size + event-data), where:
-    %%   * event-type = 3 (EV_NO_ACTION)
-    %%   * event-data starts with ASCII "Spec ID Event03".
-    %% TDX CCEL logs differ in that the first record is on
-    %% PCR != 0 (MRTD lives on PCR 1).
     <<Pcr:32/little, EvType:32/little,
       _Sha1:20/binary, DataSize:32/little, Rest/binary>> = Bin,
     IsSpecId = EvType =:= 3 andalso DataSize >= 15 andalso
@@ -1699,7 +1242,6 @@ infer_log_format(Bin) ->
     end.
 
 %%%============================================================================
-%%% boot-attestation/3
 %%%============================================================================
 
 boot_attestation(_Base, _Req, Opts) ->
@@ -1869,151 +1411,6 @@ credential_activation_public_body(CertInfo, Credential, Opts) ->
                     CertInfo, Credential, AkName, Now))
     }.
 
-verify_peer(_Base, Req, Opts) ->
-    case peer_url(Req, Opts) of
-        undefined ->
-            error_resp(400, <<"missing_peer_url">>,
-                       <<"verify-peer requires `url' or `peer'.">>);
-        Url0 ->
-            Url = strip_trailing_slash(Url0),
-            case verify_peer_url(Url, Req, Opts) of
-                {ok, Signed} ->
-                    {ok, #{<<"status">> => 200, <<"body">> => Signed}};
-                {error, #{<<"status">> := _} = Body} ->
-                    {ok, Body};
-                {error, Reason} ->
-                    error_resp(502, <<"verify_peer_failed">>, Reason)
-            end
-    end.
-
-verify_peer_url(Url, Req, Opts) ->
-    with_ok(
-        fun() ->
-            Boot0 = lapee_peer_http:get(
-                Url, <<"/~tpm@2.0a/boot-attestation">>, Opts),
-            Boot = resolve_subject_body(Boot0, Opts),
-            Subject0 =
-                lapee_peer_http:get(
-                    Url, <<"/~tpm@2.0a/credential-subject">>, Opts),
-            Subject = resolve_subject_body(Subject0, Opts),
-            FreshNonce = crypto:strong_rand_bytes(32),
-            Fresh0 = lapee_peer_http:get(
-                Url, fresh_attestation_path(FreshNonce), Opts),
-            Fresh = resolve_subject_body(Fresh0, Opts),
-            BootEnv = normalise_attestation(Boot, Opts),
-            FreshEnv = normalise_attestation(Fresh, Opts),
-            BootVerifyReq =
-                (maps:remove(<<"nonce">>, Req))#{<<"envelope">> => BootEnv},
-            {ok, #{<<"body">> := BootVerifyBody}} =
-                verify(BootEnv, BootVerifyReq, Opts),
-            case hb_maps:get(<<"verified">>, BootVerifyBody, false, #{}) of
-                true -> ok;
-                false ->
-                    throw({boot_attestation_error,
-                           #{<<"peer-boot-verification">> => BootVerifyBody}})
-            end,
-            FreshVerifyReq = Req#{
-                <<"envelope">> => FreshEnv,
-                <<"nonce">> => hb_util:encode(FreshNonce)
-            },
-            {ok, #{<<"body">> := FreshVerifyBody}} =
-                verify(FreshEnv, FreshVerifyReq, Opts),
-            case hb_maps:get(<<"verified">>, FreshVerifyBody, false, #{}) of
-                true -> ok;
-                false ->
-                    throw({boot_attestation_error,
-                           #{<<"peer-fresh-verification">> =>
-                                FreshVerifyBody}})
-            end,
-            ok = ensure_attestation_subjects_match(BootEnv, FreshEnv),
-            ok = ensure_subject_matches_boot(Subject, BootEnv),
-            ok = ensure_subject_matches_boot(Subject, FreshEnv),
-            ok = ensure_ak_public_matches_subject(Subject),
-            ok = ensure_ek_public_matches_cert(Subject),
-            Challenge = crypto:strong_rand_bytes(32),
-            Credential = make_credential_for_subject(Subject, Challenge),
-            Activation = activate_peer_credential(Url, Credential, Opts),
-            ok = ensure_activation_secret(
-                Activation, Credential, Challenge, Subject, Opts),
-            Now = erlang:system_time(second),
-            Signed = hb_message:commit(
-                #{
-                    <<"type">> => <<"zone-peer-attestation">>,
-                    <<"version">> => <<"1.0">>,
-                    <<"issued-at-unix">> => Now,
-                    <<"validity">> =>
-                        peer_attestation_validity(Now, Req, Opts),
-                    <<"peer-url">> => Url,
-                    <<"peer-scope">> =>
-                        peer_attestation_scope(
-                            Url, Boot, Fresh, Subject, Req, Opts),
-                    <<"peer-boot-attestation">> => Boot,
-                    <<"peer-fresh-attestation">> => Fresh,
-                    <<"peer-credential-subject">> => Subject,
-                    <<"boot-verification">> => BootVerifyBody,
-                    <<"verification">> => FreshVerifyBody,
-                    <<"freshness">> => #{
-                        <<"verified">> => true,
-                        <<"nonce-sha256">> =>
-                            hb_util:encode(
-                                crypto:hash(sha256, FreshNonce)),
-                        <<"fresh-attestation-id">> =>
-                            attestation_id(Fresh, Opts)
-                    },
-                    <<"credential-activation">> => #{
-                        <<"verified">> => true,
-                        <<"challenge-sha256">> =>
-                            hb_util:encode(crypto:hash(sha256, Challenge)),
-                        <<"credential-blob">> =>
-                            hb_maps:get(<<"credential-blob">>,
-                                        Credential, <<>>, #{}),
-                        <<"secret">> =>
-                            hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
-                        <<"response">> => Activation
-                    }
-                },
-                Opts),
-            ok = store_peer_attestation(Signed, Opts),
-            Signed
-        end).
-
-peer_url(Req, Opts) ->
-    first_defined([
-        hb_maps:get(<<"url">>, Req, undefined, Opts),
-        hb_maps:get(<<"peer">>, Req, undefined, Opts)
-    ]).
-
-strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
-    case binary:last(B) of
-        $/ -> binary:part(B, 0, byte_size(B) - 1);
-        _  -> B
-    end;
-strip_trailing_slash(B) ->
-    B.
-
-resolve_subject_body(Msg, Opts) when is_map(Msg) ->
-    case {
-        hb_maps:get(<<"status">>, Msg, undefined, Opts),
-        hb_maps:get(<<"body">>, Msg, undefined, Opts)
-    } of
-        {Status, Body} when is_integer(Status), is_map(Body) ->
-            resolve_subject_body(Body, Opts);
-        {undefined, Body} when is_map(Body) ->
-            case {
-                hb_maps:get(<<"type">>, Msg, undefined, Opts),
-                hb_maps:get(<<"type">>, Body, undefined, Opts)
-            } of
-                {undefined, Type} when is_binary(Type) ->
-                    resolve_subject_body(Body, Opts);
-                _ ->
-                    Msg
-            end;
-        _ ->
-            Msg
-    end;
-resolve_subject_body(Other, _Opts) ->
-    Other.
-
 make_credential_for_subject(Subject, Secret) ->
     EkPublic = hb_util:decode(
         hb_maps:get(<<"ek-public">>, Subject, <<>>, #{})),
@@ -2150,84 +1547,21 @@ kdfa_blocks(Hash, Key, Label, ContextU, ContextV, Bits, Counter, Acc) ->
         Hash, Key, Label, ContextU, ContextV, Bits, Counter + 1,
         <<Acc/binary, Block/binary>>).
 
-activate_peer_credential(Url, Credential, Opts) ->
-    Req = #{
-        <<"credential-blob">> =>
-            hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
-        <<"secret">> =>
-            hb_maps:get(<<"secret">>, Credential, <<>>, #{})
-    },
-    resolve_subject_body(
-        lapee_peer_http:post(
-            Url,
-            <<"/~tpm@2.0a/activate-credential">>,
-            Req,
-            Opts),
-        Opts).
-
-fresh_attestation_path(Nonce) ->
-    <<"/~tpm@2.0a/attestation?nonce=",
-      (hb_util:encode(Nonce))/binary>>.
-
-peer_attestation_validity(Now, Req, Opts) ->
-    Base = #{<<"not-before-unix">> => Now},
-    case peer_attestation_ttl(Req, Opts) of
-        undefined -> Base;
-        TTL -> Base#{<<"expires-at-unix">> => Now + TTL}
-    end.
-
-peer_attestation_ttl(Req, Opts) ->
-    parse_positive_integer(first_defined([
-        hb_maps:get(
-            <<"peer-attestation-ttl-seconds">>, Req, undefined, Opts),
-        hb_opts:get(
-            <<"peer-attestation-ttl-seconds">>, undefined, Opts)
-    ])).
-
-peer_attestation_scope(Url, Boot, Fresh, Subject, Req, Opts) ->
-    #{
-        <<"peer-url">> => Url,
-        <<"boot-attestation-id">> => attestation_id(Boot, Opts),
-        <<"fresh-attestation-id">> => attestation_id(Fresh, Opts),
-        <<"ek-public-sha256">> =>
-            encoded_field_sha256(<<"ek-public">>, Subject, Opts),
-        <<"ak-name-sha256">> =>
-            encoded_field_sha256(<<"ak-name">>, Subject, Opts),
-        <<"consumer-scope">> =>
-            hb_maps:get(
-                <<"peer-attestation-scope">>, Req, null, Opts)
-    }.
-
-attestation_id(Attestation, Opts) when is_map(Attestation) ->
-    hb_message:id(Attestation, all, Opts);
-attestation_id(Other, _Opts) ->
-    hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
-
-encoded_field_sha256(Key, Msg, Opts) ->
-    hb_util:encode(
-        crypto:hash(
-            sha256,
-            safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
-
-encoded_message_sha256(Msg) ->
-    hb_util:encode(crypto:hash(sha256, term_to_binary(Msg))).
-
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);
 first_defined([V | _]) -> V.
 
-parse_positive_integer(undefined) ->
-    undefined;
-parse_positive_integer(N) when is_integer(N), N > 0 ->
-    N;
-parse_positive_integer(B) when is_binary(B) ->
-    try binary_to_integer(B) of
-        N when N > 0 -> N;
-        _ -> undefined
-    catch _:_ -> undefined
-    end;
-parse_positive_integer(_) ->
-    undefined.
+uniq_preserve_order(List) ->
+    lists:reverse(
+        element(2, lists:foldl(
+            fun(V, {Seen, Acc}) ->
+                case maps:is_key(V, Seen) of
+                    true -> {Seen, Acc};
+                    false -> {Seen#{V => true}, [V | Acc]}
+                end
+            end,
+            {#{}, []},
+            List))).
 
 ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
     ok = ensure_activation_envelope(Activation, Subject, Opts),
@@ -2326,178 +1660,10 @@ credential_activation_proof_context(Credential, AkName, IssuedAt) ->
       "credential-blob:", Blob/binary, "\n",
       "secret:", EncSecret/binary>>.
 
-ensure_subject_matches_boot(Subject, BootEnv) ->
-    Pairs = [
-        {<<"ek-public">>, <<"EK public area">>},
-        {<<"ek-pub-pem">>, <<"EK public PEM">>},
-        {<<"ek-name">>, <<"EK name">>},
-        {<<"ek-qualified-name">>, <<"EK qualified name">>},
-        {<<"ak-name">>, <<"AK name">>},
-        {<<"ak-public">>, <<"AK public area">>},
-        {<<"ak-pub-pem">>, <<"AK public PEM">>},
-        {<<"ak-qualified-name">>, <<"AK qualified name">>}
-    ],
-    lists:foreach(
-        fun({Key, Label}) ->
-            case {hb_maps:get(Key, Subject, <<>>, #{}),
-                  hb_maps:get(Key, BootEnv, <<>>, #{})} of
-                {V, V} when is_binary(V), byte_size(V) > 0 -> ok;
-                {V, V} when is_list(V), V =/= [] -> ok;
-                _ ->
-                    throw({boot_attestation_error,
-                           #{<<"credential-subject">> =>
-                                <<Label/binary,
-                                  " mismatch between subject and "
-                                  "boot-attestation">>}})
-            end
-        end,
-        Pairs),
-    ok.
-
-ensure_attestation_subjects_match(BootEnv, FreshEnv) ->
-    case {
-        hb_maps:get(<<"node-message-id">>, BootEnv, <<>>, #{}),
-        hb_maps:get(<<"node-message-id">>, FreshEnv, <<>>, #{})
-    } of
-        {ID, ID} when is_binary(ID), byte_size(ID) > 0 -> ok;
-        _ ->
-            throw({boot_attestation_error,
-                   #{<<"peer-attestation">> =>
-                        <<"boot and fresh attestation subjects differ">>}})
-    end.
-
-ensure_ak_public_matches_subject(Subject) ->
-    AkPublic = hb_maps:get(<<"ak-public">>, Subject, <<>>, #{}),
-    AkPem = hb_maps:get(<<"ak-pub-pem">>, Subject, <<>>, #{}),
-    AkName = safe_decode(hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
-    case {rsa_pub_from_tpm2b_public(safe_decode(AkPublic)),
-          decode_pem_rsa_pub(AkPem),
-          tpm2b_public_name(safe_decode(AkPublic))} of
-        {{ok, Rsa}, {ok, Rsa}, {ok, AkName}} when byte_size(AkName) > 0 ->
-            ok;
-        {{error, Why}, _, _} ->
-            throw({boot_attestation_error,
-                   #{<<"ak-public">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad AK TPMT_PUBLIC: ~p", [Why]))}});
-        {_, {error, Why}, _} ->
-            throw({boot_attestation_error,
-                   #{<<"ak-pub-pem">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad AK public PEM: ~p", [Why]))}});
-        {_, _, {error, Why}} ->
-            throw({boot_attestation_error,
-                   #{<<"ak-public">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad AK name derivation: ~p",
-                                          [Why]))}});
-        _ ->
-            throw({boot_attestation_error,
-                   #{<<"ak-public">> =>
-                        <<"AK TPMT_PUBLIC, public PEM, and name do not "
-                          "match">>}})
-    end.
-
-ensure_ek_public_matches_cert(Subject) ->
-    EkPublic = hb_maps:get(<<"ek-public">>, Subject, <<>>, #{}),
-    EkPem = hb_maps:get(<<"ek-pub-pem">>, Subject, <<>>, #{}),
-    CertPem = hb_maps:get(<<"ek-cert-pem">>, Subject, <<>>, #{}),
-    case {rsa_pub_from_tpm2b_public(safe_decode(EkPublic)),
-          decode_pem_rsa_pub(EkPem),
-          cert_rsa_pub(CertPem)} of
-        {{ok, Rsa}, {ok, Rsa}, {ok, Rsa}} -> ok;
-        {{error, Why}, _, _} ->
-            throw({boot_attestation_error,
-                   #{<<"ek-public">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad EK TPMT_PUBLIC: ~p", [Why]))}});
-        {_, {error, Why}, _} ->
-            throw({boot_attestation_error,
-                   #{<<"ek-pub-pem">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad EK public PEM: ~p", [Why]))}});
-        {_, _, {error, Why}} ->
-            throw({boot_attestation_error,
-                   #{<<"ek-cert-pem">> =>
-                        iolist_to_binary(
-                            io_lib:format("bad EK cert PEM: ~p", [Why]))}});
-        _ ->
-            throw({boot_attestation_error,
-                   #{<<"ek-public">> =>
-                        <<"EK TPMT_PUBLIC, public PEM, and certificate "
-                          "public key do not match">>}})
-    end.
-
-store_peer_attestation(Signed, Opts) ->
-    SignedID = hb_message:id(Signed, signed, Opts),
-    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
-    lists:foreach(
-        fun(Path) -> ok = hb_cache:link(SignedID, Path, Opts) end,
-        peer_attestation_cache_paths(Signed, SignedID, Opts)),
-    ok.
-
-peer_attestation_cache_paths(Signed, SignedID, Opts) ->
-    Prefix = ?PEER_ATTESTATION_PREFIX,
-    PeerURL = hb_maps:get(<<"peer-url">>, Signed, <<>>, Opts),
-    PeerURLHash = hb_util:encode(crypto:hash(sha256, PeerURL)),
-    Scope = hb_maps:get(<<"peer-scope">>, Signed, #{}, Opts),
-    EkHash = hb_maps:get(<<"ek-public-sha256">>, Scope, <<"unknown">>, Opts),
-    BootID =
-        hb_maps:get(<<"boot-attestation-id">>, Scope, <<"unknown">>, Opts),
-    ConsumerScopeHash =
-        encoded_message_sha256(
-            hb_maps:get(<<"consumer-scope">>, Scope, null, Opts)),
-    [
-        <<Prefix/binary, "/by-id/", SignedID/binary>>,
-        <<Prefix/binary,
-          "/by-peer-url-sha256/", PeerURLHash/binary,
-          "/by-ek-public-sha256/", EkHash/binary,
-          "/by-boot-attestation-id/", BootID/binary,
-          "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
-          "/", SignedID/binary>>
-    ].
-
-rsa_pub_from_tpm2b_public(Tpm2BPublic) ->
-    try
-        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
-        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
-          _Attrs:32/unsigned-big, Rest0/binary>> = Public,
-        {_AuthPolicy, Rest1} = tpm2b(Rest0),
-        Rest2 = skip_tpm2_public_symmetric(Rest1),
-        Rest3 = skip_tpm2_rsa_scheme(Rest2),
-        <<_KeyBits:16/unsigned-big, Exponent0:32/unsigned-big,
-          Rest4/binary>> = Rest3,
-        {ModulusBin, _Rest5} = tpm2b(Rest4),
-        Exponent =
-            case Exponent0 of
-                0 -> 65537;
-                _ -> Exponent0
-            end,
-        {ok, #'RSAPublicKey'{
-            modulus = binary:decode_unsigned(ModulusBin),
-            publicExponent = Exponent
-        }}
-    catch
-        _:_ -> {error, bad_tpm2b_public}
-    end.
-
 tpm2b_public_body(<<Size:16/unsigned-big, Public:Size/binary, _/binary>>) ->
     {ok, Public};
 tpm2b_public_body(_) ->
     {error, bad_tpm2b_public}.
-
-tpm2b_public_name(Tpm2BPublic) ->
-    case tpm2b_public_body(Tpm2BPublic) of
-        {ok, <<_Type:16/unsigned-big, NameAlg:16/unsigned-big, _/binary>>
-                = Public} ->
-            case tpm_name_hash_alg(NameAlg) of
-                {ok, HashAlg} ->
-                    {ok, <<NameAlg:16/unsigned-big,
-                           (crypto:hash(HashAlg, Public))/binary>>};
-                {error, _} = E -> E
-            end;
-        {error, _} = E -> E
-    end.
 
 tpm2b_public_auth_policy(Tpm2BPublic) ->
     try
@@ -2516,15 +1682,6 @@ tpm_name_hash_alg(16#000C) -> {ok, sha384};
 tpm_name_hash_alg(16#000D) -> {ok, sha512};
 tpm_name_hash_alg(Other) -> {error, {unsupported_name_alg, Other}}.
 
-skip_tpm2_public_symmetric(<<16#0006:16/unsigned-big,
-                             _KeyBits:16/unsigned-big,
-                             _Mode:16/unsigned-big, Rest/binary>>) ->
-    Rest;
-skip_tpm2_public_symmetric(<<16#0010:16/unsigned-big, Rest/binary>>) ->
-    Rest;
-skip_tpm2_public_symmetric(_) ->
-    throw(bad_tpm2b_public_symmetric).
-
 skip_tpm2_rsa_scheme(<<16#0010:16/unsigned-big, Rest/binary>>) ->
     Rest;
 skip_tpm2_rsa_scheme(<<_Scheme:16/unsigned-big,
@@ -2532,22 +1689,6 @@ skip_tpm2_rsa_scheme(<<_Scheme:16/unsigned-big,
     Rest;
 skip_tpm2_rsa_scheme(_) ->
     throw(bad_tpm2b_public_scheme).
-
-cert_rsa_pub(Pem) ->
-    case decode_pem_cert(Pem) of
-        {ok, Der} ->
-            try public_key:pkix_decode_cert(Der, otp) of
-                #'OTPCertificate'{tbsCertificate = Tbs} ->
-                    case Tbs#'OTPTBSCertificate'.subjectPublicKeyInfo of
-                        #'OTPSubjectPublicKeyInfo'{
-                            subjectPublicKey = #'RSAPublicKey'{} = Rsa} ->
-                            {ok, Rsa};
-                        Other -> {error, {unsupported_cert_pubkey, Other}}
-                    end
-            catch C:R -> {error, {C, R}}
-            end;
-        {error, _} = E -> E
-    end.
 
 decode_required(Key, Req, Opts) ->
     case hb_maps:get(Key, Req, undefined, Opts) of
@@ -2675,13 +1816,6 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
                             infer_log_format(TcgLogBin),
-                        %% Derived signals from the firmware-side TCG
-                        %% event log replay -- exposed in the signed
-                        %% boot-attestation so zone templates and
-                        %% external auditors can pin policy-actionable
-                        %% facts (currently `secure-boot.enabled') without
-                        %% re-walking the log themselves. Mirrors the
-                        %% interpret-side `policy-verdict.signals' shape.
                         <<"signals">> => dev_tpm_tcg:boot_signals(TcgLogBin)
                     };
                 {error, Reason} ->
@@ -2734,79 +1868,25 @@ attestation(_Base, Req, Opts) ->
                         <<"issued-at-unix">> =>
                             erlang:system_time(second),
                         <<"ek-cert-pem">> => EKCertPem,
-                        %% Intermediates from NV `handle + 1'. Empty
-                        %% when the vendor didn't provision a chain
-                        %% slot, or when the cert is absent.
                         <<"ek-cert-chain-pem">> =>
                             ek_cert_chain_pem(),
-                        %% Provenance of the EK cert -- tpm-nv (real,
-                        %% with which handle + byte count) or absent
-                        %% (with the probe-attempt list). This is the
-                        %% hook that lets the verifier distinguish a
-                        %% legitimate hardware EK from a missing one.
-                        %% We never inject synthetic values; if the
-                        %% TPM has no EK cert, the field is empty and
-                        %% source.kind is "absent".
                         <<"ek-cert-source">> =>
                             ek_cert_source(),
                         <<"ek-cert-chain-diagnostics">> =>
                             ek_cert_chain_diagnostics(),
-                        %% Real TPM identity straight from
-                        %% TPM2_GetCapability -- manufacturer, vendor
-                        %% string, spec level/revision, firmware
-                        %% version. Populated even when the EK cert
-                        %% is absent, so the verifier always gets
-                        %% "what chip is this" from ground truth.
                         <<"tpm-properties">> =>
                             tpm_properties(),
                         <<"ek-pub-pem">> => ek_pub_pem(Opts),
                         <<"ek-public">> => ek_public(Opts),
                         <<"ek-name">> => ek_name(Opts),
                         <<"ek-qualified-name">> => ek_qualified_name(Opts),
-                        %% Runtime kernel + SMBIOS snapshot so
-                        %% claim.cpu / claim.iommu / claim.lockdown
-                        %% resolve to concrete values even when the
-                        %% TCG event log doesn't carry them (paper-
-                        %% committed fields per section Architecture
-                        %% of the LapEE paper).
                         <<"platform-probes">> =>
                             platform_probes(),
                         <<"ak-pub-pem">> => AKPubPem,
                         <<"ak-public">> => ak_public(Opts),
                         <<"ak-name">> => ak_name(Opts),
                         <<"ak-qualified-name">> => ak_qualified_name(Opts),
-                        %% v1.2.2 paper P3: AK is a primary under
-                        %% the Endorsement hierarchy (see
-                        %% native/lapee_tpm_nif/lapee_tpm_nif.c
-                        %% nif_create_primary_ak, which passes
-                        %% ESYS_TR_RH_ENDORSEMENT). The field is
-                        %% populated as a constant here because it
-                        %% is determined by the build's NIF code
-                        %% path, not runtime data -- any change in
-                        %% the NIF would need to be reflected here
-                        %% in the same commit. Verifier-side,
-                        %% dev_tpm_interpret uses this to demote
-                        %% the `ek-ak-binding-not-implemented'
-                        %% finding to an observational info note:
-                        %% when the AK and EK share the Endorsement
-                        %% hierarchy's primary seed, they must
-                        %% reside in the same physical TPM (TCG
-                        %% TPM 2.0 Architecture section 13.2).
                         <<"ak-hierarchy">> => <<"endorsement">>,
-                        %% v1.2.2 paper P4: every sensitive TPM op
-                        %% in this build uses an HMAC-authenticated
-                        %% AES-128-CFB-encrypted session as
-                        %% shandle2 (or shandle1 when no hierarchy
-                        %% auth is needed). See
-                        %% native/lapee_tpm_nif/lapee_tpm_nif.c
-                        %% lapee_ensure_auth_session(). Field is a
-                        %% compile-time constant tied to the NIF
-                        %% source; the verifier treats this as
-                        %% declarative (bus-level protection is a
-                        %% guest<->TPM property that cannot be
-                        %% re-verified post-hoc from the wire
-                        %% envelope alone).
-                        %% Refined in batch 34 after iron-smoke: P4
                         %; session now attaches only to ops with
                         %; TPM2B first-params (Quote + CreatePrimary
                         %; x2) where ENCRYPT + DECRYPT attrs are
@@ -2822,18 +1902,6 @@ attestation(_Base, Req, Opts) ->
                         <<"tpm-quote">> =>
                             quote_body(Pcrs, Nonce, Q, Sig, PcrMap),
                         <<"runtime-event-log">> => EventLog,
-                        %% Firmware-side TCG event log (PCRs 0-14
-                        %% measurements the kernel exposes).
-                        %% base64url -- consistent with every other
-                        %% binary field in this envelope
-                        %% (runtime_event_log digests, tpm_quote
-                        %% values, PCR digests, ...). The interpret
-                        %% device parses this into per-event
-                        %% messages and extracts machine-identifying
-                        %% fields (Secure Boot, firmware version,
-                        %% bootloader hash, ...) per the paper's
-                        %% section Architecture "every field is a named
-                        %% event-log entry" requirement.
                         <<"tcg-event-log">> =>
                             hb_util:encode(TcgLogBin),
                         <<"tcg-event-log-source-path">>  =>
@@ -2873,10 +1941,8 @@ quote_body(Pcrs, Nonce, Quoted, Signature, PcrMap) ->
     }.
 
 %%%============================================================================
-%%% Runtime event log
 %%%============================================================================
 
-%% @doc Return the in-memory event log accumulated since boot.
 event_log(_Opts) ->
     case persistent_term:get({dev_tpm2, event_log}, undefined) of
         undefined -> [];
@@ -2897,7 +1963,6 @@ append_event(Pcr, Payload) ->
     ok.
 
 %%%============================================================================
-%%% Subject / PCR / nonce resolution helpers
 %%%============================================================================
 
 resolve_subject(Base, Req, Opts) ->
@@ -2935,11 +2000,6 @@ pcr_int(B) when is_binary(B) ->
     catch _:_ -> 0
     end.
 
-%% Nonce convention: base64url-encoded bytes. If the caller passes a
-%% binary that decodes cleanly as base64url we hand the bytes to the
-%% TPM; otherwise we treat the input as the raw bytes directly. Hex
-%% is not supported (HyperBEAM wire convention is base64url
-%% everywhere).
 resolve_nonce(Req) when is_map(Req) ->
     case decoded_nonce(Req) of
         undefined -> crypto:strong_rand_bytes(32);
@@ -2963,14 +2023,6 @@ decoded_nonce(Req) when is_map(Req) ->
 decoded_nonce(_) ->
     undefined.
 
-%% @doc Produce a 32-byte SHA-256 digest for a subject.
-%%
-%% For HyperBEAM messages, use the same transport-independent subject
-%% ID as `~measurement@1.0'. That binds the semantic subject without
-%% requiring boot-critical PCR calculation to re-encode nested HTTP
-%% signature metadata. For binaries that are already 32 bytes we use
-%% them as-is; for other binaries we hash with SHA-256; for anything
-%% else we serialise and hash.
 digest_of(Subject, Opts) when is_map(Subject) ->
     hb_util:native_id(subject_id(Subject, Opts));
 digest_of(B, _Opts) when is_binary(B), byte_size(B) =:= 32 ->
@@ -3007,12 +2059,6 @@ error_resp(Status, Err, Reason) ->
     }}.
 
 get_node_msg(Opts) ->
-    %% Two lookups, in order: (1) the node message remembered by the
-    %% last PCR-15 extend on this boot (populated by `extend/3'); this
-    %% is the ONE the TPM state actually commits to. (2) An explicit
-    %% `lapee_attested_node_msg' in Opts, for callers that already know
-    %% what was extended (tests, or a caller priming the persistent_term
-    %% outside of the normal hook path).
     case persistent_term:get({dev_tpm2, attested_node_msg}, undefined) of
         undefined -> hb_opts:get(lapee_attested_node_msg, undefined, Opts);
         Msg -> Msg
@@ -3062,26 +2108,8 @@ legacy_attested_subject(Opts) ->
     end.
 
 %%%============================================================================
-%%% NIF wrappers + AK caching
 %%%============================================================================
 
-%% Reviewer pass 11 (concurrency race auditor, batch 13) CRITICAL
-%% fix: the pre-batch-13 version was a classic check-then-act --
-%% two concurrent /attestation requests arriving within ~10ms of
-%% boot both saw `undefined' and both entered init_chain,
-%% creating two EK primaries (same key, extra transient handle),
-%% two AK primaries (DIFFERENT keys), extending PCR 15 twice
-%% with different digests, and racing persistent_term writes.
-%% Worst case: one envelope carried ak-pub-pem from B but the
-%% quote was signed by A's AK -> rsa_pss:verify fails ->
-%% verdict=rejected on a legitimate boot.
-%%
-%% Closed via `global:trans' with double-checked locking: the
-%% fast path (ak_tr already set) stays lock-free; only the once-
-%% per-boot init path takes the node-local lock. The inner
-%% re-check under the lock ensures only one caller runs
-%% init_chain even if N callers arrived before any of them
-%% finished.
 ensure_ak(Opts) ->
     ensure_ak(undefined, undefined, undefined, Opts).
 
@@ -3118,32 +2146,13 @@ init_chain(undefined, undefined, undefined, Opts) ->
 init_chain(Subject, SubjectID, SubjectDigest, Opts) ->
     case nif_startup() of
         ok ->
-            %% Snapshot TPM-reported identity via TPM2_GetCapability.
-            %% This is the primary manufacturer / firmware-version
-            %% signal and works even when NV has no EK cert. The
-            %% TCG-OID attributes on a real EK cert, when present,
-            %% act as cross-check at the claim layer.
             capture_tpm_properties(),
-            %% v1.2 E3: snapshot kernel/sysfs identity sources that
-            %% aren't in the TCG event log (CPU vendor/model,
-            %% IOMMU groups, kernel lockdown level, SMBIOS / DMI).
-            %% These become `platform-probes' in the envelope and
-            %% feed claim.cpu / claim.iommu / claim.lockdown on the
-            %% verifier side. Probes run once at init_chain time so
-            %% every subsequent /attestation call sees the same
-            %% snapshot (important for reproducible claim digests).
             capture_platform_probes(),
             case nif_create_ek() of
                 {ok, #{esys_tr := EKTr, public_pem := EKPem} = EKInfo} ->
                     persistent_term:put({dev_tpm2, ek_tr}, EKTr),
                     persistent_term:put({dev_tpm2, ek_pub_pem}, EKPem),
                     cache_tpm_public_terms(ek, EKInfo),
-                    %% Pull the TPM's real EK certificate out of NV
-                    %% storage. If no EK cert is provisioned we record
-                    %% the absence explicitly -- we do NOT fabricate a
-                    %% substitute. A missing EK cert is meaningful
-                    %% evidence on the claim, not a condition to paper
-                    %% over. See fetch_ek_cert_from_nv/1.
                     fetch_ek_cert_from_nv(Opts),
                     case extend_initial_pcr15(
                             Subject, SubjectID, SubjectDigest) of
@@ -3297,13 +2306,6 @@ raw_cached(Prefix, Slot, Opts) ->
         V -> V
     end.
 
-%% Capture TPM identity via TPM2_GetCapability (TPM_PT_MANUFACTURER,
-%% TPM_PT_VENDOR_STRING_*, TPM_PT_FIRMWARE_VERSION_*, ...). These
-%% values come straight from the TPM hardware regardless of EK-cert
-%% provisioning -- that's what makes them the primary identification
-%% source. On failure we stamp a structured "capability-probe-failed"
-%% entry rather than dropping the field: silent absence would blur
-%% the line between "no TPM" and "TPM didn't answer".
 capture_tpm_properties() ->
     try lapee_tpm_nif:tpm_properties() of
         {ok, Props} ->
@@ -3327,31 +2329,6 @@ to_bin(L) when is_list(L) -> iolist_to_binary(L);
 to_bin(A) when is_atom(A) -> atom_to_binary(A);
 to_bin(T) -> iolist_to_binary(io_lib:format("~p", [T])).
 
-%% v1.2 E3: read the sysfs + /proc signals that identify the
-%% running platform beyond what the TCG event log carries, cache
-%% the snapshot for the /attestation envelope.
-%%
-%% Paths probed (all read-only, no side effects):
-%%
-%%   /proc/cpuinfo                      CPU vendor_id / model name /
-%%                                      family / model / stepping /
-%%                                      microcode / flags
-%%   /sys/kernel/security/lockdown      `[none] integrity confidentiality'
-%%                                      style -- the bracketed entry is
-%%                                      active
-%%   /sys/kernel/iommu_groups/          one directory per IOMMU group;
-%%                                      non-zero count == IOMMU active
-%%   /sys/class/dmi/id/sys_vendor       SMBIOS Type-1 system vendor
-%%                                      (e.g. "Framework")
-%%   /sys/class/dmi/id/product_name     SMBIOS product name
-%%   /sys/class/dmi/id/board_name       SMBIOS Type-2 board name
-%%   /sys/class/dmi/id/bios_vendor      SMBIOS Type-0 BIOS vendor
-%%   /sys/class/dmi/id/bios_version     SMBIOS Type-0 BIOS version
-%%   /sys/class/dmi/id/bios_release     SMBIOS Type-0 BIOS release
-%%
-%% Every value is surfaced as a binary; `null' when the file is
-%% absent / unreadable. Unknown paths do NOT fail the whole probe
-%% pass -- a partial snapshot is still useful.
 capture_platform_probes() ->
     Probes = live_platform_probes(),
     persistent_term:put({dev_tpm2, platform_probes}, Probes),
@@ -3385,12 +2362,6 @@ live_platform_probes() ->
         probed_at_unix     => erlang:system_time(second)
     }.
 
-%% Read the one-byte data octet from the EFI SecureBoot variable.
-%% The efivarfs file layout is `<attributes:4><data:N>', where N=1
-%% for SecureBoot. GUID suffix `8be4df61-93ca-11d2-aa0d-00e098032b8c'
-%% is the EFI_GLOBAL_VARIABLE GUID per UEFI spec. Returns an atom
-%% `enabled' / `disabled' / `unknown'; the atom is converted to
-%% a binary in platform_probes/0.
 read_secure_boot_state() ->
     Path = <<"/sys/firmware/efi/efivars/"
              "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c">>,
@@ -3401,13 +2372,9 @@ read_secure_boot_state() ->
         _                               -> not_readable
     end.
 
-%% Read the first `processor' stanza of /proc/cpuinfo into a map
-%% keyed by the normalised field name (kebab-case binary). Returns
-%% an empty map on any file-read or parse error.
 read_cpuinfo_stanza() ->
     case file:read_file(<<"/proc/cpuinfo">>) of
         {ok, Bin} ->
-            %% Split on the blank-line stanza separator.
             [First | _] = binary:split(Bin, <<"\n\n">>, [global]),
             Lines = binary:split(First, <<"\n">>, [global]),
             lists:foldl(fun line_to_kv/2, #{}, Lines);
@@ -3422,17 +2389,10 @@ line_to_kv(Line, Acc) ->
                 <<" ">>,
                 <<"-">>,
                 [global]),
-            %% Only the first occurrence counts (first processor
-            %% stanza); skip subsequent duplicates.
             maps:merge(#{K => string:trim(Val)}, Acc);
         _ -> Acc
     end.
 
-%% Count the entries in /sys/kernel/iommu_groups/. Each group
-%% corresponds to one IOMMU-enforced isolation domain. Zero
-%% groups means either no IOMMU driver is loaded or the kernel
-%% booted without an IOMMU enable flag. Returns integer or
-%% `null' on path absence.
 count_iommu_groups() ->
     case file:list_dir(<<"/sys/kernel/iommu_groups">>) of
         {ok, Entries} ->
@@ -3440,29 +2400,18 @@ count_iommu_groups() ->
         _ -> null
     end.
 
-%% True iff `E' is an all-digits directory name (a single IOMMU
-%% group ID). Filters out stray non-numeric entries that some
-%% kernels expose under /sys/kernel/iommu_groups/.
 is_group_dir(E) ->
     case string:to_integer(E) of
         {N, Rest} when is_integer(N) -> Rest =:= <<>> orelse Rest =:= "";
         _                            -> false
     end.
 
-%% Read a file and trim trailing whitespace (including the
-%% terminating \n that most sysfs entries have). Returns a
-%% binary on success, null on any read error.
 read_trim(Path) ->
     case file:read_file(Path) of
         {ok, Bin} -> string:trim(Bin, trailing, "\r\n \t");
         _ -> null
     end.
 
-%% Pretty the cached TPM properties for the /attestation envelope.
-%% Integers for firmware-version halves let the verifier reconstruct
-%% the full 64-bit revision (fw1 << 32 | fw2) without ambiguity; the
-%% binary manufacturer / vendor-string fields are kebab-cased on the
-%% wire.
 tpm_properties() ->
     case persistent_term:get({dev_tpm2, tpm_properties}, undefined) of
         undefined ->
@@ -3499,14 +2448,9 @@ tpm_properties() ->
              }
     end.
 
-%% Return the cached EK-cert-chain PEM bundle. Empty when no
-%% chain was read out of the adjacent NV slot.
 ek_cert_chain_pem() ->
     persistent_term:get({dev_tpm2, ek_cert_chain_pem}, <<>>).
 
-%% Return the cached EK-chain NV diagnostics. This is non-secret TPM
-%% public-NV metadata: which handles were probed, byte counts, parsed
-%% certificate offsets, and issuer/subject key identifiers.
 ek_cert_chain_diagnostics() ->
     persistent_term:get(
         {dev_tpm2, ek_cert_chain_diagnostics},
@@ -3514,9 +2458,6 @@ ek_cert_chain_diagnostics() ->
           <<"reason">> =>
               <<"ensure_ak/1 has not executed yet">>}).
 
-%% Return the cached platform-probes map (captured at init_chain)
-%% formatted for the wire -- binary keys, null for unknown, ints
-%% preserved as ints. Not present if init_chain hasn't run yet.
 platform_probes() ->
     case persistent_term:get({dev_tpm2, platform_probes}, undefined) of
         undefined ->
@@ -3573,10 +2514,6 @@ or_bin_null(B) when is_binary(B) -> B;
 or_bin_null(L) when is_list(L) -> iolist_to_binary(L);
 or_bin_null(_) -> null.
 
-%% Return the provenance map for the currently-cached EK cert. The
-%% ensure_ak -> init_chain -> fetch_ek_cert_from_nv pipeline populates
-%% this; if it hasn't run yet we return an "unknown" placeholder so
-%% the attestation envelope shape stays stable.
 ek_cert_source() ->
     case persistent_term:get({dev_tpm2, ek_cert_source}, undefined) of
         undefined ->
@@ -3584,9 +2521,6 @@ ek_cert_source() ->
               <<"reason">> =>
                   <<"ensure_ak/1 has not executed yet">>};
         #{} = M ->
-            %% Keys in the raw map are atoms so we're always producing
-            %% the same one-hop shape. Re-key to binary here so the
-            %% wire-format stays kebab-case-on-binary-keys throughout.
             maps:fold(
                 fun(K, V, Acc) when is_atom(K) ->
                        Acc#{atom_to_binary(K) => V};
@@ -3594,31 +2528,15 @@ ek_cert_source() ->
                 end, #{}, M)
     end.
 
-%% TCG EK Credential Profile -- standard NV indices for EK certificates.
-%% https://trustedcomputinggroup.org/resource/tcg-ek-credential-profile/
 -define(EK_NV_RSA_2048, 16#01C00002).  %% low-range RSA-2048 EK cert
 -define(EK_NV_RSA_3072, 16#01C0000A).  %% low-range RSA-3072 EK cert
 -define(EK_NV_ECC_P256, 16#01C00004).  %% low-range ECC NIST P-256
 -define(EK_NV_ECC_P384, 16#01C00006).  %% low-range ECC NIST P-384
-%% High-range (vendor-specific templates) -- checked as a fallback.
 -define(EK_NV_HIGH_RSA_2048, 16#01C00012).
 -define(EK_NV_HIGH_RSA_3072, 16#01C0001A).
-%% Intel PTT 11th-gen+ uses ODCA. The EK leaf may still live at the
-%% standard EK-cert NV handle, while the embedded intermediate CA chain
-%% is provisioned in the TCG EK-chain NV range starting at 0x01C00100.
-%% Intel documents this as the EICA chain path for ODCA PTT certs.
 -define(EK_NV_CHAIN_FIRST, 16#01C00100).
 -define(EK_NV_CHAIN_PREFIX_LIMIT, 16).
 
-%% Fetch the EK certificate from TPM NV storage and cache it. The list
-%% below is iterated in order; the first NV index that yields a valid
-%% certificate wins. If none do, the EK cert is recorded as ABSENT --
-%% a first-class signal that the verifier must see. We never synthesize
-%% a stand-in: this codepath is what makes the attestation chain
-%% legitimate rather than cosmetic.
-%%
-%% Override the probe list via `lapee_tpm_ek_nv_handles' for TPMs
-%% whose manufacturer publishes certs at non-standard indices.
 fetch_ek_cert_from_nv(Opts) ->
     Handles = hb_opts:get(
         lapee_tpm_ek_nv_handles,
@@ -3633,13 +2551,6 @@ fetch_ek_cert_from_nv(Opts) ->
         {ok, Handle, Der} ->
             Pem = der_to_pem(Der),
             persistent_term:put({dev_tpm2, ek_cert_pem}, Pem),
-            %% TCG EK Credential Profile section 2.2.1.4: some TPMs
-            %% put the EK cert's INTERMEDIATE chain in the adjacent NV
-            %% slot (handle + 1). Intel PTT 11th-gen+ instead uses
-            %% the EK-chain NV range beginning at 0x01C00100 for its
-            %% ODCA EICA chain. Probe both shapes and carry whatever
-            %% certs are actually present; the verifier treats them as
-            %% intermediates only, never as trust anchors.
             ChainHandle = Handle + 1,
             {ChainDers, ChainSource, ChainHits, ChainDiagnostics} =
                 fetch_ek_cert_chain(ChainHandle, Opts),
@@ -3682,35 +2593,6 @@ fetch_ek_cert_from_nv(Opts) ->
             ok
     end.
 
-%% Candidate EK-chain NV handles for a leaf EK cert at `EkHandle`.
-%% Keep adjacent first for older TPMs, then the standardized EK-chain
-%% range used by Intel ODCA PTT. De-dupe so a caller that points
-%% directly into the chain range does not double-read. The prefix limit
-%% avoids making boot wait on hundreds of physical TPM NV misses; unusual
-%% platforms can provide explicit handles via `lapee_tpm_ek_chain_nv_handles'.
-ek_cert_chain_handles(EkHandle) ->
-    uniq_preserve_order(
-        [EkHandle + 1 |
-         lists:seq(
-             ?EK_NV_CHAIN_FIRST,
-             ?EK_NV_CHAIN_FIRST + ?EK_NV_CHAIN_PREFIX_LIMIT - 1)]).
-
-uniq_preserve_order(List) ->
-    uniq_preserve_order(List, #{}, []).
-
-uniq_preserve_order([], _Seen, Acc) ->
-    lists:reverse(Acc);
-uniq_preserve_order([H | Rest], Seen, Acc) ->
-    case maps:is_key(H, Seen) of
-        true -> uniq_preserve_order(Rest, Seen, Acc);
-        false -> uniq_preserve_order(Rest, Seen#{H => true}, [H | Acc])
-    end.
-
-%% Read + parse EK-cert chain slots. TCG format: one or more
-%% concatenated DER-encoded certs per NV index. Some vendors ship one
-%% intermediate; some ship the full chain down to the root. We parse
-%% whatever's there and return all DER cert binaries plus the NV
-%% handles that yielded parseable certificates.
 fetch_ek_cert_chain(ChainHandle, Opts) when is_integer(ChainHandle) ->
     case configured_chain_handles(Opts) of
         Handles when is_list(Handles) ->
@@ -4047,16 +2929,6 @@ authority_key_identifier_text(
 authority_key_identifier_text(Identifier) ->
     key_identifier_text(Identifier).
 
-%% Walk a binary that should contain DER-encoded X.509 certificates.
-%% Each cert starts with ASN.1 tag `0x30' (SEQUENCE) followed by a
-%% length encoding: short form (`0x00..0x7F') or long form (`0x80 | N',
-%% then N big-endian length bytes). Intel ODCA EK-chain NV blobs have
-%% been observed with non-cert bytes between certs, so we scan forward
-%% after unrecognised bytes instead of stopping at the first gap. A
-%% candidate SEQUENCE is accepted only if OTP can decode it as X.509.
-split_concatenated_ders(Bin) ->
-    [Der || {_Offset, Der} <- split_concatenated_ders_with_offsets(Bin)].
-
 split_concatenated_ders_with_offsets(Bin) ->
     split_concatenated_ders_with_offsets(Bin, 0, []).
 
@@ -4080,8 +2952,6 @@ split_concatenated_ders_with_offsets(<<16#30, Rest/binary>> = Full,
                                 Tail2, Offset + 1, Acc)
                     end;
                 _ ->
-                    %% Length reaches past the end; no complete cert
-                    %% starts here.
                     lists:reverse(Acc)
             end;
         error ->
@@ -4100,10 +2970,6 @@ is_x509_der(Der) ->
         false
     end.
 
-%% Parse the ASN.1 length encoding at the start of `Bin' (the
-%% byte AFTER the 0x30 tag). Returns `{ok, ContentLen, LenBytes}'
-%% where LenBytes is the number of bytes the length encoding
-%% itself consumed.
 der_seq_total_len(<<L:8, _/binary>>) when L =< 16#7F ->
     {ok, L, 1};
 der_seq_total_len(<<16#81, L:8, _/binary>>) ->
@@ -4117,8 +2983,6 @@ der_seq_total_len(<<16#84, L:32/big, _/binary>>) ->
 der_seq_total_len(_) ->
     error.
 
-%% Encode a list of DERs as a PEM bundle (one CERTIFICATE block
-%% each, concatenated). Empty list -> empty binary.
 ders_to_pem([]) -> <<>>;
 ders_to_pem(Ders) ->
     iolist_to_binary([der_to_pem(D) || D <- Ders]).
@@ -4127,12 +2991,6 @@ try_nv_handles([], Acc) -> {error, lists:reverse(Acc)};
 try_nv_handles([H | Rest], Acc) ->
     case lapee_tpm_nif:nv_read(H) of
         {ok, Der} when is_binary(Der), byte_size(Der) > 0 ->
-            %% Sanity-check: does it look like an X.509 DER cert? The
-            %% first byte should be 0x30 (ASN.1 SEQUENCE). TCG says NV
-            %% 0x01C0000x indices hold exactly one DER cert with no
-            %% length prefix. If the TPM put something else here we
-            %% prefer to record it as "unrecognised" rather than feed
-            %% mystery bytes to the verifier as an "EK cert".
             case Der of
                 <<16#30, _/binary>> ->
                     {ok, H, Der};
@@ -4146,14 +3004,6 @@ try_nv_handles([H | Rest], Acc) ->
     end.
 
 format_probe_attempts(Attempts) ->
-    %% The NIF's error Reason can be either an atom
-    %% (lapee_make_error, e.g. 'nv_index_undefined') OR a nested
-    %% tuple {tss2_rc, <<"op: 0x... (decoded)">>} from
-    %% lapee_make_tss_error on any TSS2 failure we didn't
-    %% specifically map to an atom. Render both shapes without
-    %% assuming the inner structure -- a ~p fallback keeps the
-    %% envelope shape stable even when the TPM returns an
-    %% unexpected code.
     [iolist_to_binary(
         io_lib:format("0x~8.16.0B: ~s (~p bytes read)",
                       [H, reason_to_text(R), Sz]))
@@ -4165,9 +3015,6 @@ reason_to_text({tss2_rc, Bin}) when is_binary(Bin) -> Bin;
 reason_to_text(Other) ->
     iolist_to_binary(io_lib:format("~p", [Other])).
 
-%% Quick PEM re-encoder for a DER-encoded X.509 cert. Matches the
-%% wire format the rest of the stack expects (PEM with "CERTIFICATE"
-%% labels and 64-char base64 lines).
 der_to_pem(Der) when is_binary(Der) ->
     B64 = base64:encode(Der),
     Wrapped = wrap_64(B64),
@@ -4182,11 +3029,6 @@ wrap_64(Bin) when byte_size(Bin) =< 64 ->
 wrap_64(<<Line:64/binary, Rest/binary>>) ->
     <<Line/binary, "\n", (wrap_64(Rest))/binary>>.
 
-%%----------------------------------------------------------------------------
-%% NIF-facing wrappers. We resolve the NIF lazily: first a runtime module
-%% `lapee_tpm_nif' (if HB is built with the NIF linked in via its rebar
-%% port_specs), falling back to dlopening a .so at well-known paths.
-%%----------------------------------------------------------------------------
 
 nif_module() ->
     case code:is_loaded(lapee_tpm_nif) of
@@ -4247,905 +3089,4 @@ nif_quote(AKTr, Pcrs, Nonce) ->
     end.
 
 %%%============================================================================
-%%% Tests
 %%%============================================================================
-
--ifdef(TEST).
-
-info_shape_test() ->
-    Info = info(ignored),
-    ?assert(maps:is_key(exports, Info)),
-    Exports = maps:get(exports, Info),
-    ?assert(lists:member(<<"extend">>, Exports)),
-    ?assert(lists:member(<<"quote">>, Exports)),
-    ?assert(lists:member(<<"pcr-read">>, Exports)),
-    ?assert(lists:member(<<"attestation">>, Exports)),
-    ?assert(lists:member(<<"credential-subject">>, Exports)),
-    ?assert(lists:member(<<"activate-credential">>, Exports)),
-    ?assert(lists:member(<<"verify-peer">>, Exports)),
-    %% No standalone tcg-event-log endpoint -- the log travels
-    %% INSIDE the attested attestation envelope. A standalone
-    %% un-attested path would let a malicious node serve one
-    %% log via /tcg-event-log and a different one via
-    %% /attestation.
-    ?assertNot(lists:member(<<"tcg-event-log">>, Exports)).
-
-info_docs_test() ->
-    {ok, #{<<"status">> := 200, <<"body">> := Body}} = info(#{}, #{}, #{}),
-    ?assert(maps:is_key(<<"description">>, Body)),
-    ?assert(maps:is_key(<<"api">>, Body)),
-    Api = maps:get(<<"api">>, Body),
-    ?assert(maps:is_key(<<"extend">>, Api)),
-    ?assert(maps:is_key(<<"attestation">>, Api)),
-    ?assert(maps:is_key(<<"credential-subject">>, Api)),
-    ?assert(maps:is_key(<<"activate-credential">>, Api)),
-    ?assert(maps:is_key(<<"verify-peer">>, Api)).
-
-peer_attestation_cache_paths_test() ->
-    Signed = #{<<"peer-url">> => <<"http://peer.example:8734">>},
-    SignedID = <<"signed-id">>,
-    PeerURLHash = hb_util:encode(
-        crypto:hash(sha256, <<"http://peer.example:8734">>)),
-    ConsumerScopeHash = encoded_message_sha256(null),
-    Prefix = ?PEER_ATTESTATION_PREFIX,
-    ?assertEqual(
-        [
-            <<Prefix/binary, "/by-id/", SignedID/binary>>,
-            <<Prefix/binary,
-              "/by-peer-url-sha256/", PeerURLHash/binary,
-              "/by-ek-public-sha256/unknown",
-              "/by-boot-attestation-id/unknown",
-              "/by-consumer-scope-sha256/", ConsumerScopeHash/binary,
-              "/", SignedID/binary>>
-        ],
-        peer_attestation_cache_paths(Signed, SignedID, #{})).
-
-credential_activation_public_body_hides_secret_test() ->
-    Credential = #{
-        <<"credential-blob">> => hb_util:encode(<<"blob">>),
-        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
-    },
-    Secret = <<"ring-secret-must-not-be-exported">>,
-    persistent_term:put({dev_tpm2, ak, name}, <<"ak-name">>),
-    try
-        Body = credential_activation_public_body(Secret, Credential, #{}),
-        ?assertNot(maps:is_key(<<"credential-secret">>, Body)),
-        ?assert(maps:is_key(<<"credential-secret-sha256">>, Body)),
-        ?assert(maps:is_key(<<"credential-secret-proof">>, Body)),
-        ?assertEqual(ok,
-            ensure_activation_secret(Body, Credential, Secret, undefined, #{}))
-    after
-        persistent_term:erase({dev_tpm2, ak, name})
-    end.
-
-credential_activation_public_proof_rejects_wrong_secret_test() ->
-    Credential = #{
-        <<"credential-blob">> => hb_util:encode(<<"blob">>),
-        <<"secret">> => hb_util:encode(<<"encrypted-secret">>)
-    },
-    IssuedAt = 123,
-    AkName = <<"ak-name">>,
-    Activation = #{
-        <<"type">> => <<"lapee-tpm-credential-activation">>,
-        <<"version">> => <<"1.0">>,
-        <<"issued-at-unix">> => IssuedAt,
-        <<"ak-name">> => AkName,
-        <<"proof-alg">> => <<"HMAC-SHA256">>,
-        <<"credential-secret-sha256">> =>
-            hb_util:encode(crypto:hash(sha256, <<"secret-a">>)),
-        <<"credential-secret-proof">> =>
-            hb_util:encode(
-                credential_activation_proof(
-                    <<"secret-a">>, Credential, AkName, IssuedAt))
-    },
-    ?assertThrow(
-        {boot_attestation_error, #{
-            <<"credential-activation">> :=
-                <<"activation proof did not match challenge">>
-        }},
-        ensure_activation_secret(Activation, Credential, <<"secret-b">>,
-                                 undefined, #{})).
-
-verify_peer_requires_boot_fresh_subject_match_test() ->
-    ?assertEqual(ok,
-        ensure_attestation_subjects_match(
-            #{<<"node-message-id">> => <<"subject-a">>},
-            #{<<"node-message-id">> => <<"subject-a">>})),
-    ?assertThrow(
-        {boot_attestation_error, #{<<"peer-attestation">> := _}},
-        ensure_attestation_subjects_match(
-            #{<<"node-message-id">> => <<"subject-a">>},
-            #{<<"node-message-id">> => <<"subject-b">>})).
-
-chk_quote_rejects_verifier_nonce_mismatch_test() ->
-    Envelope = #{
-        <<"tpm-quote">> => #{
-            <<"nonce">> => hb_util:encode(<<"quote-nonce">>),
-            <<"quoted">> => hb_util:encode(<<>>),
-            <<"signature">> => hb_util:encode(<<>>),
-            <<"pcr-selection">> => [],
-            <<"pcr-values">> => #{}
-        },
-        <<"ak-pub-pem">> => <<>>,
-        <<"ak-qualified-name">> => hb_util:encode(<<"ak">>)
-    },
-    ?assertEqual(
-        {error, <<"quote nonce does not match verifier challenge">>},
-        chk_quote(Envelope, <<"verifier-nonce">>)).
-
-software_make_credential_shape_test() ->
-    Priv = public_key:generate_key({rsa, 2048, 65537}),
-    Rsa = #'RSAPublicKey'{
-        modulus = Priv#'RSAPrivateKey'.modulus,
-        publicExponent = Priv#'RSAPrivateKey'.publicExponent
-    },
-    EkPublic = test_ek_tpm2b_public(Rsa),
-    Secret = <<"zone-secret">>,
-    AkName = <<16#000B:16/unsigned-big, (crypto:hash(sha256, <<"ak">>))/binary>>,
-    Credential = software_make_credential(
-        EkPublic,
-        AkName,
-        Secret),
-    Blob = hb_util:decode(
-        maps:get(<<"credential-blob">>, Credential)),
-    EncSecret = hb_util:decode(
-        maps:get(<<"secret">>, Credential)),
-    <<BlobSize:16/unsigned-big, IDObject:BlobSize/binary>> = Blob,
-    <<32:16/unsigned-big, Hmac:32/binary, EncIdentity/binary>> = IDObject,
-    <<256:16/unsigned-big, EncryptedSeed:256/binary>> = EncSecret,
-    ?assertEqual(byte_size(Secret) + 2, byte_size(EncIdentity)),
-    Seed = public_key:decrypt_private(
-        EncryptedSeed,
-        Priv,
-        [
-            {rsa_padding, rsa_pkcs1_oaep_padding},
-            {rsa_oaep_md, sha256},
-            {rsa_mgf1_md, sha256},
-            {rsa_oaep_label, <<"IDENTITY", 0>>}
-        ]),
-    SymKey = kdfa(sha256, Seed, <<"STORAGE">>, AkName, <<>>, 128),
-    PlainIdentity = crypto:crypto_one_time(
-        aes_128_cfb128, SymKey, <<0:128>>, EncIdentity, false),
-    <<SecretSize:16/unsigned-big, Recovered:SecretSize/binary>> =
-        PlainIdentity,
-    HmacKey = kdfa(sha256, Seed, <<"INTEGRITY">>, <<>>, <<>>, 256),
-    ?assertEqual(
-        crypto:mac(
-            hmac, sha256, HmacKey,
-            <<EncIdentity/binary, AkName/binary>>),
-        Hmac),
-    ?assertEqual(Secret, Recovered).
-
-rsa_pub_from_tpm2b_public_test() ->
-    ModulusBin = <<1:2048>>,
-    Public = test_rsa_tpm2b_public(ModulusBin, 0),
-    ?assertEqual(
-        {ok, #'RSAPublicKey'{
-            modulus = binary:decode_unsigned(ModulusBin),
-            publicExponent = 65537
-        }},
-        rsa_pub_from_tpm2b_public(Public)).
-
-ensure_ak_public_matches_subject_test() ->
-    ModulusBin = <<1:2048>>,
-    Public = test_rsa_tpm2b_public(ModulusBin, 0),
-    {ok, Rsa} = rsa_pub_from_tpm2b_public(Public),
-    {ok, Name} = tpm2b_public_name(Public),
-    Subject = #{
-        <<"ak-public">> => hb_util:encode(Public),
-        <<"ak-pub-pem">> => test_rsa_public_pem(Rsa),
-        <<"ak-name">> => hb_util:encode(Name)
-    },
-    ?assertEqual(ok, ensure_ak_public_matches_subject(Subject)),
-    ?assertThrow(
-        {boot_attestation_error, #{<<"ak-public">> := _}},
-        ensure_ak_public_matches_subject(
-            Subject#{<<"ak-name">> => hb_util:encode(<<"wrong-name">>)})).
-
-ak_policy_bound_test() ->
-    ?assert(lists:member(?NODE_IDENTITY_PCR, ?AK_POLICY_PCRS)),
-    ModulusBin = <<1:2048>>,
-    PcrMap =
-        maps:from_list(
-            [{integer_to_binary(I),
-              hb_util:encode(crypto:strong_rand_bytes(32))}
-             || I <- ?AK_POLICY_PCRS]),
-    Policy = ak_policy_digest(?AK_POLICY_PCRS, PcrMap),
-    Public = test_rsa_tpm2b_public(ModulusBin, 0, Policy),
-    ?assertEqual({ok, Policy}, tpm2b_public_auth_policy(Public)),
-    Envelope = #{
-        <<"ak-public">> => hb_util:encode(Public),
-        <<"tpm-quote">> => #{<<"pcr-values">> => PcrMap}
-    },
-    ?assertMatch({ok, _}, chk_ak_policy_bound(Envelope)),
-    ?assertMatch(
-        {error, <<"AK authPolicy is empty">>},
-        chk_ak_policy_bound(
-            Envelope#{
-                <<"ak-public">> =>
-                    hb_util:encode(test_rsa_tpm2b_public(ModulusBin, 0))
-            })),
-    ?assertMatch(
-        {error, <<"AK authPolicy does not match quoted PCR state">>},
-        chk_ak_policy_bound(
-            Envelope#{<<"ak-public">> =>
-                hb_util:encode(
-                    test_rsa_tpm2b_public(
-                        ModulusBin, 0, crypto:strong_rand_bytes(32)))})).
-
-tpms_attest_qualified_signer_must_match_ak_test() ->
-    Nonce = crypto:strong_rand_bytes(32),
-    QualifiedSigner = <<"ak-qualified-name">>,
-    Pcr0 = crypto:strong_rand_bytes(32),
-    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
-    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
-    ?assertMatch(
-        {ok, _},
-        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)),
-    ?assertEqual(
-        {error, <<"TPMS_ATTEST qualifiedSigner does not match "
-                  "attested AK qualified name">>},
-        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, <<"other-ak">>)).
-
-tpms_attest_rejects_reported_selection_mismatch_test() ->
-    Nonce = crypto:strong_rand_bytes(32),
-    QualifiedSigner = <<"ak-qualified-name">>,
-    Pcr0 = crypto:strong_rand_bytes(32),
-    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
-    Quoted = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
-    ?assertEqual(
-        {error, <<"TPMS_ATTEST PCR selection does not match "
-                  "reported pcr-selection">>},
-        chk_tpms_attest(Quoted, Nonce, [1], PcrMap, QualifiedSigner)).
-
-tpms_attest_requires_quote_magic_type_test() ->
-    Nonce = crypto:strong_rand_bytes(32),
-    QualifiedSigner = <<"ak-qualified-name">>,
-    Pcr0 = crypto:strong_rand_bytes(32),
-    PcrMap = #{<<"0">> => hb_util:encode(Pcr0)},
-    Quoted0 = test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0),
-    <<_MagicType:6/binary, Rest/binary>> = Quoted0,
-    Quoted = <<0:32/unsigned-big, 16#8018:16/unsigned-big, Rest/binary>>,
-    ?assertEqual(
-        {error, <<"TPMS_ATTEST parse error (truncated or wrong shape)">>},
-        chk_tpms_attest(Quoted, Nonce, [0], PcrMap, QualifiedSigner)).
-
-test_tpm2b(Bin) ->
-    <<(byte_size(Bin)):16/unsigned-big, Bin/binary>>.
-
-test_rsa_tpm2b_public(ModulusBin, Exponent) ->
-    test_rsa_tpm2b_public(ModulusBin, Exponent, <<>>).
-
-test_rsa_tpm2b_public(ModulusBin, Exponent, AuthPolicy) ->
-    Body = <<
-        16#0001:16/unsigned-big,
-        16#000B:16/unsigned-big,
-        0:32/unsigned-big,
-        (test_tpm2b(AuthPolicy))/binary,
-        16#0010:16/unsigned-big,
-        16#0010:16/unsigned-big,
-        2048:16/unsigned-big,
-        Exponent:32/unsigned-big,
-        (test_tpm2b(ModulusBin))/binary
-    >>,
-    test_tpm2b(Body).
-
-test_ek_tpm2b_public(#'RSAPublicKey'{
-        modulus = Modulus,
-        publicExponent = Exponent
-    }) ->
-    ModulusBin = left_pad(binary:encode_unsigned(Modulus), 256),
-    Body = <<
-        16#0001:16/unsigned-big,
-        16#000B:16/unsigned-big,
-        0:32/unsigned-big,
-        (test_tpm2b(<<>>))/binary,
-        16#0006:16/unsigned-big,
-        128:16/unsigned-big,
-        16#0043:16/unsigned-big,
-        16#0010:16/unsigned-big,
-        2048:16/unsigned-big,
-        Exponent:32/unsigned-big,
-        (test_tpm2b(ModulusBin))/binary
-    >>,
-    test_tpm2b(Body).
-
-left_pad(Bin, Size) when byte_size(Bin) < Size ->
-    <<0:((Size - byte_size(Bin)) * 8), Bin/binary>>;
-left_pad(Bin, _Size) ->
-    Bin.
-
-test_rsa_public_pem(Rsa) ->
-    public_key:pem_encode([public_key:pem_entry_encode('RSAPublicKey', Rsa)]).
-
-test_tpms_quote_attest(QualifiedSigner, Nonce, Pcr0) ->
-    PcrDigest = crypto:hash(sha256, Pcr0),
-    Selection = <<16#000B:16/unsigned-big, 3:8/unsigned-big, 1, 0, 0>>,
-    QuoteInfo = <<1:32/unsigned-big, Selection/binary,
-                  (test_tpm2b(PcrDigest))/binary>>,
-    <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
-      (test_tpm2b(QualifiedSigner))/binary,
-      (test_tpm2b(Nonce))/binary,
-      0:(25 * 8), QuoteInfo/binary>>.
-
-%% The TCG event log source-path + length + format fields
-%% travel attested alongside tcg-event-log itself, so a
-%% verifier can see at a glance where the bytes came from
-%% without re-reading them.
-read_tcg_event_log_with_source_shape_test() ->
-    %% On a Mac dev box there's no /sys TPM; expect
-    %% `{<<>>, <<"unavailable">>}'.
-    {Bin, Src} = read_tcg_event_log_with_source(),
-    ?assertEqual(<<>>, Bin),
-    ?assertEqual(<<"unavailable">>, Src),
-    ok.
-
-%% infer_log_format/1 classifies a crypto-agile header
-%% correctly from raw bytes alone (no event-log parse needed).
-infer_log_format_crypto_agile_test() ->
-    %% TCG_PCR_EVENT:
-    %%   pcr u32 LE = 0
-    %%   event_type u32 LE = 3 (EV_NO_ACTION)
-    %%   sha1 digest (20 zero bytes)
-    %%   event_data_size u32 LE
-    %%   event_data: "Spec ID Event03" + nul + payload
-    SpecId = <<"Spec ID Event03", 0, 0:128>>,
-    Bin = <<0:32/little, 3:32/little, 0:(20*8),
-            (byte_size(SpecId)):32/little, SpecId/binary>>,
-    ?assertEqual(<<"crypto-agile">>, infer_log_format(Bin)).
-
-infer_log_format_tdx_ccel_test() ->
-    SpecId = <<"Spec ID Event03", 0, 0:128>>,
-    %% First record on PCR 1 (MRTD) -> TDX CCEL.
-    Bin = <<1:32/little, 3:32/little, 0:(20*8),
-            (byte_size(SpecId)):32/little, SpecId/binary>>,
-    ?assertEqual(<<"tdx-ccel">>, infer_log_format(Bin)).
-
-infer_log_format_empty_test() ->
-    ?assertEqual(<<"empty">>, infer_log_format(<<>>)),
-    ?assertEqual(<<"unknown">>, infer_log_format(<<0, 1, 2>>)).
-
-digest_of_32_byte_binary_test() ->
-    B32 = <<0:256>>,
-    ?assertEqual(B32, digest_of(B32, #{})).
-
-digest_of_arbitrary_binary_test() ->
-    Bin = <<"hello">>,
-    ?assertEqual(crypto:hash(sha256, Bin), digest_of(Bin, #{})).
-
-digest_of_message_uses_measurement_subject_id_test() ->
-    Msg = #{<<"a">> => 1, <<"b">> => 2},
-    D = digest_of(Msg, #{}),
-    ?assert(byte_size(D) =:= 32).
-
-resolve_subject_test() ->
-    %% Req/subject wins over body which wins over Base.
-    ?assertEqual(<<"subj">>,
-        resolve_subject(<<"base">>, #{<<"subject">> => <<"subj">>}, #{})),
-    ?assertEqual(<<"body">>,
-        resolve_subject(<<"base">>, #{<<"body">> => <<"body">>}, #{})),
-    ?assertEqual(<<"base">>,
-        resolve_subject(<<"base">>, #{}, #{})).
-
-resolve_subject_body_test() ->
-    Body = #{<<"type">> => <<"lapee-tpm-credential-activation">>},
-    ?assertEqual(
-        Body,
-        resolve_subject_body(#{<<"status">> => 200,
-                               <<"body">> => Body}, #{})),
-    ?assertEqual(
-        Body,
-        resolve_subject_body(#{<<"commitments">> => #{},
-                               <<"body">> => Body}, #{})).
-
-resolve_pcr_default_test() ->
-    ?assertEqual(15, resolve_pcr(#{}, 15, #{})),
-    ?assertEqual(10, resolve_pcr(#{<<"pcr">> => 10}, 15, #{})),
-    ?assertEqual(7, resolve_pcr(#{<<"pcr">> => <<"7">>}, 15, #{})).
-
-resolve_pcr_list_test() ->
-    ?assertEqual([0, 1, 7],
-        resolve_pcr_list(#{<<"pcrs">> => [0, 1, 7]},
-                         ?DEFAULT_QUOTE_PCRS, #{})),
-    ?assertEqual([0, 7, 15],
-        resolve_pcr_list(#{<<"pcrs">> => <<"0,7,15">>},
-                         ?DEFAULT_QUOTE_PCRS, #{})),
-    ?assertEqual(?DEFAULT_QUOTE_PCRS,
-        resolve_pcr_list(#{}, ?DEFAULT_QUOTE_PCRS, #{})).
-
-%% `chk_tcg_event_log_replay' returns `{ok, _}' when the envelope
-%% has no firmware log (accepting this case -- test/dev guests
-%% running QEMU+swtpm don't emit a firmware event log). Callers who
-%% require a firmware log chain should additionally check envelope.
-%% tcg_event_log size.
-chk_tcg_event_log_replay_empty_log_test() ->
-    %% Both "no field" and "field but empty" accepted.
-    ?assertMatch({ok, _},
-                 chk_tcg_event_log_replay(#{<<"tcg-event-log">> => <<>>})),
-    ?assertMatch({ok, _},
-                 chk_tcg_event_log_replay(#{<<"tcg-event-log">> =>
-                                              hb_util:encode(<<>>)})),
-    ?assertMatch({ok, _}, chk_tcg_event_log_replay(#{})).
-
-%% When the envelope carries a TCG log whose events replay to
-%% match the quoted PCR values, the check passes. Uses the same
-%% synthetic fixture as dev_tpm_tcg's own tests -- PCR 0 gets one
-%% event, PCR 7 gets one event, and we compute the expected
-%% reconstructed values.
-chk_tcg_event_log_replay_accepts_consistent_fixture_test() ->
-    %% Build a 2-record crypto-agile log: SpecID on PCR 0 (not
-    %% extended, EV_NO_ACTION) + one EV_S_CRTM_VERSION on PCR 0.
-    AlgPairs = <<16#04:16/little, 20:16/little,
-                 16#0B:16/little, 32:16/little>>,
-    SpecId = <<"Spec ID Event03", 0,
-               0:32/little, 0:8, 2:8, 0:8, 8:8, 2:32/little,
-               AlgPairs/binary, 0:8>>,
-    SpecIdSize = byte_size(SpecId),
-    FirstRec = <<0:32/little, 3:32/little, 0:(20*8),
-                 SpecIdSize:32/little, SpecId/binary>>,
-    Data = <<"FW-ABC">>,
-    Sha256 = crypto:hash(sha256, Data),
-    Sha1   = crypto:hash(sha,    Data),
-    Rec2 = <<0:32/little,
-             16#8:32/little,
-             2:32/little,
-             16#04:16/little, Sha1/binary,
-             16#0B:16/little, Sha256/binary,
-             (byte_size(Data)):32/little, Data/binary>>,
-    Log = <<FirstRec/binary, Rec2/binary>>,
-    %% Compute the expected PCR-0 reconstruction.
-    ExpectedPcr0 = crypto:hash(sha256, <<0:256, Sha256/binary>>),
-    Envelope = #{
-        <<"tcg-event-log">> => hb_util:encode(Log),
-        <<"tpm-quote">> => #{
-            <<"pcr-values">> =>
-                #{<<"0">> => hb_util:encode(ExpectedPcr0)}
-        }
-    },
-    ?assertMatch({ok, _}, chk_tcg_event_log_replay(Envelope)).
-
-%% Tampering the log (flip one byte of the event data) makes the
-%% reconstructed PCR diverge from the quoted value -> reject.
-chk_tcg_event_log_replay_rejects_tampered_fixture_test() ->
-    %% Same fixture construction as the prior test but with
-    %% tampered event data -- PCR 0 reconstruction diverges from
-    %% the expected value. Still records the "correct" quoted
-    %% value in the envelope so the mismatch is detectable.
-    AlgPairs = <<16#04:16/little, 20:16/little,
-                 16#0B:16/little, 32:16/little>>,
-    SpecId = <<"Spec ID Event03", 0,
-               0:32/little, 0:8, 2:8, 0:8, 8:8, 2:32/little,
-               AlgPairs/binary, 0:8>>,
-    SpecIdSize = byte_size(SpecId),
-    FirstRec = <<0:32/little, 3:32/little, 0:(20*8),
-                 SpecIdSize:32/little, SpecId/binary>>,
-    GoodData = <<"FW-ABC">>,
-    GoodSha256 = crypto:hash(sha256, GoodData),
-    BadData = <<"FW-XXX">>,
-    BadSha256 = crypto:hash(sha256, BadData),
-    BadSha1   = crypto:hash(sha,    BadData),
-    Rec2Tampered = <<0:32/little,
-                     16#8:32/little,
-                     2:32/little,
-                     16#04:16/little, BadSha1/binary,
-                     16#0B:16/little, BadSha256/binary,
-                     (byte_size(BadData)):32/little, BadData/binary>>,
-    Log = <<FirstRec/binary, Rec2Tampered/binary>>,
-    %% Quote claims the GOOD PCR 0 value. Log has tampered digest.
-    GoodPcr0 = crypto:hash(sha256, <<0:256, GoodSha256/binary>>),
-    Envelope = #{
-        <<"tcg-event-log">> => hb_util:encode(Log),
-        <<"tpm-quote">> => #{
-            <<"pcr-values">> =>
-                #{<<"0">> => hb_util:encode(GoodPcr0)}
-        }
-    },
-    ?assertMatch({error, _}, chk_tcg_event_log_replay(Envelope)).
-
-resolve_trusted_ca_priority_test() ->
-    RequestPem = <<"-----BEGIN CERTIFICATE-----\nbase64url-pem\n"
-                "-----END CERTIFICATE-----">>,
-    ConfigPem = <<"-----BEGIN CERTIFICATE-----\nconfig-pem\n"
-                  "-----END CERTIFICATE-----">>,
-    TmpDir = case os:getenv("TMPDIR") of false -> "/tmp"; D -> D end,
-    Path = filename:join(
-        TmpDir,
-        "lapee-tpm-ca-" ++ integer_to_list(
-            erlang:unique_integer([positive])) ++ ".pem"),
-    ok = file:write_file(Path, ConfigPem),
-    try
-        {Bundle, <<"internal-bundle">>} =
-            resolve_trusted_ca_with_source(#{}, #{}),
-        ?assert(byte_size(Bundle) > byte_size(RequestPem)),
-        ?assertNotEqual(
-            nomatch,
-            binary:match(Bundle, <<"-----BEGIN CERTIFICATE-----">>)),
-        ?assertEqual(
-            {Bundle, <<"internal-bundle">>},
-            resolve_trusted_ca_with_source(
-                #{<<"trusted-ca">> => hb_util:encode(RequestPem)}, #{})),
-        ?assertEqual(
-            {RequestPem, <<"request">>},
-            resolve_trusted_ca_with_source(
-                #{<<"trusted-ca">> => hb_util:encode(RequestPem)},
-                #{lapee_allow_request_trusted_ca => true})),
-        ?assertEqual(
-            {<<>>, <<"request-bad">>},
-            resolve_trusted_ca_with_source(
-                #{<<"trusted-ca">> => <<"%%%not-base64url%%%">>},
-                #{lapee_allow_request_trusted_ca => true,
-                  lapee_tpm_ca_cert => list_to_binary(Path)})),
-        ?assertEqual(
-            {<<>>, <<"node-config-missing">>},
-            resolve_trusted_ca_with_source(
-                #{}, #{lapee_tpm_ca_cert => <<"/nonexistent/ca.pem">>})),
-        ?assertEqual(
-            {ConfigPem, <<"node-config">>},
-            resolve_trusted_ca_with_source(
-                #{}, #{lapee_tpm_ca_cert => list_to_binary(Path)})),
-        ?assertEqual(Bundle, resolve_trusted_ca(#{}, #{}))
-    after
-        file:delete(Path)
-    end.
-
-%% Regression test: `chk_event_log_replay' must refuse to
-%% "replay" zero events into a zero PCR and call it valid. Even
-%% though `chk_binding' catches the same shape, we want the replay
-%% check to be explicit about non-emptiness too -- defence in depth.
-chk_event_log_replay_rejects_empty_events_test() ->
-    Zero43 = hb_util:encode(<<0:256>>),
-    Envelope = #{
-        <<"runtime-event-log">> => [],
-        <<"tpm-quote">> => #{
-            <<"pcr-values">> => #{<<"15">> => Zero43}
-        }
-    },
-    ?assertMatch({error, _}, chk_event_log_replay(Envelope)).
-
-%% Regression test: `chk_binding' must refuse to treat an empty /
-%% malformed node_message_id as matching an empty event digest
-%% (both would trivially `hb_util:decode' to `<<>>'). Real ids
-%% decode to 32 bytes; anything else is a hard reject.
-chk_binding_rejects_empty_id_test() ->
-    %% Event whose digest decodes to <<>>.
-    EmptyDigestEvent = #{<<"pcr">> => 15,
-                         <<"digest">> => <<"">>,
-                         <<"seq">> => 0},
-    EnvelopeEmptyId = #{
-        <<"node-message-id">> => <<"">>,
-        <<"runtime-event-log">> => [EmptyDigestEvent]
-    },
-    ?assertMatch({error, _}, chk_binding(EnvelopeEmptyId)),
-    %% Also: id that decodes to fewer than 32 bytes (shorter base64url).
-    EnvelopeShortId = #{
-        <<"node-message-id">> => <<"AAAA">>,   %% 3 bytes
-        <<"runtime-event-log">> =>
-            [EmptyDigestEvent#{<<"digest">> => <<"AAAA">>}]
-    },
-    ?assertMatch({error, _}, chk_binding(EnvelopeShortId)).
-
-normalise_boot_attestation_uses_extended_subject_test() ->
-    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
-    Node = #{<<"address">> => <<"node-address">>},
-    Subject = #{<<"system">> => System, <<"node">> => Node},
-    SubjectID = subject_id(Subject, #{}),
-    NodeOnlyID =
-        subject_id(Node, #{}),
-    Envelope = Subject#{
-        <<"tpm">> => #{
-            <<"extended-subject">> => SubjectID,
-            <<"quote">> => #{}
-        }
-    },
-    Normalised = normalise_attestation(Envelope, #{}),
-    ?assertNotEqual(NodeOnlyID, SubjectID),
-    ?assertEqual(SubjectID,
-                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
-                             #{})).
-
-normalise_measurement_attestation_uses_evidence_test() ->
-    System = #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}},
-    Node = #{<<"address">> => <<"node-address">>},
-    Subject = #{<<"system">> => System, <<"node">> => Node},
-    SubjectID = subject_id(Subject, #{}),
-    Measurement = #{
-        <<"type">> => <<"lapee-measurement">>,
-        <<"measurement-device">> => <<"tpm@2.0a">>,
-        <<"body">> => Subject,
-        <<"evidence">> => #{
-            <<"extended-subject">> => SubjectID,
-            <<"quote">> => #{}
-        }
-    },
-    Normalised = normalise_attestation(Measurement, #{}),
-    ?assertEqual(SubjectID,
-                 hb_maps:get(<<"node-message-id">>, Normalised, undefined,
-                             #{})),
-    ?assertEqual(Node,
-                 hb_maps:get(<<"node-message">>, Normalised, undefined,
-                             #{})).
-
-ek_cert_chain_handles_include_intel_odca_range_test() ->
-    ?assertEqual(
-        [16#01C00003 |
-         lists:seq(16#01C00100,
-                   16#01C00100 + ?EK_NV_CHAIN_PREFIX_LIMIT - 1)],
-        ek_cert_chain_handles(16#01C00002)),
-    ?assertEqual(
-        lists:seq(16#01C00100,
-                  16#01C00100 + ?EK_NV_CHAIN_PREFIX_LIMIT - 1),
-        ek_cert_chain_handles(16#01C000FF)).
-
-intel_odca_ek_chain_accepts_tcg_key_usage_test() ->
-    EkDer = pem_fixture_der("intel-mtl-odca-ek-cert.pem"),
-    ChainDers = pem_fixture_ders("intel-mtl-odca-tpm-chain.pem"),
-    TrustedDers = [
-        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem"),
-        root_ca_fixture_der("INTEL_ODCA_MTL_00003043_CA2.pem"),
-        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem")
-    ],
-    ?assertMatch({ok, _},
-                 validate_ek_chain(EkDer, ChainDers, TrustedDers)).
-
-split_concatenated_ders_skips_non_cert_gaps_test() ->
-    Der = root_ca_fixture_der(),
-    ?assertEqual(
-        [Der, Der, Der],
-        split_concatenated_ders(
-          <<Der/binary, 0:32/little, "gap", Der/binary, Der/binary>>)).
-
-split_concatenated_ders_reports_offsets_test() ->
-    Der = root_ca_fixture_der(),
-    Gap = <<0:32/little, "gap">>,
-    ?assertEqual(
-        [{0, Der}, {byte_size(Der) + byte_size(Gap), Der}],
-        split_concatenated_ders_with_offsets(
-          <<Der/binary, Gap/binary, Der/binary>>)).
-
-candidate_intermediate_chains_keeps_direct_anchor_path_test() ->
-    Peer = <<"peer-chain-cert">>,
-    Anchor = <<"issuer-anchor">>,
-    OtherTrusted = <<"root-anchor">>,
-    ?assertEqual(
-        [[Peer], [Peer, OtherTrusted]],
-        candidate_intermediate_chains([Peer],
-                                      [Anchor, OtherTrusted],
-                                      Anchor)),
-    ?assertEqual(
-        [[], [OtherTrusted]],
-        candidate_intermediate_chains([],
-                                      [Anchor, OtherTrusted],
-                                      Anchor)).
-
-%% AIA fallback: a real Intel ADL EK leaf + ROM/Kernel/PTT
-%% intermediates pin against an Intel ODCA root + the CSME
-%% Intermediate CA, but the per-SoC `ODCA 2 CSME P_ADL 00002820
-%% Issuing CA' is missing from the local corpus. Without AIA the
-%% chain fails. With AIA -- pre-cached via persistent_term so the
-%% test never hits the network -- the chain extension picks up the
-%% missing intermediate and validation succeeds.
-aia_extends_chain_for_missing_intel_adl_intermediate_test() ->
-    Leaf = aia_fixture_pem("intel-adl-ek-leaf.pem"),
-    PeerChain = aia_fixture_pems("intel-adl-ek-chain.pem"),
-    Roots = [
-        root_ca_fixture_der("INTEL_ODCA_ROOT_CA.pem"),
-        root_ca_fixture_der("INTEL_ODCA_CA2_CSME_INTERMEDIATE.pem")
-    ],
-    %% Disabled: chain incomplete, verifier rejects.
-    {error, _} = validate_ek_chain(Leaf, PeerChain, Roots,
-        #{<<"lapee-aia-fetch-enabled">> => false}),
-    %% Pre-cache the Intel ADL Issuing CA fetch result so the test
-    %% exercises the AIA wiring without hitting the network.
-    AdlIssuingDer = aia_fixture_pem("intel-adl-issuing-ca-2820.pem"),
-    AdlUrl = aia_url_from_chain(PeerChain),
-    persistent_term:put({lapee_aia, fetched, AdlUrl}, AdlIssuingDer),
-    try
-        {ok, Detail} = validate_ek_chain(Leaf, PeerChain, Roots, #{}),
-        ?assert(byte_size(Detail) > 0)
-    after
-        persistent_term:erase({lapee_aia, fetched, AdlUrl})
-    end.
-
-aia_fixture_pem(Name) ->
-    Pems = aia_fixture_pems(Name),
-    hd(Pems).
-
-aia_fixture_pems(Name) ->
-    Paths = [
-        filename:join(["priv", "tpm-interpret", "aia-fixtures", Name]),
-        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
-                       "aia-fixtures", Name])
-    ],
-    [Pem] = [Bin || P <- Paths, {ok, Bin} <- [file:read_file(P)]],
-    [Der || {'Certificate', Der, not_encrypted} <- public_key:pem_decode(Pem)].
-
-aia_url_from_chain(ChainDers) ->
-    %% Walk the chain and return the AIA caIssuers URL of the cert
-    %% whose issuer DN is the missing ADL Issuing CA. Any cert in
-    %% the fixture chain whose AIA points at the ADL Issuing CA URL
-    %% is acceptable.
-    Urls = lists:flatten([lapee_aia:caissuers_urls(D) || D <- ChainDers]),
-    [Url | _] = Urls,
-    Url.
-
-parse_chain_group_reads_cert_across_nv_boundary_test() ->
-    Der = root_ca_fixture_der(),
-    Split = byte_size(Der) - 17,
-    <<Head:Split/binary, Tail/binary>> = Der,
-    {Ders, Hits, Diagnostic} =
-        parse_chain_group([{16#01C00100, Head}, {16#01C00101, Tail}]),
-    ?assertEqual([Der], Ders),
-    ?assertEqual([16#01C00100, 16#01C00101], Hits),
-    [CertDiag] = maps:get(<<"certs">>, Diagnostic),
-    ?assertEqual(
-        [<<"0x01C00100">>, <<"0x01C00101">>],
-        maps:get(<<"span-handles">>, CertDiag)).
-
-root_ca_fixture_der() ->
-    root_ca_fixture_der("INTEL_RT.pem").
-
-root_ca_fixture_der(Name) ->
-    Paths = [
-        filename:join(["priv", "tpm-interpret", "root-cas",
-                       Name]),
-        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
-                       "root-cas", Name])
-    ],
-    Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
-    [{'Certificate', Der, not_encrypted} | _] =
-        public_key:pem_decode(hd(Pems)),
-    Der.
-
-pem_fixture_der(Name) ->
-    [Der | _] = pem_fixture_ders(Name),
-    Der.
-
-pem_fixture_ders(Name) ->
-    Paths = [
-        filename:join(["priv", "tpm-interpret", "fixtures", Name]),
-        filename:join(["hyperbeam-overlay", "priv", "tpm-interpret",
-                       "fixtures", Name])
-    ],
-    Pems = [Pem || Path <- Paths, {ok, Pem} <- [file:read_file(Path)]],
-    [Der || {'Certificate', Der, not_encrypted} <-
-                public_key:pem_decode(hd(Pems))].
-
-%% Regression test: the verify_fun used in chk_ek_chain must reject
-%% every structural / trust failure pkix can report, while letting
-%% real-world TPM EK cert extensions through so vendor certs from
-%% Nuvoton / Infineon / STMicro validate. Keeps this in lock-step
-%% with `dev_tpm_interpret:ek_verify_fun/3' -- the two live in
-%% different modules (device vs parser) per the LapEE architecture
-%% but must accept identical chains.
-ek_chain_verify_fun_rejects_bad_certs_test() ->
-    {F, []} = ek_chain_verify_fun(),
-    %% Non-TCG {bad_cert, _} events: hard fail. pkix re-wraps the
-    %% inner reason as `{error, {bad_cert, Reason}}', so returning
-    %% the unwrapped atom is the canonical convention (matches
-    %% `dev_tpm_interpret:ek_verify_fun/3').
-    ?assertMatch({fail, unknown_ca},
-                 F(ignored, {bad_cert, unknown_ca},    state)),
-    ?assertMatch({fail, selfsigned_peer},
-                 F(ignored, {bad_cert, selfsigned_peer}, state)),
-    ?assertMatch({fail, invalid_issuer},
-                 F(ignored, {bad_cert, invalid_issuer}, state)),
-    ?assertMatch({fail, invalid_signature},
-                 F(ignored, {bad_cert, invalid_signature}, state)),
-    ?assertMatch({fail, cert_expired},
-                 F(ignored, {bad_cert, cert_expired},   state)),
-    %% Critical unknown extensions carrying TCG OIDs must pass: real
-    %% EK certs mark id-tcg-kp-EKCertificate (2.23.133.8.1) and
-    %% id-tcg-tpmSpecification (2.23.133.2.16) critical, which OTP's
-    %% default validator would otherwise reject.
-    EkuExt = #'Extension'{extnID = {2, 23, 133, 8, 1}},
-    ?assertMatch({valid, state},
-                 F(ignored,
-                   {bad_cert, {not_supported_extension, EkuExt}},
-                   state)),
-    SpecExt = #'Extension'{extnID = {2, 23, 133, 2, 16}},
-    ?assertMatch({valid, state},
-                 F(ignored,
-                   {bad_cert, {not_supported_extension, SpecExt}},
-                   state)),
-    %% Critical unknown extensions outside the TCG whitelist still
-    %% fail -- a rogue EK carrying a truly-unrecognised critical
-    %% extension must not slip through.
-    RogueExt = #'Extension'{extnID = {1, 2, 3, 4}},
-    ?assertMatch({fail, {not_supported_extension, _}},
-                 F(ignored,
-                   {bad_cert, {not_supported_extension, RogueExt}},
-                   state)),
-    %% Non-critical extensions under the TCG arc are informational.
-    TcgNonCrit = #'Extension'{extnID = {2, 23, 133, 2, 1}},
-    ?assertMatch({valid, state},
-                 F(ignored, {extension, TcgNonCrit}, state)),
-    %% Non-TCG non-critical extensions: unknown (let pkix decide).
-    NonTcgNonCrit = #'Extension'{extnID = {1, 2, 3, 4, 5}},
-    ?assertMatch({unknown, state},
-                 F(ignored, {extension, NonTcgNonCrit}, state)),
-    %% Valid events pass through.
-    ?assertMatch({valid, state}, F(ignored, valid, state)),
-    ?assertMatch({valid, state}, F(ignored, valid_peer, state)),
-    ok.
-
-%% Reviewer pass 11 / batch 13: verifies that the
-%% double-checked-locking pattern used in ensure_ak/1
-%% correctly serialises concurrent callers that pass the
-%% outer check but race on the inner compute. Tests the
-%% primitive (global:trans + a shared persistent_term flag)
-%% directly rather than ensure_ak itself (which requires
-%% a real TPM NIF); regresses the shape of the fix.
-ensure_once_double_checked_lock_serialises_test() ->
-    Key = {dev_tpm2, batch13_test_flag},
-    Counter = {dev_tpm2, batch13_test_counter},
-    persistent_term:erase(Key),
-    persistent_term:put(Counter, 0),
-    %% Synthetic "init_chain" that increments a counter and
-    %% sets the flag. With no serialisation, 20 concurrent
-    %% callers past the outer check would all run the body
-    %% and the counter would hit 20. With the double-checked
-    %% locking pattern, only one caller under the lock sees
-    %% the flag as undefined; the rest re-read and short-
-    %% circuit. Counter MUST end at 1.
-    EnsureOnce = fun Loop() ->
-        case persistent_term:get(Key, undefined) of
-            undefined ->
-                global:trans(
-                    {{dev_tpm2, batch13_test_lock}, self()},
-                    fun() ->
-                        %% Re-check under lock. This is the
-                        %% critical step -- without it, the
-                        %% lock serialises but every caller
-                        %% still executes the body in turn.
-                        case persistent_term:get(Key, undefined) of
-                            undefined ->
-                                %% Simulate real init_chain
-                                %% work: small sleep so
-                                %% competing callers pile up.
-                                timer:sleep(10),
-                                Old = persistent_term:get(Counter),
-                                persistent_term:put(Counter, Old + 1),
-                                persistent_term:put(Key, done),
-                                done;
-                            done -> done
-                        end
-                    end,
-                    [node()]);
-            done -> done
-        end,
-        Loop
-    end,
-    Parent = self(),
-    N = 20,
-    Pids = [spawn_link(fun() ->
-        _ = EnsureOnce(),
-        Parent ! {done, self()}
-    end) || _ <- lists:seq(1, N)],
-    %% Wait for all callers to complete.
-    lists:foreach(
-        fun(P) ->
-            receive {done, P} -> ok
-            after 5000 -> error({timeout, P}) end
-        end, Pids),
-    %% The body ran exactly once.
-    ?assertEqual(1, persistent_term:get(Counter)),
-    ?assertEqual(done, persistent_term:get(Key)),
-    persistent_term:erase(Key),
-    persistent_term:erase(Counter),
-    ok.
-
-event_log_append_test() ->
-    %% Reset state for the test.
-    persistent_term:erase({dev_tpm2, event_log}),
-    persistent_term:erase({dev_tpm2, event_seq}),
-    ?assertEqual([], event_log(#{})),
-    ok = append_event(15, #{<<"event-type">> => <<"T">>}),
-    Log = event_log(#{}),
-    ?assertEqual(1, length(Log)),
-    [E1] = Log,
-    ?assertEqual(15, maps:get(<<"pcr">>, E1)),
-    ?assertEqual(0, maps:get(<<"seq">>, E1)),
-    ok = append_event(15, #{<<"event-type">> => <<"U">>}),
-    ?assertEqual(2, length(event_log(#{}))).
-
--endif.
