@@ -102,3 +102,21 @@ Remove historical/debug-only surfaces:
     and fails on this macOS host because `tss2/tss2_esys.h` is unavailable.
     Erlang compilation reached the staged LapEE modules before that native
     host-header failure; full image validation still needs Buildroot/Docker.
++- QEMU runtime validation:
++  - `make runtime-image TME=0`: pass. Built signed image
++    `build/images/lapee-runtime-no-tme-signed.img`.
++  - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass.
++    HyperBEAM `/~meta@1.0/info`, `/~measurement@1.0/boot`, and
++    `/~system@1.0/all` answered under QEMU+swtpm.
++
+## Reviewer Notes For Next Pass
++
+- `dev_zone` still carries a custom admission authorization envelope. Replace
++  with a zone-signed AO-Core admission message if acceptance tests stay green.
++- `dev_measurement` and `dev_zone` duplicate payload normalization and stable
++  ID code. Collapse toward one AO-Core boundary shape.
++- Public `wrap-secret` / `unwrap-secret` endpoints remain as compatibility
++  surfaces in the checkpoint. The specs now mark secret activation as
++  internal-only; remove or hide these in the next round by moving activation
++  behind zone-owned calls.
++- Stretch target needs another `2,623` production-overlay lines removed.
