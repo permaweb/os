@@ -11,8 +11,7 @@ Usage: scripts/render-splash-previews.sh
 Environment overrides:
   OUTDIR=build/splash-previews/<label> Output directory
   DIMS="160x50 128x48"                 Terminal sizes to render
-  LAYOUTS="qr max deck sigil blue orbit matrix plaque classic"
-                                       Splash layouts to render
+  LAYOUTS="blue provision"             Splash layouts to render
   STATES="ready hb-wait"               Splash phases to render
   IP=10.0.2.15                         IP shown in status/url text
   FRAME=96                             Animation frame used for previews
@@ -57,7 +56,7 @@ command -v erl >/dev/null 2>&1 || {
 timestamp="$(date +%Y%m%d-%H%M%S)"
 OUTDIR="${OUTDIR:-build/splash-previews/$timestamp}"
 DIMS="${DIMS:-160x50}"
-LAYOUTS="${LAYOUTS:-qr max deck sigil blue orbit matrix plaque classic}"
+LAYOUTS="${LAYOUTS:-blue provision}"
 STATES="${STATES:-ready hb-wait}"
 IP="${IP:-10.0.2.15}"
 FRAME="${FRAME:-96}"

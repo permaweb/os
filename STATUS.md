@@ -148,6 +148,23 @@ Remove historical/debug-only surfaces:
     signer-required zone and the empty-signer node was rejected.
   - Tracked text count after this cut: `26,603` lines outside `.git` and
     `build/`.
+- Splash cleanup checkpoint:
+  - Removed the experimental alternate splash layouts. Production now has the
+    release blue proof splash and the Secure Boot provisioner warning/report
+    splash only.
+  - Runtime init only accepts `blue` and `provision` for `LAPEE_SPLASH_LAYOUT`;
+    unknown values fall back to the compiled default.
+  - `lapee_splash.erl` shrank from `1,758` lines in v1 to `1,223` lines.
+  - Validation:
+    - `erlc -o /tmp buildroot-external/board/lapee/files/lapee_splash.erl`:
+      pass.
+    - `sh -n buildroot-external/board/lapee/rootfs-overlay/init`: pass.
+    - `bash -n scripts/render-splash-previews.sh`: pass.
+    - Rendered blue/provision previews at `160x50` and `128x48` for boot,
+      hb-wait, and ready states under
+      `build/splash-previews/compression-check/`.
+  - Tracked text count after this cut: `26,078` lines outside `.git` and
+    `build/`.
 
 ## Reviewer Notes For Next Pass
 

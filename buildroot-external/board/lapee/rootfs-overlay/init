@@ -133,7 +133,7 @@ if [ "$LAPEE_MODE" = "sb-provision" ]; then
     SPLASH_LAYOUT=provision
 fi
 case "$SPLASH_LAYOUT" in
-    qr|max|full|deck|sigil|blue|orbit|matrix|plaque|provision|classic)
+    blue|provision)
         export LAPEE_SPLASH_LAYOUT="$SPLASH_LAYOUT"
         ;;
 esac
