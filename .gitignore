@@ -16,6 +16,8 @@
 # Operator-owned secrets and Secure Boot material.
 /wifi.conf
 /config.json
+/hyperbeam-key.json
+/cache-mainnet/
 /secureboot/
 
 # Python/editor cache.

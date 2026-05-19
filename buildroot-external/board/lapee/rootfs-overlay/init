@@ -29,7 +29,7 @@ mount -t tmpfs -o nosuid,nodev         tmpfs /run
 mkdir -p /dev/pts
 mount -t devpts -o nosuid,noexec devpts /dev/pts
 mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
-mkdir -p /sys/firmware/efi/efivars
+mkdir -p /sys/firmware/efi/efivars 2>/dev/null || true
 mount -t efivarfs -o ro,nosuid,noexec,nodev \
     efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
@@ -1707,22 +1707,96 @@ fi
 
 # Config files for HyperBEAM. The operator file is copied out of the
 # read-only ESP into tmpfs and defaults to `{}`. The measured LapEE
-# file is last so it keeps the enforced devices and on/start PCR-15
-# boot-attestation hook.
+# file wins by default. If operator config supplies on/start, synthesize
+# a final tiny config that appends those startup hooks after the base
+# PCR-15 boot-attestation hook.
 LAPEE_JSON=/etc/lapee/lapee.json
 DEBUG_CONFIG_JSON=/tmp/lapee-debug.json
+MERGED_ON_START_JSON=/run/lapee/on-start-merged.json
+
+write_merged_on_start_config() {
+    rm -f "$MERGED_ON_START_JSON" "$MERGED_ON_START_JSON.tmp" \
+        2>/dev/null || true
+    command -v erl >/dev/null 2>&1 || {
+        trace "config: erl missing; operator on.start merge skipped"
+        return 0
+    }
+
+    if erl -noshell -eval '
+        [UserPath, BasePath, OutPath] = init:get_plain_arguments(),
+        Read = fun(Path) ->
+            case file:read_file(Path) of
+                {ok, Bin} -> json:decode(Bin);
+                {error, _} -> #{}
+            end
+        end,
+        OnConfig = fun(Cfg) ->
+            case maps:get(<<"on">>, Cfg, #{}) of
+                On when is_map(On) -> On;
+                _ -> #{}
+            end
+        end,
+        Start = fun(Cfg) -> maps:get(<<"start">>, OnConfig(Cfg), undefined) end,
+        ToList = fun
+            (undefined) -> [];
+            (null) -> [];
+            (List) when is_list(List) -> List;
+            (Value) -> [Value]
+        end,
+        UserConfig = Read(UserPath),
+        UserStart = ToList(Start(UserConfig)),
+        case UserStart of
+            [] ->
+                ok;
+            _ ->
+                BaseConfig = Read(BasePath),
+                BaseStart = ToList(Start(BaseConfig)),
+                On = maps:merge(OnConfig(UserConfig), OnConfig(BaseConfig)),
+                Merged = #{<<"on">> =>
+                    On#{<<"start">> => BaseStart ++ UserStart}},
+                ok = file:write_file(OutPath,
+                    iolist_to_binary(json:encode(Merged)))
+        end,
+        halt(0).
+    ' -extra "$OPERATOR_CONFIG_JSON" "$LAPEE_JSON" \
+        "$MERGED_ON_START_JSON.tmp" >/dev/null 2>&1; then
+        if [ -s "$MERGED_ON_START_JSON.tmp" ]; then
+            mv "$MERGED_ON_START_JSON.tmp" "$MERGED_ON_START_JSON" \
+                2>/dev/null || return 0
+            chmod 600 "$MERGED_ON_START_JSON" 2>/dev/null || true
+            trace "config: merged operator on.start after base on.start"
+        fi
+    else
+        rm -f "$MERGED_ON_START_JSON.tmp" 2>/dev/null || true
+        trace "config: operator on.start merge failed; using base on.start"
+    fi
+    return 0
+}
 
 status "Preparing HyperBEAM configuration."
+DEBUG_HB_CONFIG=
 if [ "$LAPEE_DEBUG" = "1" ] && cmdline_flag_set LAPEE_MEASUREMENT_TRACE; then
-    printf '%s\n' '{"measurement-trace":true}' > "$DEBUG_CONFIG_JSON" \
-        2>/dev/null || true
-    HB_CONFIG="$DEBUG_CONFIG_JSON,$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
-    trace "hyperbeam: measurement trace enabled"
-else
-    HB_CONFIG="$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+    if printf '%s\n' '{"measurement-trace":true}' > "$DEBUG_CONFIG_JSON" \
+        2>/dev/null; then
+        DEBUG_HB_CONFIG="$DEBUG_CONFIG_JSON,"
+        trace "hyperbeam: measurement trace enabled"
+    else
+        trace "hyperbeam: measurement trace config write failed"
+    fi
+fi
+
+write_merged_on_start_config
+HB_CONFIG="${DEBUG_HB_CONFIG}$OPERATOR_CONFIG_JSON,$LAPEE_JSON"
+if [ -s "$MERGED_ON_START_JSON" ]; then
+    HB_CONFIG="$HB_CONFIG,$MERGED_ON_START_JSON"
 fi
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
+
+# Keep Erlang outbound HTTP on IPv4-only networks. Some public
+# endpoints publish AAAA records even when this appliance has no
+# usable IPv6 route.
+export ERL_INETRC=/etc/erl_inetrc
 
 # TPM access.
 export LAPEE_TPM_TCTI=${LAPEE_TPM_TCTI:-device:/dev/tpm0}

@@ -53,6 +53,10 @@ SIZE_MIB=auto
 
 die() { echo "error: $*" >&2; exit 1; }
 
+file_size() {
+    stat -c %s "$1" 2>/dev/null || stat -f %z "$1"
+}
+
 usage() {
     sed -n '/^# /,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
@@ -152,8 +156,7 @@ EOF
         "
 fi
 
-UKI_SIZE=$(stat -f %z "$BUILD_DIR/lapee.efi" 2>/dev/null \
-           || stat -c %s "$BUILD_DIR/lapee.efi")
+UKI_SIZE=$(file_size "$BUILD_DIR/lapee.efi")
 echo ">> UKI size: $UKI_SIZE bytes"
 
 # ---- step 1b: stage SB enrolment .auth files if present -------
@@ -165,8 +168,7 @@ if [[ -d "$SB_ENROL_DIR" ]]; then
         if [[ -f "$SB_ENROL_DIR/$f" ]]; then
             cp "$SB_ENROL_DIR/$f" "$BUILD_DIR/$f"
             STAGED_SB="${STAGED_SB}${STAGED_SB:+ }$f"
-            sz=$(stat -f %z "$SB_ENROL_DIR/$f" 2>/dev/null \
-                 || stat -c %s "$SB_ENROL_DIR/$f")
+            sz=$(file_size "$SB_ENROL_DIR/$f")
             STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + sz))
         fi
     done
@@ -301,8 +303,7 @@ fi
 if [[ -n "$OUT_IMAGE" ]]; then
     mkdir -p "$(dirname "$OUT_IMAGE")"
     mv "$FINAL_IMG" "$OUT_IMAGE"
-    IMG_BYTES=$(stat -f %z "$OUT_IMAGE" 2>/dev/null \
-                || stat -c %s "$OUT_IMAGE")
+    IMG_BYTES=$(file_size "$OUT_IMAGE")
     echo ""
     echo "=========================================================="
     echo ">> USB image ready: $OUT_IMAGE ($IMG_BYTES bytes)"

@@ -1,0 +1,2 @@
+{lookup, [file, dns]}.
+{inet6, false}.

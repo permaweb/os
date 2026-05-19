@@ -48,6 +48,8 @@
 #                           - run one measurement node on TARGET=ssh://...
 #   make qemu-green-zone-remote-snp
 #                           - run a four-node real SNP green-zone remotely.
+#   make verify-config-invariants
+#                           - check shipped config security invariants.
 #
 # ============================================================
 
@@ -131,6 +133,7 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
         qemu qemu-oracle qemu-gui qemu-green-zone qemu-green-zone-nonvolatile \
         qemu-provisioner-nonvolatile qemu-operator-config \
         qemu-measurement-remote qemu-green-zone-remote-snp \
+        verify-config-invariants \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
@@ -146,6 +149,9 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
 help:
 	@awk '/^# =+$$/{flag=!flag;if(!flag)exit;next} \
 	      flag{sub(/^# ?/,"");print}' $(firstword $(MAKEFILE_LIST))
+
+verify-config-invariants:
+	./scripts/check-lapee-config-invariants.py
 
 # ------------------------------------------------------------
 # Public release surface.
