@@ -8,18 +8,13 @@
 
 -export([
     startup/0,
-    pcr_read/1,
     pcr_extend/2,
     create_primary_ek/0,
-    create_signing_key/1,
-    make_credential/3,
+    create_signing_key/0,
     activate_credential/4,
     quote/3,
     tpm_properties/0,
-    nv_read_public/1,
-    nv_read/1,
-    flush_context/1,
-    set_tcti/1
+    nv_read/1
 ]).
 
 -on_load(init/0).
@@ -73,21 +68,11 @@ init() ->
 
 startup() -> erlang:nif_error(nif_not_loaded).
 
-pcr_read(_Idx) -> erlang:nif_error(nif_not_loaded).
-
 pcr_extend(_Idx, _Data) -> erlang:nif_error(nif_not_loaded).
 
 create_primary_ek() -> erlang:nif_error(nif_not_loaded).
 
-create_signing_key(_ParentHandle) -> erlang:nif_error(nif_not_loaded).
-
-%% Build a TPM2 credential blob for `AkName' under `EkPublic'.
-%% `EkPublic' is a marshalled TPM2B_PUBLIC, `AkName' is the raw
-%% TPM2B_NAME payload returned by ReadPublic, and `Secret' is the
-%% verifier-chosen 32-byte credential. Returns
-%% `{ok, #{credential_blob, secret}}', both marshalled TPM2B binaries.
-make_credential(_EkPublic, _AkName, _Secret) ->
-    erlang:nif_error(nif_not_loaded).
+create_signing_key() -> erlang:nif_error(nif_not_loaded).
 
 %% Recover a MakeCredential secret using the loaded AK and EK handles.
 %% The recovered certInfo is the verifier's original secret iff the AK
@@ -107,14 +92,6 @@ quote(_SignHandle, _PcrList, _Nonce) -> erlang:nif_error(nif_not_loaded).
 %% present, act as a cross-check rather than the sole source.
 tpm_properties() -> erlang:nif_error(nif_not_loaded).
 
-%% Read the public metadata of an NV index addressed by its TPM handle
-%% (e.g. 16#01C00002 for the RSA-2048 EK cert index). Returns
-%% {ok, #{data_size, attributes, name_alg, auth_policy_len, handle}} on
-%% success, or {error, <<"nv_index_undefined">>} when the handle is not
-%% provisioned on this TPM -- which is the canonical signal that the
-%% manufacturer did not populate an EK cert at that index.
-nv_read_public(_TpmHandle) -> erlang:nif_error(nif_not_loaded).
-
 %% Read the full bytes of an NV index addressed by its TPM handle.
 %% Chunked reads handled inside the NIF. Returns {ok, Data::binary()}
 %% or {error, Reason} where Reason is one of:
@@ -123,7 +100,3 @@ nv_read_public(_TpmHandle) -> erlang:nif_error(nif_not_loaded).
 %%   <<"nv_index_not_readable">> -- attributes forbid any read path
 %%   <<"Esys_NV_Read: ...">>     -- any other TSS2 failure
 nv_read(_TpmHandle) -> erlang:nif_error(nif_not_loaded).
-
-flush_context(_Handle) -> erlang:nif_error(nif_not_loaded).
-
-set_tcti(_TctiString) -> erlang:nif_error(nif_not_loaded).

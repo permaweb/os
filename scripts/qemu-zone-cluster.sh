@@ -147,14 +147,6 @@ cfg = {
 device = sys.argv[3]
 if device != "auto":
     cfg["measurement-device"] = device
-if device == "snp-mock@1.0":
-    preloaded = list(base["preloaded-devices"])
-    preloaded.append({
-        "name": "snp-mock@1.0",
-        "module": "dev_snp_mock",
-        "ao-types": "module=\"atom\"",
-    })
-    cfg["preloaded-devices"] = preloaded
 pathlib.Path(sys.argv[2]).write_text(json.dumps(cfg))
 PY
     docker run --rm $DOCKER_PLATFORM \
@@ -292,6 +284,11 @@ node_host_url() {
 node_guest_url() {
     local n=$1
     printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + n))"
+}
+
+json_path() {
+    local path=$1
+    printf '%s' "$path"
 }
 
 node_memory_mib() {
@@ -474,8 +471,10 @@ wait_node() {
         if curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
                 "$url/~measurement@1.0/info" -o "$info" 2>/dev/null &&
                 [[ -s "$info" ]]; then
+            scripts/materialize-hb-json.py "$url" "$info"
             curl -fsSL -H "accept: application/json" -H "accept-bundle: true" \
-                "$url/~measurement@1.0/boot" -o "$att"
+                "$url$(json_path "/~measurement@1.0/boot")" -o "$att"
+            scripts/materialize-hb-json.py "$url" "$att"
             echo ">> node $n ready"
             return 0
         fi
@@ -497,8 +496,9 @@ post_json() {
         -H "accept: application/json" \
         -H "accept-bundle: true" \
         --data-binary "@$req" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 get_json() {
@@ -508,8 +508,9 @@ get_json() {
     curl -sSL \
         -H "accept: application/json" \
         -H "accept-bundle: true" \
-        "$(node_host_url "$n")$path" \
+        "$(node_host_url "$n")$(json_path "$path")" \
         -o "$out"
+    scripts/materialize-hb-json.py "$(node_host_url "$n")" "$out"
 }
 
 require_request() {
@@ -570,7 +571,13 @@ assert_nonvolatile_reused() {
 }
 
 boot_memtotal_kb() {
-    jq -r '(.body.body // .body).system.memory.meminfo.memtotal.value' "$1"
+    jq -r '
+        def measurement:
+            if .body.type == "lapee-measurement" then .body
+            elif .type == "lapee-measurement" then .
+            else . end;
+        measurement.body.system.memory.meminfo.memtotal.value
+    ' "$1"
 }
 
 assert_current_boot_attestation_after_join() {
@@ -681,38 +688,34 @@ start_node 3 "$IMG"
 start_node 4 "$IMG"
 
 for n in 1 2 3 4; do wait_node "$n"; done
-for n in 1 2 3 4; do
-    get_json "$n" "/~measurement@1.0/subject" \
-        "$OUTDIR/responses/node$n-credential-subject.json"
-done
 
 jq -n \
     --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
     --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
     --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
-    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" \
-    --slurpfile c1 "$OUTDIR/responses/node1-credential-subject.json" \
-    --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
-    --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
-    --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
+    --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
     def falsy: . == false or . == "false";
-    def props($node; $att; $cred): {
+    def measurement($att):
+        if $att.body.type == "lapee-measurement" then $att.body
+        elif $att.type == "lapee-measurement" then $att
+        else $att end;
+    def props($node; $att): {
         node: $node,
-        cmdline: $att.body.body.system.kernel.cmdline,
-        boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
-        node_initialized: $att.body.body.node.initialized,
+        cmdline: measurement($att).body.system.kernel.cmdline,
+        boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+        node_initialized: measurement($att).body.node.initialized,
         access_remote_cache_for_client:
-            $att.body.body.node."access-remote-cache-for-client",
-        load_remote_devices: $att.body.body.node."load-remote-devices",
-        memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
-        dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
-        measurement_device: $att.body."measurement-device",
-        ek_cert_source_kind: $att.body.evidence."ek-cert-source".kind,
-        ek_public: $cred.body."ek-public",
-        ak_name: $cred.body."ak-name"
+            measurement($att).body.node."access-remote-cache-for-client",
+        load_remote_devices: measurement($att).body.node."load-remote-devices",
+        memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
+        dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
+        measurement_device: measurement($att)."measurement-device",
+        ek_cert_source_kind: measurement($att).evidence."ek-cert-source".kind,
+        ek_public: measurement($att)."secret-recipient"."ek-public",
+        ak_name: measurement($att)."secret-recipient"."ak-name"
     };
-    [props(1; $n1[0]; $c1[0]), props(2; $n2[0]; $c2[0]),
-     props(3; $n3[0]; $c3[0]), props(4; $n4[0]; $c4[0])]
+    [props(1; $n1[0]), props(2; $n2[0]),
+     props(3; $n3[0]), props(4; $n4[0])]
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
@@ -888,7 +891,9 @@ for n in 1 2 3; do
         assert_nonvolatile_status "$n" "$OUTDIR/responses/node$n-status.json"
     fi
     member_count=$(jq -r '.body."zone".members
-                          | with_entries(select(.key != "commitments"))
+                          | with_entries(
+                                select(.key != "commitments" and
+                                       .key != "device"))
                           | keys | length' \
         "$OUTDIR/responses/node$n-status.json")
     expected=$(expected_member_count "$n")
@@ -931,8 +936,6 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_cached_message_not_found 2 "$node2_pre_reboot_boot_id" \
         "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
     echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
-    get_json 2 "/~measurement@1.0/subject" \
-        "$OUTDIR/responses/node2-reboot-credential-subject.json"
     python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     jq --arg addr "$ring_addr" \
         '. + {"expected-ring-address": $addr}' \
@@ -972,7 +975,13 @@ if [[ "$NONVOLATILE" = "1" ]]; then
 fi
 
 for n in 1 2 3; do
-    member_addr=$(jq -r '.body.body.node.address' \
+    member_addr=$(jq -r '
+        def measurement:
+            if .body.type == "lapee-measurement" then .body
+            elif .type == "lapee-measurement" then .
+            else . end;
+        measurement.body.node.address
+    ' \
         "$OUTDIR/responses/node$n-boot-attestation.json")
     get_json "$n" \
         "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=qemu-zone-index" \

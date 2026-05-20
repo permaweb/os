@@ -1,80 +1,17 @@
-%%% @doc Measurement-backed zone rings.
+%%% @doc Measurement-backed shared-identity zones.
 %%%
-%%% A zone is a shared signing identity admitted by evidence rather than
-%%% by operator fiat. The device is intentionally small:
-%%%
-%%% * `init' creates a named ring wallet, a 256-bit AES ring secret, and a
-%%%   deeply-nested template after proving that the initializing node matches
-%%%   the template.
-%%% * `admit' verifies a candidate peer through `~measurement@1.0/verify-peer',
-%%%   matches the candidate's boot attestation against the template, then
-%%%   wraps the ring AES secret to the peer's measured secret recipient. The
-%%%   fresh measurement and secret-activation proof establish liveness and
-%%%   possession of the engine-native recipient named in that boot measurement.
-%%%   The ring wallet is encrypted under the wrapped AES key.
-%%% * `join' asks an existing member for a named ring admission, checks the
-%%%   envelope, unwraps the AES key through `~measurement@1.0/unwrap-secret',
-%%%   decrypts the wallet, verifies its advertised ring address, and installs
-%%%   it as a local zone identity.
-%%% * `member' returns a narrow membership proof signed by the installed
-%%%   zone identity. It proves that this node address is present in the
-%%%   local zone member set without exposing an arbitrary signing endpoint.
-%%%   A request can set `membership-codec-device' to choose the commitment
-%%%   codec used for that proof; otherwise the node's normal commitment
-%%%   device is used. A request can also set `target' to bind the proof to
-%%%   an index, scheduler, or process that should consume it.
-%%% The ring wallet is installed as an additional HyperBEAM identity
-%%% (`zone/<name>'). Signing with that identity is deliberately
-%%% handled by HyperBEAM's identity system, not by a zone-specific
-%%% arbitrary signing endpoint.
-%%%
-%%% Ring templates are normal HyperBEAM message match templates: AO metadata
-%%% keys are ignored, template keys must be present in the candidate, non-map
-%%% values match exactly, and the atom `_' is a wildcard. JSON callers can send
-%%% the string `"_"', which is normalized to that atom before matching.
-%%%
-%%% The admission protocol is:
-%%%
-%%% 1. The initializer calls `init' with a `name' and `template'. The node
-%%%    reads its own cached `~measurement@1.0/boot', verifies that the
-%%%    template matches it, then generates the ring AES key and wallet locally.
-%%%    Callers cannot provide those secrets.
-%%% 2. A joiner calls its local `join' with the zone `name', a member
-%%%    `peer-url', its own `self-url', and the expected `ring-address'.
-%%% 3. The joiner sends an admission request to the peer. The peer calls
-%%%    `~measurement@1.0/verify-peer' for the joiner's URL. That device verifies
-%%%    the joiner's boot measurement, verifies a fresh nonce-bound measurement,
-%%%    checks the secret recipient agrees, and performs the engine-native
-%%%    wrap/unwrap proof to prove the joiner controls the recipient inside that
-%%%    measured environment.
-%%%    It returns a signed `zone-peer-attestation'.
-%%% 4. The peer matches the ring template against the boot attestation inside
-%%%    that peer attestation. If it matches, the peer wraps the ring AES key to
-%%%    the joiner's TPM and encrypts the ring wallet under that AES key.
-%%% 5. The peer returns a `zone-admission'. The top-level HTTP/JSON
-%%%    envelope may acquire transport commitments, so the durable ring
-%%%    signature is over the nested `authorization' message. That authorization
-%%%    binds the scalar admission fields and locally recomputed stable IDs of
-%%%    the nested payloads: validity, ring-reference, zone definition,
-%%%    template, peer-attestation, credential, and encrypted-wallet. Nested
-%%%    transport commitments are ignored for this ID calculation so an attacker
-%%%    cannot smuggle a signed ID into a modified payload. JSON type metadata is
-%%%    transport metadata and is ignored for this authorization hash; scalar
-%%%    type checks happen in the peer-attestation and measurement verifiers.
-%%% 6. The joiner verifies the ring-signed authorization, checks every payload
-%%%    ID, activates the credential locally, decrypts the wallet, confirms
-%%%    the wallet address equals the expected ring address, and installs the
-%%%    identity as `zone/<name>'.
-%%% 7. A member can call `member' to receive a signed, narrow statement that
-%%%    its node address is a member of the named zone. The only signer is the
-%%%    ring identity. The caller may only choose the zone, commitment codec,
-%%%    and optional target/audience.
+%%% `init' creates a locally generated zone wallet/AES secret after the node's
+%%% own boot measurement matches the template. `admit' verifies a live peer via
+%%% `~measurement@1.0/verify-peer', matches the peer's boot measurement against
+%%% that template, wraps the AES secret to the peer's measured recipient, and
+%%% returns a ring-signed admission. `join' verifies the admission, unwraps the
+%%% AES key locally, decrypts the wallet, and installs it as `zone/<name>'.
+%%% `member' returns only a narrow zone-signed membership proof.
 -module(dev_zone).
--export([info/1, info/3, init/3, status/3, admit/3, join/3,
-         member/3, match/3]).
+-implements(<<"zone@1.0">>).
+-export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 
 -include("include/hb.hrl").
--include_lib("eunit/include/eunit.hrl").
 
 -define(IDENTITY_PREFIX, <<"zone/">>).
 -define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
@@ -87,8 +24,7 @@ info(_) ->
             <<"status">>,
             <<"admit">>,
             <<"join">>,
-            <<"member">>,
-            <<"match">>
+            <<"member">>
         ]
     }.
 
@@ -96,18 +32,8 @@ info(_Base, _Req, _Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"Measurement-backed zone ring admission and shared "
-                  "identity">>,
             <<"version">> => <<"1.0">>,
-            <<"template-semantics">> =>
-                <<"HyperBEAM message primary match; non-map values exact; "
-                  "'_' wildcard">>,
-            <<"peer-attestation-trust">> =>
-                <<"Zone admission verifies live peers through "
-                  "~measurement@1.0/verify-peer. Reusable/transitive "
-                  "peer-attestation publisher trust is a measurement-device "
-                  "concern, not ring state.">>
+            <<"exports">> => maps:get(exports, info(#{}), [])
         }
     }}.
 
@@ -143,18 +69,6 @@ status(_Base, Req, Opts) ->
         end
     end, Opts).
 
-match(_Base, Req, Opts) ->
-    with_result(fun() ->
-        Template = clean_template(
-            hb_maps:get(<<"template">>, Req, #{}, Opts),
-            Opts),
-        Candidate = hb_maps:get(<<"candidate">>, Req, undefined, Opts),
-        #{
-            <<"matched">> => match_template(Template, Candidate, Opts),
-            <<"template">> => Template
-        }
-    end, Opts).
-
 admit(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
@@ -169,7 +83,7 @@ admit(_Base, Req, Opts) ->
         Subject = hb_maps:get(
             <<"peer-credential-subject">>, PeerAttestation, undefined, Opts),
         Credential = commit_unsigned_tree(
-            dev_measurement:wrap_secret_for_subject(Subject, AES, Opts),
+            measurement_wrap_secret(Subject, AES, Opts),
             Opts),
         EncryptedWallet = commit_unsigned_tree(encrypt_wallet(Wallet, AES), Opts),
         Members = add_member_to_members(
@@ -330,10 +244,8 @@ admission_authorization(Admission, Wallet, Opts) ->
             [
                 {AuthKey, stable_authorization_payload_id(
                     hb_maps:get(AdmissionKey, Admission, #{}, Opts),
-                    Opts,
-                    MetadataMode)}
-             || {AuthKey, AdmissionKey, MetadataMode} <-
-                    authorization_id_fields()
+                    Opts)}
+             || {AuthKey, AdmissionKey} <- authorization_id_fields()
             ])),
         #{<<"priv-wallet">> => Wallet}
     ).
@@ -349,17 +261,20 @@ authorization_scalar_fields() ->
 
 authorization_id_fields() ->
     [
-        {<<"validity-id">>, <<"validity">>, strip_json_metadata},
-        {<<"ring-reference-id">>, <<"ring-reference">>, strip_json_metadata},
-        {<<"zone-id">>, <<"zone">>, strip_json_metadata},
-        {<<"template-id">>, <<"template">>, strip_json_metadata},
-        {<<"peer-attestation-id">>, <<"peer-attestation">>, strip_json_metadata},
-        {<<"credential-id">>, <<"credential">>, strip_json_metadata},
-        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>, strip_json_metadata}
+        {<<"validity-id">>, <<"validity">>},
+        {<<"ring-reference-id">>, <<"ring-reference">>},
+        {<<"zone-id">>, <<"zone">>},
+        {<<"template-id">>, <<"template">>},
+        {<<"peer-attestation-id">>, <<"peer-attestation">>},
+        {<<"credential-id">>, <<"credential">>},
+        {<<"encrypted-wallet-id">>, <<"encrypted-wallet">>}
     ].
 
 stable_authorization_payload_id(Msg, Opts) when is_map(Msg) ->
-    stable_authorization_payload_id(Msg, Opts, strip_json_metadata);
+    stable_uncommitted_id(
+        canonical_authorization_payload(
+            hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
+            Opts));
 stable_authorization_payload_id(Bin, _Opts)
         when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
@@ -371,97 +286,26 @@ stable_authorization_payload_id(Bin, _Opts) when is_binary(Bin) ->
 stable_authorization_payload_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
-stable_authorization_payload_id(Msg, Opts, MetadataMode) when is_map(Msg) ->
-    stable_uncommitted_id(
-        canonical_authorization_payload(
-            hb_cache:ensure_all_loaded(response_body(Msg, Opts), Opts),
-            Opts,
-            MetadataMode));
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
-        when is_binary(Bin), byte_size(Bin) =:= 32 ->
-    hb_util:human_id(Bin);
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode)
-        when is_binary(Bin), byte_size(Bin) =:= 43 ->
-    Bin;
-stable_authorization_payload_id(Bin, _Opts, _MetadataMode) when is_binary(Bin) ->
-    hb_util:encode(hb_crypto:sha256(Bin));
-stable_authorization_payload_id(Value, _Opts, _MetadataMode) ->
-    hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
-
-canonical_authorization_payload(Value, Opts) ->
-    canonical_authorization_payload(Value, Opts, strip_json_metadata).
-
-canonical_authorization_payload(Link, Opts, MetadataMode) when ?IS_LINK(Link) ->
-    canonical_authorization_payload(response_body(Link, Opts), Opts, MetadataMode);
-canonical_authorization_payload(Msg, Opts, MetadataMode) when is_map(Msg) ->
+canonical_authorization_payload(Link, Opts) when ?IS_LINK(Link) ->
+    canonical_authorization_payload(response_body(Link, Opts), Opts);
+canonical_authorization_payload(Msg, Opts) when is_map(Msg) ->
     Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
-    Types = authorization_ao_types(Loaded),
     maps:from_list(
         [
-            {Key, canonical_authorization_value(
-                Key, Value, Types, Opts, MetadataMode)}
+            {Key, canonical_authorization_payload(Value, Opts)}
          || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
-            not authorization_meta_key(Key, MetadataMode)
+            not detached_meta_key(Key)
         ]);
-canonical_authorization_payload(List, Opts, MetadataMode) when is_list(List) ->
-    [
-        canonical_authorization_payload(Value, Opts, MetadataMode)
-     || Value <- List
-    ];
-canonical_authorization_payload(Value, _Opts, _MetadataMode)
-        when is_atom(Value) ->
+canonical_authorization_payload(List, Opts) when is_list(List) ->
+    [canonical_authorization_payload(Value, Opts) || Value <- List];
+canonical_authorization_payload(Value, _Opts) when is_atom(Value) ->
     hb_util:bin(Value);
-canonical_authorization_payload(Value, _Opts, _MetadataMode) ->
+canonical_authorization_payload(Value, _Opts) ->
     Value.
 
-canonical_authorization_value(Key, Value, Types, Opts, MetadataMode) ->
-    authorization_typed_value(
-        maps:get(Key, Types, undefined),
-        canonical_authorization_payload(Value, Opts, MetadataMode)).
-
-authorization_meta_key(<<"commitments">>, _MetadataMode) -> true;
-authorization_meta_key(<<"ao-types">>, strip_json_metadata) -> true;
-authorization_meta_key(_Key, _MetadataMode) -> false.
-
-authorization_ao_types(Msg) ->
-    case maps:get(<<"ao-types">>, Msg, undefined) of
-        Types when is_binary(Types) ->
-            maps:from_list(
-                [Parsed
-                 || Part <- binary:split(Types, <<",">>, [global]),
-                    Parsed <- [authorization_ao_type(Part)],
-                    Parsed =/= undefined]);
-        _ ->
-            #{}
-    end.
-
-authorization_ao_type(Part0) ->
-    Part = iolist_to_binary(string:trim(binary_to_list(Part0))),
-    case binary:split(Part, <<"=">>) of
-        [RawKey, RawType0] ->
-            Key = iolist_to_binary(string:trim(binary_to_list(RawKey))),
-            Type0 = iolist_to_binary(string:trim(binary_to_list(RawType0))),
-            {Key, trim_type_quotes(Type0)};
-        _ ->
-            undefined
-    end.
-
-trim_type_quotes(<<"\"", Rest/binary>>) ->
-    case Rest of
-        <<Inner:(byte_size(Rest) - 1)/binary, "\"">> -> Inner;
-        _ -> Rest
-    end;
-trim_type_quotes(Type) ->
-    Type.
-
-authorization_typed_value(<<"atom">>, Value) ->
-    hb_util:bin(Value);
-authorization_typed_value(<<"integer">>, Value) when is_binary(Value) ->
-    try binary_to_integer(Value)
-    catch _:_ -> Value
-    end;
-authorization_typed_value(_Type, Value) ->
-    Value.
+detached_meta_key(<<"commitments">>) -> true;
+detached_meta_key(<<"ao-types">>) -> true;
+detached_meta_key(_Key) -> false.
 
 stable_uncommitted_id(Msg) ->
     hb_message:id(
@@ -718,9 +562,14 @@ zone_identity(Name) ->
     <<?IDENTITY_PREFIX/binary, Name/binary>>.
 
 self_attestation_body(Template, Opts) ->
-    case dev_measurement:boot(#{}, #{}, Opts) of
+    case measurement_boot(Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
             measurement_template_target(Template, response_body(Body, Opts), Opts);
+        {ok, Measurement} ->
+            measurement_template_target(
+                Template,
+                response_body(Measurement, Opts),
+                Opts);
         _ ->
             throw({zone_error, #{
                 <<"error">> => <<"self-attestation-failed">>
@@ -797,7 +646,7 @@ verify_joiner(JoinerURL, Req, RingReference, Opts) ->
         <<"url">> => JoinerURL,
         <<"peer-attestation-scope">> => RingReference
     },
-    case dev_measurement:verify_peer(#{}, VerifyReq, Opts) of
+    case measurement_verify_peer(VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
         _ ->
             throw({zone_error, #{
@@ -826,12 +675,6 @@ parse_positive_integer(B, Default) when is_binary(B) ->
     end;
 parse_positive_integer(_, Default) ->
     Default.
-
-encoded_field_sha256(Key, Msg, Opts) ->
-    hb_util:encode(
-        crypto:hash(
-            sha256,
-            safe_decode(hb_maps:get(Key, Msg, <<>>, Opts)))).
 
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     Required = [
@@ -969,7 +812,12 @@ assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
     end.
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
-    stable_authorization_payload_id(Attestation, Opts);
+    hb_message:id(
+        hb_cache:ensure_all_loaded(
+            hb_link:decode_all_links(Attestation),
+            Opts),
+        all,
+        Opts);
 attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
 attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -985,15 +833,6 @@ assert_scope_field(Key, Scope, RingReference, Opts) ->
         Expected when Expected =/= undefined -> ok;
         _ -> bad_peer_attestation(<<"peer-scope.consumer-scope">>)
     end.
-
-peer_boot_attestation_body(PeerAttestation, Opts) ->
-    measurement_template_target(
-        #{},
-        response_body(
-            hb_maps:get(
-                <<"peer-boot-attestation">>, PeerAttestation, undefined, Opts),
-            Opts),
-        Opts).
 
 peer_boot_attestation_body(Template, PeerAttestation, Opts) ->
     measurement_template_target(
@@ -1200,10 +1039,9 @@ assert_authorization_fields(Authorization, Admission, Opts) ->
 
 assert_authorization_ids(Authorization, Admission, Opts) ->
     lists:foreach(
-        fun({AuthKey, AdmissionKey, MetadataMode}) ->
+        fun({AuthKey, AdmissionKey}) ->
             Payload = hb_maps:get(AdmissionKey, Admission, undefined, Opts),
-            Expected =
-                stable_authorization_payload_id(Payload, Opts, MetadataMode),
+            Expected = stable_authorization_payload_id(Payload, Opts),
             case hb_maps:get(AuthKey, Authorization, undefined, Opts) of
                 Expected -> ok;
                 _ -> bad_admission(<<"authorization.", AuthKey/binary>>)
@@ -1238,7 +1076,7 @@ assert_expected_ring_address(Admission, Req, Opts) ->
     end.
 
 activate_local_credential(Credential, Opts) ->
-    case dev_measurement:unwrap_secret_value(Credential, Opts) of
+    case measurement_unwrap_secret_value(Credential, Opts) of
         {ok, Secret} when is_binary(Secret) ->
             Secret;
         _ ->
@@ -1247,15 +1085,41 @@ activate_local_credential(Credential, Opts) ->
             }})
     end.
 
+measurement_module(Opts) ->
+    case hb_device_load:reference(<<"measurement@1.0">>, Opts) of
+        {ok, Module} -> Module;
+        {error, Reason} ->
+            throw({zone_error, #{
+                <<"error">> => <<"measurement-device-unavailable">>,
+                <<"reason">> => hb_util:bin(Reason)
+            }})
+    end.
+
+measurement_boot(Opts) ->
+    Module = measurement_module(Opts),
+    Module:boot(#{}, #{}, Opts).
+
+measurement_verify_peer(Req, Opts) ->
+    Module = measurement_module(Opts),
+    Module:verify_peer(#{}, Req, Opts).
+
+measurement_wrap_secret(Subject, Secret, Opts) ->
+    Module = measurement_module(Opts),
+    Module:wrap_secret_for_subject(Subject, Secret, Opts).
+
+measurement_unwrap_secret_value(Credential, Opts) ->
+    Module = measurement_module(Opts),
+    Module:unwrap_secret_value(Credential, Opts).
+
 response_body(Link, Opts) when ?IS_LINK(Link) ->
     response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
-response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
 response_body(#{<<"body">> := Body} = Msg, Opts) ->
     case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
         <<"lapee-measurement">> -> Msg;
         _ -> response_body(Body, Opts)
     end;
+response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
+    response_body(Body, Opts);
 response_body(Body, _Opts) ->
     Body.
 
@@ -1268,11 +1132,6 @@ decode_required(Key, Msg, Opts) ->
                 <<"field">> => Key
             }})
     end.
-
-safe_decode(B) when is_binary(B) ->
-    try hb_util:decode(B) catch _:_ -> <<>> end;
-safe_decode(_) ->
-    <<>>.
 
 encrypt_wallet(Wallet, AES) ->
     IV = crypto:strong_rand_bytes(12),
@@ -1325,9 +1184,6 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
 wallet_address(Wallet) ->
     hb_util:human_id(ar_wallet:to_address(Wallet)).
 
-match_template(Template, Candidate, Opts) ->
-    hb_message:match(Template, Candidate, primary, Opts) =:= true.
-
 clean_template(Template, Opts) when is_map(Template) ->
     clean_template_map(Template, Opts);
 clean_template(Template, _Opts) ->
@@ -1358,693 +1214,3 @@ canonical_mismatch_path(<<"/", _/binary>> = Path) ->
     Path;
 canonical_mismatch_path(Path) when is_binary(Path) ->
     <<"/", Path/binary>>.
-
--ifdef(TEST).
-
-deep_subset_match_test() ->
-    Template = #{
-        <<"system">> => #{
-            <<"cpu">> => #{<<"vendor">> => <<"GenuineIntel">>},
-            <<"secure-boot">> => <<"enabled">>
-        },
-        <<"tpm">> => #{<<"ek-cert-source">> => <<"nvram">>}
-    },
-    Candidate = #{
-        <<"system">> => #{
-            <<"cpu">> => #{
-                <<"vendor">> => <<"GenuineIntel">>,
-                <<"model">> => <<"Framework">>
-            },
-            <<"secure-boot">> => <<"enabled">>
-        },
-        <<"tpm">> => #{<<"ek-cert-source">> => <<"nvram">>},
-        <<"extra">> => true
-    },
-    ?assert(match_template(Template, Candidate, #{})),
-    ?assertNot(match_template(
-        Template,
-        Candidate#{<<"system">> => #{<<"secure-boot">> => <<"disabled">>}},
-        #{}
-    )).
-
-wildcard_match_test() ->
-    Template = clean_template(
-        #{<<"node">> => #{<<"address">> => <<"_">>}},
-        #{}),
-    ?assert(match_template(
-        Template,
-        #{<<"node">> => #{<<"address">> => <<"abc">>}},
-        #{}
-    )),
-    ?assertNot(match_template(
-        Template,
-        #{<<"node">> => #{}},
-        #{}
-    )).
-
-template_envelope_metadata_is_not_policy_test() ->
-    Template = clean_template(
-        #{
-            <<"commitments">> => #{<<"ignored">> => true},
-            <<"ao-types">> => #{<<"ignored">> => true},
-            <<"system">> => #{
-                <<"kernel">> => #{
-                    <<"cmdline">> => <<"good">>
-                }
-            }
-        },
-        #{}),
-    Candidate = #{
-        <<"system">> => #{
-            <<"kernel">> => #{<<"cmdline">> => <<"good">>}
-        }
-    },
-    ?assertEqual(
-        #{<<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
-        Template),
-    ?assert(match_template(Template, Candidate, #{})).
-
-wallet_encryption_roundtrip_test() ->
-    Wallet = ar_wallet:new(),
-    AES = crypto:strong_rand_bytes(32),
-    Enc = encrypt_wallet(Wallet, AES),
-    Dec = decrypt_wallet(Enc, AES, #{}),
-    ?assertEqual(wallet_address(Wallet), wallet_address(Dec)).
-
-admission_response_body_preserves_policy_rejection_test() ->
-    Rejection = #{
-        <<"status">> => 400,
-        <<"body">> => #{<<"error">> => <<"template-mismatch">>}
-    },
-    WrappedRejection = #{
-        <<"status">> => 200,
-        <<"body">> => Rejection
-    },
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
-        admission_response_body(Rejection, #{})),
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
-        admission_response_body(WrappedRejection, #{})),
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
-        admission_response_body(
-            #{<<"error">> => <<"template-mismatch">>},
-            #{})).
-
-stored_peer_attestation_is_not_zone_trust_input_test() ->
-    PublisherWallet = ar_wallet:new(),
-    RingReference = test_ring_reference(),
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingReference),
-    Req = #{<<"peer-attestation">> => Attestation},
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"missing-joiner-url">>}},
-        peer_attestation_from_req(Req, RingReference, #{})).
-
-zone_policy_uses_boot_attestation_test() ->
-    PublisherWallet = ar_wallet:new(),
-    RingReference = test_ring_reference(),
-    Boot = #{
-        <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-        }
-    },
-    Fresh = #{
-        <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"bad">>}}
-        }
-    },
-    Attestation = signed_peer_attestation(
-        PublisherWallet, Boot, RingReference, erlang:system_time(second), Fresh),
-    Template = #{<<"system">> => #{
-        <<"kernel">> => #{<<"cmdline">> => <<"good">>}}},
-    ?assert(match_template(
-        Template, peer_boot_attestation_body(Attestation, #{}), #{})),
-    ?assertNot(match_template(
-        Template,
-        response_body(
-            hb_maps:get(
-                <<"peer-fresh-attestation">>, Attestation, undefined, #{}),
-        #{}),
-        #{})).
-
-measurement_template_preserves_cached_measurement_envelope_test() ->
-    Opts = #{
-        <<"store">> => hb_test_utils:test_store(),
-        <<"priv-wallet">> => ar_wallet:new(),
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Template = #{
-        <<"measurement-device">> => <<"tpm@2.0a">>,
-        <<"body">> => #{
-            <<"system">> => #{
-                <<"kernel">> => #{<<"cmdline">> => <<"good">>}
-            }
-        },
-        <<"evidence">> => #{
-            <<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>}
-        }
-    },
-    Measurement = hb_message:commit(
-        #{
-            <<"type">> => <<"lapee-measurement">>,
-            <<"version">> => <<"1.0">>,
-            <<"measurement-device">> => <<"tpm@2.0a">>,
-            <<"body">> => #{
-                <<"system">> => #{
-                    <<"kernel">> => #{<<"cmdline">> => <<"good">>}
-                },
-                <<"node">> => #{<<"address">> => <<"addr">>}
-            },
-            <<"evidence">> => #{
-                <<"ek-cert-source">> => #{<<"kind">> => <<"tpm-nv">>},
-                <<"extra">> => true
-            }
-        },
-        Opts),
-    {ok, ID} = hb_cache:write(Measurement, Opts),
-    Cached = hb_cache:ensure_loaded(
-        {link, ID, #{<<"type">> => <<"link">>, <<"lazy">> => false}},
-        Opts),
-    Candidate = measurement_template_target(
-        Template,
-        response_body(Cached, Opts),
-        Opts),
-    ?assert(match_template(Template, Candidate, Opts)).
-
-expired_peer_attestation_rejected_test() ->
-    PublisherWallet = ar_wallet:new(),
-    RingReference = test_ring_reference(),
-    Old = erlang:system_time(second) - 7200,
-    Attestation = signed_peer_attestation(PublisherWallet, #{
-        <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-    }, RingReference, Old),
-    ?assertThrow(
-        {zone_error, #{
-            <<"error">> := <<"peer-attestation-invalid">>,
-            <<"field">> := <<"issued-at-unix">>
-        }},
-        assert_peer_attestation_body(Attestation, RingReference, #{})).
-
-admission_body_requires_joiner_binding_test() ->
-    Wallet = ar_wallet:new(),
-    Admission = (test_admission(Wallet))#{
-        <<"joiner-url">> => <<"http://other.example">>
-    },
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"admission-invalid">>}},
-        assert_admission_body(
-            Admission,
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{<<"name">> => test_name()},
-            #{})).
-
-admission_body_requires_expected_ring_test() ->
-    Wallet = ar_wallet:new(),
-    ?assertThrow(
-        {zone_error, #{
-            <<"error">> := <<"admission-invalid">>,
-            <<"field">> := <<"expected-ring-address">>
-        }},
-        assert_admission_body(
-            test_admission(Wallet),
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{<<"name">> => test_name()},
-            #{})).
-
-admission_body_accepts_expected_ring_test() ->
-    Wallet = ar_wallet:new(),
-    RingAddress = wallet_address(Wallet),
-    ?assertEqual(ok,
-        assert_admission_body(
-            test_admission(Wallet),
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{
-                <<"name">> => test_name(),
-                <<"expected-ring-address">> => RingAddress
-            },
-            #{})).
-
-admission_body_accepts_skewed_validity_when_nonce_matches_test() ->
-    Wallet = ar_wallet:new(),
-    Future = erlang:system_time(second) + 14400,
-    Admission0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
-    Admission1 = Admission0#{
-        <<"validity">> => #{
-            <<"not-before-unix">> => Future,
-            <<"expires-at-unix">> => Future + 300
-        }
-    },
-    Admission = Admission1#{
-        <<"authorization">> => admission_authorization(Admission1, Wallet, #{})
-    },
-    ?assertEqual(ok,
-        assert_admission_body(
-            Admission,
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{
-                <<"name">> => test_name(),
-                <<"expected-ring-address">> => wallet_address(Wallet)
-            },
-            #{})).
-
-admission_body_rejects_invalid_validity_window_test() ->
-    Wallet = ar_wallet:new(),
-    Now = erlang:system_time(second),
-    Admission0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
-    Admission1 = Admission0#{
-        <<"validity">> => #{
-            <<"not-before-unix">> => Now + 300,
-            <<"expires-at-unix">> => Now
-        }
-    },
-    Admission = Admission1#{
-        <<"authorization">> => admission_authorization(Admission1, Wallet, #{})
-    },
-    ?assertThrow(
-        {zone_error, #{
-            <<"error">> := <<"admission-invalid">>,
-            <<"field">> := <<"validity">>
-        }},
-        assert_admission_body(
-            Admission,
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{
-                <<"name">> => test_name(),
-                <<"expected-ring-address">> => wallet_address(Wallet)
-            },
-            #{})).
-
-admission_rejects_payload_commitment_id_substitution_test() ->
-    Wallet = ar_wallet:new(),
-    Admission0 = test_admission(Wallet),
-    Authorization = maps:get(<<"authorization">>, Admission0),
-    OriginalTemplateID = maps:get(<<"template-id">>, Authorization),
-    TamperedTemplate = #{
-        <<"system">> => #{<<"kernel">> => <<"weakened">>},
-        <<"commitments">> => #{
-            OriginalTemplateID => #{<<"type">> => <<"hmac-sha256">>}
-        }
-    },
-    Admission = Admission0#{<<"template">> => TamperedTemplate},
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"admission-invalid">>}},
-        assert_admission_body(
-            Admission,
-            <<"http://self.example">>,
-            <<"nonce">>,
-            #{
-                <<"name">> => test_name(),
-                <<"expected-ring-address">> => wallet_address(Wallet)
-            },
-            #{})).
-
-admission_authorization_ids_survive_json_bundle_roundtrip_test() ->
-    Wallet = ar_wallet:new(),
-    Opts = #{
-        <<"priv-wallet">> => Wallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Base0 = maps:remove(<<"authorization">>, test_admission(Wallet)),
-    RingReference = hb_maps:get(<<"ring-reference">>, Base0, #{}, Opts),
-    Admission0 = Base0#{
-        <<"joiner-url">> => <<"http://peer.example">>,
-        <<"peer-attestation">> =>
-            signed_peer_attestation(Wallet, #{}, RingReference)
-    },
-    Admission = Admission0#{
-        <<"authorization">> => admission_authorization(
-            Admission0, Wallet, Opts)
-    },
-    {ok, JSON} = dev_codec_json:to(
-        #{<<"status">> => 200, <<"body">> => Admission},
-        #{<<"bundle">> => true},
-        Opts),
-    #{<<"body">> := DecodedAdmission} = json:decode(JSON),
-    Authorization = response_body(
-        hb_maps:get(<<"authorization">>, DecodedAdmission, undefined, Opts),
-        Opts),
-    ?assertEqual(
-        ok,
-        assert_authorization_ids(Authorization, DecodedAdmission, Opts)).
-
-authorization_payload_id_is_transport_stable_test() ->
-    Wallet = ar_wallet:new(),
-    Opts = #{
-        <<"priv-wallet">> => Wallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Definition = commit_unsigned_tree(
-        zone_definition(
-            test_name(),
-            #{<<"system">> => #{<<"kernel">> => <<"same">>}},
-            Wallet,
-            #{},
-            Opts),
-        Opts),
-    Decoded = hb_json:decode(hb_json:encode(
-        canonical_authorization_payload(Definition, Opts))),
-    ?assertEqual(
-        stable_authorization_payload_id(Definition, Opts),
-        stable_authorization_payload_id(Decoded, Opts)),
-    ?assertEqual(
-        stable_authorization_payload_id(Definition, Opts),
-        stable_authorization_payload_id(
-            Decoded#{<<"ao-types">> => <<"transport=\"atom\"">>},
-            Opts)).
-
-authorization_payload_id_uses_ao_core_binary_rules_test() ->
-    NativeID = crypto:strong_rand_bytes(32),
-    HumanID = hb_util:human_id(NativeID),
-    ?assertEqual(HumanID, stable_authorization_payload_id(NativeID, #{})),
-    ?assertEqual(HumanID, stable_authorization_payload_id(HumanID, #{})),
-    ?assertEqual(
-        hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
-        stable_authorization_payload_id(<<"plain challenge">>, #{})).
-
-authorization_payload_id_is_atom_transport_stable_test() ->
-    Native = #{
-        <<"verification">> => #{<<"verified">> => true},
-        <<"drivers">> => [dev_tpm2, dev_measurement]
-    },
-    Wire = #{
-        <<"verification">> => #{<<"verified">> => <<"true">>},
-        <<"drivers">> => [<<"dev_tpm2">>, <<"dev_measurement">>]
-    },
-    ?assertEqual(
-        stable_authorization_payload_id(Native, #{}),
-        stable_authorization_payload_id(Wire, #{})).
-
-missing_member_url_is_transport_stable_test() ->
-    ?assertEqual(<<>>, null_or_url(undefined)).
-
-ring_wallet_address_mismatch_rejected_test() ->
-    Wallet = ar_wallet:new(),
-    Admission = test_admission(ar_wallet:new()),
-    ?assertThrow(
-        {zone_error, #{
-            <<"error">> := <<"ring-wallet-address-mismatch">>
-        }},
-        assert_wallet_matches_admission(Wallet, Admission, #{})).
-
-metadata_keys_are_stripped_recursively_test() ->
-    Template = clean_template(#{
-        <<"system">> => #{<<"commitments">> => <<"required">>},
-        <<"commitments">> => #{<<"ignored-envelope-metadata">> => true}
-    }, #{}),
-    ?assertEqual(#{<<"system">> => #{}}, Template),
-    ?assert(match_template(
-        Template,
-        #{<<"system">> => #{}},
-        #{})).
-
-metadata_only_template_rejected_test() ->
-    ?assertThrow(
-        {zone_error, #{<<"error">> := <<"empty-template">>}},
-        install_ring(
-            test_name(),
-            #{<<"commitments">> => #{<<"only-metadata">> => true}},
-            crypto:strong_rand_bytes(32),
-            ar_wallet:new(),
-            #{},
-            #{})).
-
-%% Regression: a third-hop admission must carry the new joiner in
-%% zone.members. The previous implementation did `Members#{...}'
-%% on a Members map that arrived from a prior admission with a stale
-%% `commitments' key; the next `commit_unsigned_tree' linkified the
-%% inner map, the cache write honoured the existing signature's
-%% `committed' list, and the new key was silently dropped. The fix
-%% uncommits before setting via the AO-Core primitive, and the
-%% regression check passes the result through `commit_unsigned_tree'
-%% to drive the same cache-write path that exposed the bug on real
-%% nodes.
-member_survives_admission_commit_tree_test() ->
-    RingWallet = ar_wallet:new(),
-    Opts = #{
-        <<"priv-wallet">> => RingWallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    %% Existing committed Members snapshot the way it leaves a prior
-    %% admission's zone.members.
-    M0 = #{<<"existing">> =>
-            hb_message:commit(
-                #{<<"address">> => <<"existing">>,
-                  <<"role">> => <<"initializer">>},
-                Opts)},
-    CommittedMembers = hb_message:commit(M0, Opts),
-    [_ | _] = hb_message:signers(CommittedMembers, Opts),
-    %% Build a peer-attestation whose boot-attestation reports a node
-    %% address `joiner-addr'.
-    Attestation =
-        #{<<"node">> => #{<<"address">> => <<"joiner-addr">>}},
-    NewMembers = add_member_to_members(
-        CommittedMembers,
-        <<"http://joiner.example">>,
-        Attestation,
-        <<"member">>,
-        Opts),
-    %% Drive through commit_unsigned_tree -- the same path that loses
-    %% keys on a stale-commitment Erlang `#{=>}' update.
-    Definition = commit_unsigned_tree(
-        #{<<"type">> => <<"zone-definition">>,
-          <<"name">> => <<"book-shelf">>,
-          <<"members">> => NewMembers},
-        Opts),
-    Resolved = case maps:get(<<"members">>, Definition) of
-        L when is_tuple(L), element(1, L) =:= link ->
-            hb_cache:ensure_loaded(L, Opts);
-        Other -> Other
-    end,
-    Keys = lists:sort(maps:keys(Resolved)),
-    ?assert(lists:member(<<"existing">>, Keys)),
-    ?assert(lists:member(<<"joiner-addr">>, Keys)).
-
-member_proof_is_signed_by_ring_identity_test() ->
-    Name = test_name(),
-    NodeWallet = ar_wallet:new(),
-    RingWallet = ar_wallet:new(),
-    Address = wallet_address(NodeWallet),
-    RingAddress = wallet_address(RingWallet),
-    Opts0 = #{
-        <<"priv-wallet">> => NodeWallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Opts = install_ring(
-        Name,
-        #{<<"node">> => #{<<"address">> => <<"_">>}},
-        crypto:strong_rand_bytes(32),
-        RingWallet,
-        #{Address => #{
-            <<"address">> => Address,
-            <<"url">> => <<"http://self.example">>,
-            <<"role">> => <<"member">>,
-            <<"last-seen-unix">> => erlang:system_time(second)
-        }},
-        Opts0),
-    {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
-        member(#{}, #{<<"zone">> => Name}, Opts),
-    ?assertEqual(<<"zone-membership-proof">>, maps:get(<<"type">>, Proof)),
-    ?assertEqual(Address, maps:get(<<"address">>, Proof)),
-    ?assertEqual(Name, maps:get(<<"member-of">>, Proof)),
-    ?assertEqual(zone_identity(Name), maps:get(<<"identity">>, Proof)),
-    ?assertEqual(RingAddress, maps:get(<<"ring-address">>, Proof)),
-    ?assertEqual([RingAddress], hb_message:signers(Proof, Opts)),
-    ?assert(hb_message:verify(Proof, [RingAddress], Opts)).
-
-member_proof_requires_local_member_entry_test() ->
-    Name = test_name(),
-    NodeWallet = ar_wallet:new(),
-    Opts0 = #{
-        <<"priv-wallet">> => NodeWallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Opts = install_ring(
-        Name,
-        #{<<"node">> => #{<<"address">> => <<"_">>}},
-        crypto:strong_rand_bytes(32),
-        ar_wallet:new(),
-        #{},
-        Opts0),
-    {ok, #{<<"status">> := 400, <<"body">> := Body}} =
-        member(#{}, #{<<"zone">> => Name}, Opts),
-    ?assertEqual(<<"zone-not-member">>, maps:get(<<"error">>, Body)).
-
-member_proof_uses_membership_codec_device_test() ->
-    Name = test_name(),
-    NodeWallet = ar_wallet:new(),
-    RingWallet = ar_wallet:new(),
-    Address = wallet_address(NodeWallet),
-    Opts0 = #{
-        <<"priv-wallet">> => NodeWallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Opts = install_ring(
-        Name,
-        #{<<"node">> => #{<<"address">> => <<"_">>}},
-        crypto:strong_rand_bytes(32),
-        RingWallet,
-        #{Address => #{
-            <<"address">> => Address,
-            <<"url">> => <<"http://self.example">>,
-            <<"role">> => <<"member">>,
-            <<"last-seen-unix">> => erlang:system_time(second)
-        }},
-        Opts0),
-    {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
-        member(
-            #{},
-            #{
-                <<"zone">> => Name,
-                <<"membership-codec-device">> => <<"ans104@1.0">>
-            },
-            Opts
-        ),
-    ?assert(lists:member(
-        <<"ans104@1.0">>,
-        hb_message:commitment_devices(Proof, Opts)
-    )),
-    ?assertEqual([wallet_address(RingWallet)], hb_message:signers(Proof, Opts)),
-    ?assert(hb_message:verify(Proof, [wallet_address(RingWallet)], Opts)).
-
-member_proof_accepts_member_key_and_target_test() ->
-    Name = test_name(),
-    Target = <<"ao-process-id">>,
-    NodeWallet = ar_wallet:new(),
-    RingWallet = ar_wallet:new(),
-    Address = wallet_address(NodeWallet),
-    RingAddress = wallet_address(RingWallet),
-    Opts0 = #{
-        <<"priv-wallet">> => NodeWallet,
-        <<"commitment-device">> => <<"httpsig@1.0">>
-    },
-    Opts = install_ring(
-        Name,
-        #{<<"node">> => #{<<"address">> => <<"_">>}},
-        crypto:strong_rand_bytes(32),
-        RingWallet,
-        #{Address => #{
-            <<"address">> => Address,
-            <<"url">> => <<"http://self.example">>,
-            <<"role">> => <<"member">>,
-            <<"last-seen-unix">> => erlang:system_time(second)
-        }},
-        Opts0),
-    {ok, #{<<"status">> := 200, <<"body">> := Proof}} =
-        member(
-            #{},
-            #{
-                <<"member">> => Name,
-                <<"target">> => Target
-            },
-            Opts
-        ),
-    ?assertEqual(Name, maps:get(<<"member-of">>, Proof)),
-    ?assertEqual(Target, maps:get(<<"target">>, Proof)),
-    ?assertEqual([RingAddress], hb_message:signers(Proof, Opts)),
-    ?assert(hb_message:verify(Proof, [RingAddress], Opts)).
-
-test_admission(Wallet) ->
-    RingReference = test_ring_reference(Wallet),
-    Admission = #{
-        <<"type">> => <<"zone-admission">>,
-        <<"version">> => <<"1.0">>,
-        <<"name">> => test_name(),
-        <<"issued-at-unix">> => erlang:system_time(second),
-        <<"validity">> => admission_validity(#{}),
-        <<"admission-nonce">> => <<"nonce">>,
-        <<"ring-reference">> => RingReference,
-        <<"zone">> => #{
-            <<"name">> => test_name(),
-            <<"members">> => #{}
-        },
-        <<"template">> => #{},
-        <<"joiner-url">> => <<"http://self.example">>,
-        <<"credential">> => #{},
-        <<"encrypted-wallet">> => #{},
-        <<"peer-attestation">> => #{<<"peer-url">> => <<"http://self.example">>},
-        <<"ring-address">> => wallet_address(Wallet)
-    },
-    Admission#{
-        <<"authorization">> => admission_authorization(Admission, Wallet, #{})
-    }.
-
-signed_peer_attestation(Wallet, BootAttestation, RingReference) ->
-    signed_peer_attestation(
-        Wallet, BootAttestation, RingReference, erlang:system_time(second)).
-
-signed_peer_attestation(Wallet, BootAttestation, RingReference, Now) ->
-    signed_peer_attestation(
-        Wallet, BootAttestation, RingReference, Now, test_fresh_attestation()).
-
-signed_peer_attestation(Wallet, BootAttestation, RingReference, Now,
-                        FreshAttestation) ->
-    Subject = test_credential_subject(),
-    BootBody = response_body(BootAttestation, #{}),
-    FreshBody = response_body(FreshAttestation, #{}),
-    PeerURL = <<"http://peer.example">>,
-    hb_message:commit(
-        #{
-            <<"type">> => <<"zone-peer-attestation">>,
-            <<"version">> => <<"1.0">>,
-            <<"issued-at-unix">> => Now,
-            <<"validity">> => #{<<"not-before-unix">> => Now},
-            <<"peer-url">> => PeerURL,
-            <<"peer-scope">> => #{
-                <<"peer-url">> => PeerURL,
-                <<"boot-attestation-id">> =>
-                    attestation_id(BootBody, #{}),
-                <<"fresh-attestation-id">> =>
-                    attestation_id(FreshBody, #{}),
-                <<"consumer-scope">> => RingReference,
-                <<"ek-public-sha256">> =>
-                    encoded_field_sha256(<<"ek-public">>, Subject, #{}),
-                <<"ak-name-sha256">> =>
-                    encoded_field_sha256(<<"ak-name">>, Subject, #{})
-            },
-            <<"peer-boot-attestation">> => BootAttestation,
-            <<"peer-fresh-attestation">> => FreshAttestation,
-            <<"peer-credential-subject">> => Subject,
-            <<"boot-verification">> => #{<<"verified">> => true},
-            <<"verification">> => #{<<"verified">> => true},
-            <<"freshness">> => #{<<"verified">> => true},
-            <<"credential-activation">> => #{<<"verified">> => true}
-        },
-        #{<<"priv-wallet">> => Wallet}).
-
-test_ring_reference() ->
-    #{
-        <<"type">> => <<"zone-ring-reference">>,
-        <<"version">> => <<"1.0">>,
-        <<"name">> => test_name(),
-        <<"ring-address">> => <<"ring-address">>,
-        <<"template-id">> => <<"template-id">>
-    }.
-
-test_ring_reference(Wallet) ->
-    (test_ring_reference())#{<<"ring-address">> => wallet_address(Wallet)}.
-
-test_name() ->
-    <<"book-shelf">>.
-
-test_credential_subject() ->
-    #{
-        <<"ek-public">> => hb_util:encode(<<"ek-public">>),
-        <<"ak-name">> => hb_util:encode(<<"ak-name">>)
-    }.
-
-test_fresh_attestation() ->
-    #{
-        <<"body">> => #{
-            <<"system">> => #{<<"kernel">> => #{<<"cmdline">> => <<"good">>}}
-        }
-    }.
-
--endif.

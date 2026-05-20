@@ -32,14 +32,7 @@ NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
 NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
 NODE4_DMI_PRODUCT=${NODE4_DMI_PRODUCT:-LapEE-SNP-Zone-reject-4}
 
-usage() {
-    cat >&2 <<EOF
-usage:
-  TARGET=ssh://hb@dev-1.forward.computer \\
-  IMAGE=build/images/lapee-runtime-no-tme-signed.img \\
-  ./scripts/qemu-zone-remote-snp.sh
-EOF
-}
+usage() { echo "usage: TARGET=ssh://user@host IMAGE=build/images/lapee-runtime-no-tme-signed.img $0" >&2; }
 
 while (($# > 0)); do
     case "$1" in
@@ -55,10 +48,7 @@ while (($# > 0)); do
 done
 
 [[ -f "$IMAGE" ]] || { echo "missing image: $IMAGE" >&2; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "missing docker" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "missing jq" >&2; exit 1; }
-command -v ssh >/dev/null 2>&1 || { echo "missing ssh" >&2; exit 1; }
-command -v scp >/dev/null 2>&1 || { echo "missing scp" >&2; exit 1; }
+for cmd in docker jq ssh scp; do command -v "$cmd" >/dev/null 2>&1 || { echo "missing $cmd" >&2; exit 1; }; done
 
 case "$TARGET" in
     ssh://*) HOST=${TARGET#ssh://};;
@@ -85,29 +75,19 @@ time_step() {
 }
 
 node_dmi_product() {
-    case "$1" in
-        1) echo "$NODE1_DMI_PRODUCT";;
-        2) echo "$NODE2_DMI_PRODUCT";;
-        3) echo "$NODE3_DMI_PRODUCT";;
-        4) echo "$NODE4_DMI_PRODUCT";;
-        *) echo "LapEE-SNP-Zone-node-$1";;
-    esac
+    local var="NODE${1}_DMI_PRODUCT"
+    printf '%s\n' "${!var:-LapEE-SNP-Zone-node-$1}"
 }
 
-node_host_url() {
-    printf 'http://127.0.0.1:%d' "$((BASE_PORT + $1))"
-}
+node_host_url() { printf 'http://127.0.0.1:%d' "$((BASE_PORT + $1))"; }
 
-node_guest_url() {
-    printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + $1))"
-}
+node_guest_url() { printf 'http://%s:%d' "$GUEST_HOST" "$((BASE_PORT + $1))"; }
 
 prepare_image() {
-    local n=$1
-    local dst="$OUTDIR/nodes/node$n/disk.img"
-    local cfg="$OUTDIR/nodes/node$n/config.json"
+    local dst="$OUTDIR/nodes/node1/disk.img"
+    local cfg="$OUTDIR/nodes/node1/config.json"
     local trace_json=false
-    mkdir -p "$OUTDIR/nodes/node$n"
+    mkdir -p "$OUTDIR/nodes/node1"
     [[ "$MEASUREMENT_TRACE" == "1" ]] && trace_json=true
     cp "$IMAGE" "$dst"
     jq -n \
@@ -126,8 +106,8 @@ prepare_image() {
         -w /work \
         "$BUILD_IMAGE" \
         bash -euo pipefail -c '
-            DISK="/work/nodes/node$1/disk.img"
-            CFG="/work/nodes/node$1/config.json"
+            DISK=/work/nodes/node1/disk.img
+            CFG=/work/nodes/node1/config.json
             START=$(parted --script --machine "$DISK" \
                 unit s print | awk -F: "/^1:/ {gsub(\"s\",\"\",\$2); print \$2}")
             SECT=$(parted --script --machine "$DISK" \
@@ -138,19 +118,13 @@ prepare_image() {
             mcopy -i /tmp/esp.img -o "$CFG" ::/EFI/boot/config.json
             dd if=/tmp/esp.img of="$DISK" \
                 bs=512 seek=$START count=$SECT conv=notrunc status=none
-        ' bash "$n"
-}
-
-prepare_images() {
-    prepare_image 1
-    for n in 2 3 4; do
-        mkdir -p "$OUTDIR/nodes/node$n"
-        cp "$OUTDIR/nodes/node1/disk.img" "$OUTDIR/nodes/node$n/disk.img"
-    done
+        '
 }
 
 install_remote_helper() {
     ssh "$HOST" "mkdir -p '$REMOTE_WORKDIR/nodes'"
+    scp scripts/materialize-hb-json.py \
+        "$HOST:$REMOTE_WORKDIR/materialize-hb-json.py" >/dev/null
     ssh "$HOST" "cat > '$REMOTE_WORKDIR/run-snp-cluster.sh'" <<'REMOTE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -291,8 +265,10 @@ remote_get() {
     local n=$1
     local path=$2
     local out=$3
+    local base
+    base=$(node_host_url "$n")
     ssh "$HOST" \
-        "curl --max-time 300 -sSL -H 'accept: application/json' -H 'accept-bundle: true' '$(node_host_url "$n")$path'" \
+        "set -euo pipefail; tmp=\$(mktemp '$REMOTE_WORKDIR/.response.XXXXXX.json'); trap 'rm -f \"\$tmp\"' EXIT; curl --max-time 300 -sSL -H 'accept: application/json' -H 'accept-bundle: true' '$base$path' > \"\$tmp\"; python3 '$REMOTE_WORKDIR/materialize-hb-json.py' '$base' \"\$tmp\"; cat \"\$tmp\"" \
         > "$out"
 }
 
@@ -301,8 +277,10 @@ remote_post() {
     local path=$2
     local req=$3
     local out=$4
+    local base
+    base=$(node_host_url "$n")
     ssh "$HOST" \
-        "curl --max-time 300 -sSL -X POST -H 'content-type: application/json' -H 'accept: application/json' -H 'accept-bundle: true' --data-binary @- '$(node_host_url "$n")$path'" \
+        "set -euo pipefail; tmp=\$(mktemp '$REMOTE_WORKDIR/.response.XXXXXX.json'); trap 'rm -f \"\$tmp\"' EXIT; curl --max-time 300 -sSL -X POST -H 'content-type: application/json' -H 'accept: application/json' -H 'accept-bundle: true' --data-binary @- '$base$path' > \"\$tmp\"; python3 '$REMOTE_WORKDIR/materialize-hb-json.py' '$base' \"\$tmp\"; cat \"\$tmp\"" \
         < "$req" > "$out"
 }
 
@@ -333,40 +311,35 @@ wait_all_nodes() {
     done
 }
 
-fetch_subjects() {
-    for n in 1 2 3 4; do
-        remote_get "$n" "/~measurement@1.0/subject" \
-            "$OUTDIR/responses/node$n-credential-subject.json"
-    done
-}
-
 assert_security_properties() {
     jq -n \
         --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
         --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
         --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
-        --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" \
-        --slurpfile c1 "$OUTDIR/responses/node1-credential-subject.json" \
-        --slurpfile c2 "$OUTDIR/responses/node2-credential-subject.json" \
-        --slurpfile c3 "$OUTDIR/responses/node3-credential-subject.json" \
-        --slurpfile c4 "$OUTDIR/responses/node4-credential-subject.json" '
-        def props($node; $att; $cred): {
+        --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
+        def measurement($att):
+            if $att.body.type == "lapee-measurement" then $att.body
+            elif $att.type == "lapee-measurement" then $att
+            else $att end;
+        def props($node; $att): {
             node: $node,
-            cmdline: $att.body.body.system.kernel.cmdline,
-            boot_uki_sha256: $att.body.body.system.boot."loaded-uki".sha256,
-            node_initialized: $att.body.body.node.initialized,
+            cmdline: measurement($att).body.system.kernel.cmdline,
+            boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+            node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
-                $att.body.body.node."access-remote-cache-for-client",
-            load_remote_devices: $att.body.body.node."load-remote-devices",
-            memtotal_kb: $att.body.body.system.memory.meminfo.memtotal.value,
-            dmi_product: $att.body.body.system.firmware.dmi.fields."product-name",
-            measurement_device: $att.body."measurement-device",
-            evidence_type: $att.body.evidence.type,
-            recipient_key_id: $cred.body."key-id",
-            recipient_public: $cred.body."public-material"."x25519-public-key"
+                measurement($att).body.node."access-remote-cache-for-client",
+            load_remote_devices: measurement($att).body.node."load-remote-devices",
+            memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
+            dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
+            measurement_device: measurement($att)."measurement-device",
+            evidence_type: measurement($att).evidence.type,
+            recipient_key_id: measurement($att)."secret-recipient"."key-id",
+            recipient_public: (
+                measurement($att)."secret-recipient"."public-material"."x25519-public-key" //
+                measurement($att)."secret-recipient"."public-material+link")
         };
-        [props(1; $n1[0]; $c1[0]), props(2; $n2[0]; $c2[0]),
-         props(3; $n3[0]; $c3[0]), props(4; $n4[0]; $c4[0])]
+        [props(1; $n1[0]), props(2; $n2[0]),
+         props(3; $n3[0]), props(4; $n4[0])]
         | {
             nodes: .,
             distinct_cmdlines: ([.[].cmdline] | unique | length),
@@ -515,7 +488,13 @@ run_zone_flow() {
     echo ">> node 4 cannot produce a zone membership proof"
 
     for n in 1 2 3; do
-        member_addr=$(jq -r '.body.body.node.address' \
+        member_addr=$(jq -r '
+            def measurement:
+                if .body.type == "lapee-measurement" then .body
+                elif .type == "lapee-measurement" then .
+                else . end;
+            measurement.body.node.address
+        ' \
             "$OUTDIR/responses/node$n-boot-attestation.json")
         remote_get "$n" \
             "/~zone@1.0/member=book-shelf?membership-codec-device=ans104@1.0&target=remote-snp-zone-index" \
@@ -558,12 +537,11 @@ echo "image: $IMAGE"
 ls -lhT "$IMAGE" 2>/dev/null || ls -lh "$IMAGE"
 
 total_start=$(date +%s)
-time_step "prepare-local-images" prepare_images
+time_step "prepare-local-images" prepare_image
 time_step "install-remote-helper" install_remote_helper
 time_step "copy-images-to-remote" copy_images
 time_step "start-remote-snp-nodes" remote_start_nodes
 time_step "wait-measurement-boot" wait_all_nodes
-time_step "fetch-secret-subjects" fetch_subjects
 time_step "assert-security-properties" assert_security_properties
 time_step "generate-zone-requests" generate_requests
 time_step "zone-admission-flow" run_zone_flow

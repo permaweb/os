@@ -221,6 +221,7 @@ if [[ ! -s "$ATT_OUT" ]]; then
     echo "!! empty boot attestation from $BASE_URL" >&2
     exit 1
 fi
+scripts/materialize-hb-json.py "$BASE_URL" "$ATT_OUT"
 
 echo ">> fetching system report"
 if ! curl -fsSL \
@@ -239,6 +240,7 @@ if [[ ! -s "$PROBE_OUT" ]]; then
     echo "!! empty system report from $BASE_URL" >&2
     exit 1
 fi
+scripts/materialize-hb-json.py "$BASE_URL" "$PROBE_OUT"
 
 if [[ -n "$ORACLE_URL" ]]; then
     echo ">> fetching signed oracle response via relay: $ORACLE_URL"
@@ -255,7 +257,7 @@ PY
             --max-time "$CURL_FETCH_MAX_TIME" \
             -H "accept-bundle: true" \
             -D "$ORACLE_HEADERS" \
-            "$BASE_URL/~relay@1.0/call?method=GET&accept-bundle=true&relay-path=$ORACLE_QUERY" \
+            "$BASE_URL/~relay@1.0/call?method=GET&accept-bundle=true&bundle=true&relay-path=$ORACLE_QUERY" \
             -o "$ORACLE_OUT"; then
         echo "!! oracle relay failed from $BASE_URL" >&2
         echo "!! last 80 lines of serial log:" >&2
@@ -320,4 +322,4 @@ if [[ -n "$ORACLE_URL" ]]; then
 fi
 echo ""
 echo "For physical hardware, prefer the live network path:"
-echo "  ./scripts/interpret-local-capture.sh --url http://NODE-IP:8734 --label LABEL"
+echo "  curl -fsS http://NODE-IP:8734/~measurement@1.0/boot"

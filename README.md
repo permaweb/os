@@ -140,13 +140,10 @@ brew install erlang rebar3 python@3
 
 ```sh
 make hb-fetch
-./scripts/interpret-local-capture.sh \
-  --url http://<node-ip>:8734 \
-  --label "Framework 13"
+curl -fsS http://<node-ip>:8734/~measurement@1.0/boot
 ```
 
-The verifier fetches the node's measurement evidence, interprets it,
-and writes an HTML dashboard under:
+The measurement endpoint returns the node's signed boot evidence.
 
 ```text
 build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
@@ -156,7 +153,6 @@ Useful live endpoints:
 
 ```text
 http://<node-ip>:8734/~tpm@2.0a/info
-http://<node-ip>:8734/~tpm@2.0a/pcr-read&pcr=0
 http://<node-ip>:8734/~measurement@1.0/info
 http://<node-ip>:8734/~measurement@1.0/boot
 http://<node-ip>:8734/~system@1.0/all
@@ -502,11 +498,11 @@ are built from source.
   `make operator-config-apply IMAGE=build/images/lapee-usb.img`, and
   confirm the laptop's wireless hardware is covered by the release
   firmware set.
-- `~measurement@1.0/boot` fails but `~tpm@2.0a/pcr-read&pcr=0` works:
-  the TPM is alive; the failure is likely in quote/key policy, EK material,
-  measurement backend selection, or verifier policy, not basic TPM discovery.
-- `interpret-local-capture.sh` says no HyperBEAM checkout: run
-  `make hb-fetch`, or set `REPO=/path/to/HyperBEAM`.
+- `~measurement@1.0/boot` fails: inspect `~measurement@1.0/info` and
+  `~system@1.0/all` to confirm backend selection and hardware discovery, then
+  check quote/key policy, EK material, and verifier policy.
+- Use `~measurement@1.0/boot` for live measurement inspection. The old
+  TPM interpretation helper is not part of the v1 runtime surface.
 - macOS asks for a password while writing: the write path uses `sudo dd`
   against `/dev/rdiskN`.
 - USB tethering is not expected in production builds because production
@@ -525,10 +521,8 @@ are built from source.
 - `hyperbeam-overlay/` - LapEE-owned HyperBEAM device modules, TPM NIF
   sources, verifier catalogues, and the `lapee` rebar profile fragment
   staged into the temporary HyperBEAM checkout during builds.
-- `scripts/` - image assembly, QEMU boot, verifier capture, WiFi and
+- `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
   Secure Boot helpers.
-- `secondary-external-verifier/` - standalone Python verifier for
-  reviewers and CI-style checks.
 - `paper/` - research paper and design notes.
 
 `build/`, `wifi.conf`, `config.json`, and `secureboot/` are

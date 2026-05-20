@@ -25,6 +25,7 @@ REMOTE_QEMU=${REMOTE_QEMU:-/home/hb/hb-os/build/snp-release/usr/local/bin/qemu-s
 REMOTE_OVMF=${REMOTE_OVMF:-/home/hb/hb-os/release/DIRECT_BOOT_OVMF.fd}
 REMOTE_CBITPOS=${REMOTE_CBITPOS:-51}
 REMOTE_MEMORY_MIB=${REMOTE_MEMORY_MIB:-2048}
+GUEST_SELF_URL=${GUEST_SELF_URL:-http://127.0.0.1:8734}
 TIMEOUT=${TIMEOUT:-600}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
 
@@ -114,6 +115,8 @@ remote_run() {
 
     ssh "$host" "mkdir -p '$remote_dir'"
     scp "$disk" "$host:$remote_disk" >/dev/null
+    scp scripts/materialize-hb-json.py \
+        "$host:$remote_dir/materialize-hb-json.py" >/dev/null
     ssh "$host" "cat > '$remote_dir/run-snp-node.sh'" <<'REMOTE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -214,24 +217,47 @@ REMOTE
         sleep 2
     done
 
-    ssh "$host" "curl --max-time 120 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/info?accept=application/json&accept-bundle=true'" \
-        > "$OUTDIR/info.json" || {
+    ssh "$host" "set -e;
+        curl --max-time 120 -fsS \
+            -H 'accept: application/json' \
+            -H 'accept-bundle: true' \
+            'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/info' \
+            -o '$remote_dir/info.json';
+        python3 '$remote_dir/materialize-hb-json.py' \
+            'http://127.0.0.1:$REMOTE_PORT' '$remote_dir/info.json';
+        cat '$remote_dir/info.json'" > "$OUTDIR/info.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-info-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
+            if [[ "$KEEP_RUNNING" != "1" ]]; then
+                ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
+            fi
             exit 1
         }
-    ssh "$host" "curl --max-time 120 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/boot?accept=application/json&accept-bundle=true'" \
-        > "$OUTDIR/boot.json" || {
+    ssh "$host" "set -e;
+        curl --max-time 120 -fsS \
+            -H 'accept: application/json' \
+            -H 'accept-bundle: true' \
+            'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/boot' \
+            -o '$remote_dir/boot.json';
+        python3 '$remote_dir/materialize-hb-json.py' \
+            'http://127.0.0.1:$REMOTE_PORT' '$remote_dir/boot.json';
+        cat '$remote_dir/boot.json'" > "$OUTDIR/boot.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-boot-failed.log" || true
             ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
             exit 1
         }
     local nonce
-    nonce=$(printf 'lapee-remote-snp-%s' "$(date +%s)" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
-    ssh "$host" "curl --max-time 120 -fsS 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/fresh?nonce=$nonce&accept=application/json&accept-bundle=true'" \
-        > "$OUTDIR/fresh.json" || {
+    nonce=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+    ssh "$host" "set -e;
+        curl --max-time 120 -fsS \
+            -H 'accept: application/json' \
+            -H 'accept-bundle: true' \
+            'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/fresh?nonce=$nonce' \
+            -o '$remote_dir/fresh.json';
+        python3 '$remote_dir/materialize-hb-json.py' \
+            'http://127.0.0.1:$REMOTE_PORT' '$remote_dir/fresh.json';
+        cat '$remote_dir/fresh.json'" > "$OUTDIR/fresh.json" || {
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
                 > "$OUTDIR/serial-fresh-failed.log" || true
             ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
@@ -241,30 +267,60 @@ REMOTE
         .body."selected-measurement-device" == $device
             or (.body."selected-measurement-device" == "snp@1.0" and $device == "auto")
     ' "$OUTDIR/info.json" >/dev/null
-    jq -e '.body."measurement-device" == "snp@1.0"' "$OUTDIR/boot.json" >/dev/null
-    jq -e '.body."measurement-device" == "snp@1.0"' "$OUTDIR/fresh.json" >/dev/null
-    ssh "$host" "curl --max-time 120 -fsS -X POST -H 'content-type: application/json' 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/verify?accept=application/json&accept-bundle=true' --data-binary @-" \
-        < "$OUTDIR/boot.json" > "$OUTDIR/verify-boot.json" || {
+    jq -e '(if .body.type == "lapee-measurement" then .body else . end)."measurement-device" == "snp@1.0"' \
+        "$OUTDIR/boot.json" >/dev/null
+    jq -e '(if .body.type == "lapee-measurement" then .body else . end)."measurement-device" == "snp@1.0"' \
+        "$OUTDIR/fresh.json" >/dev/null
+    local peer_url
+    peer_url=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$GUEST_SELF_URL")
+    ssh "$host" "set -e;
+        http_status=\$(curl --max-time 300 -sS \
+            -H 'accept: application/json' \
+            -H 'accept-bundle: true' \
+            'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/verify-peer?url=$peer_url' \
+            -o '$remote_dir/verify-peer.json' \
+            -w '%{http_code}');
+        if [ \"\$http_status\" -lt 200 ] || [ \"\$http_status\" -ge 300 ]; then
+            python3 '$remote_dir/materialize-hb-json.py' \
+                'http://127.0.0.1:$REMOTE_PORT' '$remote_dir/verify-peer.json' \
+                >/dev/null 2>&1 || true;
+            cat '$remote_dir/verify-peer.json' >&2 || true
+            exit 1
+        fi;
+        python3 '$remote_dir/materialize-hb-json.py' \
+            'http://127.0.0.1:$REMOTE_PORT' '$remote_dir/verify-peer.json';
+        cat '$remote_dir/verify-peer.json'" \
+        > "$OUTDIR/verify-peer.json" || {
+            ssh "$host" "cat '$remote_dir/verify-peer.json' 2>/dev/null || true" \
+                > "$OUTDIR/verify-peer-failed.json" || true
             ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
-                > "$OUTDIR/serial-verify-boot-failed.log" || true
-            ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
+                > "$OUTDIR/serial-verify-peer-failed.log" || true
+            if [[ "$KEEP_RUNNING" != "1" ]]; then
+                ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
+            fi
             exit 1
         }
-    local fresh_nonce
-    fresh_nonce=$(jq -r '.body.evidence.nonce' "$OUTDIR/fresh.json")
-    ssh "$host" "curl --max-time 120 -fsS -X POST -H 'content-type: application/json' 'http://127.0.0.1:$REMOTE_PORT/~measurement@1.0/verify?nonce=$fresh_nonce&accept=application/json&accept-bundle=true' --data-binary @-" \
-        < "$OUTDIR/fresh.json" > "$OUTDIR/verify-fresh.json" || {
-            ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
-                > "$OUTDIR/serial-verify-fresh-failed.log" || true
+    if ! {
+        jq -e '
+            def truthy: . == true or . == "true";
+            .body."boot-verification".verified | truthy
+        ' "$OUTDIR/verify-peer.json" >/dev/null
+        jq -e '
+            def truthy: . == true or . == "true";
+            .body.verification.verified | truthy
+        ' "$OUTDIR/verify-peer.json" >/dev/null
+        jq -e '
+            def truthy: . == true or . == "true";
+            .body."credential-activation".verified | truthy
+        ' "$OUTDIR/verify-peer.json" >/dev/null
+    }; then
+        ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \
+            > "$OUTDIR/serial-verify-peer-assert-failed.log" || true
+        if [[ "$KEEP_RUNNING" != "1" ]]; then
             ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true
-            exit 1
-        }
-    jq -e '(.body.verified == true or .body.verified == "true")
-        and .body.verdict == "accepted"' \
-        "$OUTDIR/verify-boot.json" >/dev/null
-    jq -e '(.body.verified == true or .body.verified == "true")
-        and .body.verdict == "accepted"' \
-        "$OUTDIR/verify-fresh.json" >/dev/null
+        fi
+        exit 1
+    fi
 
     if [[ "$KEEP_RUNNING" != "1" ]]; then
         ssh "$host" "'$remote_dir/run-snp-node.sh' stop '$remote_dir' '$REMOTE_PORT' '$REMOTE_QEMU' '$REMOTE_OVMF' '$REMOTE_CBITPOS' '$REMOTE_MEMORY_MIB' '$REMOTE_BIND'" || true

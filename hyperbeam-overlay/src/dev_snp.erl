@@ -11,14 +11,14 @@
 %%% measured guest, bind that public key into SNP `report_data', and let peers
 %%% encrypt admission material to it.
 -module(dev_snp).
+-implements(<<"snp@1.0">>).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
-         wrap_secret/3, unwrap_secret/3]).
+         unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
 
 -include("include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
--include_lib("eunit/include/eunit.hrl").
 
 -define(VERSION, <<"1.0">>).
 -define(REPORT_CONTEXT, <<"lapee-measurement-v1">>).
@@ -32,7 +32,6 @@ info(_) ->
             <<"subject">>,
             <<"measure">>,
             <<"verify">>,
-            <<"wrap-secret">>,
             <<"unwrap-secret">>
         ]
     }.
@@ -41,8 +40,6 @@ info(_Base, _Req, Opts) ->
     {ok, #{
         <<"status">> => 200,
         <<"body">> => #{
-            <<"description">> =>
-                <<"AMD SEV-SNP measurement engine for ~measurement@1.0">>,
             <<"version">> => ?VERSION,
             <<"supported">> => snp_supported(Opts)
         }
@@ -65,7 +62,7 @@ measure(_Base, Req, Opts) ->
             <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
         Nonce = measurement_nonce(Req),
         ReportData = report_data(Body, Nonce, Recipient, Opts),
-        case dev_snp_nif:report(ReportData, vmpl(Opts)) of
+        case lapee_snp_nif:report(ReportData, vmpl(Opts)) of
             {ok, ReportRaw, Certs} ->
                 Report = decode_report(ReportRaw),
                 {ok, #{
@@ -107,14 +104,6 @@ verify(Base, Req, Opts) ->
         }
     }}.
 
-wrap_secret(_Base, Req, Opts) ->
-    Subject = hb_maps:get(<<"subject">>, Req, undefined, Opts),
-    Secret = decode_secret(hb_maps:get(<<"secret">>, Req, <<>>, Opts)),
-    {ok, #{
-        <<"status">> => 200,
-        <<"body">> => wrap_secret_for_subject(Subject, Secret, Opts)
-    }}.
-
 unwrap_secret(_Base, Req, Opts) ->
     try
         Credential = activation_credential(Req, Opts),
@@ -131,7 +120,7 @@ unwrap_secret(_Base, Req, Opts) ->
     end.
 
 snp_supported(_Opts) ->
-    try dev_snp_nif:supported() of
+    try lapee_snp_nif:supported() of
         {ok, true} -> true;
         _ -> false
     catch _:_ ->
@@ -328,30 +317,19 @@ check_report_signature(Body, Evidence, Opts) ->
             assert_report_signature(Body, Evidence, Opts)
         end).
 
-assert_report_signature(_Body, Evidence, Opts) ->
-    case allow_test_signature(Evidence, Opts) of
-        true ->
-            ok;
-        false ->
-            Raw = decode_required(<<"report-raw">>, Evidence, Opts),
-            Report = decode_report(Raw),
-            assert_signature_algorithm(Report),
-            Certs = resolved_certificates(Report, _Body, Evidence, Opts),
-            assert_certificate_chain(Certs),
-            Signed = binary:part(Raw, 0, 672),
-            Signature = ecdsa_signature_der(report_get(<<"signature">>, Report, #{})),
-            case public_key:verify(
-                Signed, sha384, Signature, cert_public_key(maps:get(vcek, Certs))) of
-                true -> ok;
-                false -> throw(<<"SNP report signature rejected">>)
-            end
+assert_report_signature(Body, Evidence, Opts) ->
+    Raw = decode_required(<<"report-raw">>, Evidence, Opts),
+    Report = decode_report(Raw),
+    assert_signature_algorithm(Report),
+    Certs = resolved_certificates(Report, Body, Evidence, Opts),
+    assert_certificate_chain(Certs),
+    Signed = binary:part(Raw, 0, 672),
+    Signature = ecdsa_signature_der(report_get(<<"signature">>, Report, #{})),
+    case public_key:verify(
+        Signed, sha384, Signature, cert_public_key(maps:get(vcek, Certs))) of
+        true -> ok;
+        false -> throw(<<"SNP report signature rejected">>)
     end.
-
-allow_test_signature(Evidence, Opts) ->
-    hb_opts:get(<<"allow-test-snp-signature">>, false, Opts) =:= true
-        andalso
-        hb_maps:get(<<"signature-check">>, Evidence, #{}, Opts)
-            =:= #{<<"verified">> => true, <<"source">> => <<"test">>}.
 
 assert_signature_algorithm(Report) ->
     case report_get(<<"signature-algorithm">>, Report, undefined) of
@@ -558,12 +536,7 @@ device_context_digest(Context) ->
     stable_id(Context, #{}).
 
 vmpl(Opts) ->
-    parse_integer(
-        first_defined([
-            hb_opts:get(<<"snp-vmpl">>, undefined, Opts),
-            hb_opts:get(snp_vmpl, undefined, Opts)
-        ]),
-        0).
+    parse_integer(hb_opts:get(<<"snp-vmpl">>, undefined, Opts), 0).
 
 measurement_nonce(Req) ->
     case expected_nonce(Req) of
@@ -781,8 +754,6 @@ response_body({ok, Msg}, Opts) ->
     response_body(Msg, Opts);
 response_body({error, Reason}, _Opts) ->
     throw(Reason);
-response_body(#{<<"status">> := _Status, <<"body">> := Body}, Opts) ->
-    response_body(Body, Opts);
 response_body(#{<<"body">> := Body} = Msg, Opts) ->
     case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
         <<"lapee-measurement">> -> Msg;
@@ -795,9 +766,14 @@ resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
         E when is_map(E) -> E;
         _ ->
-            case hb_maps:get(<<"body">>, Base, undefined, Opts) of
-                Inner when is_map(Inner) -> Inner;
-                _ -> Base
+            case hb_maps:get(<<"type">>, Base, undefined, Opts) of
+                <<"lapee-measurement">> ->
+                    Base;
+                _ ->
+                    case hb_maps:get(<<"body">>, Base, undefined, Opts) of
+                        Inner when is_map(Inner) -> Inner;
+                        _ -> Base
+                    end
             end
     end;
 resolve_envelope(_Base, Req, Opts) ->
@@ -843,156 +819,3 @@ reason_to_text(B) when is_binary(B) -> B;
 reason_to_text(M) when is_map(M) -> M;
 reason_to_text(A) when is_atom(A) -> atom_to_binary(A, utf8);
 reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
-
-hkdf_roundtrip_test() ->
-    Subject = secret_recipient(#{}, #{}),
-    Secret = crypto:strong_rand_bytes(32),
-    Credential = wrap_secret_for_subject(Subject, Secret, #{}),
-    {ok, Secret} = unwrap_secret_value(Credential, #{}).
-
-stable_id_uses_ao_core_binary_rules_test() ->
-    NativeID = crypto:strong_rand_bytes(32),
-    HumanID = hb_util:human_id(NativeID),
-    ?assertEqual(HumanID, stable_id(NativeID, #{})),
-    ?assertEqual(HumanID, stable_id(HumanID, #{})),
-    ?assertEqual(
-        hb_util:encode(hb_crypto:sha256(<<"plain challenge">>)),
-        stable_id(<<"plain challenge">>, #{})).
-
-snp_body_id_is_atom_transport_stable_test() ->
-    Native = #{
-        <<"system">> => #{
-            <<"drivers">> => [dev_tpm2, dev_snp],
-            <<"available">> => true
-        },
-        <<"node">> => #{<<"initialized">> => permanent}
-    },
-    Wire = #{
-        <<"system">> => #{
-            <<"drivers">> => [<<"dev_tpm2">>, <<"dev_snp">>],
-            <<"available">> => <<"true">>
-        },
-        <<"node">> => #{<<"initialized">> => <<"permanent">>}
-    },
-    ?assertEqual(body_id(Native, #{}), body_id(Wire, #{})).
-
-snp_secret_activation_uses_explicit_credential_request_test() ->
-    Subject = secret_recipient(#{}, #{}),
-    Secret = crypto:strong_rand_bytes(32),
-    Credential = wrap_secret_for_subject(Subject, Secret, #{}),
-    Req = #{
-        <<"credential">> => Credential,
-        <<"accept">> => <<"application/json">>,
-        <<"accept-bundle">> => <<"true">>
-    },
-    Credential = activation_credential(Req, #{}),
-    {ok, Secret} = unwrap_secret_value(Credential, #{}),
-    Activation = secret_activation_public_body(Secret, Credential),
-    ok = ensure_secret_activation(Activation, Credential, Secret, Subject, #{}).
-
-snp_verify_accepts_bound_report_test() ->
-    Body = test_body(),
-    Recipient = secret_recipient(Body, #{}),
-    Nonce = crypto:strong_rand_bytes(32),
-    Measurement = test_measurement(Body, Recipient, Nonce, #{}),
-    ?assertMatch(
-        {ok, #{<<"status">> := 200,
-               <<"body">> := #{<<"verified">> := true}}},
-        verify(
-            #{},
-            #{<<"envelope">> => Measurement,
-              <<"nonce">> => hb_util:encode(Nonce)},
-            #{<<"allow-test-snp-signature">> => true})).
-
-snp_verify_rejects_wrong_nonce_test() ->
-    Body = test_body(),
-    Recipient = secret_recipient(Body, #{}),
-    Measurement =
-        test_measurement(Body, Recipient, crypto:strong_rand_bytes(32), #{}),
-    {ok, #{<<"body">> := Result}} =
-        verify(
-            #{},
-            #{<<"envelope">> => Measurement,
-              <<"nonce">> => hb_util:encode(crypto:strong_rand_bytes(32))},
-            #{<<"allow-test-snp-signature">> => true}),
-    ?assertEqual(false, hb_maps:get(<<"verified">>, Result, true, #{})).
-
-snp_verify_rejects_wrong_body_test() ->
-    Body = test_body(),
-    Recipient = secret_recipient(Body, #{}),
-    Nonce = crypto:strong_rand_bytes(32),
-    Measurement =
-        (test_measurement(Body, Recipient, Nonce, #{}))#{
-            <<"body">> => #{<<"system">> => #{<<"tampered">> => true}}
-        },
-    {ok, #{<<"body">> := Result}} =
-        verify(
-            #{},
-            #{<<"envelope">> => Measurement,
-              <<"nonce">> => hb_util:encode(Nonce)},
-            #{<<"allow-test-snp-signature">> => true}),
-    ?assertEqual(false, hb_maps:get(<<"verified">>, Result, true, #{})).
-
-snp_verify_rejects_bad_signature_test() ->
-    Body = test_body(),
-    Recipient = secret_recipient(Body, #{}),
-    Nonce = crypto:strong_rand_bytes(32),
-    Evidence =
-        (test_evidence(Body, Recipient, Nonce, #{}))#{
-            <<"signature-check">> => #{<<"verified">> => false}
-        },
-    {ok, #{<<"body">> := Result}} =
-        verify(
-            #{},
-            #{<<"envelope">> =>
-                #{<<"type">> => <<"lapee-measurement">>,
-                  <<"body">> => Body,
-                  <<"evidence">> => Evidence,
-                  <<"secret-recipient">> => Recipient},
-              <<"nonce">> => hb_util:encode(Nonce)},
-            #{}),
-    ?assertEqual(false, hb_maps:get(<<"verified">>, Result, true, #{})).
-
-snp_verify_rejects_malformed_report_test() ->
-    Body = test_body(),
-    Recipient = secret_recipient(Body, #{}),
-    Nonce = crypto:strong_rand_bytes(32),
-    Evidence =
-        (test_evidence(Body, Recipient, Nonce, #{}))#{
-            <<"report-json">> => <<"not-json">>
-        },
-    {ok, #{<<"body">> := Result}} =
-        verify(
-            #{},
-            #{<<"envelope">> =>
-                #{<<"type">> => <<"lapee-measurement">>,
-                  <<"body">> => Body,
-                  <<"evidence">> => Evidence,
-                  <<"secret-recipient">> => Recipient},
-              <<"nonce">> => hb_util:encode(Nonce)},
-            #{}),
-    ?assertEqual(false, hb_maps:get(<<"verified">>, Result, true, #{})).
-
-test_measurement(Body, Recipient, Nonce, Opts) ->
-    #{
-        <<"type">> => <<"lapee-measurement">>,
-        <<"body">> => Body,
-        <<"evidence">> => test_evidence(Body, Recipient, Nonce, Opts),
-        <<"secret-recipient">> => Recipient
-    }.
-
-test_evidence(Body, Recipient, Nonce, Opts) ->
-    ReportData = report_data(Body, Nonce, Recipient, Opts),
-    #{
-        <<"nonce">> => hb_util:encode(Nonce),
-        <<"report-data">> => hb_util:encode(ReportData),
-        <<"report-json">> => #{<<"report_data">> => binary_to_list(ReportData)},
-        <<"signature-check">> =>
-            #{<<"verified">> => true, <<"source">> => <<"test">>}
-    }.
-
-test_body() ->
-    #{
-        <<"system">> => #{<<"kernel">> => <<"test">>},
-        <<"node">> => #{<<"address">> => <<"test-node">>}
-    }.

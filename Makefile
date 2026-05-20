@@ -429,7 +429,9 @@ hb-fetch:
 	        echo "refusing to clean dirty HYPERBEAM_SRC outside $(BUILD_DIR); set HYPERBEAM_ALLOW_CLEAN=1 if this checkout is disposable" >&2; \
 	        exit 1; \
 	    fi; \
-	    git -C "$(HYPERBEAM_SRC)" fetch origin edge; \
+	    git -C "$(HYPERBEAM_SRC)" fetch origin \
+	        '+refs/heads/*:refs/remotes/origin/*' \
+	        '+refs/tags/*:refs/tags/*'; \
 	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
 	elif [ -d "$(HOME_DIR)/src/hyperbeam/.git" ] && \
 	     git -C "$(HOME_DIR)/src/hyperbeam" cat-file -e "$(HYPERBEAM_VERSION)^{commit}" 2>/dev/null; then \

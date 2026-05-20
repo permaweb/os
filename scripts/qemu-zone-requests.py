@@ -14,7 +14,7 @@ def main() -> int:
     guest_host = sys.argv[3]
 
     att = json.loads((out / "responses/node1-boot-attestation.json").read_text())
-    measurement = att["body"]
+    measurement = measurement_message(att)
     body = measurement["body"]
     evidence = measurement["evidence"]
     cmdline = body["system"]["kernel"]["cmdline"]
@@ -135,6 +135,15 @@ def main() -> int:
     (out / "requests/verify2.json").write_text(json.dumps(verify))
 
     return 0
+
+
+def measurement_message(att: dict) -> dict:
+    body = att.get("body")
+    if isinstance(body, dict) and body.get("type") == "lapee-measurement":
+        return body
+    if att.get("type") == "lapee-measurement":
+        return att
+    raise SystemExit("boot attestation did not contain a measurement message")
 
 
 if __name__ == "__main__":

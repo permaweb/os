@@ -31,12 +31,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # DEST is the runtime trust corpus baked into the LapEE node image:
-# `~tpm-interpret@1.0' loads it via `hb_db_tpm:read_cert_roots/1' and
-# `~tpm@2.0a/verify' reads from the same path. The secondary external
-# verifier (`secondary-external-verifier/verifier_hb.py') is the
-# *secondary* verifier and points at this same directory so that one
-# refresh updates both sides; do not maintain a parallel corpus.
-DEST="hyperbeam-overlay/priv/tpm-interpret/root-cas"
+# `~tpm@2.0a/verify' loads it via `hb_db_tpm:read_cert_roots/1'.
+DEST="hyperbeam-overlay/src/priv/dev_tpm2/tpm-interpret/root-cas"
 mkdir -p "$DEST"
 
 MODE="${1:-fetch}"
