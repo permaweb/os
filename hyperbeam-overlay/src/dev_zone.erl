@@ -177,7 +177,7 @@ member(_Base, Req, Opts) ->
             <<"issued-at-unix">> => erlang:system_time(second),
             <<"member">> => Member
         },
-        Proof = maybe_add_target(Proof0, Req, Opts),
+        Proof = maybe_add_target(maybe_add_operator(Proof0, Opts), Req, Opts),
         case hb_opts:as(Identity, Opts) of
             {ok, ZoneOpts} ->
                 hb_message:commit(
@@ -404,6 +404,16 @@ membership_codec_device(Req, Opts) ->
                 no_viable_commitment_device,
                 Opts
             )
+    end.
+
+maybe_add_operator(Proof, Opts) ->
+    case hb_opts:get(operator, undefined, Opts) of
+        Operator when ?IS_ID(Operator) ->
+            Proof#{<<"operator">> => hb_util:human_id(Operator)};
+        Operator when is_binary(Operator), byte_size(Operator) > 0 ->
+            Proof#{<<"operator">> => Operator};
+        _ ->
+            Proof
     end.
 
 maybe_add_target(Proof, Req, Opts) ->
