@@ -65,8 +65,8 @@ def main() -> int:
             BASE_CONFIG,
             "first on.start hook must be measurement@1.0 boot POST",
         )
-    if config.get("load-remote-devices") is True:
-        fail(BASE_CONFIG, "base config must not enable load-remote-devices")
+    if "load-remote-devices" in config:
+        fail(BASE_CONFIG, "base config must leave load-remote-devices to operator config")
     if config.get("trusted-device-signers"):
         fail(BASE_CONFIG, "base config must not pin trusted remote device signers")
     return 0
