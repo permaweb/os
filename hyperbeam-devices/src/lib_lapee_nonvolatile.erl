@@ -7,7 +7,7 @@
 %%% the first local HyperBEAM store. Missing keys from the temporary boot LMDB
 %%% are copied across, then current-boot pseudo-paths are refreshed into the
 %%% persistent store before it can affect HyperBEAM cache reads.
--module(lapee_nonvolatile).
+-module(lib_lapee_nonvolatile).
 
 -export([activate/4, status/1]).
 

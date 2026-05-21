@@ -2,12 +2,12 @@
 %%%
 %%% The v1 product path only needs the measured-in TPM EK root CA bundle.
 %%% Historical interpretation catalogues are not loaded in production.
--module(hb_db_tpm).
+-module(lib_hb_db_tpm).
 -export([load/1, load/2, priv_dir/0, priv_dir/1, read_cert_roots/1]).
 
 -define(APPNAME, hb).
 -define(DB_SUBDIR, "tpm-interpret").
--define(CACHE_KEY, {hb_db_tpm, loaded}).
+-define(CACHE_KEY, {lib_hb_db_tpm, loaded}).
 
 load(Opts) ->
     load(undefined, Opts).

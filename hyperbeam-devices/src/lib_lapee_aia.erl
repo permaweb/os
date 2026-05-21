@@ -32,7 +32,7 @@
 %%% Disable end-to-end via `Opts#{<<"lapee-aia-fetch-enabled">> => false}'
 %%% for offline / locked-down deployments. The chain validator then
 %%% falls back to local-corpus-only behaviour.
--module(lapee_aia).
+-module(lib_lapee_aia).
 -export([caissuers_urls/1, fetch_issuer/1, fetch_issuer/2,
          enabled/1]).
 -include_lib("public_key/include/public_key.hrl").

@@ -4,7 +4,7 @@
 %%% replies through HTTPSig with bundling enabled. This keeps device-to-device
 %%% verification in the signed AO-Core HTTP path without ad hoc JSON parsing or
 %%% link expansion.
--module(lapee_peer_http).
+-module(lib_lapee_peer_http).
 -export([get/3, post/4, peer_opts/2]).
 
 

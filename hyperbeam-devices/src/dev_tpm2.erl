@@ -4,6 +4,7 @@
 %%% MakeCredential/ActivateCredential into `~measurement@1.0'.
 -module(dev_tpm2).
 -implements(<<"tpm@2.0a">>).
+-device_libraries([lib_hb_db_tpm, lib_lapee_aia, lib_lapee_tpm_tcg]).
 -export([info/1, info/3, supported/3, subject/3, measure/3,
          unwrap_secret/3, activate_credential_secret/2]).
 -export([verify/3]).
@@ -219,7 +220,7 @@ configured_trusted_ca_path(Opts) ->
     hb_opts:get(<<"lapee-tpm-ca-cert">>, undefined, Opts).
 
 resolve_trusted_ca_from_internal_bundle(Opts) ->
-    Roots = hb_maps:get(<<"cert-roots">>, hb_db_tpm:load(?MODULE, Opts), [], #{}),
+    Roots = hb_maps:get(<<"cert-roots">>, lib_hb_db_tpm:load(?MODULE, Opts), [], #{}),
     Pem = iolist_to_binary(
         [pem_with_trailing_newline(RootPem)
          || Root <- Roots,
@@ -269,7 +270,7 @@ validate_ek_chain(EkDer, PeerChainDers, TrustedDers, Opts) ->
     case attempt_chain(EkDer, PeerChainDers, TrustedDers) of
         {ok, _} = Ok -> Ok;
         {error, Reasons} ->
-            case lapee_aia:enabled(Opts) of
+            case lib_lapee_aia:enabled(Opts) of
                 false ->
                     {error, render_chain_failure(Reasons, TrustedDers,
                                                  <<"AIA disabled">>)};
@@ -359,7 +360,7 @@ aia_fetch_for(Der, AccChain, Trusted, Opts) ->
             case issuer_known(IssuerDn, AccChain ++ Trusted) of
                 true -> skip;
                 false ->
-                    case lapee_aia:caissuers_urls(Otp) of
+                    case lib_lapee_aia:caissuers_urls(Otp) of
                         [] -> {error, no_aia_url};
                         Urls ->
                             try_aia_urls(Urls, IssuerDn, Opts)
@@ -370,7 +371,7 @@ aia_fetch_for(Der, AccChain, Trusted, Opts) ->
 
 try_aia_urls([], _IssuerDn, _Opts) -> {error, all_aia_urls_failed};
 try_aia_urls([Url | Rest], IssuerDn, Opts) ->
-    case lapee_aia:fetch_issuer(Url, Opts) of
+    case lib_lapee_aia:fetch_issuer(Url, Opts) of
         {ok, IssuerDer} ->
             try
                 Otp = public_key:pkix_decode_cert(IssuerDer, otp),
@@ -1361,7 +1362,7 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
                             infer_log_format(TcgLogBin),
-                        <<"signals">> => lapee_tpm_tcg:boot_signals(TcgLogBin)
+                        <<"signals">> => lib_lapee_tpm_tcg:boot_signals(TcgLogBin)
                     };
                 {error, Reason} ->
                     throw({boot_attestation_error,
@@ -1684,7 +1685,12 @@ raw_cached(Prefix, Slot, Opts) ->
     end.
 
 capture_tpm_properties() ->
-    try lapee_tpm_nif:tpm_properties() of
+    try
+        case nif_module() of
+            not_loaded -> {error, nif_not_loaded};
+            M -> M:tpm_properties()
+        end
+    of
         {ok, Props} ->
             persistent_term:put({dev_tpm2, tpm_properties}, Props),
             ok;
@@ -1864,7 +1870,7 @@ fetch_ek_cert_chain_handles(Handles) ->
     {Ders, Source, Hits}.
 
 read_chain_entry(Handle) ->
-    case lapee_tpm_nif:nv_read(Handle) of
+    case nif_nv_read(Handle) of
         {ok, Bin} when is_binary(Bin), byte_size(Bin) > 0 ->
             {ok, Handle, Bin};
         {ok, _} ->
@@ -1992,7 +1998,7 @@ ders_to_pem(Ders) ->
 
 try_nv_handles([], Acc) -> {error, lists:reverse(Acc)};
 try_nv_handles([H | Rest], Acc) ->
-    case lapee_tpm_nif:nv_read(H) of
+    case nif_nv_read(H) of
         {ok, Der} when is_binary(Der), byte_size(Der) > 0 ->
             case Der of
                 <<16#30, _/binary>> ->
@@ -2004,6 +2010,12 @@ try_nv_handles([H | Rest], Acc) ->
             end;
         {error, Reason} ->
             try_nv_handles(Rest, [{H, Reason, 0} | Acc])
+    end.
+
+nif_nv_read(Handle) ->
+    case nif_module() of
+        not_loaded -> {error, nif_not_loaded};
+        M -> M:nv_read(Handle)
     end.
 
 format_probe_attempts(Attempts) ->
@@ -2037,10 +2049,28 @@ nif_module() ->
     case code:is_loaded(lapee_tpm_nif) of
         {file, _} -> lapee_tpm_nif;
         false ->
-            case code:ensure_loaded(lapee_tpm_nif) of
-                {module, _} -> lapee_tpm_nif;
-                _ -> not_loaded
+            case load_priv_module(lapee_tpm_nif) of
+                lapee_tpm_nif ->
+                    lapee_tpm_nif;
+                _ ->
+                    case code:ensure_loaded(lapee_tpm_nif) of
+                        {module, _} -> lapee_tpm_nif;
+                        _ -> not_loaded
+                    end
             end
+    end.
+
+load_priv_module(Module) ->
+    try
+        PrivDir = hb_device_archive:implementation_dir(?MODULE),
+        os:putenv("LAPEE_TPM_NIF_DIR", PrivDir),
+        Path = filename:join(PrivDir, atom_to_list(Module)),
+        case code:load_abs(Path) of
+            {module, Module} -> Module;
+            _ -> not_loaded
+        end
+    catch _:_ ->
+        not_loaded
     end.
 
 nif_startup() ->

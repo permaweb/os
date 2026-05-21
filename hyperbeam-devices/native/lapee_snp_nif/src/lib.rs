@@ -1,11 +1,16 @@
 use rustler::types::atom::{error, ok};
 use rustler::{Binary, Encoder, Env, NifResult, NewBinary, Term};
 use sev::firmware::guest::{AttestationReport, Firmware};
+use std::io::ErrorKind;
 use std::mem;
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn supported<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
-    Ok((ok(), Firmware::open().is_ok()).encode(env))
+    match Firmware::open() {
+        Ok(_) => Ok((ok(), true).encode(env)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok((ok(), false).encode(env)),
+        Err(err) => Ok((error(), format!("open /dev/sev-guest: {err:?}")).encode(env)),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

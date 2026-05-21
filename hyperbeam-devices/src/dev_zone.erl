@@ -9,6 +9,7 @@
 %%% `member' returns only a narrow zone-signed membership proof.
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
+-device_libraries([lib_lapee_nonvolatile, lib_lapee_peer_http]).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 
 -include("include/hb.hrl").
@@ -177,7 +178,7 @@ member(_Base, Req, Opts) ->
             <<"issued-at-unix">> => erlang:system_time(second),
             <<"member">> => Member
         },
-        Proof = maybe_add_target(Proof0, Req, Opts),
+        Proof = maybe_add_target(maybe_add_operator(Proof0, Opts), Req, Opts),
         case hb_opts:as(Identity, Opts) of
             {ok, ZoneOpts} ->
                 hb_message:commit(
@@ -351,7 +352,7 @@ install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
 
 install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts) ->
     Opts1 = install_ring(Name, Template, AES, Wallet, Members, Opts),
-    case lapee_nonvolatile:activate(Name, wallet_address(Wallet), AES, Opts1) of
+    case lib_lapee_nonvolatile:activate(Name, wallet_address(Wallet), AES, Opts1) of
         {ok, Opts2} -> Opts2;
         _ -> Opts1
     end.
@@ -406,6 +407,16 @@ membership_codec_device(Req, Opts) ->
             )
     end.
 
+maybe_add_operator(Proof, Opts) ->
+    case hb_opts:get(operator, undefined, Opts) of
+        Operator when ?IS_ID(Operator) ->
+            Proof#{<<"operator">> => hb_util:human_id(Operator)};
+        Operator when is_binary(Operator), byte_size(Operator) > 0 ->
+            Proof#{<<"operator">> => Operator};
+        _ ->
+            Proof
+    end.
+
 maybe_add_target(Proof, Req, Opts) ->
     case hb_maps:get(<<"target">>, Req, undefined, Opts) of
         undefined -> Proof;
@@ -447,7 +458,7 @@ status_body(Name, Opts) ->
     end.
 
 maybe_add_nonvolatile_status(Body, Opts) ->
-    case lapee_nonvolatile:status(Opts) of
+    case lib_lapee_nonvolatile:status(Opts) of
         Status when is_map(Status), map_size(Status) > 0 ->
             Body#{<<"nonvolatile-storage">> => Status};
         _ ->
@@ -912,7 +923,7 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     },
     try
         admission_response_body(
-            lapee_peer_http:post(
+            lib_lapee_peer_http:post(
                 PeerURL,
                 <<"/~zone@1.0/admit">>,
                 AdmitReq,

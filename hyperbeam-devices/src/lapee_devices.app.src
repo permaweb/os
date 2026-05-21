@@ -1,0 +1,9 @@
+{application, lapee_devices, [
+    {description, "LapEE HyperBEAM device package"},
+    {vsn, "1.0.0"},
+    {registered, []},
+    {applications, [kernel, stdlib, crypto, public_key, ssl, inets, hb]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]}
+]}.

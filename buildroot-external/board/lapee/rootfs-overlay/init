@@ -731,6 +731,15 @@ debug_dump_hardware() {
     debug_log "[debug] cpu: ${_cpu:-unknown}"
     _tpm=$(ls /sys/class/tpm 2>/dev/null | tr '\n' ' ')
     debug_log "[debug] tpm class: ${_tpm:-none}"
+    _sev=$(ls -l /dev/sev* 2>/dev/null || true)
+    if [ -n "$_sev" ]; then
+        debug_log "[debug] sev devices:"
+        printf '%s\n' "$_sev" | while IFS= read -r _line; do
+            debug_log "  $_line"
+        done
+    else
+        debug_log "[debug] sev devices: none"
+    fi
 
     debug_log "[debug] block devices:"
     for _b in /sys/block/*; do
@@ -1791,6 +1800,21 @@ if [ -s "$MERGED_ON_START_JSON" ]; then
 fi
 echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
+
+PRELOADED_INDEX_HRL=/usr/lib/hyperbeam/_build/hb_preloaded_index.hrl
+if [ -f "$PRELOADED_INDEX_HRL" ]; then
+    HB_PRELOADED_DEVICES_INDEX=$(
+        sed -n 's/.*PRELOADED_DEVICES_INDEX_MESSAGE_ID, <<"\([^"]*\)">>.*/\1/p' \
+            "$PRELOADED_INDEX_HRL" | head -1
+    )
+    if [ -n "$HB_PRELOADED_DEVICES_INDEX" ]; then
+        export HB_PRELOADED_STORE=/usr/lib/hyperbeam/_build/preloaded-store
+        export HB_PRELOADED_DEVICES_INDEX
+        trace "hyperbeam: preloaded device index $HB_PRELOADED_DEVICES_INDEX"
+    else
+        trace "hyperbeam: could not parse preloaded device index"
+    fi
+fi
 
 # Keep Erlang outbound HTTP on IPv4-only networks. Some public
 # endpoints publish AAAA records even when this appliance has no

@@ -7,6 +7,7 @@
 %%% provenance as signed AO-Core messages.
 -module(dev_measurement).
 -implements(<<"measurement@1.0">>).
+-device_libraries([lib_lapee_peer_http]).
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
@@ -206,13 +207,13 @@ measurement_body_id(Body, Opts) when is_map(Body) ->
 
 verify_peer_url(Url, Req, Opts) ->
     with_raw_ok(fun() ->
-        PeerOpts = lapee_peer_http:peer_opts(Url, Opts),
+        PeerOpts = lib_lapee_peer_http:peer_opts(Url, Opts),
         Boot = peer_measurement_payload(response_body(
-            lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
+            lib_lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
             PeerOpts), PeerOpts),
         FreshNonce = crypto:strong_rand_bytes(32),
         Fresh = peer_measurement_payload(response_body(
-            lapee_peer_http:get(
+            lib_lapee_peer_http:get(
                 Url,
                 <<"/~measurement@1.0/fresh?nonce=",
                   (hb_util:encode(FreshNonce))/binary>>,
@@ -368,9 +369,9 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     end.
 
 activate_peer_secret(Url, Credential, Opts) ->
-    PeerOpts = lapee_peer_http:peer_opts(Url, Opts),
+    PeerOpts = lib_lapee_peer_http:peer_opts(Url, Opts),
     materialize_peer_value(response_body(
-        lapee_peer_http:post(
+        lib_lapee_peer_http:post(
             Url,
             <<"/~measurement@1.0/unwrap-secret">>,
             #{<<"credential">> => Credential},
