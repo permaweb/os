@@ -106,15 +106,17 @@ HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
 ```
 
 The measured LapEE config is last, so enforced measurement devices and
-the boot measurement hook remain part of the node. Do not put secrets in
-`config.json`: it is operator policy, and the resulting node message is
-included in boot measurement evidence.
+the boot measurement hook remain part of the node. Operator policy keys
+such as remote device loading remain configurable and are included in the
+measured node message. Do not put secrets in `config.json`: it is public
+operator policy, and the resulting node message is included in boot
+measurement evidence.
 
 A small example:
 
 ```json
 {
-  "load-remote-devices": false,
+  "load-remote-devices": true,
   "trusted-device-signers": [
     "WjnS-s03HWsDSdMnyTdzB1eHZB2QheUWP_FVRVYxkXk"
   ]
@@ -124,8 +126,8 @@ A small example:
 Use HyperBEAM/AO-Core key spelling directly in `config.json`:
 hyphenated keys such as `trusted-device-signers` and
 `load-remote-devices`. Signer values are AO/Arweave-style base64url
-addresses. If you do not intend to load remote devices, keep
-`load-remote-devices` false.
+addresses. Zone templates and external verifiers can match these node
+message fields according to their deployment policy.
 
 ## Verify A Running Node
 

@@ -2,11 +2,12 @@
 # qemu-operator-config-zone.sh -- prove USB config.json is attested.
 #
 # Boots two LapEE nodes under QEMU+OVMF+swtpm from the same signed image:
-#   * node 1 has ESP /EFI/boot/config.json with trusted-device-signers=[ADDR]
+#   * node 1 has ESP /EFI/boot/config.json with remote device loading enabled
+#     and trusted-device-signers=[ADDR]
 #   * node 2 has no operator config.json
 #
 # Acceptance checked here:
-#   * node 1 exposes ADDR at /~meta@1.0/info/trusted-device-signers
+#   * node 1 exposes operator load-remote-devices and trusted-device-signers
 #   * node 2 exposes the default empty trusted-device-signers list
 #   * both boot measurements contain the expected node-message values
 #   * verifier replay proves PCR15 commits to the attested node-message-id
@@ -86,10 +87,10 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 SOCK_DIR=$(mktemp -d /tmp/lapee-config-zone.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
-{"trusted-device-signers":["$SIGNER"]}
+{"load-remote-devices":true,"trusted-device-signers":["$SIGNER"]}
 EOF
 cat > "$OUTDIR/with-signer-init.json" <<EOF
-{"name":"with-signer","template":{"node":{"trusted-device-signers":["$SIGNER"]}}}
+{"name":"with-signer","template":{"node":{"load-remote-devices":"true","trusted-device-signers":["$SIGNER"]}}}
 EOF
 
 prepare_image() {
@@ -306,7 +307,8 @@ wait_node 1
 wait_node 2
 
 jq -e --arg signer "$SIGNER" \
-    '."trusted-device-signers" == [$signer]' \
+    '."trusted-device-signers" == [$signer] and
+     (."load-remote-devices" == true or ."load-remote-devices" == "true")' \
     "$OUTDIR/responses/node1-meta-info.json" >/dev/null
 jq -e '
     def empty_ao_list: . == [] or . == {"device":"json@1.0"};
@@ -317,7 +319,7 @@ jq -e --arg signer "$SIGNER" \
     "$OUTDIR/responses/node1-trusted-device-signers.json" >/dev/null
 jq -e '([to_entries[] | select(.key | test("^[0-9]+$")) | .value] == [])' \
     "$OUTDIR/responses/node2-trusted-device-signers.json" >/dev/null
-echo ">> /~meta@1.0/info exposes operator trusted-device-signers"
+echo ">> /~meta@1.0/info exposes operator remote-device policy"
 
 jq -e --arg signer "$SIGNER" \
     'def measurement:
@@ -330,10 +332,17 @@ jq -e 'def measurement:
         if .body.type == "lapee-measurement" then .body
         elif .type == "lapee-measurement" then .
         else . end;
+     (measurement.body.node."load-remote-devices" == true or
+      measurement.body.node."load-remote-devices" == "true")' \
+    "$OUTDIR/responses/node1-boot-attestation.json" >/dev/null
+jq -e 'def measurement:
+        if .body.type == "lapee-measurement" then .body
+        elif .type == "lapee-measurement" then .
+        else . end;
      def empty_ao_list: . == [] or . == {"device":"json@1.0"};
      measurement.body.node."trusted-device-signers" | empty_ao_list' \
     "$OUTDIR/responses/node2-boot-attestation.json" >/dev/null
-echo ">> boot-attestation node-message contains expected signer lists"
+echo ">> boot-attestation node-message contains expected operator policy"
 
 for n in 1 2; do
     get_json "$n" "/~measurement@1.0/boot/~measurement@1.0/verify" \
@@ -360,7 +369,8 @@ post_json 2 "/~zone@1.0/init" \
     "$OUTDIR/with-signer-init.json" \
     "$OUTDIR/responses/node2-with-signer-init.json"
 jq -e '.status == 400 and .body.error == "template-mismatch" and
-       (.body."mismatch-path" | startswith("/node/trusted-device-signers"))' \
+       (.body."mismatch-path" == "/node/load-remote-devices" or
+        (.body."mismatch-path" | startswith("/node/trusted-device-signers")))' \
     "$OUTDIR/responses/node2-with-signer-init.json" >/dev/null
 echo ">> only configured node can initialize signer-required zone"
 
