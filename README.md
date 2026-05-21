@@ -458,9 +458,10 @@ The image contains:
   OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, cryptsetup,
   e2fsprogs, parted, and HyperBEAM.
 - A custom Buildroot `hyperbeam` package that fetches pinned upstream
-  HyperBEAM `edge`, stages LapEE-owned measurement, TPM, SNP, zone, and
-  system devices from `hyperbeam-overlay/`, builds Erlang code, and
-  cross-compiles the native TPM/SNP helpers.
+  HyperBEAM `edge`, builds stock HyperBEAM, packages LapEE-owned
+  measurement, TPM, SNP, zone, and system devices from
+  `hyperbeam-devices/` with the HyperBEAM Forge, and bakes them into the
+  preloaded device store.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
 
@@ -518,9 +519,9 @@ are built from source.
   input-surface reduction.
 - `buildroot-external/package/hyperbeam/` - Buildroot package for the
   pinned HyperBEAM release.
-- `hyperbeam-overlay/` - LapEE-owned HyperBEAM device modules, TPM NIF
-  sources, verifier catalogues, and the `lapee` rebar profile fragment
-  staged into the temporary HyperBEAM checkout during builds.
+- `hyperbeam-devices/` - LapEE-owned HyperBEAM device package: AO-Core
+  device modules, Forge libraries, native TPM/SNP helpers, and measured
+  TPM EK roots baked into the preloaded device store.
 - `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
   Secure Boot helpers.
 - `paper/` - research paper and design notes.

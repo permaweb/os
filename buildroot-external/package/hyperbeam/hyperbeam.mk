@@ -6,8 +6,8 @@
 # the build:
 #
 #   1. Erlang code (.beam bytecode, platform-independent): compiled
-#      by host-erlang's `erlc' driving rebar3 in `lapee' profile.
-#   2. C NIFs (lapee_tpm_nif): compiled by Buildroot's cross-gcc
+#      by host-erlang's `erlc' driving stock rebar3.
+#   2. LapEE C NIFs (lapee_tpm_nif): compiled by Buildroot's cross-gcc
 #      (TARGET_CC) against staged libtss2 / OpenSSL headers from
 #      $(STAGING_DIR)/usr/include.
 #   3. Rust NIFs (hb_keccak via rustler): compiled by `cargo'
@@ -25,10 +25,10 @@
 #
 ################################################################################
 
-# Track upstream HyperBEAM rc/0.10. LapEE-owned devices and the
-# `lapee' build profile are staged from this repository's
-# hyperbeam-overlay tree during the package pre-build step.
-HYPERBEAM_VERSION ?= 465928197e99e99ee2b35f9ca44143ed9f9bdbb4
+# Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
+# an external Forge device source set and baked into the preloaded
+# store without mutating the HyperBEAM checkout.
+HYPERBEAM_VERSION ?= 8c19c6adb45fc658e1ac06e6555efd916fd305e5
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -52,14 +52,7 @@ define HYPERBEAM_DOWNLOAD_REBAR3
 endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
-HYPERBEAM_OVERLAY_DIR ?= $(BR2_EXTERNAL_LAPEE_PATH)/../hyperbeam-overlay
-HYPERBEAM_OVERLAY_SCRIPT ?= $(BR2_EXTERNAL_LAPEE_PATH)/../scripts/stage-hyperbeam-overlay.sh
-
-define HYPERBEAM_STAGE_LAPEE_OVERLAY
-	LAPEE_HB_OVERLAY_DIR='$(HYPERBEAM_OVERLAY_DIR)' \
-		'$(HYPERBEAM_OVERLAY_SCRIPT)' $(@D)
-endef
-HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_STAGE_LAPEE_OVERLAY
+HYPERBEAM_DEVICE_DIR ?= $(BR2_EXTERNAL_LAPEE_PATH)/../hyperbeam-devices
 
 # Buildroot exports HyperBEAM from a git checkout into a plain source
 # tree, so rebar's build-info hooks cannot rely on `.git' being
@@ -82,11 +75,13 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		'#!/bin/sh' \
 		'set -e' \
 		'crate=$$(basename "$$(pwd)")' \
-		'if [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; then' \
-		'    /home/builder/.cargo/bin/cargo "$$@"' \
-		'    if [ -n "$${CARGO_BUILD_TARGET:-}" ] && [ -f "target/$$CARGO_BUILD_TARGET/release/lib$$crate.so" ]; then' \
+		'if { [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; } && [ "$${1:-}" = build ]; then' \
+		'    mkdir -p target' \
+		'    /home/builder/.cargo/bin/cargo "$$@" >target/lapee-target-cargo.json' \
+		'    target_so=$$(find target ../../target -path "*/$${CARGO_BUILD_TARGET:-__none__}/release/lib$$crate.so" -type f -print -quit 2>/dev/null || true)' \
+		'    if [ -n "$$target_so" ]; then' \
 		'        mkdir -p target/lapee-target/release' \
-		'        cp -af "target/$$CARGO_BUILD_TARGET/release/lib$$crate.so" "target/lapee-target/release/lib$$crate.so"' \
+		'        cp -af "$$target_so" "target/lapee-target/release/lib$$crate.so"' \
 		'    fi' \
 		'    env -u CARGO_BUILD_TARGET \' \
 		'        -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER \' \
@@ -102,18 +97,7 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		'        -u CFLAGS -u LDFLAGS \' \
 		'        -u PKG_CONFIG_ALLOW_CROSS -u PKG_CONFIG_SYSROOT_DIR \' \
 		'        -u PKG_CONFIG_PATH -u CMAKE_TOOLCHAIN_FILE \' \
-		'        /home/builder/.cargo/bin/cargo build --release --target-dir target/lapee-host' \
-		'    mkdir -p target/release' \
-		'    cp -af "target/lapee-host/release/lib$$crate.so" "target/release/lib$$crate.so"' \
-		'    if [ -n "$${CARGO_BUILD_TARGET:-}" ] && [ -f "target/$$CARGO_BUILD_TARGET/release/lib$$crate.so" ]; then' \
-		'        cp -af "target/lapee-host/release/lib$$crate.so" "target/$$CARGO_BUILD_TARGET/release/lib$$crate.so"' \
-		'    fi' \
-		'    if [ "$$crate" = elmdb_nif ]; then' \
-		'        mkdir -p ../../priv/crates/elmdb_nif ../../priv' \
-		'        cp -af "target/lapee-host/release/lib$$crate.so" ../../priv/crates/elmdb_nif/elmdb_nif.so' \
-		'        cp -af "target/lapee-host/release/lib$$crate.so" ../../priv/elmdb_nif.so' \
-		'        cp -af "target/lapee-host/release/lib$$crate.so" ../../priv/libelmdb_nif.so' \
-		'    fi' \
+		'        /home/builder/.cargo/bin/cargo "$$@"' \
 		'    exit 0' \
 		'fi' \
 		'/home/builder/.cargo/bin/cargo "$$@"' \
@@ -229,35 +213,50 @@ HYPERBEAM_BUILD_ENV = \
 	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib"
 
 define HYPERBEAM_BUILD_CMDS
-	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 as lapee compile
-	cd $(@D)/native/lapee_snp_nif && $(HYPERBEAM_BUILD_ENV) cargo build --release
-	mkdir -p $(@D)/priv/crates/lapee_snp_nif
-	cp -af $(@D)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
-	    $(@D)/priv/crates/lapee_snp_nif/lapee_snp_nif.so
-	if [ -f $(@D)/_build/default/lib/b64rs/native/b64rs/target/lapee-target/release/libb64rs.so ]; then \
-	    cp -af $(@D)/_build/default/lib/b64rs/native/b64rs/target/lapee-target/release/libb64rs.so \
-	        $(@D)/_build/default/lib/b64rs/priv/b64rs.so; \
-	fi
-	if [ -f $(@D)/_build/default/lib/elmdb/native/elmdb_nif/target/lapee-target/release/libelmdb_nif.so ]; then \
-	    rm -f $(@D)/_build/default/lib/elmdb/priv/elmdb_nif.so \
-	        $(@D)/_build/default/lib/elmdb/priv/libelmdb_nif.so; \
-	    cp -af $(@D)/_build/default/lib/elmdb/native/elmdb_nif/target/lapee-target/release/libelmdb_nif.so \
-	        $(@D)/_build/default/lib/elmdb/priv/crates/elmdb_nif/elmdb_nif.so; \
-	    cp -af $(@D)/_build/default/lib/elmdb/native/elmdb_nif/target/lapee-target/release/libelmdb_nif.so \
-	        $(@D)/_build/default/lib/elmdb/priv/elmdb_nif.so; \
-	    cp -af $(@D)/_build/default/lib/elmdb/native/elmdb_nif/target/lapee-target/release/libelmdb_nif.so \
-	        $(@D)/_build/default/lib/elmdb/priv/libelmdb_nif.so; \
-	fi
-	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 as lapee release \
+	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 compile
+	rm -rf $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.beam \
+	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.so \
+	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/lapee_snp_nif.beam \
+	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif
+	mkdir -p $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2 \
+	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif
+	cd $(HYPERBEAM_DEVICE_DIR)/src && \
+	    $(HOST_DIR)/bin/erlc -o priv/dev_tpm2 lapee_tpm_nif.erl
+	$(TARGET_CC) $(TARGET_CFLAGS) $(HYPERBEAM_C_NATIVE_COMPAT_FLAGS) \
+	    -std=c11 -Wall -Wextra -Wno-unused-parameter -fPIC -O2 -shared \
+	    -I$(STAGING_DIR)/usr/lib/erlang/usr/include \
+	    -I$(STAGING_DIR)/usr/include/tss2 \
+	    -I$(STAGING_DIR)/usr/include \
+	    -o $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.so \
+	    $(HYPERBEAM_DEVICE_DIR)/native/lapee_tpm_nif/lapee_tpm_nif.c \
+	    $(HYPERBEAM_DEVICE_DIR)/native/lapee_tpm_nif/tpm_helpers.c \
+	    $(TARGET_LDFLAGS) -L$(STAGING_DIR)/usr/lib \
+	    -ltss2-esys -ltss2-mu -ltss2-tctildr -ltss2-rc -lcrypto
+	cd $(HYPERBEAM_DEVICE_DIR)/src && \
+	    $(HOST_DIR)/bin/erlc -o priv/dev_lapee_snp lapee_snp_nif.erl
+	cd $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif && \
+	    $(HYPERBEAM_BUILD_ENV) cargo build --release
+	cp -af $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
+	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
+	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 release \
 		--include-erts $(TARGET_DIR)/usr/lib/erlang
+	rm -rf $(@D)/_build/lapee-preload-src $(@D)/_build/preloaded-store
+	mkdir -p $(@D)/_build/lapee-preload-src
+	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/preloaded
+	rm -f $(@D)/_build/lapee-preload-src/preloaded/auth/dev_snp.erl
+	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 device preload \
+	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
+	    --output-dir _build/preloaded-store
 endef
 
 define HYPERBEAM_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam
-	cp -a $(@D)/_build/lapee/rel/hb/. $(TARGET_DIR)/usr/lib/hyperbeam/
+	cp -a $(@D)/_build/default/rel/hb/. $(TARGET_DIR)/usr/lib/hyperbeam/
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/_build
 	cp -a $(@D)/_build/preloaded-store \
 		$(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
+	cp -a $(@D)/_build/hb_preloaded_index.hrl \
+		$(TARGET_DIR)/usr/lib/hyperbeam/_build/hb_preloaded_index.hrl
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/scripts
 	cp -a $(@D)/scripts/schema.gql \
 		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/schema.gql
@@ -303,13 +302,6 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	        cp -af "$$elmdb_target" \
 	            "$$d/priv/libelmdb_nif.so"; \
 	        ln -sf libelmdb_nif.so "$$d/priv/elmdb_nif.so"; \
-	    done; \
-	fi
-	if [ -f $(@D)/priv/crates/lapee_snp_nif/lapee_snp_nif.so ]; then \
-	    for d in $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*; do \
-	        mkdir -p "$$d/priv/crates/lapee_snp_nif"; \
-	        cp -af $(@D)/priv/crates/lapee_snp_nif/lapee_snp_nif.so \
-	            "$$d/priv/crates/lapee_snp_nif/lapee_snp_nif.so"; \
 	    done; \
 	fi
 	chmod +x $(TARGET_DIR)/usr/lib/hyperbeam/bin/hb

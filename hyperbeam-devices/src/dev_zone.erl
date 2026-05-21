@@ -9,6 +9,7 @@
 %%% `member' returns only a narrow zone-signed membership proof.
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
+-device_libraries([lib_lapee_nonvolatile, lib_lapee_peer_http]).
 -export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
 
 -include("include/hb.hrl").
@@ -351,7 +352,7 @@ install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
 
 install_ring_and_storage(Name, Template, AES, Wallet, Members, Opts) ->
     Opts1 = install_ring(Name, Template, AES, Wallet, Members, Opts),
-    case lapee_nonvolatile:activate(Name, wallet_address(Wallet), AES, Opts1) of
+    case lib_lapee_nonvolatile:activate(Name, wallet_address(Wallet), AES, Opts1) of
         {ok, Opts2} -> Opts2;
         _ -> Opts1
     end.
@@ -457,7 +458,7 @@ status_body(Name, Opts) ->
     end.
 
 maybe_add_nonvolatile_status(Body, Opts) ->
-    case lapee_nonvolatile:status(Opts) of
+    case lib_lapee_nonvolatile:status(Opts) of
         Status when is_map(Status), map_size(Status) > 0 ->
             Body#{<<"nonvolatile-storage">> => Status};
         _ ->
@@ -922,7 +923,7 @@ request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
     },
     try
         admission_response_body(
-            lapee_peer_http:post(
+            lib_lapee_peer_http:post(
                 PeerURL,
                 <<"/~zone@1.0/admit">>,
                 AdmitReq,

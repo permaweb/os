@@ -10,7 +10,7 @@
 %%% construction is to generate a boot-local X25519 recipient key inside the
 %%% measured guest, bind that public key into SNP `report_data', and let peers
 %%% encrypt admission material to it.
--module(dev_snp).
+-module(dev_lapee_snp).
 -implements(<<"snp@1.0">>).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          unwrap_secret/3]).
@@ -62,16 +62,22 @@ measure(_Base, Req, Opts) ->
             <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
         Nonce = measurement_nonce(Req),
         ReportData = report_data(Body, Nonce, Recipient, Opts),
-        case lapee_snp_nif:report(ReportData, vmpl(Opts)) of
-            {ok, ReportRaw, Certs} ->
-                Report = decode_report(ReportRaw),
-                {ok, #{
-                    <<"status">> => 200,
-                    <<"body">> => evidence(ReportRaw, Certs, Report, Nonce,
-                                             ReportData, Recipient, Opts)
-                }};
+        case snp_nif() of
             {error, Reason} ->
-                error_resp(500, <<"snp-report-failed">>, Reason)
+                error_resp(500, <<"snp-nif-not-loaded">>, reason_to_text(Reason));
+            Nif ->
+                case Nif:report(ReportData, vmpl(Opts)) of
+                    {ok, ReportRaw, Certs} ->
+                        Report = decode_report(ReportRaw),
+                        {ok, #{
+                            <<"status">> => 200,
+                            <<"body">> =>
+                                evidence(ReportRaw, Certs, Report, Nonce,
+                                         ReportData, Recipient, Opts)
+                        }};
+                    {error, Reason} ->
+                        error_resp(500, <<"snp-report-failed">>, Reason)
+                end
         end
     catch
         Class:CatchReason ->
@@ -120,11 +126,64 @@ unwrap_secret(_Base, Req, Opts) ->
     end.
 
 snp_supported(_Opts) ->
-    try lapee_snp_nif:supported() of
-        {ok, true} -> true;
-        _ -> false
-    catch _:_ ->
+    try
+        case snp_nif() of
+            {error, Reason} ->
+                io:format(
+                    standard_error,
+                    "[lapee_snp_nif] SNP NIF unavailable: ~p~n",
+                    [Reason]
+                ),
+                false;
+            Nif ->
+                case Nif:supported() of
+                    {ok, true} -> true;
+                    {error, Reason} ->
+                        io:format(
+                            standard_error,
+                            "[lapee_snp_nif] SNP support probe failed: ~p~n",
+                            [Reason]
+                        ),
+                        false;
+                    _ -> false
+                end
+        end
+    catch Class:CatchReason ->
+        io:format(
+            standard_error,
+            "[lapee_snp_nif] SNP support probe crashed: ~p:~p~n",
+            [Class, CatchReason]
+        ),
         false
+    end.
+
+snp_nif() ->
+    case code:is_loaded(lapee_snp_nif) of
+        {file, _} ->
+            lapee_snp_nif;
+        false ->
+            case load_priv_module(lapee_snp_nif) of
+                lapee_snp_nif ->
+                    lapee_snp_nif;
+                _ ->
+                    case code:ensure_loaded(lapee_snp_nif) of
+                        {module, _} -> lapee_snp_nif;
+                        {error, Reason} -> {error, {ensure_loaded, Reason}}
+                    end
+            end
+    end.
+
+load_priv_module(Module) ->
+    try
+        PrivDir = hb_device_archive:implementation_dir(?MODULE),
+        os:putenv("LAPEE_SNP_NIF_DIR", PrivDir),
+        Path = filename:join(PrivDir, atom_to_list(Module)),
+        case code:load_abs(Path) of
+            {module, Module} -> Module;
+            {error, Reason} -> {error, {load_abs, Path, Reason}}
+        end
+    catch Class:CatchReason ->
+        {error, {load_priv_module, Class, CatchReason}}
     end.
 
 secret_recipient(Body, Opts) ->
@@ -149,12 +208,12 @@ secret_recipient(Body, Opts) ->
     }.
 
 recipient_keypair() ->
-    case persistent_term:get({dev_snp, x25519_keypair}, undefined) of
+    case persistent_term:get({dev_lapee_snp, x25519_keypair}, undefined) of
         {Public, Private} ->
             {Public, Private};
         undefined ->
             {Public, Private} = crypto:generate_key(ecdh, x25519),
-            persistent_term:put({dev_snp, x25519_keypair}, {Public, Private}),
+            persistent_term:put({dev_lapee_snp, x25519_keypair}, {Public, Private}),
             {Public, Private}
     end.
 
@@ -393,12 +452,12 @@ fetch_vcek(Product, Report) ->
     http_get(URL).
 
 http_get(URL) ->
-    case persistent_term:get({dev_snp, http_get, URL}, undefined) of
+    case persistent_term:get({dev_lapee_snp, http_get, URL}, undefined) of
         Body when is_binary(Body) ->
             Body;
         undefined ->
             Body = http_get_uncached(URL),
-            persistent_term:put({dev_snp, http_get, URL}, Body),
+            persistent_term:put({dev_lapee_snp, http_get, URL}, Body),
             Body
     end.
 

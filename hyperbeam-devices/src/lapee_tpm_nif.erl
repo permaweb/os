@@ -19,25 +19,10 @@
 
 -on_load(init/0).
 
-%% NIF lives alongside the rest of HB's priv files when the `lapee'
-%% rebar3 profile is used; at release time `priv/lapee_tpm_nif.so' ends
-%% up at `lib/hb-<vsn>/priv/', which `code:priv_dir(hb)' finds.
--define(APPNAME, hb).
 -define(LIBNAME, "lapee_tpm_nif").
 
 init() ->
-    SoName =
-        case code:priv_dir(?APPNAME) of
-            {error, bad_name} ->
-                case filelib:is_dir(filename:join("..", "priv")) of
-                    true ->
-                        filename:join("../priv", ?LIBNAME);
-                    false ->
-                        filename:join("priv", ?LIBNAME)
-                end;
-            Dir ->
-                filename:join(Dir, ?LIBNAME)
-        end,
+    SoName = filename:join(priv_dir(), ?LIBNAME),
     %% Default TCTI for dev; appliance init overrides this with /dev/tpm0.
     DefaultTcti = "swtpm:host=127.0.0.1,port=2321",
     Tcti =
@@ -62,6 +47,24 @@ init() ->
                 [Err]
             ),
             ok
+    end.
+
+priv_dir() ->
+    case os:getenv("LAPEE_TPM_NIF_DIR") of
+        false -> priv_dir_from_code();
+        Dir -> Dir
+    end.
+
+priv_dir_from_code() ->
+    case code:which(?MODULE) of
+        Path when is_list(Path) -> filename:dirname(Path);
+        _ -> fallback_priv_dir()
+    end.
+
+fallback_priv_dir() ->
+    case filelib:is_dir(filename:join("..", "priv")) of
+        true -> filename:join("..", "priv");
+        false -> "priv"
     end.
 
 %% --- NIF stubs; real implementations live in c_src/ ---

@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 
 LAPEE_ROOT="$(pwd)"
 HOST_BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE_ROOT/build}"
-LAPEE_HB_OVERLAY_DIR="${LAPEE_HB_OVERLAY_DIR:-$LAPEE_ROOT/hyperbeam-overlay}"
+LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/hyperbeam-devices}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
@@ -67,8 +67,8 @@ if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
     DEFCONFIG_EXTRA_SNIPPET="$(cd "$(dirname "$DEFCONFIG_EXTRA_SNIPPET")" && pwd)/$(basename "$DEFCONFIG_EXTRA_SNIPPET")"
 fi
 
-[[ -d "$LAPEE_HB_OVERLAY_DIR" ]] || {
-    echo "missing LAPEE_HB_OVERLAY_DIR: $LAPEE_HB_OVERLAY_DIR" >&2
+[[ -d "$LAPEE_HB_DEVICE_DIR" ]] || {
+    echo "missing LAPEE_HB_DEVICE_DIR: $LAPEE_HB_DEVICE_DIR" >&2
     exit 1
 }
 
@@ -95,18 +95,14 @@ docker run --rm $DOCKER_PLATFORM \
     $IMAGE bash -c "rm -rf /build/buildroot-external && \
                     cp -r /src-external /build/buildroot-external"
 
-# Sync the LapEE-owned HyperBEAM overlay and helper script into the
-# volume. Buildroot's package source tree is temporary; the overlay is
-# replayed into that fetched upstream checkout during the package build.
+# Sync the LapEE-owned HyperBEAM device package into the volume. The
+# HyperBEAM package build consumes this as an external Forge device source
+# set; the fetched upstream checkout remains stock.
 docker run --rm $DOCKER_PLATFORM \
     -v $VOLUME:/build \
-    -v "$LAPEE_HB_OVERLAY_DIR":/src-hyperbeam-overlay:ro \
-    -v "$LAPEE_ROOT/scripts/stage-hyperbeam-overlay.sh":/src-stage-hyperbeam-overlay.sh:ro \
-    $IMAGE bash -c "rm -rf /build/hyperbeam-overlay /build/scripts && \
-                    mkdir -p /build/scripts && \
-                    cp -r /src-hyperbeam-overlay /build/hyperbeam-overlay && \
-                    cp /src-stage-hyperbeam-overlay.sh /build/scripts/stage-hyperbeam-overlay.sh && \
-                    chmod +x /build/scripts/stage-hyperbeam-overlay.sh"
+    -v "$LAPEE_HB_DEVICE_DIR":/src-hyperbeam-devices:ro \
+    $IMAGE bash -c "rm -rf /build/hyperbeam-devices && \
+                    cp -r /src-hyperbeam-devices /build/hyperbeam-devices"
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"
@@ -213,8 +209,7 @@ KERNEL_FRAGMENT_SHA=$(
 HYPERBEAM_RECIPE_SHA=$(
     {
         find buildroot-external/package/hyperbeam -type f
-        find "$LAPEE_HB_OVERLAY_DIR" -type f
-        printf '%s\n' scripts/stage-hyperbeam-overlay.sh
+        find "$LAPEE_HB_DEVICE_DIR" -type f
     } \
         | LC_ALL=C sort \
         | xargs shasum -a 256 \

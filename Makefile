@@ -108,7 +108,7 @@ HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 HYPERBEAM_ALLOW_CLEAN ?= 0
-LAPEE_HB_OVERLAY_DIR ?= $(LAPEE_ROOT)/hyperbeam-overlay
+LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/hyperbeam-devices
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -126,7 +126,7 @@ RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNT
 RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).signed.efi
 IMAGE ?= $(RUNTIME_SIGNED_OUT)
 WRITE_IMAGE = $(if $(filter file,$(origin OUT)),$(IMAGE),$(OUT))
-export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET
+export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET LAPEE_HB_DEVICE_DIR
 
 .PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
@@ -443,8 +443,7 @@ hb-fetch:
 	    git clone "$(HYPERBEAM_REPO)" "$(HYPERBEAM_SRC)"; \
 	    git -C "$(HYPERBEAM_SRC)" checkout --detach "$(HYPERBEAM_VERSION)"; \
 	fi
-	@LAPEE_HB_OVERLAY_DIR="$(LAPEE_HB_OVERLAY_DIR)" \
-	    ./scripts/stage-hyperbeam-overlay.sh "$(HYPERBEAM_SRC)"
+	@echo ">> HyperBEAM source is stock; LapEE devices are packaged from $(LAPEE_HB_DEVICE_DIR)"
 
 # ------------------------------------------------------------
 # ESP injection helpers (operator-side, no UKI re-sign).
