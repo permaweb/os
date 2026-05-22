@@ -106,11 +106,11 @@ HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
 ```
 
 The measured LapEE config is last, so enforced measurement devices and
-the boot measurement hook remain part of the node. Operator policy keys
-such as remote device loading remain configurable and are included in the
-measured node message. Do not put secrets in `config.json`: it is public
-operator policy, and the resulting node message is included in boot
-measurement evidence.
+the boot measurement hook remain part of the node. Operator-controlled
+keys such as `load-remote-devices` and `trusted-device-signers` are not
+set by the measured base config, so deployments can opt in explicitly
+and have that choice included in boot measurement evidence. Do not put
+secrets in `config.json`: it is public operator policy.
 
 A small example:
 
