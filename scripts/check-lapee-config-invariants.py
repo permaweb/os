@@ -12,6 +12,9 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASE_CONFIG = (
     ROOT
+    / "arch"
+    / "common"
+    / "linux"
     / "buildroot-external"
     / "board"
     / "lapee"

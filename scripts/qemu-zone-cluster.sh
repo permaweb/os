@@ -134,7 +134,7 @@ prepare_qemu_image() {
     local dst_rel="${dst#$OUTDIR/}"
     cp "$src" "$dst"
     python3 - \
-        "buildroot-external/board/lapee/rootfs-overlay/etc/lapee/lapee.json" \
+        "arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/etc/lapee/lapee.json" \
         "$cfg" "$device" <<'PY'
 import json, pathlib, sys
 

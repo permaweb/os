@@ -24,7 +24,9 @@ cd "$(dirname "$0")/.."
 
 LAPEE_ROOT="$(pwd)"
 HOST_BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE_ROOT/build}"
-LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/hyperbeam-devices}"
+LAPEE_LINUX_DIR="${LAPEE_LINUX_DIR:-$LAPEE_ROOT/arch/common/linux}"
+LAPEE_BUILDROOT_EXTERNAL="${LAPEE_BUILDROOT_EXTERNAL:-$LAPEE_LINUX_DIR/buildroot-external}"
+LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/permawebos}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
@@ -91,7 +93,7 @@ docker run --rm $DOCKER_PLATFORM --user 0 \
 # Sync the external tree into the volume (always — it's tiny).
 docker run --rm $DOCKER_PLATFORM \
     -v $VOLUME:/build \
-    -v "$LAPEE_ROOT/buildroot-external":/src-external:ro \
+    -v "$LAPEE_BUILDROOT_EXTERNAL":/src-external:ro \
     $IMAGE bash -c "rm -rf /build/buildroot-external && \
                     cp -r /src-external /build/buildroot-external"
 
@@ -101,8 +103,8 @@ docker run --rm $DOCKER_PLATFORM \
 docker run --rm $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -v "$LAPEE_HB_DEVICE_DIR":/src-hyperbeam-devices:ro \
-    $IMAGE bash -c "rm -rf /build/hyperbeam-devices && \
-                    cp -r /src-hyperbeam-devices /build/hyperbeam-devices"
+    $IMAGE bash -c "rm -rf /build/permawebos-devices && \
+                    cp -r /src-hyperbeam-devices /build/permawebos-devices"
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"
@@ -181,7 +183,7 @@ docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
 # aligned with BR2_EXTERNAL inputs.
 DEFCONFIG_SHA=$(
     {
-        shasum -a 256 "buildroot-external/configs/$DEFCONFIG"
+        shasum -a 256 "$LAPEE_BUILDROOT_EXTERNAL/configs/$DEFCONFIG"
         if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
             shasum -a 256 "$KERNEL_EXTRA_FRAGMENT"
         fi
@@ -192,12 +194,12 @@ DEFCONFIG_SHA=$(
 )
 KERNEL_FRAGMENT_SHA=$(
     {
-        shasum -a 256 buildroot-external/board/lapee/linux-*.config
-        if [[ -d buildroot-external/board/lapee/patches ]]; then
+        shasum -a 256 "$LAPEE_BUILDROOT_EXTERNAL"/board/lapee/linux-*.config
+        if [[ -d "$LAPEE_BUILDROOT_EXTERNAL/board/lapee/patches" ]]; then
             while IFS= read -r patch; do
                 shasum -a 256 "$patch"
             done < <(
-                find buildroot-external/board/lapee/patches -type f \
+                find "$LAPEE_BUILDROOT_EXTERNAL/board/lapee/patches" -type f \
                     | LC_ALL=C sort
             )
         fi
@@ -208,7 +210,7 @@ KERNEL_FRAGMENT_SHA=$(
 )
 HYPERBEAM_RECIPE_SHA=$(
     {
-        find buildroot-external/package/hyperbeam -type f
+        find "$LAPEE_BUILDROOT_EXTERNAL/package/hyperbeam" -type f
         find "$LAPEE_HB_DEVICE_DIR" -type f
     } \
         | LC_ALL=C sort \
@@ -220,7 +222,7 @@ FIRMWARE_SELECTION_SHA=$(
     {
         printf 'LINUX_FIRMWARE_VERSION=%s\n' "$LINUX_FIRMWARE_VERSION"
         printf 'LINUX_FIRMWARE_SHA256=%s\n' "$LINUX_FIRMWARE_SHA256"
-        grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "buildroot-external/configs/$DEFCONFIG"
+        grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$LAPEE_BUILDROOT_EXTERNAL/configs/$DEFCONFIG"
         if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
             grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$DEFCONFIG_EXTRA_SNIPPET" || true
         fi

@@ -1,11 +1,11 @@
-# LapEE
+# PermawebOS / LapEE
 
-LapEE, the Laptop Execution Environment, turns commodity hardware into a
-single-purpose HyperBEAM appliance node. HyperBEAM is the AO-Core runtime:
-it executes messages, produces signed results, and participates in AO's
-distributed compute network. Boot LapEE from a USB stick and the machine
-starts that runtime, shows a QR code for the node URL, and serves a signed
-hardware measurement at:
+PermawebOS packages HyperBEAM, the AO-Core runtime, into measured operating
+environments. LapEE is the Linux laptop/server appliance architecture in this
+repo; HandEE is the Android architecture. HyperBEAM executes messages,
+produces signed results, and participates in AO's distributed compute network.
+Boot a Linux LapEE USB stick and the machine starts that runtime, shows a QR
+code for the node URL, and serves a signed hardware measurement at:
 
 ```text
 http://<node-ip>:8734/~measurement@1.0/boot
@@ -348,6 +348,21 @@ JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
   make runtime-image
 ```
 
+The architecture-oriented release targets are:
+
+```sh
+make tme
+make no-tme
+make snp
+make provisioner
+make android
+make all EXCLUDE_ARCH=android,snp
+```
+
+`tme`, `no-tme`, and `snp` share the Linux appliance build; `snp` denotes an
+SNP-capable Linux image rather than a different kernel ABI. `android` builds
+the HandEE Android runtime/APK under `arch/android/`.
+
 The build produces:
 
 ```text
@@ -469,9 +484,9 @@ The image contains:
   OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, cryptsetup,
   e2fsprogs, parted, and HyperBEAM.
 - A custom Buildroot `hyperbeam` package that fetches pinned upstream
-  HyperBEAM `edge`, builds stock HyperBEAM, packages LapEE-owned
+  HyperBEAM `edge`, builds stock HyperBEAM, packages PermawebOS-owned
   measurement, TPM, SNP, zone, and system devices from
-  `hyperbeam-devices/` with the HyperBEAM Forge, and bakes them into the
+  `devices/permawebos/` with the HyperBEAM Forge, and bakes them into the
   preloaded device store.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
@@ -523,16 +538,21 @@ are built from source.
 ## Repo Layout
 
 - `Makefile` - operator and build entry points.
-- `buildroot-external/board/lapee/rootfs-overlay/init` - appliance init,
-  production hardening, WiFi, splash, TPM/HyperBEAM startup.
-- `buildroot-external/board/lapee/linux-m1-fragment.config` - kernel
-  config fragment for TPM, networking, framebuffer, and production
-  input-surface reduction.
-- `buildroot-external/package/hyperbeam/` - Buildroot package for the
-  pinned HyperBEAM release.
-- `hyperbeam-devices/` - LapEE-owned HyperBEAM device package: AO-Core
-  device modules, Forge libraries, native TPM/SNP helpers, and measured
+- `arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/init` -
+  Linux appliance init, production hardening, WiFi, splash, storage, and
+  HyperBEAM startup.
+- `arch/common/linux/buildroot-external/board/lapee/linux-m1-fragment.config` -
+  Linux kernel config fragment for TPM, SNP, networking, framebuffer, and
+  production input-surface reduction.
+- `arch/common/linux/buildroot-external/package/hyperbeam/` - Buildroot
+  package for the pinned stock HyperBEAM release.
+- `arch/android/` - Android HandEE Gradle project, runtime packaging, local
+  Android verifier assets, and Android/emulator harness scripts.
+- `devices/permawebos/` - Linux PermawebOS HyperBEAM device package:
+  AO-Core device modules, Forge libraries, native TPM/SNP helpers, and
   TPM EK roots baked into the preloaded device store.
+- `devices/android/` - Android HandEE HyperBEAM device package and
+  Android-specific stores/measurement devices.
 - `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
   Secure Boot helpers.
 - `paper/` - research paper and design notes.

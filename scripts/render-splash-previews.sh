@@ -38,7 +38,7 @@ case "${1:-}" in
         ;;
 esac
 
-SRC="buildroot-external/board/lapee/files/lapee_splash.erl"
+SRC="arch/common/linux/buildroot-external/board/lapee/files/lapee_splash.erl"
 if [ ! -f "$SRC" ]; then
     echo "error: missing $SRC" >&2
     exit 1

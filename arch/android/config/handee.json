@@ -1,0 +1,40 @@
+{
+  "render-index-page": false,
+  "initialized": "permanent",
+  "access-remote-cache-for-client": false,
+  "port": 8734,
+  "protocol": "http1",
+  "prometheus": false,
+  "process-sampler": false,
+  "routes": [],
+  "name-resolvers": [],
+  "trusted-device-signers": [],
+  "trusted-devices": {},
+  "preloaded-store": [],
+  "loaded-device-store": [],
+  "default-codec": "httpsig@1.0",
+  "default-index": {
+    "device": "meta@1.0",
+    "path": "info"
+  },
+  "measurement-device": "handee@1.0",
+  "load-remote-devices": false,
+  "store": [
+    {
+      "store-module": "hb_store_volatile",
+      "name": "handee-volatile"
+    }
+  ],
+  "on": {
+    "request": [],
+    "start": {
+      "device": "measurement@1.0",
+      "path": "boot",
+      "method": "POST",
+      "target": "body",
+      "hook": {
+        "result": "ignore"
+      }
+    }
+  }
+}

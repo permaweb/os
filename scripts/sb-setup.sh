@@ -29,7 +29,7 @@
 #   - sbsigntool's efi-updatevar / cert-to-efi-sig-list / sign-efi-sig-list
 #
 # On macOS: the SB tooling was pulled from Homebrew, so we ship
-# `lapee-build:local' (docker/Dockerfile) with sbsigntool +
+# `lapee-build:local' (arch/common/linux/docker/Dockerfile) with sbsigntool +
 # efitools preinstalled. `make toolchain' builds it; this script
 # transparently falls back to `docker run' when sbsign / etc. are
 # missing from the host PATH. On Linux: `apt install sbsigntool
@@ -159,7 +159,7 @@ if [ "$cmd" = "tools" ]; then
     cat <<'NOTE'
 
 Tools shown as "[container]" will run inside lapee-build:local
-(docker/Dockerfile) automatically. The container ships
+(arch/common/linux/docker/Dockerfile) automatically. The container ships
 sbsigntool, efitools, openssl, uuid-runtime. If it isn't built
 yet, run `make toolchain' once.
 

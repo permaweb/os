@@ -1,72 +1,77 @@
-# LapEE Packaged Devices Status
+# PermawebOS Architecture Split Status
 
-Branch: `IMPR/packaged-devices`
+Branch: `agent/permawebos-arch-handee`
 
-Mission: update LapEE to latest HyperBEAM `edge` and make the repo an OS image
-wrapper around a stock HyperBEAM kernel. LapEE-owned devices live under
-`hyperbeam-devices/` and are consumed through HyperBEAM Forge device packaging
-instead of being staged into the HyperBEAM source tree.
+Mission: keep upstream HyperBEAM as the kernel and reshape this repository as a
+PermawebOS distribution that builds multiple operating environments around that
+kernel: Linux LapEE runtime/provisioner images, Linux SNP-capable images, and
+Android HandEE packages.
 
 ## Current State
 
+- Base branch: `main` at `46a7cdf2abeca0380cd5c612a6abad1e3993e8ae`.
 - HyperBEAM pin: `8c19c6adb45fc658e1ac06e6555efd916fd305e5`.
-- The old overlay tree is now `hyperbeam-devices/`.
-- The old staging script and `lapee` rebar profile fragment are gone.
-- LapEE helper modules are Forge `lib_*` libraries:
-  `lib_hb_db_tpm`, `lib_lapee_aia`, `lib_lapee_nonvolatile`,
-  `lib_lapee_peer_http`, and `lib_lapee_tpm_tcg`.
-- LapEE's SNP implementation is packaged from `dev_lapee_snp` while still
-  implementing the public `snp@1.0` device name, avoiding a collision with
-  HyperBEAM's built-in `dev_snp`.
-- Native TPM/SNP wrappers stay stable as `lapee_tpm_nif` and
-  `lapee_snp_nif`; Buildroot compiles their target BEAM/SO files into each
-  relevant device's packaged `priv` payload before running
-  `rebar3 device preload`.
-- Init exports `HB_PRELOADED_STORE` and `HB_PRELOADED_DEVICES_INDEX` from the
-  installed preloaded-store/index file, so runtime resolution uses the
-  LapEE-packaged store even though the HyperBEAM release itself is stock.
-- TPM/SNP NIF wrapper modules are stored as package `priv` resources and
-  explicitly loaded by stable module name from each device archive's
-  implementation directory, while the release remains in embedded-code mode.
+- Linux Buildroot content lives under `arch/common/linux/`.
+- Linux PermawebOS devices live under `devices/permawebos/`.
+- Android HandEE architecture content from `~/src/handee` tip
+  `5dc6af13e7a658792f8ac95cbf077185f9a24145` lives under `arch/android/`
+  and `devices/android/`.
+- The HandEE cache-ignore commit
+  `5e46e818efc70650c36d668b0520d89f03903dc7` is represented by the
+  generalized `devices/*/cache-http` and `devices/*/cache-mainnet`
+  `.gitignore` rules.
+- Public build surface now includes architecture targets:
+  `make tme`, `make no-tme`, `make snp`, `make android`,
+  `make provisioner`, and `make all EXCLUDE_ARCH=...`.
 
-## Validation
+## Intentional Boundaries
 
-- `make hb-fetch`: pass. Checkout is stock HyperBEAM at
-  `8c19c6adb45fc658e1ac06e6555efd916fd305e5`.
-- Host Forge smoke:
-  `rebar3 device preload --device-src src/preloaded,<repo>/hyperbeam-devices/src`
-  generated a preloaded store containing `measurement@1.0`, `system@1.0`,
-  `tpm@2.0a`, `snp@1.0`, and `zone@1.0`.
+- Linux and Android device packages are still separate. HandEE's Android
+  measurement/system/zone implementation has not been force-merged into the
+  Linux package during this pass.
+- The Linux Buildroot package still copies the selected device package into
+  `/build/permawebos-devices` inside the Buildroot volume. That path is an
+  internal compatibility mount point, not a source-tree layout promise.
+- Android packaging is imported as an architecture package. It should be tested
+  independently before shared measurement/device convergence work.
+
+## Validation To Run
+
+- `make verify-config-invariants`
+- `bash -n scripts/build-buildroot.sh`
+- `sh -n arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/init`
+- `find arch/android/scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n`
+- `make -n tme no-tme snp android-check provisioner`
+- `make -C arch/android verify-config-invariants`
+- `make -C arch/android erl-compile`
+- `git diff --check`
+
+Full Linux image and Android APK builds have been run in this branch; see the
+completed validation log below.
+
+## Validation Completed
+
 - `make verify-config-invariants`: pass.
 - `bash -n scripts/build-buildroot.sh`: pass.
-- `sh -n buildroot-external/board/lapee/rootfs-overlay/init`: pass.
-- `git diff --check`: pass.
-- `make runtime-image TME=0`: pass; generated
+- `sh -n arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/init`:
+  pass.
+- `find arch/android/scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n`:
+  pass.
+- `make -n tme no-tme snp android-check provisioner`: pass.
+- `make -n all EXCLUDE_ARCH=android,snp`: pass.
+- `make -C arch/android verify-config-invariants`: pass.
+- `make -C arch/android android-check`: pass.
+- `make -C arch/android erl-compile`: pass.
+- `make -C arch/android runtime`: pass; produced
+  `arch/android/android/app/src/main/assets/handee-runtime.zip`.
+- `make -C arch/android apk`: pass; produced
+  `arch/android/android/app/build/outputs/apk/debug/app-debug.apk`.
+- `make hb-fetch`: pass; fetched stock HyperBEAM at the pinned commit and
+  reported `devices/permawebos` as the packaged device source.
+- `JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" make runtime-image TME=0`:
+  pass; produced signed Linux no-TME image at
   `build/images/lapee-runtime-no-tme-signed.img`.
-  - Image SHA-256:
-    `f100e021823612b824f8fbe497ff4e6675609d7cee44c4e22366752d13ab6ca1`.
-  - Boot-attested UKI SHA-256:
-    `7ELlW3w4f2mA_DuQjSDN0wpzD_Ph8fqwxEKnvG7NNnY`.
 - `make qemu IMAGE=build/images/lapee-runtime-no-tme-signed.img`: pass;
-  `/info`, `~measurement@1.0/boot`, and `~system@1.0/all` answered.
-- `make qemu-zone IMG=build/images/lapee-runtime-no-tme-signed.img`: pass;
-  three TPM/swtpm nodes admitted, fourth node rejected.
-- `make qemu-zone-nonvolatile IMG=build/images/lapee-runtime-no-tme-signed.img`:
-  pass; encrypted zone store survives reboot and refreshes current boot
-  measurement paths after rejoin.
-- `make qemu-operator-config IMG=build/images/lapee-runtime-no-tme-signed.img`:
-  pass; operator config appears in node info, boot measurement evidence, and
-  PCR15 replay, and only the configured node can initialize a signer-required
-  zone.
-- `make provisioner-image`: pass; generated signed Secure Boot provisioner
-  image at `build/images/lapee-sb-provisioner.img`.
-  - Image SHA-256:
-    `86d9efe226e2060e9890c6c158e00738c68a5ca859930b5707202b4eaa1ece44`.
-- `make qemu-provisioner-nonvolatile`: pass; provisioner finds and labels the
-  non-volatile zone partition path.
-- `make qemu-measurement-remote` against `hb@dev-1.forward.computer`: pass;
-  a real SEV-SNP guest boots the same image and exposes SNP measurement
-  evidence through `~measurement@1.0`.
-- `make qemu-zone-remote-snp` against `hb@dev-1.forward.computer`: pass;
-  four real SEV-SNP guests booted, three admitted, one rejected, and all
-  admitted nodes produced ring-signed membership proofs.
+  HyperBEAM `/info`, `~measurement@1.0/boot`, and `~system@1.0/all`
+  answered from the signed no-TME image under QEMU/swtpm.
+- `git diff --check`: pass.

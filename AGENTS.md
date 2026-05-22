@@ -1,16 +1,17 @@
 # LapEE Agent Guide
 
-LapEE is a measurement-backed HyperBEAM appliance OS for commodity laptops. The
-repository owns the Buildroot/image tooling, the appliance init flow, and the
-LapEE-specific HyperBEAM device package under `hyperbeam-devices/`.
+LapEE is becoming the PermawebOS distribution: HyperBEAM is the kernel, and
+this repository packages deployable operating environments around it. The repo
+owns the Linux Buildroot image tooling, Android HandEE packaging, appliance init
+flows, and PermawebOS-specific HyperBEAM device packages under `devices/`.
 
 ## Work Native To HyperBEAM
 
 - Treat upstream HyperBEAM as the substrate. Do not patch `~/src/hyperbeam`
   or a generated checkout to make this repo work.
 - Generated HyperBEAM checkouts belong under `build/` and are disposable.
-  Persistent LapEE behavior belongs in `hyperbeam-devices/` or the
-  Buildroot/image scripts that package it.
+  Persistent PermawebOS behavior belongs in `devices/`, `arch/`, or the
+  image scripts that package those architectures.
 - Prefer AO-Core messages, hashpaths, codecs, `accept` / `accept-bundle`,
   `hb_maps`, `hb_message`, `hb_cache`, `hb_store`, and existing device
   conventions. Avoid inventing parallel JSON protocols inside devices.
