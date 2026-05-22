@@ -8,6 +8,8 @@ a zone template.
 - `init`: create a named zone from the local node after verifying that the
   local boot measurement matches the supplied template.
 - `join`: ask an existing member to admit this node.
+- `start`: boot hook that schedules joins for zones explicitly configured in
+  `zone-allow`.
 - `admit`: verify a candidate peer through `~measurement@1.0/verify-peer`,
   match its boot measurement against the zone template, and return encrypted
   zone material.
@@ -42,6 +44,16 @@ A zone has:
 6. Joiner unwraps the zone secret through internal measurement helpers,
    decrypts the ring wallet, installs it as an additional identity, and
    activates nonvolatile storage if configured.
+
+Before `init` or `join` installs local zone material, the device evaluates
+`zone-allow`. The default is `1`, so a node can join or initialize exactly one
+zone unless its operator config opts into more.
+
+If `zone-allow` is a map from zone ID to peer URL, `start` schedules each
+listed join after the HTTP listener has come up. This keeps the normal peer
+verification flow intact: the admitting peer can still call back into the
+joining node's measurement endpoint. The joining node must have a reachable
+`public-url` or `zone-self-url` in its node options.
 
 ## Membership Proof
 

@@ -3,14 +3,25 @@
     "initialized": "permanent",
     "access-remote-cache-for-client": false,
     "on": {
-        "start": {
-            "device": "measurement@1.0",
-            "path": "boot",
-            "method": "POST",
-            "target": "body",
-            "hook": {
-                "result": "ignore"
+        "start": [
+            {
+                "device": "measurement@1.0",
+                "path": "boot",
+                "method": "POST",
+                "target": "body",
+                "hook": {
+                    "result": "ignore"
+                }
+            },
+            {
+                "device": "zone@1.0",
+                "path": "start",
+                "method": "POST",
+                "target": "body",
+                "hook": {
+                    "result": "ignore"
+                }
             }
-        }
+        ]
     }
 }

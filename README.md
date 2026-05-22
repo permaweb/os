@@ -116,6 +116,7 @@ A small example:
 
 ```json
 {
+  "zone-allow": 1,
   "load-remote-devices": true,
   "trusted-device-signers": [
     "WjnS-s03HWsDSdMnyTdzB1eHZB2QheUWP_FVRVYxkXk"
@@ -128,6 +129,14 @@ hyphenated keys such as `trusted-device-signers` and
 `load-remote-devices`. Signer values are AO/Arweave-style base64url
 addresses. Zone templates and external verifiers can match these node
 message fields according to their deployment policy.
+
+`zone-allow` controls whether this node may install zone identities. If
+omitted, the node may initialize or join one zone during the current run. Use
+`0` or `false` to disable zone joins, a positive integer to allow that many
+zones, `true` for no count limit, a list of zone IDs to allow only those zones,
+or a map of zone IDs to bootstrap peer URLs to auto-join those explicit zones
+after HyperBEAM starts. Auto-join still uses normal peer verification, so the
+node must also advertise a reachable `public-url` or `zone-self-url`.
 
 ## Verify A Running Node
 

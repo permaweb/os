@@ -55,6 +55,15 @@ def is_measurement_boot_hook(hook: Any) -> bool:
     )
 
 
+def is_zone_start_hook(hook: Any) -> bool:
+    return (
+        isinstance(hook, dict)
+        and hook.get("device") == "zone@1.0"
+        and hook.get("path") == "start"
+        and hook.get("method") == "POST"
+    )
+
+
 def main() -> int:
     config = load(BASE_CONFIG)
     hooks = start_hooks(config)
@@ -64,6 +73,11 @@ def main() -> int:
         fail(
             BASE_CONFIG,
             "first on.start hook must be measurement@1.0 boot POST",
+        )
+    if not any(is_zone_start_hook(hook) for hook in hooks[1:]):
+        fail(
+            BASE_CONFIG,
+            "base config must include zone@1.0 start POST after measurement",
         )
     if "load-remote-devices" in config:
         fail(BASE_CONFIG, "base config must leave load-remote-devices to operator config")

@@ -6,11 +6,13 @@
 %%% that template, wraps the AES secret to the peer's measured recipient, and
 %%% returns a ring-signed admission. `join' verifies the admission, unwraps the
 %%% AES key locally, decrypts the wallet, and installs it as `zone/<name>'.
-%%% `member' returns only a narrow zone-signed membership proof.
+%%% `member' returns only a narrow zone-signed membership proof. `start' is a
+%%% boot hook that auto-joins explicitly configured zones after the HTTP listener
+%%% is available.
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
 -device_libraries([lib_lapee_nonvolatile, lib_lapee_peer_http]).
--export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3]).
+-export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
 
 -include("include/hb.hrl").
 
@@ -25,7 +27,8 @@ info(_) ->
             <<"status">>,
             <<"admit">>,
             <<"join">>,
-            <<"member">>
+            <<"member">>,
+            <<"start">>
         ]
     }.
 
@@ -41,6 +44,7 @@ info(_Base, _Req, _Opts) ->
 init(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
+        ok = assert_zone_install_allowed(Name, Opts),
         Template = clean_template(
             hb_maps:get(<<"template">>, Req, #{}, Opts),
             Opts),
@@ -127,6 +131,7 @@ admit(_Base, Req, Opts) ->
 join(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
+        ok = assert_zone_install_allowed(Name, Opts),
         PeerURL = required_peer(Req, Opts),
         SelfURL = required_self(Req, Opts),
         AdmissionNonce = hb_util:encode(crypto:strong_rand_bytes(32)),
@@ -159,6 +164,28 @@ join(_Base, Req, Opts) ->
                 Name, Template, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
+    end, Opts).
+
+start(_Base, Req, Opts) ->
+    with_result(fun() ->
+        NodeOpts = start_node_opts(Req, Opts),
+        case zone_allow(NodeOpts) of
+            {bootstrap, Entries} when map_size(Entries) > 0 ->
+                ServerID = node_address(NodeOpts),
+                spawn(fun() -> bootstrap_zones(ServerID, Entries) end),
+                #{
+                    <<"type">> => <<"zone-start">>,
+                    <<"version">> => <<"1.0">>,
+                    <<"bootstrap">> => <<"scheduled">>,
+                    <<"zones">> => maps:keys(Entries)
+                };
+            _ ->
+                #{
+                    <<"type">> => <<"zone-start">>,
+                    <<"version">> => <<"1.0">>,
+                    <<"bootstrap">> => <<"not-configured">>
+                }
+        end
     end, Opts).
 
 member(_Base, Req, Opts) ->
@@ -329,6 +356,194 @@ reject_supplied_secret_material(Req, Opts) ->
             }})
     end.
 
+assert_zone_install_allowed(Name, Opts) ->
+    Zones = hb_opts:get(<<"zones">>, #{}, Opts),
+    case hb_maps:get(Name, Zones, undefined, Opts) of
+        Existing when is_map(Existing) ->
+            throw({zone_error, #{
+                <<"error">> => <<"zone-already-joined">>,
+                <<"name">> => Name
+            }});
+        _ ->
+            assert_zone_allowed(Name, Zones, zone_allow(Opts), Opts)
+    end.
+
+assert_zone_allowed(Name, _Zones, disabled, _Opts) ->
+    throw({zone_error, #{
+        <<"error">> => <<"zone-join-disabled">>,
+        <<"name">> => Name
+    }});
+assert_zone_allowed(_Name, _Zones, unlimited, _Opts) ->
+    ok;
+assert_zone_allowed(_Name, Zones, {limit, Limit}, _Opts)
+        when map_size(Zones) < Limit ->
+    ok;
+assert_zone_allowed(Name, Zones, {limit, Limit}, _Opts) ->
+    throw({zone_error, #{
+        <<"error">> => <<"zone-limit-exceeded">>,
+        <<"name">> => Name,
+        <<"joined">> => map_size(Zones),
+        <<"limit">> => Limit
+    }});
+assert_zone_allowed(Name, _Zones, {names, Names}, _Opts) ->
+    case lists:member(Name, Names) of
+        true -> ok;
+        false ->
+            throw({zone_error, #{
+                <<"error">> => <<"zone-not-allowed">>,
+                <<"name">> => Name
+            }})
+    end;
+assert_zone_allowed(Name, _Zones, {bootstrap, Entries}, _Opts) ->
+    case maps:is_key(Name, Entries) of
+        true -> ok;
+        false ->
+            throw({zone_error, #{
+                <<"error">> => <<"zone-not-allowed">>,
+                <<"name">> => Name
+            }})
+    end;
+assert_zone_allowed(Name, _Zones, invalid, _Opts) ->
+    throw({zone_error, #{
+        <<"error">> => <<"invalid-zone-allow">>,
+        <<"name">> => Name
+    }}).
+
+zone_allow(Opts) ->
+    normalize_zone_allow(hb_opts:get(<<"zone-allow">>, 1, Opts)).
+
+normalize_zone_allow(false) -> disabled;
+normalize_zone_allow(0) -> disabled;
+normalize_zone_allow(<<"false">>) -> disabled;
+normalize_zone_allow(<<"0">>) -> disabled;
+normalize_zone_allow(true) -> unlimited;
+normalize_zone_allow(<<"true">>) -> unlimited;
+normalize_zone_allow(1) -> {limit, 1};
+normalize_zone_allow(N) when is_integer(N), N > 1 -> {limit, N};
+normalize_zone_allow(Bin) when is_binary(Bin) ->
+    case catch binary_to_integer(Bin) of
+        0 -> disabled;
+        N when is_integer(N), N > 0 -> {limit, N};
+        _ -> invalid
+    end;
+normalize_zone_allow([N]) when is_integer(N), N >= 0 ->
+    normalize_zone_allow(N);
+normalize_zone_allow(Names) when is_list(Names) ->
+    case lists:all(fun is_zone_name/1, Names) of
+        true -> {names, Names};
+        false -> invalid
+    end;
+normalize_zone_allow(Map) when is_map(Map) ->
+    normalize_zone_bootstrap(Map);
+normalize_zone_allow(_Other) ->
+    invalid.
+
+normalize_zone_bootstrap(Map) ->
+    Entries = maps:from_list(
+        [
+            {Name, PeerURL}
+         || {Name, PeerURL} <- maps:to_list(Map),
+            is_zone_name(Name),
+            is_bootstrap_url(PeerURL)
+        ]),
+    case map_size(Entries) =:= map_size(Map) of
+        true -> {bootstrap, Entries};
+        false -> invalid
+    end.
+
+is_zone_name(Bin) when is_binary(Bin), byte_size(Bin) > 0 -> true;
+is_zone_name(_Other) -> false.
+
+is_bootstrap_url(Bin) when is_binary(Bin), byte_size(Bin) > 0 -> true;
+is_bootstrap_url(_Other) -> false.
+
+start_node_opts(Req, Opts) ->
+    case hb_maps:get(<<"body">>, Req, undefined, Opts) of
+        NodeOpts when is_map(NodeOpts) -> NodeOpts;
+        _ -> Opts
+    end.
+
+bootstrap_zones(ServerID, Entries) ->
+    timer:sleep(1000),
+    Results =
+        [
+            bootstrap_zone(ServerID, Name, PeerURL)
+         || {Name, PeerURL} <- maps:to_list(Entries)
+        ],
+    update_zone_start_status(ServerID, #{
+        <<"type">> => <<"zone-start-status">>,
+        <<"version">> => <<"1.0">>,
+        <<"completed-at-unix">> => erlang:system_time(second),
+        <<"results">> => Results
+    }).
+
+bootstrap_zone(ServerID, Name, PeerURL) ->
+    case wait_for_server_opts(ServerID, 60) of
+        Opts when is_map(Opts) ->
+            case hb_maps:get(Name, hb_opts:get(<<"zones">>, #{}, Opts),
+                             undefined, Opts) of
+                Existing when is_map(Existing) ->
+                    #{<<"name">> => Name, <<"status">> => <<"already-joined">>};
+                _ ->
+                    bootstrap_join(ServerID, Name, PeerURL, Opts)
+            end;
+        _ ->
+            #{
+                <<"name">> => Name,
+                <<"peer-url">> => PeerURL,
+                <<"status">> => <<"failed">>,
+                <<"error">> => <<"server-unavailable">>
+            }
+    end.
+
+bootstrap_join(_ServerID, Name, PeerURL, Opts) ->
+    Req = #{
+        <<"name">> => Name,
+        <<"peer-url">> => PeerURL
+    },
+    case join(#{}, Req, Opts) of
+        {ok, #{<<"status">> := 200, <<"body">> := Body}} ->
+            #{
+                <<"name">> => Name,
+                <<"peer-url">> => PeerURL,
+                <<"status">> => <<"joined">>,
+                <<"result">> => response_body(Body, Opts)
+            };
+        {ok, #{<<"status">> := Status, <<"body">> := Body}} ->
+            #{
+                <<"name">> => Name,
+                <<"peer-url">> => PeerURL,
+                <<"status">> => <<"failed">>,
+                <<"http-status">> => Status,
+                <<"error">> => response_body(Body, Opts)
+            };
+        Other ->
+            #{
+                <<"name">> => Name,
+                <<"peer-url">> => PeerURL,
+                <<"status">> => <<"failed">>,
+                <<"error">> => hb_util:bin(io_lib:format("~0p", [Other]))
+            }
+    end.
+
+wait_for_server_opts(_ServerID, 0) ->
+    unavailable;
+wait_for_server_opts(ServerID, Attempts) ->
+    case catch hb_http_server:get_opts(#{<<"http-server">> => ServerID}) of
+        Opts when is_map(Opts) -> Opts;
+        _ ->
+            timer:sleep(500),
+            wait_for_server_opts(ServerID, Attempts - 1)
+    end.
+
+update_zone_start_status(ServerID, Status) ->
+    case wait_for_server_opts(ServerID, 1) of
+        Opts when is_map(Opts) ->
+            hb_http_server:set_opts(Opts#{<<"zone-start">> => Status});
+        _ ->
+            ok
+    end.
+
 install_ring(Name, Template0, AES, Wallet, Members, Opts) ->
     Template = clean_template(Template0, Opts),
     ok = ensure_nonempty_template(Template),
@@ -435,7 +650,7 @@ zone_not_initialized(Name) ->
 
 all_status_body(Opts) ->
     Zones = hb_opts:get(<<"zones">>, #{}, Opts),
-    maybe_add_nonvolatile_status(#{
+    maybe_add_runtime_status(#{
         <<"type">> => <<"zone-status">>,
         <<"version">> => <<"1.0">>,
         <<"initialized">> => map_size(Zones) > 0,
@@ -447,7 +662,7 @@ status_body(Name, Opts) ->
                      undefined, Opts) of
         undefined -> zone_not_initialized(Name);
         Zone ->
-            maybe_add_nonvolatile_status(#{
+            maybe_add_runtime_status(#{
                 <<"type">> => <<"zone-status">>,
                 <<"version">> => <<"1.0">>,
                 <<"initialized">> => true,
@@ -455,6 +670,17 @@ status_body(Name, Opts) ->
                 <<"identity">> => zone_identity(Name),
                 <<"zone">> => Zone
             }, Opts)
+    end.
+
+maybe_add_runtime_status(Body, Opts) ->
+    maybe_add_nonvolatile_status(maybe_add_start_status(Body, Opts), Opts).
+
+maybe_add_start_status(Body, Opts) ->
+    case hb_opts:get(<<"zone-start">>, undefined, Opts) of
+        Status when is_map(Status) ->
+            Body#{<<"zone-start">> => Status};
+        _ ->
+            Body
     end.
 
 maybe_add_nonvolatile_status(Body, Opts) ->
@@ -1225,3 +1451,38 @@ canonical_mismatch_path(<<"/", _/binary>> = Path) ->
     Path;
 canonical_mismatch_path(Path) when is_binary(Path) ->
     <<"/", Path/binary>>.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+zone_allow_values_test() ->
+    ?assertEqual(disabled, normalize_zone_allow(false)),
+    ?assertEqual(disabled, normalize_zone_allow(0)),
+    ?assertEqual({limit, 1}, normalize_zone_allow(1)),
+    ?assertEqual({limit, 3}, normalize_zone_allow(3)),
+    ?assertEqual({limit, 2}, normalize_zone_allow([2])),
+    ?assertEqual(unlimited, normalize_zone_allow(true)),
+    ?assertEqual({names, [<<"alpha">>, <<"beta">>]},
+                 normalize_zone_allow([<<"alpha">>, <<"beta">>])),
+    ?assertEqual({bootstrap, #{<<"alpha">> => <<"http://peer">>}},
+                 normalize_zone_allow(#{<<"alpha">> => <<"http://peer">>})).
+
+zone_allow_policy_test() ->
+    ?assertEqual(ok, assert_zone_install_allowed(<<"alpha">>, #{})),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"zone-limit-exceeded">>}},
+        assert_zone_install_allowed(
+            <<"beta">>,
+            #{<<"zones">> => #{<<"alpha">> => #{}}})),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"zone-not-allowed">>}},
+        assert_zone_install_allowed(
+            <<"beta">>,
+            #{<<"zone-allow">> => [<<"alpha">>]})),
+    ?assertEqual(
+        ok,
+        assert_zone_install_allowed(
+            <<"alpha">>,
+            #{<<"zone-allow">> => [<<"alpha">>]})).
+
+-endif.

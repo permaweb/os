@@ -452,6 +452,14 @@ run_zone_flow() {
         echo ">> node $n joined zone"
     done
 
+    jq -n '{"name":"second-zone"}' > "$OUTDIR/requests/init-second-zone.json"
+    remote_post 2 "/~zone@1.0/init" \
+        "$OUTDIR/requests/init-second-zone.json" \
+        "$OUTDIR/responses/node2-init-second-zone.json"
+    jq -e '.status == 400 and .body.error == "zone-limit-exceeded"' \
+        "$OUTDIR/responses/node2-init-second-zone.json" >/dev/null
+    echo ">> node 2 cannot install a second zone by default"
+
     remote_post 4 "/~zone@1.0/join" \
         "$OUTDIR/requests/join4.json" \
         "$OUTDIR/responses/node4-join.json"
