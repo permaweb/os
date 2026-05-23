@@ -52,7 +52,7 @@ define HYPERBEAM_DOWNLOAD_REBAR3
 endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
-HYPERBEAM_DEVICE_DIR ?= /build/permawebos-devices
+HYPERBEAM_DEVICE_DIR ?= /build/common-devices
 
 # Buildroot exports HyperBEAM from a git checkout into a plain source
 # tree, so rebar's build-info hooks cannot rely on `.git' being

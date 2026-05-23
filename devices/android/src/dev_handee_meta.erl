@@ -8,7 +8,7 @@
 -export([info/1, info/3, build/3, handle/2, is/2, is/3]).
 -export([is_operator/2, is_operator/3]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 
 info(Base) ->
     dev_meta:info(Base).

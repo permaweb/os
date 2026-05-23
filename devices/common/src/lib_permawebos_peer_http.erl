@@ -1,10 +1,10 @@
-%%% @doc AO-Core peer HTTP helper for LapEE devices.
+%%% @doc AO-Core peer HTTP helper for PermawebOS devices.
 %%%
 %%% Peer handshakes use ordinary HyperBEAM HTTP calls and ask the peer to encode
 %%% replies through HTTPSig with bundling enabled. This keeps device-to-device
 %%% verification in the signed AO-Core HTTP path without ad hoc JSON parsing or
 %%% link expansion.
--module(lib_lapee_peer_http).
+-module(lib_permawebos_peer_http).
 -export([get/3, post/4, peer_opts/2]).
 
 

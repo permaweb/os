@@ -19,10 +19,11 @@ init() ->
         {error, Reason} ->
             io:format(
                 standard_error,
-                "[lapee_snp_nif] load_nif(~s) failed: ~p~n",
+                "[lapee_snp_nif] running without NIF "
+                "(load_nif(~s) returned ~p)~n",
                 [Path, Reason]
             ),
-            {error, Reason}
+            ok
     end.
 
 priv_dir() ->

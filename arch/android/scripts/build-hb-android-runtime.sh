@@ -17,6 +17,8 @@ require_tool python3
 require_tool rebar3
 require_tool erlc
 
+"$ROOT/scripts/stage-android-devices.sh"
+
 for clang in aarch64-linux-android29-clang x86_64-linux-android29-clang llvm-strip; do
     if [ ! -x "$TOOLCHAIN/$clang" ]; then
         echo "missing Android NDK tool: $TOOLCHAIN/$clang" >&2

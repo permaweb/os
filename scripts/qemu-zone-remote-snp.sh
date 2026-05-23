@@ -383,6 +383,7 @@ require_request() {
 
 generate_requests() {
     ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+    ZONE_TEMPLATE_LIST="${ZONE_TEMPLATE_LIST:-}" \
         python3 scripts/qemu-zone-requests.py \
             "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
@@ -424,13 +425,15 @@ run_zone_flow() {
         "$OUTDIR/requests/verify2.json" \
         "$OUTDIR/responses/node1-verify2.json"
     jq -e '.status == 200 and .body.type == "zone-peer-attestation" and
-           (.body.verification.verified == true or
-            .body.verification.verified == "true") and
-           (.body.freshness.verified == true or
-            .body.freshness.verified == "true") and
-           .body."peer-scope"."consumer-scope"."ring-address" == "'"$ring_addr"'" and
-           (.body."credential-activation".verified == true or
-            .body."credential-activation".verified == "true")' \
+           (.body."boot-verified" == true or
+            .body."boot-verified" == "true") and
+           (.body."fresh-verified" == true or
+            .body."fresh-verified" == "true") and
+           (.body."freshness-verified" == true or
+            .body."freshness-verified" == "true") and
+           .body."peer-scope-ring-address" == "'"$ring_addr"'" and
+           (.body."credential-activation-verified" == true or
+            .body."credential-activation-verified" == "true")' \
         "$OUTDIR/responses/node1-verify2.json" >/dev/null
 
     remote_post 1 "/~zone@1.0/admit" \
@@ -464,7 +467,8 @@ run_zone_flow() {
         "$OUTDIR/requests/join4.json" \
         "$OUTDIR/responses/node4-join.json"
     if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-                .body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"' \
+                (.body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name" or
+                 any(.body.mismatches[]?; ."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"))' \
             "$OUTDIR/responses/node4-join.json" >/dev/null; then
         echo "node 4 rejection was not the expected template-mismatch" >&2
         cat "$OUTDIR/responses/node4-join.json" >&2

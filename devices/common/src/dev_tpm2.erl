@@ -10,7 +10,7 @@
 -export([verify/3]).
 -export([make_credential_for_subject/2]).
 -export([ensure_activation_secret/5]).
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 %% Default PCR that HyperBEAM extends with the node-message identity.

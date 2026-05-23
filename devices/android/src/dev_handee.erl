@@ -12,7 +12,7 @@
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 
 -define(VERSION, <<"1.0">>).
 -define(METHOD, <<"android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm">>).

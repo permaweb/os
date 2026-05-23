@@ -11,7 +11,7 @@
 -export([start/3, stop/3, reset/3, scope/0, scope/1]).
 -export([write/3, read/3, list/3, type/3, link/3, group/3, resolve/3]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -define(ROOT_GROUP, <<"/">>).

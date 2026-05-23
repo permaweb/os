@@ -4,7 +4,9 @@ ROOT := $(abspath .)
 PERMAWEBOS_ROOT := $(abspath ../..)
 BUILD_DIR ?= $(ROOT)/build
 ANDROID_DIR := $(ROOT)/android
-HANDEE_DEVICE_ROOT ?= $(PERMAWEBOS_ROOT)/devices/android
+PERMAWEBOS_COMMON_DEVICE_ROOT ?= $(PERMAWEBOS_ROOT)/devices/common
+HANDEE_DEVICE_OVERLAY_ROOT ?= $(PERMAWEBOS_ROOT)/devices/android
+HANDEE_DEVICE_ROOT ?= $(BUILD_DIR)/android-devices
 ANDROID_SDK_ROOT ?= /opt/homebrew/share/android-commandlinetools
 ANDROID_HOME ?= $(ANDROID_SDK_ROOT)
 JAVA_HOME ?= /opt/homebrew/opt/openjdk@17
@@ -12,7 +14,8 @@ GRADLE := $(ANDROID_DIR)/gradlew
 ADB := $(ANDROID_SDK_ROOT)/platform-tools/adb
 EMULATOR := $(ANDROID_SDK_ROOT)/emulator/emulator
 AVD_NAME ?= handee-api-36-arm64
-export BUILD_DIR HANDEE_DEVICE_ROOT
+export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT HANDEE_DEVICE_OVERLAY_ROOT \
+    HANDEE_DEVICE_ROOT
 
 .PHONY: help android-env android-check android-sdk android-gradle-wrapper fetch-attestation-roots \
         apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
@@ -86,7 +89,7 @@ scenarios: android-build
 next-boot-config-test: apk
 	./scripts/handee-next-boot-config-test.sh
 
-android-zone-storage-smoke: apk
+android-zone-storage-smoke: android-build
 	./scripts/handee-android-zone-storage-smoke.sh
 
 zone-storage-scenario:
@@ -96,6 +99,7 @@ verify-config-invariants:
 	./scripts/check-handee-config-invariants.py
 
 erl-compile:
+	./scripts/stage-android-devices.sh
 	cd "$(HANDEE_DEVICE_ROOT)" && rebar3 compile
 
 clean:

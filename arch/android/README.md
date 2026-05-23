@@ -10,6 +10,8 @@ This directory contains the Android HandEE architecture imported from
 - `secondary-external-verifier/` contains Android attestation verifier assets.
 - `specs/` contains the HandEE device specification from the source branch.
 
-The HyperBEAM device package for this architecture lives in
-`devices/android/`. Android currently ships its own measurement/system/zone
-implementation rather than linking the Linux TPM/SNP NIF package.
+Android stages one device package from `devices/common/` plus the
+Android-specific overlay in `devices/android/`. The shared measurement and zone
+devices are therefore identical to the Linux builds; Android contributes the
+HandEE measurement backend, Android system report, app-private encrypted store,
+and service devices.

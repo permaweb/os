@@ -9,5 +9,5 @@ current LapEE Linux images:
 - Secure Boot and encrypted-storage provisioner (`make provisioner`).
 
 The Buildroot external tree builds a stock pinned HyperBEAM checkout, then
-preloads the selected PermawebOS device package from `devices/permawebos/`.
+preloads the selected PermawebOS device package from `devices/common/`.
 Do not patch the fetched HyperBEAM source from here; package devices instead.

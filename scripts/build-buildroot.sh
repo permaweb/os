@@ -26,7 +26,7 @@ LAPEE_ROOT="$(pwd)"
 HOST_BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE_ROOT/build}"
 LAPEE_LINUX_DIR="${LAPEE_LINUX_DIR:-$LAPEE_ROOT/arch/common/linux}"
 LAPEE_BUILDROOT_EXTERNAL="${LAPEE_BUILDROOT_EXTERNAL:-$LAPEE_LINUX_DIR/buildroot-external}"
-LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/permawebos}"
+LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/common}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
@@ -103,8 +103,8 @@ docker run --rm $DOCKER_PLATFORM \
 docker run --rm $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -v "$LAPEE_HB_DEVICE_DIR":/src-hyperbeam-devices:ro \
-    $IMAGE bash -c "rm -rf /build/permawebos-devices && \
-                    cp -r /src-hyperbeam-devices /build/permawebos-devices"
+    $IMAGE bash -c "rm -rf /build/common-devices && \
+                    cp -r /src-hyperbeam-devices /build/common-devices"
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"

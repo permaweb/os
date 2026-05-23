@@ -187,6 +187,7 @@ echo "outdir: $OUTDIR"
 echo "qemu image: $IMG"
 echo "measurement devices: $(node_measurement_device 1), $(node_measurement_device 2), $(node_measurement_device 3), $(node_measurement_device 4)"
 echo "zone template mode: $ZONE_TEMPLATE_MODE"
+echo "zone template list: ${ZONE_TEMPLATE_LIST:-0}"
 echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
@@ -774,6 +775,7 @@ echo ">> observed differing boot-attested properties"
 jq -c '.nodes[]' "$OUTDIR/responses/security-properties.json"
 
 ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+ZONE_TEMPLATE_LIST="${ZONE_TEMPLATE_LIST:-}" \
     python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
 for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
     require_request "$req"
@@ -805,13 +807,15 @@ post_json 1 "/~measurement@1.0/verify-peer" \
     "$OUTDIR/requests/verify2.json" \
     "$OUTDIR/responses/node1-verify2.json"
 jq -e '.status == 200 and .body.type == "zone-peer-attestation" and
-       (.body.verification.verified == true or
-        .body.verification.verified == "true") and
-       (.body.freshness.verified == true or
-        .body.freshness.verified == "true") and
-       .body."peer-scope"."consumer-scope"."ring-address" == "'"$ring_addr"'" and
-       (.body."credential-activation".verified == true or
-        .body."credential-activation".verified == "true")' \
+       (.body."boot-verified" == true or
+        .body."boot-verified" == "true") and
+       (.body."fresh-verified" == true or
+        .body."fresh-verified" == "true") and
+       (.body."freshness-verified" == true or
+        .body."freshness-verified" == "true") and
+       .body."peer-scope-ring-address" == "'"$ring_addr"'" and
+       (.body."credential-activation-verified" == true or
+        .body."credential-activation-verified" == "true")' \
     "$OUTDIR/responses/node1-verify2.json" >/dev/null
 post_json 1 "/~zone@1.0/admit" \
     "$OUTDIR/requests/admit2.json" \
@@ -850,7 +854,8 @@ if [[ "$join4_rc" != 0 ]]; then
     exit 1
 fi
 if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-            .body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"' \
+            (.body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name" or
+             any(.body.mismatches[]?; ."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"))' \
         "$OUTDIR/responses/node4-join.json" >/dev/null; then
     echo "!! node 4 rejection was not the expected template-mismatch" >&2
     cat "$OUTDIR/responses/node4-join.json" >&2
@@ -944,7 +949,9 @@ if [[ "$NONVOLATILE" = "1" ]]; then
     assert_cached_message_not_found 2 "$node2_pre_reboot_boot_id" \
         "$OUTDIR/responses/node2-reboot-prejoin-sentinel.json"
     echo ">> node 2 pre-reboot object is unavailable before rejoining the ring"
-    python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
+    ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+    ZONE_TEMPLATE_LIST="${ZONE_TEMPLATE_LIST:-}" \
+        python3 scripts/qemu-zone-requests.py "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     jq --arg addr "$ring_addr" \
         '. + {"expected-ring-address": $addr}' \
         "$OUTDIR/requests/join2.json" \

@@ -486,7 +486,7 @@ The image contains:
 - A custom Buildroot `hyperbeam` package that fetches pinned upstream
   HyperBEAM `edge`, builds stock HyperBEAM, packages PermawebOS-owned
   measurement, TPM, SNP, zone, and system devices from
-  `devices/permawebos/` with the HyperBEAM Forge, and bakes them into the
+  `devices/common/` with the HyperBEAM Forge, and bakes them into the
   preloaded device store.
 - A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
   single FAT32 ESP.
@@ -548,11 +548,11 @@ are built from source.
   package for the pinned stock HyperBEAM release.
 - `arch/android/` - Android HandEE Gradle project, runtime packaging, local
   Android verifier assets, and Android/emulator harness scripts.
-- `devices/permawebos/` - Linux PermawebOS HyperBEAM device package:
-  AO-Core device modules, Forge libraries, native TPM/SNP helpers, and
-  TPM EK roots baked into the preloaded device store.
-- `devices/android/` - Android HandEE HyperBEAM device package and
-  Android-specific stores/measurement devices.
+- `devices/common/` - shared PermawebOS HyperBEAM device package:
+  measurement, TPM, SNP, zone, system, Forge libraries, native Linux helpers,
+  and TPM EK roots baked into the Linux preloaded device store.
+- `devices/android/` - Android HandEE overlay: Android measurement backend,
+  app-private encrypted store, HandEE system/meta devices, and service devices.
 - `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
   Secure Boot helpers.
 - `paper/` - research paper and design notes.

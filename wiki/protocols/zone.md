@@ -1,18 +1,19 @@
 # Zone Protocol
 
 `~zone@1.0` creates named shared identities for nodes whose measurements match
-a zone template.
+one of the zone's admissible templates.
 
 ## Public Exports
 
 - `init`: create a named zone from the local node after verifying that the
-  local boot measurement matches the supplied template.
+  local boot measurement matches the supplied template or one of the supplied
+  `templates`.
 - `join`: ask an existing member to admit this node.
 - `start`: boot hook that schedules joins for zones explicitly configured in
   `zone-allow`.
 - `admit`: verify a candidate peer through `~measurement@1.0/verify-peer`,
-  match its boot measurement against the zone template, and return encrypted
-  zone material.
+  match its boot measurement against one admissible template, and return
+  encrypted zone material.
 - `member`: return a membership proof signed by the installed zone identity.
 - `status`: list local zone membership state and nonvolatile-storage status.
 
@@ -21,7 +22,9 @@ a zone template.
 A zone has:
 
 - `name`: local human-readable zone name.
-- `template`: AO-Core message matched against normalized boot measurement.
+- `template` or `templates`: AO-Core message or list of messages matched
+  against normalized boot measurement. A peer is admissible when any one
+  template matches.
 - `ring-reference`: unique reference derived from name, ring address, and
   template identity.
 - ring wallet: generated inside the first admitted member and never supplied
@@ -33,8 +36,8 @@ A zone has:
 
 1. Joiner calls `join` with zone name and an admitting member URL.
 2. Admitter calls `~measurement@1.0/verify-peer` on the joiner URL.
-3. Admitter matches the verified peer boot measurement against the zone
-   template.
+3. Admitter matches the verified peer boot measurement against the zone's
+   admissible templates.
 4. Admitter returns its membership proof and an authorization signed by the
    zone identity. The authorization binds the joiner node address, peer
    attestation ID, recipient ID, ring-reference, template ID, encrypted secret

@@ -7,6 +7,8 @@ require_tool curl
 require_tool python3
 require_tool erl
 
+"$ROOT/scripts/stage-android-devices.sh"
+
 OUT="$BUILD_DIR/handee-zone-storage"
 NODE1_PORT="${HANDEE_ZONE_NODE1_PORT:-18746}"
 NODE2_PORT="${HANDEE_ZONE_NODE2_PORT:-18747}"
@@ -155,6 +157,7 @@ base["zone-self-url"] = sys.argv[3]
 base["name"] = sys.argv[4]
 base["encrypted-volumes"] = True
 base["encrypted-volume-root"] = sys.argv[5]
+base["allow-rejected-peer-attestation"] = True
 pathlib.Path(sys.argv[6]).write_text(json.dumps(base, indent=2) + "\n")
 PY
 }

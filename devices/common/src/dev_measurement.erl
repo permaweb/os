@@ -1,26 +1,26 @@
-%%% @doc Common LapEE hardware-measurement protocol.
+%%% @doc Common PermawebOS hardware-measurement protocol.
 %%%
 %%% This device owns the standard measured subject:
 %%% `#{<<"system">> => ~system@1.0/all, <<"node">> => ~meta@1.0/info}'.
-%%% TPM, SNP, and later engines supply only native evidence and recipient
-%%% handling. Policy stays outside the device; measurements expose facts and
-%%% provenance as signed AO-Core messages.
+%%% TPM, SNP, HandEE, and later engines supply only native evidence and
+%%% recipient handling. Policy stays outside the device; measurements expose
+%%% facts and provenance as signed AO-Core messages.
 -module(dev_measurement).
 -implements(<<"measurement@1.0">>).
--device_libraries([lib_lapee_peer_http]).
+-device_libraries([lib_permawebos_peer_http]).
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          measurement_body/1, measurement_body_id/2]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 
 -define(VERSION, <<"1.0">>).
 -define(TYPE, <<"lapee-measurement">>).
 -define(BOOT_PATH, <<"~measurement@1.0/boot">>).
 -define(PEER_ATTESTATION_PREFIX,
         <<"~measurement@1.0/peer-attestations">>).
--define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>]).
+-define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"handee@1.0">>]).
 -define(DEFAULT_TIMEOUT_MS, 30000).
 
 info(_) ->
@@ -48,10 +48,14 @@ info(_Base, _Req, Opts) ->
     }}.
 
 boot(_Base, _Req, Opts) ->
-    case hb_cache:read(?BOOT_PATH, Opts) of
-        {ok, Msg} ->
-            {ok, materialize_measurement(Msg, Opts)};
-        _ ->
+    case persistent_term:get({dev_measurement, boot}, undefined) of
+        Msg when is_map(Msg) ->
+            {ok,
+                materialize_measurement(
+                    publish_cached_measurement(Msg, Opts),
+                    Opts
+                )};
+        undefined ->
             global:trans(
                 {dev_measurement, boot},
                 fun() -> boot_locked(Opts) end,
@@ -59,20 +63,33 @@ boot(_Base, _Req, Opts) ->
     end.
 
 boot_locked(Opts) ->
-    case hb_cache:read(?BOOT_PATH, Opts) of
-        {ok, Msg} ->
-            {ok, materialize_measurement(Msg, Opts)};
-        _ ->
+    case persistent_term:get({dev_measurement, boot}, undefined) of
+        Msg when is_map(Msg) ->
+            {ok,
+                materialize_measurement(
+                    publish_cached_measurement(Msg, Opts),
+                    Opts
+                )};
+        undefined ->
             case generate_measurement(boot, #{}, Opts) of
-                {ok, Signed} ->
-                    SignedID = hb_message:id(Signed, signed, Opts),
-                    {ok, _UnsignedID} = hb_cache:write(Signed, Opts),
-                    ok = hb_cache:link(SignedID, ?BOOT_PATH, Opts),
+                {ok, Signed0} ->
+                    Signed = cacheable_measurement(Signed0, Opts),
+                    persistent_term:put({dev_measurement, boot}, Signed),
+                    publish_cached_measurement(Signed, Opts),
                     {ok, materialize_measurement(Signed, Opts)};
                 {error, Reason} ->
                     error_resp(500, <<"measurement-boot-failed">>, Reason)
             end
     end.
+
+cacheable_measurement(Msg, Opts) ->
+    materialize_peer_value(Msg, Opts).
+
+publish_cached_measurement(Msg, Opts) ->
+    SignedID = hb_message:id(Msg, signed, Opts),
+    {ok, _UnsignedID} = hb_cache:write(Msg, Opts),
+    ok = hb_cache:link(SignedID, ?BOOT_PATH, Opts),
+    Msg.
 
 fresh(_Base, Req, Opts) ->
     case generate_measurement(fresh, Req, Opts) of
@@ -114,16 +131,80 @@ verify_peer(_Base, Req, Opts) ->
 unwrap_secret(_Base, Req, Opts) ->
     with_ok(
         fun() ->
-            LoadedReq = materialize_peer_value(Req, Opts),
-            Credential = first_defined([
-                hb_maps:get(<<"credential">>, LoadedReq, undefined, Opts),
-                hb_maps:get(<<"wrapped-secret">>, LoadedReq, undefined, Opts),
-                LoadedReq
-            ]),
+            % Bundled HTTPSig requests can carry transport links; only the
+            % credential is part of the secret-recipient contract.
+            Credential0 = credential_from_request(Req, Opts),
+            Credential = materialize_peer_value(Credential0, Opts),
             Device = measurement_device(Credential, Opts),
             resolve_device_body(Device, <<"unwrap-secret">>, Credential, Opts)
         end,
         <<"unwrap-secret-failed">>).
+
+credential_from_request(Req, Opts) when is_map(Req) ->
+    case credential_reference_from_request(Req, Opts) of
+        {NodeURL, CredentialID} ->
+            fetch_linked_credential(NodeURL, CredentialID, Opts);
+        undefined ->
+            credential_body_from_request(Req, Opts)
+    end;
+credential_from_request(Req, _Opts) ->
+    Req.
+
+credential_body_from_request(Req, Opts) ->
+    case first_defined([
+        hb_maps:get(<<"credential">>, Req, undefined, Opts),
+        hb_maps:get(<<"wrapped-secret">>, Req, undefined, Opts)
+    ]) of
+        undefined ->
+            Body = hb_maps:get(<<"body">>, Req, undefined, Opts),
+            case Body of
+                BodyMap when is_map(BodyMap) ->
+                    case first_defined([
+                        hb_maps:get(<<"credential">>, BodyMap, undefined, Opts),
+                        hb_maps:get(<<"wrapped-secret">>, BodyMap, undefined, Opts)
+                    ]) of
+                        undefined -> BodyMap;
+                        Credential -> Credential
+                    end;
+                _ -> Req
+            end;
+        Credential ->
+            Credential
+    end.
+
+credential_reference_from_request(Req, Opts) ->
+    case {
+        first_defined([
+            hb_maps:get(<<"credential-node-url">>, Req, undefined, Opts),
+            hb_maps:get(<<"credential-source-url">>, Req, undefined, Opts)
+        ]),
+        hb_maps:get(<<"credential-id">>, Req, undefined, Opts)
+    } of
+        {NodeURL, CredentialID}
+                when is_binary(NodeURL), byte_size(NodeURL) > 0,
+                     is_binary(CredentialID), byte_size(CredentialID) > 0 ->
+            {strip_trailing_slash(NodeURL), CredentialID};
+        _ ->
+            undefined
+    end.
+
+fetch_linked_credential(NodeURL, CredentialID, Opts) ->
+    PeerOpts = lib_permawebos_peer_http:peer_opts(NodeURL, Opts),
+    materialize_peer_value(
+        response_body(
+            lib_permawebos_peer_http:get(
+                NodeURL,
+                credential_json_path(CredentialID),
+                Opts),
+            PeerOpts),
+        PeerOpts).
+
+credential_path(<<"/", _/binary>> = Path) -> Path;
+credential_path(ID) -> <<"/", ID/binary>>.
+
+credential_json_path(CredentialID) ->
+    Path = credential_path(CredentialID),
+    <<Path/binary, "?accept=application%2Fjson">>.
 
 generate_measurement(Purpose, Req, Opts) ->
     with_raw_ok(fun() ->
@@ -207,13 +288,13 @@ measurement_body_id(Body, Opts) when is_map(Body) ->
 
 verify_peer_url(Url, Req, Opts) ->
     with_raw_ok(fun() ->
-        PeerOpts = lib_lapee_peer_http:peer_opts(Url, Opts),
+        PeerOpts = lib_permawebos_peer_http:peer_opts(Url, Opts),
         Boot = peer_measurement_payload(response_body(
-            lib_lapee_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
+            lib_permawebos_peer_http:get(Url, <<"/~measurement@1.0/boot">>, Opts),
             PeerOpts), PeerOpts),
         FreshNonce = crypto:strong_rand_bytes(32),
         Fresh = peer_measurement_payload(response_body(
-            lib_lapee_peer_http:get(
+            lib_permawebos_peer_http:get(
                 Url,
                 <<"/~measurement@1.0/fresh?nonce=",
                   (hb_util:encode(FreshNonce))/binary>>,
@@ -225,20 +306,28 @@ verify_peer_url(Url, Req, Opts) ->
         ok = ensure_same_subject(Boot, Fresh, Opts),
         ok = ensure_subject_matches_measurement(Subject, Boot, Opts),
         ok = ensure_subject_matches_measurement(Subject, Fresh, Opts),
+        AllowRejected = allow_rejected_peer_attestation(Req, Opts),
         BootVerify = verify_measurement_body(
-            <<"boot-verification">>, Boot, Req, Opts),
+            <<"boot-verification">>, Boot, Req, AllowRejected, Opts),
         FreshVerify = verify_measurement_body(
             <<"fresh-verification">>,
             Fresh,
             Req#{<<"nonce">> => hb_util:encode(FreshNonce)},
+            AllowRejected,
             Opts),
         Challenge = crypto:strong_rand_bytes(32),
         Credential = wrap_secret_for_subject(Subject, Challenge, Opts),
-        Activation = activate_peer_secret(Url, Credential, Opts),
+        Activation = activate_peer_secret(Url, Credential, Req, Opts),
         ok = ensure_secret_activation(
             Activation, Credential, Challenge, Subject, Opts),
         Now = erlang:system_time(second),
-        Signed = hb_message:commit(
+        SubjectID = secret_recipient_id(Subject, Opts),
+        BootID = measurement_id(Boot, Opts),
+        FreshID = measurement_id(Fresh, Opts),
+        Validity = peer_attestation_validity(Now, Req, Opts),
+        ConsumerScope =
+            hb_maps:get(<<"peer-attestation-scope">>, Req, #{}, Opts),
+        Signed0 = hb_message:commit(
             #{
                 <<"type">> => <<"zone-peer-attestation">>,
                 <<"version">> => <<"1.0">>,
@@ -246,35 +335,45 @@ verify_peer_url(Url, Req, Opts) ->
                 <<"measurement-device">> => measurement_device(Boot, Opts),
                 <<"secret-method">> =>
                     hb_maps:get(<<"method">>, Subject, null, Opts),
-                <<"validity">> =>
-                    peer_attestation_validity(Now, Req, Opts),
+                <<"validity-not-before-unix">> =>
+                    hb_maps:get(<<"not-before-unix">>, Validity, Now, Opts),
+                <<"validity-expires-at-unix">> =>
+                    hb_maps:get(<<"expires-at-unix">>, Validity, Now, Opts),
                 <<"peer-url">> => Url,
-                <<"peer-scope">> =>
-                    peer_attestation_scope(
-                        Url, Boot, Fresh, Subject, Req, Opts),
-                <<"peer-boot-attestation">> => Boot,
-                <<"peer-fresh-attestation">> => Fresh,
-                <<"peer-credential-subject">> => Subject,
-                <<"peer-secret-subject">> => Subject,
-                <<"boot-verification">> => BootVerify,
-                <<"verification">> => FreshVerify,
-                <<"freshness">> => #{
-                    <<"verified">> => true,
-                    <<"nonce-sha256">> =>
-                        hb_util:encode(crypto:hash(sha256, FreshNonce)),
-                    <<"fresh-attestation-id">> =>
-                        measurement_id(Fresh, Opts)
-                },
-                <<"credential-activation">> => #{
-                    <<"verified">> => true,
-                    <<"challenge-sha256">> =>
-                        hb_util:encode(crypto:hash(sha256, Challenge)),
-                    <<"credential">> => Credential,
-                    <<"response">> => Activation
-                }
+                <<"peer-scope-name">> =>
+                    hb_maps:get(<<"name">>, ConsumerScope, null, Opts),
+                <<"peer-scope-ring-address">> =>
+                    hb_maps:get(<<"ring-address">>, ConsumerScope, null, Opts),
+                <<"peer-scope-template-id">> =>
+                    hb_maps:get(<<"template-id">>, ConsumerScope, null, Opts),
+                <<"peer-boot-attestation-id">> => BootID,
+                <<"peer-fresh-attestation-id">> => FreshID,
+                <<"peer-credential-subject-id">> => SubjectID,
+                <<"peer-secret-subject-id">> => SubjectID,
+                <<"boot-verified">> =>
+                    hb_maps:get(<<"verified">>, BootVerify, false, Opts),
+                <<"fresh-verified">> =>
+                    hb_maps:get(<<"verified">>, FreshVerify, false, Opts),
+                <<"allow-rejected-peer-attestation">> => AllowRejected,
+                <<"freshness-verified">> => true,
+                <<"nonce-sha256">> =>
+                    hb_util:encode(crypto:hash(sha256, FreshNonce)),
+                <<"credential-activation-verified">> => true,
+                <<"challenge-sha256">> =>
+                    hb_util:encode(crypto:hash(sha256, Challenge))
             },
-            Opts),
-        ok = store_peer_attestation(Signed, Opts),
+            Opts,
+            <<"httpsig@1.0">>),
+        ok = store_peer_attestation(Signed0, Opts),
+        Signed = hb_private:set(Signed0, #{
+            <<"peer-boot-attestation">> => Boot,
+            <<"peer-fresh-attestation">> => Fresh,
+            <<"peer-credential-subject">> => Subject,
+            <<"credential">> => Credential,
+            <<"secret-activation">> => Activation,
+            <<"boot-verification">> => BootVerify,
+            <<"fresh-verification">> => FreshVerify
+        }, Opts),
         {ok, Signed}
     end).
 
@@ -307,15 +406,32 @@ normalize_top_keys(Value) ->
 normalize_key(Key) when is_atom(Key) -> atom_to_binary(Key, utf8);
 normalize_key(Key) -> Key.
 
-verify_measurement_body(Label, Measurement, Req, Opts) ->
+verify_measurement_body(Label, Measurement, Req, AllowRejected, Opts) ->
     {ok, #{<<"status">> := 200, <<"body">> := Body}} =
         verify(Measurement, Req#{<<"envelope">> => Measurement}, Opts),
     case hb_maps:get(<<"verified">>, Body, false, Opts) of
         true -> Body;
+        false when AllowRejected ->
+            Body;
         false ->
             throw({measurement_error,
                    #{Label => verification_failure(Measurement, Body, Opts)}})
     end.
+
+allow_rejected_peer_attestation(Req, Opts) ->
+    RequestAllows = truthy(first_defined([
+        hb_maps:get(<<"allow-rejected-peer-attestation">>, Req, undefined, Opts),
+        hb_maps:get(<<"allow-rejected">>, Req, undefined, Opts)
+    ])),
+    ConfigAllows = truthy(
+        hb_opts:get(<<"allow-rejected-peer-attestation">>, false, Opts)),
+    RequestAllows andalso ConfigAllows.
+
+truthy(true) -> true;
+truthy(<<"true">>) -> true;
+truthy(<<"1">>) -> true;
+truthy(1) -> true;
+truthy(_) -> false.
 
 verification_failure(Measurement, Verification, Opts) ->
     Evidence = hb_maps:get(<<"evidence">>, Measurement, #{}, Opts),
@@ -345,6 +461,8 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
             };
         <<"snp@1.0">> ->
             Module:wrap_secret_for_subject(Subject, Secret, Opts);
+        <<"handee@1.0">> ->
+            Module:wrap_secret_for_subject(Subject, Secret, Opts);
         _ ->
             resolve_device_body(
                 Device,
@@ -362,21 +480,53 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     case Device of
         <<"tpm@2.0a">> -> Module:activate_credential_secret(Credential, Opts);
         <<"snp@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
+        <<"handee@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
         Device ->
             throw({measurement_error,
                    #{<<"unwrap-secret">> =>
                         <<"No local raw-secret helper for ", Device/binary>>}})
     end.
 
-activate_peer_secret(Url, Credential, Opts) ->
-    PeerOpts = lib_lapee_peer_http:peer_opts(Url, Opts),
+activate_peer_secret(Url, Credential, Req, Opts) ->
+    case credential_source_url(Req, Opts) of
+        undefined ->
+            activate_peer_secret_body(Url, Credential, Opts);
+        SourceURL ->
+            activate_peer_secret_link(Url, Credential, SourceURL, Opts)
+    end.
+
+activate_peer_secret_body(Url, Credential, Opts) ->
+    PeerOpts = lib_permawebos_peer_http:peer_opts(Url, Opts),
     materialize_peer_value(response_body(
-        lib_lapee_peer_http:post(
+        lib_permawebos_peer_http:post(
             Url,
             <<"/~measurement@1.0/unwrap-secret">>,
             #{<<"credential">> => Credential},
             Opts),
         PeerOpts), PeerOpts).
+
+activate_peer_secret_link(Url, Credential, SourceURL, Opts) ->
+    {ok, CredentialID} = hb_cache:write(Credential, Opts),
+    PeerOpts = lib_permawebos_peer_http:peer_opts(Url, Opts),
+    materialize_peer_value(response_body(
+        lib_permawebos_peer_http:get(
+            Url,
+            <<"/~measurement@1.0/unwrap-secret?credential-node-url=",
+              (uri_string:quote(strip_trailing_slash(SourceURL)))/binary,
+              "&credential-id=",
+              (uri_string:quote(CredentialID))/binary>>,
+            Opts),
+        PeerOpts), PeerOpts).
+
+credential_source_url(Req, Opts) ->
+    case first_defined([
+        hb_maps:get(<<"credential-source-url">>, Req, undefined, Opts),
+        hb_maps:get(<<"secret-source-url">>, Req, undefined, Opts),
+        hb_opts:get(<<"credential-source-url">>, undefined, Opts)
+    ]) of
+        B when is_binary(B), byte_size(B) > 0 -> strip_trailing_slash(B);
+        _ -> undefined
+    end.
 
 ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
     Device = measurement_device(Credential, Opts),
@@ -386,6 +536,9 @@ ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
             Module:ensure_activation_secret(
                 Activation, Credential, Expected, Subject, Opts);
         <<"snp@1.0">> ->
+            Module:ensure_secret_activation(
+                Activation, Credential, Expected, Subject, Opts);
+        <<"handee@1.0">> ->
             Module:ensure_secret_activation(
                 Activation, Credential, Expected, Subject, Opts);
         _ ->
@@ -460,19 +613,12 @@ ensure_subject_matches_measurement(Subject, Measurement, Opts) ->
                    }})
     end.
 
-peer_attestation_scope(Url, Boot, Fresh, Subject, Req, Opts) ->
-    #{
-        <<"peer-url">> => Url,
-        <<"measurement-device">> => measurement_device(Boot, Opts),
-        <<"boot-attestation-id">> => measurement_id(Boot, Opts),
-        <<"fresh-attestation-id">> => measurement_id(Fresh, Opts),
-        <<"secret-recipient-id">> => stable_id(Subject, Opts),
-        <<"consumer-scope">> =>
-            hb_maps:get(<<"peer-attestation-scope">>, Req, null, Opts)
-    }.
-
 store_peer_attestation(Signed, Opts) ->
-    ID = hb_message:id(Signed, signed, Opts),
+    ID =
+        case committed_message_id(Signed, Opts) of
+            undefined -> hb_message:id(Signed, signed, Opts);
+            SignedID -> SignedID
+        end,
     {ok, _} = hb_cache:write(Signed, Opts),
     Path = <<?PEER_ATTESTATION_PREFIX/binary, "/", ID/binary>>,
     ok = hb_cache:link(ID, Path, Opts),
@@ -505,14 +651,27 @@ configured_device(Opts) ->
     end.
 
 auto_device(Opts) ->
-    case [D || D <- ?DEFAULT_DEVICES, device_supported(D, Opts)] of
+    case [D || D <- candidate_device_names(Opts), device_supported(D, Opts)] of
         [D | _] -> {D, <<"auto">>};
         [] -> {<<"unavailable">>, <<"no measurement device supported">>}
     end.
 
 candidate_devices(Opts) ->
     [#{<<"device">> => D, <<"supported">> => device_supported(D, Opts)}
-     || D <- ?DEFAULT_DEVICES].
+     || D <- candidate_device_names(Opts)].
+
+candidate_device_names(Opts) ->
+    normalize_device_names(
+        hb_opts:get(<<"measurement-devices">>, ?DEFAULT_DEVICES, Opts)).
+
+normalize_device_names(Devices) when is_list(Devices) ->
+    [normalize_device_name(Device) || Device <- Devices];
+normalize_device_names(Device) ->
+    [normalize_device_name(Device)].
+
+normalize_device_name(Device) when is_binary(Device) -> Device;
+normalize_device_name(Device) when is_atom(Device) -> atom_to_binary(Device, utf8);
+normalize_device_name(Device) -> hb_util:bin(Device).
 
 device_supported(Device, Opts) ->
     try resolve_device_body(Device, <<"supported">>, #{}, Opts) of
@@ -785,12 +944,12 @@ canonical_payload(Value, _Opts) ->
     Value.
 
 measurement_id(Measurement, Opts) ->
-    case response_body(Measurement, Opts) of
+    case measurement_envelope(Measurement, Opts) of
         Msg when is_map(Msg) ->
-            hb_message:id(
-                hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
-                all,
-                Opts);
+            case committed_message_id(Msg, Opts) of
+                undefined -> stable_id(Msg, Opts);
+                ID -> ID
+            end;
         Bin when is_binary(Bin), byte_size(Bin) =:= 32 ->
             hb_util:human_id(Bin);
         Bin when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -799,6 +958,34 @@ measurement_id(Measurement, Opts) ->
             hb_util:encode(hb_crypto:sha256(Bin));
         Other ->
             hb_util:encode(crypto:hash(sha256, term_to_binary(Other)))
+    end.
+
+measurement_envelope(Msg, Opts) when is_map(Msg) ->
+    case hb_maps:get(<<"type">>, Msg, undefined, Opts) of
+        ?TYPE -> Msg;
+        _ -> response_body(Msg, Opts)
+    end;
+measurement_envelope(Other, _Opts) ->
+    Other.
+
+committed_message_id(Msg, Opts) ->
+    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
+    IDs = hb_maps:to_list(Commitments, Opts),
+    first_valid_id(
+        [ID || {ID, Commitment} <- IDs,
+               hb_maps:get(<<"committer">>, Commitment, undefined, Opts)
+                   =/= undefined]
+        ++ [ID || {ID, _Commitment} <- IDs]).
+
+first_valid_id([]) ->
+    undefined;
+first_valid_id([ID0 | Rest]) ->
+    ID = hb_util:bin(ID0),
+    try hb_util:native_id(ID) of
+        Native when byte_size(Native) =:= 32 -> ID;
+        _ -> first_valid_id(Rest)
+    catch _:_ ->
+        first_valid_id(Rest)
     end.
 
 first_defined([]) -> undefined;

@@ -38,9 +38,3 @@ On `hb@dev-1.forward.computer`, under a dedicated workdir:
 - Reject one mismatched node.
 - Confirm membership proofs.
 - Run a mixed TPM/SNP policy and an SNP-only rejection policy.
-
-## Completion Gate
-
-The rewrite is complete only when all tests above pass and the production
-overlay LoC count is at least 60% below the v1 baseline, with a stretch target
-above 70%.

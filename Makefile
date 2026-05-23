@@ -118,7 +118,7 @@ LINUX_DOCKER_DIR ?= $(LINUX_ARCH_DIR)/docker
 HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' $(LINUX_BUILDROOT_EXTERNAL)/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 HYPERBEAM_ALLOW_CLEAN ?= 0
-LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/permawebos
+LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/common
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)

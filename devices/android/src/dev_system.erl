@@ -8,7 +8,7 @@
 -implements(<<"system@1.0">>).
 -export([info/1, info/3, all/3]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 
 info(_) ->
     #{

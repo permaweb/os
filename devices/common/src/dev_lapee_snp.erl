@@ -17,7 +17,7 @@
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
 
--include("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 -define(VERSION, <<"1.0">>).
