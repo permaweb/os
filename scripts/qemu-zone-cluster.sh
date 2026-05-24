@@ -452,10 +452,15 @@ start_node() {
         -monitor "unix:$monitor,server,nowait"
         -netdev "user,id=net0,hostfwd=tcp::${port}-:8734"
         -device virtio-net-pci,netdev=net0
-        -nographic
+        -display none
+        -serial "file:$node_dir/serial.log"
     )
-    "${qemu_args[@]}" \
-        > "$node_dir/serial.log" 2>&1 &
+    : > "$node_dir/serial.log"
+    if [[ "$KEEP_RUNNING" = "1" ]]; then
+        nohup "${qemu_args[@]}" > "$node_dir/qemu.log" 2>&1 &
+    else
+        "${qemu_args[@]}" > "$node_dir/qemu.log" 2>&1 &
+    fi
     pids+=("$!")
     echo "$!" > "$node_dir/qemu.pid"
     echo ">> node $n started: host=$(node_host_url "$n") guest=$(node_guest_url "$n") memory=${memory_mib}MiB dmi-product=$dmi_product measurement-device=$(node_measurement_device "$n")"
@@ -1029,3 +1034,9 @@ echo ""
 echo "=== zone QEMU cluster PASSED ==="
 echo "out: $OUTDIR"
 echo "ring-address: $ring_addr"
+if [[ "$KEEP_RUNNING" = "1" ]]; then
+    echo ">> KEEP_RUNNING=1; harness is staying alive with QEMU nodes attached"
+    while :; do
+        sleep 3600
+    done
+fi

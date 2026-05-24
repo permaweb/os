@@ -12,13 +12,12 @@
 load(Opts) ->
     load(undefined, Opts).
 
-load(DeviceModule, _Opts) ->
-    case persistent_term:get(?CACHE_KEY, undefined) of
+load(DeviceModule, Opts) ->
+    CacheKey = {?CACHE_KEY, DeviceModule},
+    case persistent_term:get(CacheKey, undefined) of
         undefined ->
-            Root = filename:join(priv_dir(DeviceModule), ?DB_SUBDIR),
-            Db = #{<<"cert-roots">> =>
-                       read_cert_roots(filename:join(Root, "root-cas"))},
-            persistent_term:put(?CACHE_KEY, Db),
+            Db = #{<<"cert-roots">> => cert_roots(DeviceModule, Opts)},
+            persistent_term:put(CacheKey, Db),
             Db;
         Db ->
             Db
@@ -35,6 +34,30 @@ priv_dir(DeviceModule) when is_atom(DeviceModule) ->
 priv_dir(_) ->
     app_priv_dir().
 
+cert_roots(DeviceModule, Opts) ->
+    Roots =
+        lists:append(
+            [
+                read_cert_roots(filename:join([Dir, ?DB_SUBDIR, "root-cas"]))
+             || Dir <- priv_dirs(DeviceModule, Opts)
+            ]),
+    unique_roots(Roots).
+
+priv_dirs(DeviceModule, Opts) ->
+    unique_dirs(
+        lists:filtermap(
+            fun
+                (undefined) -> false;
+                (Dir) -> existing_dir(Dir)
+            end,
+            [
+                packaged_priv_dir(DeviceModule),
+                app_priv_dir(),
+                configured_runtime_priv_dir(DeviceModule, Opts),
+                env_runtime_priv_dir(DeviceModule),
+                source_priv_dir(DeviceModule)
+            ])).
+
 packaged_priv_dir(DeviceModule) ->
     try hb_device_archive:implementation_dir(DeviceModule)
     catch _:_ -> undefined
@@ -50,6 +73,56 @@ app_priv_dir() ->
             Dir
     end.
 
+configured_runtime_priv_dir(DeviceModule, Opts) ->
+    case hb_opts:get(<<"handee-runtime-root">>, undefined, Opts) of
+        undefined -> undefined;
+        Root -> runtime_priv_dir(Root, DeviceModule)
+    end.
+
+env_runtime_priv_dir(DeviceModule) ->
+    case os:getenv("HANDEE_RUNTIME_ROOT") of
+        false -> undefined;
+        Root -> runtime_priv_dir(Root, DeviceModule)
+    end.
+
+runtime_priv_dir(Root, DeviceModule) ->
+    filename:join([path_to_list(Root), "priv", atom_to_list(DeviceModule)]).
+
+source_priv_dir(DeviceModule) ->
+    filename:join(
+        [
+            filename:dirname(filename:dirname(code:which(?MODULE))),
+            "src",
+            "priv",
+            atom_to_list(DeviceModule)
+        ]).
+
+existing_dir(Dir) ->
+    case filelib:is_dir(Dir) of
+        true -> {true, Dir};
+        false -> false
+    end.
+
+unique_dirs(Dirs) ->
+    unique_by(fun filename:absname/1, Dirs).
+
+unique_roots(Roots) ->
+    unique_by(fun(Root) -> hb_maps:get(<<"pem">>, Root, <<>>, #{}) end, Roots).
+
+unique_by(F, Values) ->
+    {Out, _Seen} =
+        lists:foldl(
+            fun(Value, {Acc, Seen}) ->
+                Key = F(Value),
+                case maps:is_key(Key, Seen) of
+                    true -> {Acc, Seen};
+                    false -> {[Value | Acc], Seen#{Key => true}}
+                end
+            end,
+            {[], #{}},
+            Values),
+    lists:reverse(Out).
+
 read_cert_roots(Dir) ->
     case file:list_dir(Dir) of
         {ok, Files} ->
@@ -61,3 +134,7 @@ read_cert_roots(Dir) ->
         _ ->
             []
     end.
+
+path_to_list(Path) when is_binary(Path) -> binary_to_list(Path);
+path_to_list(Path) when is_list(Path) -> Path;
+path_to_list(Path) -> binary_to_list(hb_util:bin(Path)).

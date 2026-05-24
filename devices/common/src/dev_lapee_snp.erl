@@ -72,7 +72,7 @@ measure(_Base, Req, Opts) ->
                         {ok, #{
                             <<"status">> => 200,
                             <<"body">> =>
-                                evidence(ReportRaw, Certs, Report, Nonce,
+                                evidence(ReportRaw, Certs, Body, Report, Nonce,
                                          ReportData, Recipient, Opts)
                         }};
                     {error, Reason} ->
@@ -87,13 +87,16 @@ measure(_Base, Req, Opts) ->
     end.
 
 verify(Base, Req, Opts) ->
-    Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),
-    Evidence = hb_maps:get(<<"evidence">>, Measurement, #{}, Opts),
-    Body = hb_maps:get(<<"body">>, Measurement, #{}, Opts),
-    Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
+    Measurement = hb_link:decode_all_links(
+        response_body(resolve_envelope(Base, Req, Opts), Opts)),
+    Evidence = measurement_part(<<"evidence">>, Measurement, Opts),
+    Body = maps:get(<<"body">>, Measurement, #{}),
+    Recipient = maps:get(<<"secret-recipient">>, Measurement, #{}),
+    ReportDataCheck = check_report_data(Body, Recipient, Evidence, Req, Opts),
+    SignatureCheck = check_report_signature(Body, Evidence, Opts),
     Checks = [
-        check_report_data(Body, Recipient, Evidence, Req, Opts),
-        check_report_signature(Body, Evidence, Opts)
+        ReportDataCheck,
+        SignatureCheck
     ],
     Verified = lists:all(
         fun(#{<<"ok">> := Ok, <<"severity">> := Severity}) ->
@@ -284,14 +287,15 @@ ensure_secret_activation(Activation, Credential, Expected, _Subject, Opts) ->
             Expected,
             secret_activation_context(Credential, IssuedAt))),
     case {GotHash, Proof} of
-        {ExpectedHash, ExpectedProof} -> ok;
+        {ExpectedHash, ExpectedProof} ->
+            ok;
         _ ->
             throw({snp_error,
                    #{<<"secret-activation">> =>
                         <<"activation proof did not match challenge">>}})
     end.
 
-evidence(ReportRaw, Certs, Report, Nonce, ReportData, Recipient, Opts) ->
+evidence(ReportRaw, Certs, Body, Report, Nonce, ReportData, Recipient, Opts) ->
     #{
         <<"type">> => <<"lapee-snp-evidence">>,
         <<"version">> => ?VERSION,
@@ -299,22 +303,78 @@ evidence(ReportRaw, Certs, Report, Nonce, ReportData, Recipient, Opts) ->
         <<"report-data">> => hb_util:encode(ReportData),
         <<"report-raw">> => hb_util:encode(ReportRaw),
         <<"report">> => parsed_report_summary(Report),
-        <<"certificates">> => certificates(Certs),
+        <<"certificates">> => certificates(Certs, Body, Report, Opts),
+        <<"snp-product">> => snp_product(Body, Opts),
         <<"secret-recipient-id">> => stable_id(Recipient, Opts),
         <<"device-context">> => device_context(Opts)
     }.
 
-certificates(Certs) when is_list(Certs) ->
-    [certificate_entry(Guid, Data) || {Guid, Data} <- Certs];
-certificates(_) ->
+certificates(Certs, Body, Report, Opts) ->
+    Embedded = certificates_from_table(Certs),
+    Configured = configured_certificates(Opts),
+    Available = unique_certificate_entries(Embedded ++ Configured),
+    Missing = [Type || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>],
+                       not certificate_type_present(Type, Available, Opts)],
+    certificate_entry_map(Available ++ fetched_certificates(Missing, Body, Report, Opts)).
+
+certificates_from_table(Certs) when is_list(Certs) ->
+    [certificate_entry(Guid, Data, <<"platform-certificate-table">>)
+     || {Guid, Data} <- Certs];
+certificates_from_table(_) ->
     [].
 
-certificate_entry(Guid, Data) ->
+certificate_entry(Guid, Data, Source) ->
     #{
         <<"type">> => certificate_type(Guid),
         <<"guid">> => Guid,
+        <<"source">> => Source,
         <<"data">> => hb_util:encode(Data)
     }.
+
+fetched_certificates([], _Body, _Report, _Opts) ->
+    [];
+fetched_certificates(Missing, Body, Report, Opts) ->
+    try
+        Product = snp_product(Body, Opts),
+        Chain =
+            case lists:any(
+                fun(Type) -> lists:member(Type, Missing) end,
+                [<<"ark">>, <<"ask">>]) of
+                true ->
+                    {Ask, Ark} = fetch_amd_cert_chain(Product),
+                    [{<<"ark">>, Ark}, {<<"ask">>, Ask}];
+                false ->
+                    []
+            end,
+        VCEK =
+            case lists:member(<<"vcek">>, Missing) of
+                true -> [{<<"vcek">>, fetch_vcek(Product, Report)}];
+                false -> []
+            end,
+        [fetched_certificate(Type, Data) || {Type, Data} <- Chain ++ VCEK]
+    catch
+        Class:Reason ->
+            [#{
+                <<"type">> => <<"endorsement-fetch-error">>,
+                <<"source">> => <<"amd-kds">>,
+                <<"class">> => hb_util:bin(Class),
+                <<"reason">> => reason_to_text(Reason)
+            }]
+    end.
+
+fetched_certificate(Type, Data) ->
+    #{
+        <<"type">> => Type,
+        <<"source">> => <<"amd-kds">>,
+        <<"data">> => hb_util:encode(Data)
+    }.
+
+certificate_type_present(Type, Certs, Opts) ->
+    lists:any(
+        fun(Cert) ->
+            hb_maps:get(<<"type">>, Cert, undefined, Opts) =:= Type
+        end,
+        Certs).
 
 certificate_type(<<"c0b406a4-a803-4952-9743-3fb6014cd0ae">>) -> <<"ark">>;
 certificate_type(<<"4ab7b379-bbac-4fe4-a02f-05aef327c782">>) -> <<"ask">>;
@@ -357,7 +417,14 @@ check_report_data(Body, Recipient, Evidence, Req, Opts) ->
                 Nonce -> ok;
                 _ -> throw(<<"fresh nonce does not match verifier challenge">>)
             end,
-            Expected = report_data(Body, Nonce, Recipient, Opts),
+            RecipientID = recipient_id(Recipient, Evidence, Opts),
+            BodyID = measured_body_id(Body, Recipient, Opts),
+            ContextDigest = measurement_context_digest(Recipient, Opts),
+            Expected = report_data_for_ids(
+                BodyID,
+                Nonce,
+                RecipientID,
+                ContextDigest),
             Got = decode_required(<<"report-data">>, Evidence, Opts),
             Report = evidence_report(Evidence, Opts),
             ReportData = array_binary(
@@ -399,7 +466,7 @@ assert_signature_algorithm(Report) ->
 
 resolved_certificates(Report, Body, Evidence, Opts) ->
     Embedded = evidence_certificates(Evidence, Opts),
-    Product = snp_product(Body, Opts),
+    Product = snp_product(Body, Evidence, Opts),
     {Ask, Ark, ChainSource} =
         case {maps:get(ask, Embedded, undefined),
               maps:get(ark, Embedded, undefined)} of
@@ -417,21 +484,149 @@ resolved_certificates(Report, Body, Evidence, Opts) ->
     #{ask => Ask, ark => Ark, vcek => VCEK, source => ChainSource}.
 
 evidence_certificates(Evidence, Opts) ->
-    Certs = hb_maps:get(<<"certificates">>, Evidence, [], Opts),
+    Certs = evidence_certificate_map(Evidence, Opts),
     maps:from_list(
         [
             {binary_to_atom(Type, utf8), decode_required(<<"data">>, Cert, Opts)}
-         || Cert <- Certs,
+         || {Type, Cert} <- hb_maps:to_list(Certs, Opts),
             is_map(Cert),
-            Type <- [hb_maps:get(<<"type">>, Cert, undefined, Opts)],
             lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>])
         ]).
+
+evidence_certificate_map(Evidence0, Opts) ->
+    Evidence = hb_link:decode_all_links(Evidence0),
+    case hb_maps:get(<<"certificates">>, Evidence, undefined, Opts) of
+        undefined -> #{};
+        Certs -> certificate_map_value(Certs, Opts)
+    end.
+
+certificate_map_value(Link, Opts) when ?IS_LINK(Link) ->
+    certificate_map_value(hb_cache:ensure_loaded(Link, Opts), Opts);
+certificate_map_value({ok, Msg}, Opts) ->
+    certificate_map_value(Msg, Opts);
+certificate_map_value(Msg, Opts) when is_map(Msg) ->
+    Decoded = hb_link:decode_all_links(Msg),
+    Entries =
+        [
+            {Type, certificate_entry_value(Cert, Opts)}
+         || {Type, Cert} <- hb_maps:to_list(Decoded, Opts),
+            lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>])
+        ],
+    case Entries of
+        [] ->
+            case hb_maps:get(<<"body">>, Decoded, undefined, Opts) of
+                Body when is_map(Body) -> certificate_map_value(Body, Opts);
+                _ -> #{}
+            end;
+        _ ->
+            maps:from_list(Entries)
+    end;
+certificate_map_value(_Other, _Opts) ->
+    #{}.
+
+certificate_entry_value(Link, Opts) when ?IS_LINK(Link) ->
+    certificate_entry_value(hb_cache:ensure_loaded(Link, Opts), Opts);
+certificate_entry_value({ok, Msg}, Opts) ->
+    certificate_entry_value(Msg, Opts);
+certificate_entry_value(Msg, Opts) when is_map(Msg) ->
+    Decoded = hb_link:decode_all_links(Msg),
+    case hb_maps:get(<<"body">>, Decoded, undefined, Opts) of
+        Body when is_map(Body) -> Body;
+        _ -> Decoded
+    end;
+certificate_entry_value(Other, _Opts) ->
+    Other.
+
+configured_certificates(Opts) ->
+    unique_certificate_entries(
+        configured_cert_chain(Opts) ++
+            [Cert || Cert <- [
+                configured_certificate(
+                    <<"ark">>, <<"snp-ark-der">>, <<"snp-ark-pem">>, Opts),
+                configured_certificate(
+                    <<"ask">>, <<"snp-ask-der">>, <<"snp-ask-pem">>, Opts),
+                configured_certificate(
+                    <<"vcek">>, <<"snp-vcek-der">>, <<"snp-vcek-pem">>, Opts)
+            ], Cert =/= undefined]).
+
+configured_cert_chain(Opts) ->
+    case hb_opts:get(<<"snp-cert-chain-pem">>, undefined, Opts) of
+        Pem when is_binary(Pem), byte_size(Pem) > 0 ->
+            case pem_certificates(Pem) of
+                [Ask, Ark] ->
+                    [configured_certificate_entry(<<"ask">>, Ask),
+                     configured_certificate_entry(<<"ark">>, Ark)];
+                _ ->
+                    throw(#{<<"snp-cert-chain-pem">> =>
+                        <<"expected AMD ASK and ARK certificates">>})
+            end;
+        _ ->
+            []
+    end.
+
+configured_certificate(Type, DerKey, PemKey, Opts) ->
+    case hb_opts:get(DerKey, undefined, Opts) of
+        Der when is_binary(Der), byte_size(Der) > 0 ->
+            configured_certificate_entry(Type, config_binary(Der));
+        _ ->
+            case hb_opts:get(PemKey, undefined, Opts) of
+                Pem when is_binary(Pem), byte_size(Pem) > 0 ->
+                    case pem_certificates(Pem) of
+                        [Cert] ->
+                            configured_certificate_entry(Type, Cert);
+                        _ ->
+                            throw(#{PemKey =>
+                                <<"expected one PEM certificate">>})
+                    end;
+                _ ->
+                    undefined
+            end
+    end.
+
+configured_certificate_entry(Type, Data) ->
+    #{
+        <<"type">> => Type,
+        <<"source">> => <<"config">>,
+        <<"data">> => hb_util:encode(Data)
+    }.
+
+unique_certificate_entries(Entries) ->
+    [Entry
+     || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>,
+                 <<"vlek">>, <<"crl">>, <<"other">>],
+        Entry <- take_certificate_type(Type, Entries)].
+
+certificate_entry_map(Entries) ->
+    maps:from_list(
+        [
+            {hb_maps:get(<<"type">>, Entry, undefined, #{}), Entry}
+         || Entry <- Entries,
+            lists:member(
+                hb_maps:get(<<"type">>, Entry, undefined, #{}),
+                [<<"ark">>, <<"ask">>, <<"vcek">>, <<"vlek">>,
+                 <<"crl">>, <<"other">>])
+        ]).
+
+take_certificate_type(Type, Entries) ->
+    case [Entry || Entry <- Entries,
+                   hb_maps:get(<<"type">>, Entry, undefined, #{}) =:= Type] of
+        [Entry | _] -> [Entry];
+        [] -> []
+    end.
+
+config_binary(Bin) ->
+    try hb_util:decode(Bin)
+    catch _:_ -> Bin
+    end.
+
+pem_certificates(Pem) ->
+    [Der || {'Certificate', Der, _} <- public_key:pem_decode(Pem)].
 
 fetch_amd_cert_chain(Product) ->
     URL = <<"https://kdsintf.amd.com/vcek/v1/", Product/binary,
             "/cert_chain">>,
     PEM = http_get(URL),
-    Certs = [Der || {'Certificate', Der, _} <- public_key:pem_decode(PEM)],
+    Certs = pem_certificates(PEM),
     case Certs of
         [Ask, Ark] -> {Ask, Ark};
         _ -> throw(#{<<"amd-kds-cert-chain">> => <<"unexpected certificate chain">>})
@@ -467,7 +662,7 @@ http_get_uncached(URL) ->
     case httpc:request(
         get,
         {binary_to_list(URL), []},
-        [{timeout, 15000}],
+        [{timeout, 15000}, {ssl, [{cacertfile, certifi:cacertfile()}]}],
         [{body_format, binary}]) of
         {ok, {{_, Code, _}, _Headers, Body}} when Code >= 200, Code < 300 ->
             Body;
@@ -529,21 +724,34 @@ reverse_binary(Bin) ->
     list_to_binary(lists:reverse(binary_to_list(Bin))).
 
 snp_product(Body, Opts) ->
+    snp_product(Body, #{}, Opts).
+
+snp_product(Body, Evidence, Opts) ->
     case hb_opts:get(<<"snp-product">>, undefined, Opts) of
         Product when is_binary(Product), byte_size(Product) > 0 ->
             Product;
         _ ->
-            System = hb_maps:get(<<"system">>, Body, #{}, Opts),
-            CPU = hb_maps:get(<<"cpu">>, System, #{}, Opts),
-            CPUInfo = hb_maps:get(<<"cpuinfo">>, CPU, #{}, Opts),
-            Family = parse_integer(
-                hb_maps:get(<<"cpu-family">>, CPUInfo, undefined, Opts),
-                undefined),
-            Model = parse_integer(
-                hb_maps:get(<<"model">>, CPUInfo, undefined, Opts),
-                undefined),
-            snp_product_from_fms(Family, Model)
+            case hb_maps:get(<<"snp-product">>, Evidence, undefined, Opts) of
+                Product when is_binary(Product), byte_size(Product) > 0 ->
+                    Product;
+                _ ->
+                    snp_product_from_body(Body, Opts)
+            end
     end.
+
+snp_product_from_body(Body, Opts) when is_map(Body) ->
+    System = hb_maps:get(<<"system">>, Body, #{}, Opts),
+    CPU = hb_maps:get(<<"cpu">>, System, #{}, Opts),
+    CPUInfo = hb_maps:get(<<"cpuinfo">>, CPU, #{}, Opts),
+    Family = parse_integer(
+        hb_maps:get(<<"cpu-family">>, CPUInfo, undefined, Opts),
+        undefined),
+    Model = parse_integer(
+        hb_maps:get(<<"model">>, CPUInfo, undefined, Opts),
+        undefined),
+    snp_product_from_fms(Family, Model);
+snp_product_from_body(_Body, _Opts) ->
+    <<"Genoa">>.
 
 snp_product_from_fms(25, Model) when is_integer(Model), Model < 16 ->
     <<"Milan">>;
@@ -568,9 +776,13 @@ decimal_param(_) ->
     <<"0">>.
 
 report_data(Body, Nonce, Recipient, Opts) ->
-    BodyID = body_id(Body, Opts),
-    RecipientID = stable_id(Recipient, Opts),
-    ContextDigest = device_context_digest(device_context(Opts)),
+    report_data_for_ids(
+        measured_body_id(Body, Recipient, Opts),
+        Nonce,
+        recipient_id(Recipient, #{}, Opts),
+        measurement_context_digest(Recipient, Opts)).
+
+report_data_for_ids(BodyID, Nonce, RecipientID, ContextDigest) ->
     crypto:hash(
         sha512,
         <<?REPORT_CONTEXT/binary,
@@ -579,10 +791,95 @@ report_data(Body, Nonce, Recipient, Opts) ->
           (hb_util:native_id(RecipientID))/binary,
           (hb_util:decode(ContextDigest))/binary>>).
 
+recipient_id(Link, _Evidence, _Opts) when ?IS_LINK(Link) ->
+    link_id(Link);
+recipient_id(Recipient, Evidence, Opts) ->
+    case hb_maps:get(<<"secret-recipient-id">>, Evidence, undefined, Opts) of
+        ID when is_binary(ID), byte_size(ID) > 0 ->
+            ID;
+        _ ->
+            stable_id(Recipient, Opts)
+    end.
+
+measured_body_id(Body, Recipient, Opts) ->
+    case recipient_body_id(Recipient, Opts) of
+        undefined ->
+            body_id(Body, Opts);
+        BodyID ->
+            ok = assert_body_id(Body, BodyID, Opts),
+            BodyID
+    end.
+
+recipient_body_id(Recipient, Opts) when is_map(Recipient) ->
+    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
+    case maps:get(<<"body-id">>, Binding, undefined) of
+        ID when is_binary(ID), byte_size(ID) > 0 -> ID;
+        _ -> undefined
+    end;
+recipient_body_id(_Recipient, _Opts) ->
+    undefined.
+
+measurement_context_digest(Recipient, Opts) ->
+    case recipient_binding_value(
+        <<"device-context-digest">>, Recipient, Opts) of
+        Digest when is_binary(Digest), byte_size(Digest) > 0 ->
+            Digest;
+        _ ->
+            device_context_digest(device_context(Opts))
+    end.
+
+recipient_binding_value(Key, Recipient, Opts) when is_map(Recipient) ->
+    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
+    maps:get(Key, Binding, undefined);
+recipient_binding_value(_Key, _Recipient, _Opts) ->
+    undefined.
+
+assert_body_id(Link, BodyID, _Opts) when ?IS_LINK(Link) ->
+    case link_id(Link) of
+        BodyID -> ok;
+        _ -> throw(<<"recipient body-id does not match measurement body">>)
+    end;
+assert_body_id(Body, BodyID, Opts) when is_map(Body) ->
+    case committed_id_present(BodyID, Body) of
+        true -> ok;
+        false ->
+            case body_id(Body, Opts) of
+                BodyID -> ok;
+                _ -> throw(<<"recipient body-id does not match measurement body">>)
+            end
+    end;
+assert_body_id(Body, BodyID, Opts) ->
+    case body_id(Body, Opts) of
+        BodyID -> ok;
+        _ -> throw(<<"recipient body-id does not match measurement body">>)
+    end.
+
 body_id(Body, Opts) when is_map(Body) ->
-    stable_id(Body, Opts);
+    case committed_message_id(Body) of
+        undefined -> stable_id(Body, Opts);
+        ID -> ID
+    end;
+body_id(Link, _Opts) when ?IS_LINK(Link) ->
+    link_id(Link);
 body_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
+
+committed_message_id(Msg) ->
+    first_valid_id(maps:keys(maps:get(<<"commitments">>, Msg, #{}))).
+
+committed_id_present(ID, Msg) ->
+    maps:is_key(ID, maps:get(<<"commitments">>, Msg, #{})).
+
+first_valid_id([]) ->
+    undefined;
+first_valid_id([ID | Rest]) when is_binary(ID), byte_size(ID) =:= 43 ->
+    try hb_util:native_id(ID) of
+        Native when byte_size(Native) =:= 32 -> ID;
+        _ -> first_valid_id(Rest)
+    catch _:_ -> first_valid_id(Rest)
+    end;
+first_valid_id([_ | Rest]) ->
+    first_valid_id(Rest).
 
 device_context(Opts) ->
     #{
@@ -638,7 +935,40 @@ secret_activation_context(Credential, IssuedAt) ->
       "measurement-device:snp@1.0\n",
       "method:", ?METHOD/binary, "\n",
       "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
-      "credential-id:", (stable_id(Credential, #{}))/binary>>.
+      "credential-id:", (wrapped_secret_id(Credential, #{}))/binary>>.
+
+wrapped_secret_id(Credential, Opts) when is_map(Credential) ->
+    case hb_maps:get(<<"credential-id">>, Credential, undefined, #{}) of
+        ID when is_binary(ID), byte_size(ID) > 0 ->
+            ID;
+        _ ->
+            hb_message:id(
+                maps:from_list(
+                    [
+                        {Key, Value}
+                     || Key <- wrapped_secret_identity_keys(),
+                        (Value = hb_maps:get(Key, Credential, undefined, #{}))
+                            =/= undefined
+                    ]),
+                uncommitted,
+                Opts)
+    end;
+wrapped_secret_id(Credential, Opts) ->
+    stable_id(Credential, Opts).
+
+wrapped_secret_identity_keys() ->
+    [
+        <<"type">>,
+        <<"version">>,
+        <<"measurement-device">>,
+        <<"method">>,
+        <<"subject-id">>,
+        <<"ephemeral-public-key">>,
+        <<"salt">>,
+        <<"iv">>,
+        <<"ciphertext">>,
+        <<"tag">>
+    ].
 
 activation_credential(Req, Opts) when is_map(Req) ->
     first_defined([
@@ -780,6 +1110,8 @@ stable_id(Msg, Opts) when is_map(Msg) ->
         hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
         uncommitted,
         Opts);
+stable_id(Link, _Opts) when ?IS_LINK(Link) ->
+    link_id(Link);
 stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
 stable_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -788,6 +1120,9 @@ stable_id(Bin, _Opts) when is_binary(Bin) ->
     hb_util:encode(hb_crypto:sha256(Bin));
 stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
+
+link_id({link, ID, _LinkOpts}) ->
+    ID.
 
 canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_payload(response_body(Link, Opts), Opts);
@@ -821,6 +1156,18 @@ response_body(#{<<"body">> := Body} = Msg, Opts) ->
 response_body(Body, _Opts) ->
     Body.
 
+measurement_part(Key, Measurement, Opts) ->
+    load_part(maps:get(Key, Measurement, #{}), Opts).
+
+load_part(Link, Opts) when ?IS_LINK(Link) ->
+    load_part(hb_cache:ensure_loaded(Link, Opts), Opts);
+load_part({ok, Msg}, Opts) ->
+    load_part(Msg, Opts);
+load_part(Msg, _Opts) when is_map(Msg) ->
+    hb_link:decode_all_links(Msg);
+load_part(Value, _Opts) ->
+    Value.
+
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
         E when is_map(E) -> E;
@@ -846,7 +1193,7 @@ safely_check(Name, Severity, Fun) ->
               <<"detail">> => <<"ok">>,
               <<"severity">> => Severity}
     catch
-        _:Reason ->
+        _Class:Reason:_Stack ->
             #{<<"name">> => Name,
               <<"ok">> => false,
               <<"detail">> => reason_to_text(Reason),

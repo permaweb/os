@@ -1,6 +1,6 @@
 # HandEE Device Interface Specification
 
-Status: implementation specification for the current `fork/handee` branch.
+Status: implementation specification for the PermawebOS HandEE architecture.
 
 Audience: verifier authors, third-party HandEE implementers, and agents adding
 tests or peer interoperability. This document specifies the public AO-Core
@@ -9,18 +9,20 @@ message bindings that external verifiers must check.
 
 ## 1. Scope
 
-HandEE keeps LapEE's public measurement and zone contracts while replacing all
-Linux/TPM/SNP measurement backends with Android Keystore/StrongBox evidence.
+HandEE keeps PermawebOS's public measurement and zone contracts while using
+Android Keystore/StrongBox evidence as one measurement backend.
 
-The only new measurement backend is `~handee@1.0`. The other device names in
-this document are inherited public interfaces that a HandEE runtime binds to
-local Android-oriented implementations:
+The HandEE measurement backend is `~handee@1.0`. It is packaged with the
+shared PermawebOS devices so every architecture can verify HandEE peers. Local
+measurement generation requires Android; peer verification is pure BEAM.
 
 - `~measurement@1.0`: inherited public attestation envelope, fresh nonce flow,
   peer verification, and secret activation entry point. In HandEE it selects
   `handee@1.0` as the only backend.
-- `~handee@1.0`: new Android Keystore/StrongBox measurement backend and
-  secret-recipient implementation.
+- `~handee@1.0`: Android Keystore/StrongBox measurement backend and
+  secret-recipient implementation. `subject`, `measure`, and `unwrap-secret`
+  require the app-private Android crypto agent; `verify` and `wrap-secret`
+  are portable.
 - `~system@1.0`: inherited system-report slot, reduced to Android/app/runtime
   facts inserted into the measured subject.
 - `~meta@1.0`: inherited HyperBEAM meta device. HandEE replaces only `info`
@@ -610,14 +612,18 @@ Returns status `200`:
 }
 ```
 
-`policy-accepted` is read from the Android crypto agent's `policy-status`
-action. It is false if the agent is unavailable or policy rejects.
+`supported` is true iff the local Android crypto agent is reachable. This keeps
+non-Android nodes from selecting HandEE for local measurement generation while
+still allowing them to verify HandEE peers. `policy-accepted` is read from the
+agent's `policy-status` action and is evidence only.
 
 ### 7.4 `GET|POST /~handee@1.0/supported`
 
-Returns the bare AO-Core boolean value `true`. It is not wrapped in a
-`status/body` response by the Erlang backend. `~measurement@1.0/info` uses this
-export to decide whether `handee@1.0` is an available measurement candidate.
+Returns the bare AO-Core boolean value `true` only when the local Android
+crypto agent is reachable. It is not wrapped in a `status/body` response by the
+Erlang backend. `~measurement@1.0/info` uses this export to decide whether
+`handee@1.0` is an available local measurement candidate. Non-Android nodes
+normally return `false` here but can still call `~handee@1.0/verify`.
 
 ### 7.5 `POST /~handee@1.0/subject`
 
@@ -691,9 +697,7 @@ The backend first builds an evidence subject:
   "purpose": "boot",
   "nonce": "<base64url nonce bytes>",
   "issued-at-unix": 0,
-  "body": {},
   "body-id": "<stable-id(body)>",
-  "secret-recipient": {},
   "secret-recipient-id": "<stable-id(secret-recipient)>",
   "node-binding": {
     "node-address": "<HyperBEAM node address or unknown>",
@@ -944,12 +948,20 @@ Core checks performed by the backend:
 1. Measurement envelope has `measurement-device = "handee@1.0"`.
 2. If request `nonce` exists, it matches
    `evidence.evidence-subject.nonce` after base64url normalization.
-3. `evidence.evidence-subject.body-id == stable-id(measurement.body)`.
+3. `evidence.evidence-subject.body-id == stable-id(measurement.body)` or the
+   verified AO-Core ID carried by a materialized bundled body.
 4. `evidence.evidence-subject.secret-recipient-id ==
    stable-id(measurement.secret-recipient)`.
 5. `evidence.evidence-subject-id ==
    stable-id(evidence.evidence-subject)`.
-6. Android agent `verify-evidence` returns `verified = true`.
+6. Android attestation certificate chain parses, validates to a bundled
+   Android attestation root, and contains the Android Key Attestation
+   extension.
+7. The attestation challenge equals
+   `SHA-256(UTF-8(evidence.attestation-challenge-subject))`.
+8. `evidence.keystore-signature` verifies
+   `UTF-8(evidence.evidence-subject-id)` with the leaf certificate public key.
+9. Reported `key-security-level` matches the parsed KeyMint security level.
 
 Response:
 
@@ -969,18 +981,23 @@ Response:
       "severity": "core"
     },
     {
-      "name": "Android attestation chain, package identity, policy, and signature verify",
+      "name": "Android attestation root is trusted",
       "ok": true,
       "severity": "core"
     }
-  ]
+  ],
+  "facts": {
+    "keymint-security-level": "TEE",
+    "device-locked": true,
+    "verified-boot-state": "VERIFIED"
+  }
 }
 ```
 
 ### 7.10 External Verifier Algorithm
 
-An independent verifier MUST apply at least these checks before reporting
-accepted HandEE evidence:
+An independent verifier MUST apply at least these provenance checks before
+reporting cryptographically verified HandEE evidence:
 
 1. Materialize all AO-Core links used by the measurement envelope.
 2. Require envelope:
@@ -998,7 +1015,8 @@ accepted HandEE evidence:
    - `measurement-device = "handee@1.0"`;
    - `context = "handee-android-evidence-v1"`;
    - same method as evidence.
-5. Recompute `stable-id(measurement.body)` and compare to
+5. Recompute `stable-id(measurement.body)`, or use the verified AO-Core ID
+   carried by a materialized bundled body, and compare it to
    `evidence-subject.body-id`.
 6. Recompute `stable-id(measurement.secret-recipient)` and compare to
    `evidence-subject.secret-recipient-id`.
@@ -1017,44 +1035,19 @@ accepted HandEE evidence:
 13. Parse leaf extension OID `1.3.6.1.4.1.11129.2.1.17`.
 14. Require extension challenge equals
     `SHA-256(UTF-8(evidence.attestation-challenge-subject))`.
-15. Parse KeyMint security level and require TEE or STRONGBOX. If deployment
-    policy requires StrongBox, require STRONGBOX exactly.
-16. Parse RootOfTrust and require:
-    - `deviceLocked = true`;
-    - `verifiedBootState = VERIFIED`.
-17. If deployment policy pins `verifiedBootKey` or `verifiedBootHash`, compare
-    them to the attested RootOfTrust fields.
-18. Parse AttestationApplicationId and require:
-    - package name equals expected package, normally `org.permaweb.handee`;
-    - at least one attested signature digest equals an expected release signing
-      digest supplied by the verifier.
-19. Require the policy snapshot package name equals the expected package.
-20. Require the policy snapshot signer digest set contains an expected release
-    signing digest.
-21. Require local policy facts:
-    - `build-debug = false`;
-    - `app-debuggable = false`;
-    - `debugger-attached = false`;
-    - `tracer-pid = 0`;
-    - `adb-enabled = false`;
-    - `local-policy-accepted = true`.
-22. Require hardware policy facts:
-    - `android-attestation.accepted = true`;
-    - `chain-signatures-valid = true`;
-    - `root-trusted = true`;
-    - `challenge-valid = true`;
-    - `attestation-application-valid = true`;
-    - `device-locked = true`;
-    - `verified-boot-state = "VERIFIED"`;
-    - patch levels satisfy verifier floors.
-23. Verify `evidence.keystore-signature` over
+15. Parse KeyMint security level, RootOfTrust, AttestationApplicationId, patch
+    levels, verified boot key/hash, package names, and signing digests. Expose
+    them as facts; do not collapse them into a universal pass/fail policy.
+16. Verify `evidence.keystore-signature` over
     `UTF-8(evidence.evidence-subject-id)` with the leaf certificate public key
     using ECDSA P-256/SHA-256 for current HandEE.
-24. Require `evidence.accepted = true` and `evidence.verdict = "accepted"`.
 
-A verifier MUST NOT accept evidence if it only validates the Keystore signature
-but skips the package/signing identity, RootOfTrust, local debug/ADB facts, or
-AO-Core subject binding.
+Zone templates or external callers decide whether parsed facts such as
+`keymint-security-level`, `device-locked`, `verified-boot-state`,
+`attestation-application-id`, local debug/ADB facts, package identity, signing
+digest, and patch levels are acceptable for their deployment. `policy-snapshot`
+and `evidence.accepted` are useful signed-node evidence, but they are not the
+root of cryptographic verification.
 
 ### 7.11 `POST /~handee@1.0/wrap-secret`
 

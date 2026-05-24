@@ -125,8 +125,6 @@ for abi in arm64-v8a x86_64; do
         find "$app/ebin" -type f \
             ! -name 'hb_store_lmdb.beam' \
             ! -name 'hb_snp_nif.beam' \
-            ! -name 'dev_snp*.beam' \
-            ! -name 'dev_tpm*.beam' \
             | while IFS= read -r ebin_file; do
                 cp "$ebin_file" "$APP_LIB/$name/ebin/"
             done
@@ -145,24 +143,11 @@ for abi in arm64-v8a x86_64; do
     done
     HB_SRC="$HANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
     HB_APP="$HANDEE_DEVICE_ROOT/_build/default/lib/hb"
-    PATCHED_HB="$WORK/patched-hb-src"
-    mkdir -p "$PATCHED_HB"
-    python3 - <<'PY' "$HB_SRC/core/http/hb_http.erl" "$PATCHED_HB/hb_http.erl"
-import pathlib, sys
-src = pathlib.Path(sys.argv[1])
-dst = pathlib.Path(sys.argv[2])
-text = src.read_text()
-text = text.replace(
-    "should_finalize_stream(_, _EncodedBody) -> false.",
-    "should_finalize_stream(_, _EncodedBody) -> true."
-)
-dst.write_text(text)
-PY
     erlc -pa "$HB_APP/ebin" +'{feature,maybe_expr,enable}' \
         -I "$HB_APP/include" \
         -I "$HB_SRC/core" \
         -o "$APP_LIB/hb/ebin" \
-        "$PATCHED_HB/hb_http.erl" \
+        "$HB_SRC/core/http/hb_http.erl" \
         "$HB_SRC/preloaded/message/dev_message.erl" \
         "$HB_SRC/preloaded/codec/dev_structured.erl" \
         "$HB_SRC/preloaded/codec/dev_flat.erl" \

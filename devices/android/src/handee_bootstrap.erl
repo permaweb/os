@@ -194,6 +194,8 @@ bootstrap_devices() ->
             dev_simple_oracle,
         <<"cache@1.0">> => dev_cache,
         <<"router@1.0">> => dev_router,
+        <<"tpm@2.0a">> => dev_tpm2,
+        <<"snp@1.0">> => dev_lapee_snp,
         <<"handee@1.0">> => dev_handee,
         <<"measurement@1.0">> => dev_measurement,
         <<"system@1.0">> => dev_system,

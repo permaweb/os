@@ -13,5 +13,5 @@ This directory contains the Android HandEE architecture imported from
 Android stages one device package from `devices/common/` plus the
 Android-specific overlay in `devices/android/`. The shared measurement and zone
 devices are therefore identical to the Linux builds; Android contributes the
-HandEE measurement backend, Android system report, app-private encrypted store,
-and service devices.
+HandEE crypto-agent runtime for local measurements, Android system reporting,
+app-private encrypted storage, and service devices.

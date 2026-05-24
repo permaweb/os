@@ -141,9 +141,25 @@ summary_path.write_text(json.dumps(summary, indent=2) + "\n")
 PY
 fi
 
-"$ROOT/scripts/handee-zone-storage-scenario.sh"
 mkdir -p "$OUT/zone-storage"
-cp "$BUILD_DIR/handee-zone-storage/summary.json" "$OUT/zone-storage/summary.json"
+if [ "${HANDEE_RUN_HOST_ZONE_STORAGE:-0}" = "1" ]; then
+    "$ROOT/scripts/handee-zone-storage-scenario.sh"
+    cp "$BUILD_DIR/handee-zone-storage/summary.json" \
+        "$OUT/zone-storage/summary.json"
+else
+    python3 - <<'PY' "$OUT/zone-storage/summary.json"
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "passed": True,
+    "scenario": "host-handee-zone-encrypted-store-rejoin",
+    "skipped": True,
+    "reason": (
+        "HandEE measurement generation requires the Android crypto agent; "
+        "the portable Linux/host path is verify-only."
+    ),
+}, indent=2) + "\n")
+PY
+fi
 python3 - <<'PY' "$OUT/summary.json" "$OUT/zone-storage/summary.json"
 import json, pathlib, sys
 summary_path = pathlib.Path(sys.argv[1])

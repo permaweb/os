@@ -1476,9 +1476,10 @@ assert_peer_attestation_scope(PeerAttestation, RingReference, Opts) ->
         ScopeDevice,
         SubjectDevice,
         ScopeSubjectID,
-        SubjectID
+        SubjectID,
+        peer_subject_id(Subject, Opts)
     } of
-        {Device, Device, ID, ID} when Device =/= undefined -> ok;
+        {Device, Device, ID, ID, ID} when Device =/= undefined -> ok;
         _ -> bad_peer_attestation(<<"peer-scope.secret-recipient">>)
     end.
 
@@ -1500,22 +1501,21 @@ assert_scope_value(FlatKey, ScopeKey, Scope, RingReference,
 
 assert_scope_attestation_id(ScopeKey, AttestationKey, PeerAttestation,
                             Scope, Opts) ->
-    Expected =
-        case hb_maps:get(
+    PayloadID = peer_attestation_payload_id(
+        AttestationKey, PeerAttestation, Opts),
+    Expected = first_defined([
+        hb_maps:get(
             <<AttestationKey/binary, "-id">>,
             PeerAttestation,
             undefined,
-            Opts)
-        of
-            ID when is_binary(ID), byte_size(ID) > 0 ->
-                ID;
-            _ ->
-                case peer_attestation_payload(AttestationKey, PeerAttestation, Opts) of
-                    undefined -> undefined;
-                    Attestation ->
-                        attestation_id(response_body(Attestation, Opts), Opts)
-                end
-        end,
+            Opts),
+        PayloadID
+    ]),
+    case PayloadID of
+        undefined -> ok;
+        Expected -> ok;
+        _ -> bad_peer_attestation(<<AttestationKey/binary, "-id">>)
+    end,
     Actual = first_defined([
         hb_maps:get(ScopeKey, Scope, undefined, Opts),
         hb_maps:get(
@@ -1534,6 +1534,18 @@ peer_attestation_payload(Key, PeerAttestation, Opts) ->
         undefined -> hb_maps:get(Key, PeerAttestation, undefined, Opts);
         Value -> Value
     end.
+
+peer_attestation_payload_id(Key, PeerAttestation, Opts) ->
+    case peer_attestation_payload(Key, PeerAttestation, Opts) of
+        undefined -> undefined;
+        Attestation -> attestation_id(response_body(Attestation, Opts), Opts)
+    end.
+
+peer_subject_id(Subject, Opts) when is_map(Subject) ->
+    Module = measurement_module(Opts),
+    Module:secret_recipient_id(Subject, Opts);
+peer_subject_id(_Subject, _Opts) ->
+    undefined.
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
     case committed_message_id(Attestation, Opts) of
@@ -1583,37 +1595,10 @@ peer_boot_attestation_body(Templates, PeerAttestation, Opts) ->
         Opts).
 
 measurement_template_target(Template, Measurement, Opts) ->
-    Candidate = materialize_measurement_candidate(Template, Measurement, Opts),
+    Candidate = response_body(Measurement, Opts),
     case template_mentions_measurement(Template, Opts) of
         true -> Candidate;
         false -> measurement_body(Candidate, Opts)
-    end.
-
-materialize_measurement_candidate(Template, Measurement, Opts)
-        when is_map(Measurement) ->
-    Decoded = hb_link:decode_all_links(Measurement),
-    lists:foldl(
-        fun(Key, Acc) -> materialize_measurement_key(Key, Acc, Opts) end,
-        Decoded,
-        materialized_measurement_keys(Template, Opts));
-materialize_measurement_candidate(_Template, Measurement, _Opts) ->
-    Measurement.
-
-materialized_measurement_keys(Template, Opts) ->
-    [<<"body">> |
-        [
-            Key
-         || Key <- [<<"evidence">>, <<"secret-recipient">>],
-            hb_maps:get(Key, Template, undefined, Opts) =/= undefined
-        ]].
-
-materialize_measurement_key(Key, Measurement, Opts) ->
-    LinkKey = <<Key/binary, "+link">>,
-    WithoutLink = maps:remove(LinkKey, Measurement),
-    case hb_maps:get(Key, Measurement, undefined, Opts) of
-        undefined -> WithoutLink;
-        Value ->
-            WithoutLink#{Key => hb_cache:ensure_all_loaded(Value, Opts)}
     end.
 
 template_mentions_measurement(Template, Opts) when is_map(Template) ->

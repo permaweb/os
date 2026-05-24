@@ -6,6 +6,7 @@
     <application
         android:allowBackup="false"
         android:fullBackupContent="false"
+        android:largeHeap="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/HandeeTheme">

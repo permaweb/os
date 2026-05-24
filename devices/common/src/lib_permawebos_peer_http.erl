@@ -65,9 +65,8 @@ semantic_response(#{<<"status">> := Status, <<"body">> := Body})
 semantic_response(Response) ->
     Response.
 
-peer_opts(BaseURL, Opts) ->
-    URL = strip_trailing_slash(BaseURL),
-    Base = (with_peer_store(URL, Opts))#{
+peer_opts(_BaseURL, Opts) ->
+    Base = Opts#{
         http_only_result => false,
         <<"http-only-result">> => false,
         <<"linkify-mode">> => false,
@@ -104,19 +103,6 @@ with_timeout(From, To, Opts) ->
             end;
         _ -> Opts
     end.
-
-with_peer_store(URL, Opts) ->
-    Stores = store_list(hb_opts:get(<<"store">>, [], Opts)),
-    PeerStore = #{
-        <<"store-module">> => hb_store_remote_node,
-        <<"node">> => URL,
-        <<"only-ids">> => true
-    },
-    Opts#{<<"store">> => Stores ++ [PeerStore]}.
-
-store_list(undefined) -> [];
-store_list(Store) when is_list(Store) -> Store;
-store_list(Store) -> [Store].
 
 strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
     case binary:last(B) of

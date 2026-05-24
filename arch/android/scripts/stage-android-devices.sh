@@ -23,5 +23,9 @@ copy_device_tree "$HANDEE_DEVICE_OVERLAY_ROOT"
 
 rm -f "$HANDEE_DEVICE_ROOT/src/lapee_devices.app.src"
 rm -rf "$HANDEE_DEVICE_ROOT/_build/default/lib/handee_devices"
+if [ -d "$HANDEE_DEVICE_ROOT/src/priv" ]; then
+    rm -rf "$HANDEE_DEVICE_ROOT/priv"
+    cp -a "$HANDEE_DEVICE_ROOT/src/priv" "$HANDEE_DEVICE_ROOT/priv"
+fi
 
 echo "android device package: $HANDEE_DEVICE_ROOT"

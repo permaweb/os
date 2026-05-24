@@ -329,6 +329,8 @@ int main(int argc, char **argv) {
     args_add(&args, erlexec);
     args_add(&args, xstrdup("-boot"));
     args_add(&args, boot_script);
+    args_add(&args, xstrdup("+S"));
+    args_add(&args, xstrdup("2:2"));
     args_add(&args, xstrdup("-noshell"));
     args_add(&args, xstrdup("-noinput"));
     args_add(&args, xstrdup("-start_epmd"));
