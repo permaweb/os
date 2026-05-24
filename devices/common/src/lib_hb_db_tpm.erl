@@ -74,13 +74,13 @@ app_priv_dir() ->
     end.
 
 configured_runtime_priv_dir(DeviceModule, Opts) ->
-    case hb_opts:get(<<"handee-runtime-root">>, undefined, Opts) of
+    case hb_opts:get(<<"andee-runtime-root">>, undefined, Opts) of
         undefined -> undefined;
         Root -> runtime_priv_dir(Root, DeviceModule)
     end.
 
 env_runtime_priv_dir(DeviceModule) ->
-    case os:getenv("HANDEE_RUNTIME_ROOT") of
+    case os:getenv("ANDEE_RUNTIME_ROOT") of
         false -> undefined;
         Root -> runtime_priv_dir(Root, DeviceModule)
     end.

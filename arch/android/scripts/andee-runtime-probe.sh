@@ -2,11 +2,11 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$BUILD_DIR/handee-runtime-probe"
+OUT="$BUILD_DIR/andee-runtime-probe"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 HOST_PORT="${HOST_PORT:-28734}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-240}"
-PACKAGE="org.permaweb.handee"
+PACKAGE="org.permaweb.andee"
 RESET_APP_DATA="${RESET_APP_DATA:-0}"
 
 rm -rf "$OUT"
@@ -19,7 +19,7 @@ fi
 
 adb shell "run-as $PACKAGE sh -c 'kill \$(pidof beam.smp 2>/dev/null) 2>/dev/null || true; \
     kill \$(pidof erlexec 2>/dev/null) 2>/dev/null || true; \
-    kill \$(pidof libhandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
+    kill \$(pidof libandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
     >/dev/null 2>&1 || true
 adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
 if [ "$RESET_APP_DATA" = "1" ]; then
@@ -35,7 +35,7 @@ adb shell "run-as $PACKAGE sh -c 'mkdir -p no_backup/run; \
     rm -f no_backup/run/hyperbeam.stdout no_backup/run/hyperbeam.stderr'" \
     >/dev/null 2>&1 || true
 adb shell am start -n "$PACKAGE/.OrnamentActivity" > "$OUT/activity.txt"
-adb shell am start-foreground-service -n "$PACKAGE/.HandeeService" \
+adb shell am start-foreground-service -n "$PACKAGE/.AndeeService" \
     > "$OUT/service-start.txt" 2>&1 || true
 
 STARTED=0
@@ -44,7 +44,7 @@ for _ in $(seq 1 90); do
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \
         > "$OUT/hyperbeam.stderr" 2>/dev/null || true
-    if grep -q "HandEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
+    if grep -q "AndEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
         STARTED=1
         break
     fi
@@ -93,13 +93,13 @@ for name in meta boot fresh; do
 done
 
 if [ -f "$OUT/boot.materialized.json" ]; then
-    python3 "$HANDEE_VERIFIER_DIR/verifier_handee.py" \
+    python3 "$ANDEE_VERIFIER_DIR/verifier_andee.py" \
         "$OUT/boot.materialized.json" \
         --out "$OUT/external-verifier-boot" \
         --allow-rejected || true
 fi
 if [ -f "$OUT/fresh.materialized.json" ]; then
-    python3 "$HANDEE_VERIFIER_DIR/verifier_handee.py" \
+    python3 "$ANDEE_VERIFIER_DIR/verifier_andee.py" \
         "$OUT/fresh.materialized.json" \
         --nonce="$FRESH_NONCE" \
         --out "$OUT/external-verifier-fresh" \

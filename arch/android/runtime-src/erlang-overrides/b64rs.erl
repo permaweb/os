@@ -1,6 +1,6 @@
 %%% @doc Pure Erlang b64rs-compatible codec for the Android runtime.
 %%%
-%%% Upstream b64rs is a Rust NIF. HandEE's Android runtime keeps the same public
+%%% Upstream b64rs is a Rust NIF. AndEE's Android runtime keeps the same public
 %%% module contract but avoids this native dependency unless/until we ship a
 %%% separately audited Android NIF build.
 -module(b64rs).

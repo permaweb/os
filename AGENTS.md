@@ -1,9 +1,9 @@
-# LapEE Agent Guide
+# PermawebOS Agent Guide
 
-LapEE is becoming the PermawebOS distribution: HyperBEAM is the kernel, and
-this repository packages deployable operating environments around it. The repo
-owns the Linux Buildroot image tooling, Android HandEE packaging, appliance init
-flows, and PermawebOS-specific HyperBEAM device packages under `devices/`.
+PermawebOS is the distribution around the HyperBEAM kernel. This repository
+packages deployable operating environments for HyperBEAM: Linux LapEE images,
+SNP-capable Linux images, TME/no-TME laptop images, and Android AndEE images.
+It also owns PermawebOS-specific HyperBEAM device packages under `devices/`.
 
 ## Work Native To HyperBEAM
 
@@ -22,20 +22,21 @@ flows, and PermawebOS-specific HyperBEAM device packages under `devices/`.
 
 ## Keep The Security Model In View
 
-- Production LapEE should boot, attest, serve HyperBEAM, and otherwise be
-  locally inert. Avoid adding keyboard, mouse, shell, writeback, debug, or
-  USB/runtime surfaces to production paths. Diagnostic, provisioning, and
-  QEMU-only surfaces are acceptable only behind explicit measured modes that
-  cannot leak into production mode.
+- Production Linux PermawebOS should boot, measure, serve HyperBEAM, and
+  otherwise be locally inert. Avoid adding keyboard, mouse, shell, writeback,
+  debug, or USB/runtime surfaces to production paths. Diagnostic,
+  provisioning, and QEMU-only surfaces are acceptable only behind explicit
+  measured modes that cannot leak into production mode.
 - The boot USB is an input medium. Read only the intended boot-time inputs,
   then detach it before HyperBEAM starts.
-- The node message, boot attestation, AK/EK proof, PCR replay, and loaded
-  identities are one model. Changes around one of them usually need a
-  verifier or QEMU acceptance check.
+- The node message, boot measurement, backend evidence, PCR/SNP/Android
+  binding, and loaded identities are one model. Changes around one of them
+  usually need a verifier or QEMU acceptance check.
 - Do not add arbitrary signing endpoints for protected identities. Use
   HyperBEAM identity selection and HTTP-signature mechanics where possible.
 - Operator config is public configuration. It may shape the node message, but
-  it must not bypass enforced LapEE config, TPM devices, or attestation hooks.
+  it must not bypass enforced PermawebOS config, measurement devices, or boot
+  hooks.
 
 ## Cut To Root Causes
 
@@ -64,8 +65,9 @@ flows, and PermawebOS-specific HyperBEAM device packages under `devices/`.
 - Done means maintainable and externally verified, not merely "the first
   happy path worked." For image/security changes, prefer QEMU+swtpm tests and
   real hardware validation when hardware is available.
-- When touching zone, TPM, boot measurement, operator config, or init,
-  expect to run the relevant QEMU acceptance harness before declaring success.
+- When touching zone, measurement, TPM, SNP, AndEE, operator config, or init,
+  expect to run the relevant QEMU/remote/Android acceptance harness before
+  declaring success.
 
 ## Documentation Standard
 

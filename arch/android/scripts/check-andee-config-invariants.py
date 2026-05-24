@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check security invariants for shipped HandEE HyperBEAM config."""
+"""Check security invariants for shipped AndEE HyperBEAM config."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BASE_CONFIG = ROOT / "config" / "handee.json"
+BASE_CONFIG = ROOT / "config" / "andee.json"
 
 
 def fail(message: str) -> None:
@@ -53,8 +53,8 @@ def main() -> int:
         fail("base config must define on.start")
     if not is_measurement_boot_hook(hooks[0]):
         fail("first on.start hook must be measurement@1.0 boot POST")
-    if config.get("measurement-device") != "handee@1.0":
-        fail("measurement-device must be handee@1.0")
+    if config.get("measurement-device") != "andee@1.0":
+        fail("measurement-device must be andee@1.0")
     if config.get("load-remote-devices") is not False:
         fail("load-remote-devices must be false")
     stores = config.get("store")

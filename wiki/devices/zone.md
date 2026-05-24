@@ -1,12 +1,15 @@
 # `~zone@1.0` Device Specification
 
-`~zone@1.0` is the only public shared-identity admission device.
+`~zone@1.0` is the public shared-identity admission device. It turns
+measurement policies into ring identities that can be used by AO-Core clients
+without re-verifying every member on every request.
 
 ## Responsibilities
 
-- Initialize a zone only if the local boot measurement matches the template.
+- Initialize a zone only if the local boot measurement matches the template or
+  one of the templates.
 - Admit a peer only after `~measurement@1.0/verify-peer` succeeds and the peer
-  boot measurement matches the template.
+  boot measurement matches one admissible template.
 - Generate zone wallet and AES material internally.
 - Sign admission authorizations over recomputed stable payload IDs.
 - Install admitted zone identities through normal HyperBEAM identity options.
@@ -20,6 +23,8 @@
 - It does not verify TPM or SNP evidence directly.
 - It does not trust stored peer attestations as admission inputs.
 - It does not expose arbitrary signing with the zone key.
+- It does not define which hardware classes are good enough. Templates encode
+  the operator's policy.
 
 ## `zone-allow`
 

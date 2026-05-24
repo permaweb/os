@@ -109,7 +109,7 @@ OTP_WORK="$ABI_OUT/otp_src_$OTP_VERSION"
 rm -rf "$OTP_WORK" "$OTP_RELEASE"
 tar -xzf "$OTP_TARBALL" -C "$ABI_OUT"
 
-XCOMP_CONF="$OTP_WORK/xcomp/handee-$OTP_XCOMP"
+XCOMP_CONF="$OTP_WORK/xcomp/andee-$OTP_XCOMP"
 sed \
     -e 's/^LD=.*/LD="$CC"/' \
     "$OTP_WORK/xcomp/$OTP_XCOMP" > "$XCOMP_CONF"

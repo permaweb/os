@@ -1,7 +1,9 @@
 # `~system@1.0` Device Specification
 
 `~system@1.0` returns policy-neutral evidence about the current machine and
-runtime. It does not verify, score, or decide trust.
+runtime. It does not verify, score, or decide trust. Its job is to expose the
+facts that let callers distinguish SNP, TME, LPDDR/no-TME, AndEE, and other
+deployment classes.
 
 ## Exports
 
@@ -14,9 +16,11 @@ runtime. It does not verify, score, or decide trust.
 - `device`: `<<"system@1.0">>`.
 - `version`: `<<"1.0">>`.
 - `collected-at-unix`: timestamp.
-- `runtime`: kernel command line, LapEE mode, UKI/build metadata when present.
+- `runtime`: kernel command line, PermawebOS mode, UKI/build metadata when
+  present.
 - `cpu`: CPUID-derived and sysfs CPU facts.
-- `memory`: memory block, EDAC, Intel DRM DRAM, and memory-encryption facts.
+- `memory`: memory block, EDAC, Intel DRM DRAM, LPDDR/TME/SME, and
+  memory-encryption facts.
 - `firmware`: UEFI/Secure Boot/Boot Guard-observed facts where available.
 - `acpi`: ACPI table summaries, table provenance, and override-support state.
 - `tpm`: TPM device presence and public capability facts.

@@ -1,4 +1,4 @@
-package org.permaweb.handee
+package org.permaweb.andee
 
 import android.content.Context
 import android.net.LocalServerSocket
@@ -28,7 +28,7 @@ import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.atomic.AtomicBoolean
 
-class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
+class AndeeCryptoAgent(private val context: Context) : AutoCloseable {
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
     private var listenerSocket: LocalSocket? = null
@@ -36,8 +36,8 @@ class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        HandeePaths.runDir(context).mkdirs()
-        thread = Thread(::serve, "HandeeCryptoAgent").also { it.start() }
+        AndeePaths.runDir(context).mkdirs()
+        thread = Thread(::serve, "AndeeCryptoAgent").also { it.start() }
     }
 
     override fun close() {
@@ -50,7 +50,7 @@ class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
             listenerSocket?.close()
         } catch (_: Exception) {
         }
-        HandeePaths.cryptoSocketFile(context).delete()
+        AndeePaths.cryptoSocketFile(context).delete()
         thread?.interrupt()
         thread = null
     }
@@ -58,7 +58,7 @@ class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
     fun policyStatus(): JSONObject = policySnapshot()
 
     private fun serve() {
-        val socketFile = HandeePaths.cryptoSocketFile(context)
+        val socketFile = AndeePaths.cryptoSocketFile(context)
         try {
             socketFile.delete()
             val listener = LocalSocket()
@@ -394,11 +394,11 @@ class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
 
     private fun enrollmentChallengeSubject(): String {
         return JSONObject()
-            .put("type", "handee-android-enrollment-subject")
+            .put("type", "andee-android-enrollment-subject")
             .put("version", "1.0")
             .put("package-name", context.packageName)
             .put("release-digest", releaseDigest())
-            .put("measurement-device", "handee@1.0")
+            .put("measurement-device", "andee@1.0")
             .toString()
     }
 
@@ -805,9 +805,9 @@ class HandeeCryptoAgent(private val context: Context) : AutoCloseable {
     )
 
     companion object {
-        private const val TAG = "HandeeCryptoAgent"
+        private const val TAG = "AndeeCryptoAgent"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        private const val KEY_ALIAS = "handee_android_attestation_v1"
+        private const val KEY_ALIAS = "andee_android_attestation_v1"
         private const val ANDROID_ATTESTATION_OID = "1.3.6.1.4.1.11129.2.1.17"
         private const val ANDROID_ATTESTATION_ROOTS = "android-attestation-roots.pem"
         private const val ATTESTATION_APPLICATION_ID_TAG = 709

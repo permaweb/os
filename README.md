@@ -1,118 +1,260 @@
-# PermawebOS / LapEE
+# PermawebOS
 
-PermawebOS packages HyperBEAM, the AO-Core runtime, into measured operating
-environments. LapEE is the Linux laptop/server appliance architecture in this
-repo; HandEE is the Android architecture. HyperBEAM executes messages,
-produces signed results, and participates in AO's distributed compute network.
-Boot a Linux LapEE USB stick and the machine starts that runtime, shows a QR
-code for the node URL, and serves a signed hardware measurement at:
+Pretty good hardware-supported security for HyperBEAM execution on abundant
+commodity hardware.
+
+PermawebOS packages the HyperBEAM kernel into deployable operating
+environments. HyperBEAM implements AO-Core: a computation protocol in which any
+computable value has a unique address, and cryptographically identifiable
+parties can attest to the correctness of the values they produce. That
+primitive lets users, applications, and other nodes build many kinds of trust in
+those identities. PermawebOS does not prescribe one universal hardware trust
+story; it exposes measured evidence so callers can decide what they trust.
+
+This repository contains:
+
+- build tools for producing signed PermawebOS images,
+- architecture wrappers for Linux laptops/servers, AMD SEV-SNP guests, and
+  Android devices,
+- common HyperBEAM device packages for measurement, system reporting, zones,
+  TPM, SNP, and AndEE verification,
+- provisioning and QEMU/remote validation harnesses.
+
+HyperBEAM is the kernel. This repository is the operating-system distribution
+around it.
+
+## The Thesis
+
+Hardware security is a spectrum, not a binary.
+
+Decentralized compute systems often talk as if hardware attestation is either
+"secure" or "not secure." Real systems have never worked that way. Every
+hardware root of trust, secure enclave, cryptographic implementation, firmware
+chain, and operating system is safe only within some threat model, until it is
+not. The practical question is economic: how hard and expensive is it for a
+rational attacker to subvert one node's computation or key material, and how
+much could they gain by doing so?
+
+PermawebOS makes that trade-off explicit. Instead of requiring every participant
+to own the newest server TEE hardware, it turns several widely available
+hardware patterns into verifiable execution environments for AO-Core work:
+
+- current-generation TEEs such as AMD SEV-SNP,
+- commodity x86 machines with total memory encryption,
+- single-purpose laptop appliances whose RAM is practically difficult to
+  interpose, especially LPDDR systems,
+- Android devices with Verified Boot and hardware-backed app/key attestation.
+
+None of these are perfect. Many are still useful. By exposing the evidence
+clearly, PermawebOS lets zones, applications, and users set their own admission
+policies for the value at risk.
+
+## Execution Environments
+
+PermawebOS currently supports these deployment families.
+
+### SNP
+
+The SNP architecture runs the Linux PermawebOS image inside an AMD SEV-SNP
+guest. SNP provides hardware-backed guest memory confidentiality and integrity,
+including protections against many classes of host memory remapping and replay
+attacks inside the SEV-SNP threat model. It is the strongest currently
+implemented server/VM environment in this repository and is suitable for
+virtualized deployment.
+
+### LapEE With TME
+
+LapEE is the Laptop Execution Environment: a single-purpose Linux appliance
+that boots HyperBEAM directly on commodity x86 hardware. On TME-capable
+machines, Total Memory Encryption makes off-package DRAM contents encrypted.
+TME does not provide the same integrity, replay, or guest/host isolation
+properties as SNP, and it is not a safe way to run mutually distrusting host
+programs beside HyperBEAM.
+
+PermawebOS makes TME useful by making the machine locally inert. The production
+image is not a desktop: it boots, measures itself, starts one HyperBEAM node,
+shows an ornamental splash/QR display, and takes no intended local input during
+operation. There are no user programs beside HyperBEAM in the protected runtime
+space.
+
+### LapEE Without TME
+
+Some useful laptops do not expose TME/SME. For those, PermawebOS can build a
+measured no-TME image. This is not equivalent to encrypted memory. Its value is
+in combination with physical hardware facts and the single-purpose appliance
+model.
+
+The most interesting no-TME class is LPDDR hardware. LPDDR is usually attached
+directly on the board and is much harder to interpose than socketed DIMM memory.
+The Linux kernel and GPU/memory-controller drivers can expose controller-
+observed DRAM type such as LPDDR4/LPDDR5. Zones can require those facts, plus
+known models or other system evidence, when they want to admit LPDDR-style
+machines. Zone creators should still be explicit: a small number of machines
+may report LPDDR-like memory while not meeting the intended physical
+inaccessibility bar.
+
+### AndEE
+
+AndEE is the Android Execution Environment. It packages HyperBEAM as an Android
+app/runtime and uses Android Verified Boot plus Android Keystore/StrongBox
+attestation to produce PermawebOS measurements.
+
+AndEE is a different point on the spectrum. It is software isolation provided
+by the Android kernel and app sandbox, rooted in Android's hardware-backed
+attestation chain. Breaking it generally means compromising the Android device
+or kernel/app isolation model for that phone, not clipping a RAM bus. That is
+not the same guarantee as SNP, but it can be appropriate for low-value or
+high-replication work.
+
+## Appliance Security
+
+The Linux PermawebOS image is single purpose by design.
+
+In production mode:
+
+- the boot USB is treated as input media, read once, unmounted, and detached
+  before HyperBEAM starts;
+- keyboard, mouse, touchpad, HID, Bluetooth, sound, USB4/Thunderbolt, SysRq,
+  debugfs, `/dev/mem`, kexec, hibernation, and suspend are removed from the
+  production kernel/runtime surface where practical;
+- HyperBEAM is the only intended userspace service;
+- stdin/stdout/stderr are not operator interfaces;
+- the local screen is ornament: a QR/address display, not a console.
+
+This matters. TME does not isolate one process from another, and no-TME LPDDR
+does not encrypt memory at all. PermawebOS gets useful security out of those
+machines by ensuring that there should be no second local program with which an
+operator can inspect or tamper with HyperBEAM memory. The remote interface is
+the HyperBEAM HTTP API; the local machine is an appliance.
+
+## Measurement
+
+`~measurement@1.0` is the common protocol for hardware-backed measurements.
+It builds a subject:
+
+```erlang
+#{
+    <<"system">> => SystemReport,
+    <<"node">> => SignedNodeMessage
+}
+```
+
+The system report comes from `~system@1.0/all`. The node message comes from
+`~meta@1.0/info`. The selected measurement engine then binds that subject to
+hardware-rooted evidence:
+
+- `~tpm@2.0a` for TPM-backed LapEE machines,
+- `~snp@1.0` for AMD SEV-SNP guests,
+- `~andee@1.0` for AndEE Android devices,
+- future devices such as TDX by implementing the same engine contract.
+
+The measurement message is signed by the node identity generated inside the
+measured environment. A verifier checks the AO-Core message signatures, the
+backend evidence, and the relationship between the measurement subject,
+firmware/boot state, node configuration, and node address.
+
+The device is policy neutral. It exposes facts: PCRs, Secure Boot state, UKI
+identity, kernel command line, TPM/EK/AK evidence, SNP report fields, Android
+attestation facts, memory-controller evidence, ACPI summaries, CPU/platform
+facts, node config, and the node address. Callers and zones decide which facts
+matter.
+
+Live boot measurement:
 
 ```text
 http://<node-ip>:8734/~measurement@1.0/boot
 ```
 
-The point is simple: people should be able to contribute useful AO-Core
-compute using commodity hardware they already own, while giving users
-and other nodes something concrete to verify about the machine that is
-doing the work.
+Fresh nonce-bound measurement:
 
-Why this can work on commodity hardware: UEFI, TPM 2.0, Secure Boot,
-measured boot, and newer hardware measurement engines already ship in
-ordinary laptops and servers. LapEE uses those parts to bind a HyperBEAM
-node to a measured boot and node message, instead of requiring every
-worker to be hosted by one cloud TEE vendor.
+```text
+http://<node-ip>:8734/~measurement@1.0/fresh?nonce=<base64url-nonce>
+```
 
-LapEE is not a magic cloud TEE and does not make arbitrary multi-tenant
-Linux safe. It takes a different trade-off: make the whole laptop one
-auditable appliance OS/node, keep local inputs and writable runtime
-storage out of the production path, and let AO-Core get tenancy by
-distributing work across HyperBEAM workers. Single-tenant here means
-one appliance OS/node; it is not a proof that arbitrary AO workloads are
-safely isolated from each other by LapEE itself. The measurement device,
-firmware event log, Secure Boot state, system report, and node identity
-let a verifier ask, "what actually booted, and what key is speaking for
-it?"
+## Zones
+
+`~zone@1.0` creates mutually enforced security zones. A zone is a shared
+identity and secret held only by nodes whose measurements match one of the
+zone's admissible templates.
+
+The admission flow is symmetric in spirit:
+
+1. A candidate asks a current member to join a named zone.
+2. Each side verifies the other's measurement through `~measurement@1.0`.
+3. The current member checks that the candidate's boot measurement matches the
+   zone policy.
+4. The candidate checks the member's proof and authorization.
+5. The zone secret and wallet are encrypted to the candidate using the
+   candidate's measurement backend.
+6. The candidate installs the zone identity and can later return a membership
+   proof signed by that zone identity.
+
+A recipient of a computation signed by a zone identity does not need to
+personally verify every live machine. They know that either the computation was
+signed by a node admitted under that zone policy, or the zone's security model
+has been breached. This gives AO applications a compact way to depend on
+transitive, policy-scoped hardware trust.
 
 ## Quick Start
 
-Most operators should start from a signed runtime image supplied by a
-release or by someone they trust for the current test. Building from
-source is supported, but it is not the first thing a new hardware tester
-needs to do. Run these commands from the repository root.
+Most operators should start from a signed release image. Building from source
+is supported, but the first hardware test is usually: verify, inject operator
+files, write, boot.
 
-1. Download or receive a LapEE runtime USB image, usually named
-   `lapee-usb.img`, plus its signed release note or hash.
-2. Verify the supplied SHA-256 hash against the signed release note or a
-   coordinator-provided hash obtained separately:
+Run commands from the repository root.
 
-   ```sh
-   printf '<expected-sha256>  /path/to/lapee-usb.img\n' | shasum -a 256 -c -
-   ```
-
-3. Put the image at the default repo path:
+1. Put the image at a local path:
 
    ```sh
    mkdir -p build/images
-   cp /path/to/lapee-usb.img build/images/lapee-usb.img
+   cp /path/to/permawebos-no-tme-signed.img build/images/permawebos-no-tme-signed.img
    ```
 
-4. Add WiFi credentials if they were not already baked into the image.
-   This uses the small Docker tooling container to edit the FAT ESP, so
-   Docker Desktop should be running. This builds tooling only; it does
-   not rebuild LapEE itself:
+2. Verify its supplied hash out of band:
+
+   ```sh
+   printf '<expected-sha256>  build/images/permawebos-no-tme-signed.img\n' | shasum -a 256 -c -
+   ```
+
+3. Add WiFi and optional public operator config to the ESP:
 
    ```sh
    make wifi-creds
-   make operator-config-apply IMAGE=build/images/lapee-usb.img
+   make operator-config-apply IMAGE=build/images/permawebos-no-tme-signed.img
    ```
 
-   `wifi.conf` is plaintext and is copied into the image. After this
-   step, both `wifi.conf` and `build/images/lapee-usb.img` contain the WiFi
-   password; do not share them. Adding `wifi.conf` changes the disk
-   image hash, but not the signed UKI on the ESP. If you also want
-   public operator config, create `config.json` before running
-   `make operator-config-apply`; see the next section.
+   `wifi.conf` is plaintext. Do not share it. Adding `wifi.conf` or
+   `config.json` changes the disk image hash, but not the signed UKI.
 
-5. Write the image to a USB stick. This destroys the selected disk. Use
-   the removable whole disk from `diskutil list`, not `/dev/disk0` and
-   not a partition like `diskNs1`:
+4. Write the image to a USB stick. Use the whole removable disk from
+   `diskutil list`, not `/dev/disk0` and not a partition such as
+   `/dev/diskNs1`:
 
    ```sh
    diskutil list
-   make write-image DEV=/dev/diskN IMAGE=build/images/lapee-usb.img
+   make write-image DEV=/dev/diskN IMAGE=build/images/permawebos-no-tme-signed.img
    ```
 
-6. If the firmware does not already trust the runtime image, disable
-   Secure Boot or follow the Secure Boot section before booting. Then
-   boot the laptop from the USB stick. When the blue splash reaches
-   `Running at http://...`, scan the QR code or open the shown URL.
-
-Framework 13 is the primary tested laptop. Other UEFI + TPM 2.0 laptops
-may work, especially if their network hardware is supported by the
-kernel and firmware set in this image. Runtime images normally require
-CPU TME/SME capability. Test images can be built with the measured
-`LAPEE_NO_TME=1` flag for hardware that lacks it; verifiers see that
-flag in node evidence and can decide whether to accept the node.
+5. Boot the machine. When the splash reaches `Running at http://...`, scan the
+   QR code or open the shown URL.
 
 ## Operator Config
 
-`config.json` is optional public HyperBEAM configuration for this node.
-LapEE reads it once from the boot USB ESP, copies it into tmpfs as
-`/tmp/config.json`, unmounts and detaches the USB, then starts HyperBEAM
-with:
+`config.json` is optional public HyperBEAM configuration for the node. The
+Linux appliance reads it once from the boot USB ESP, copies it into tmpfs as
+`/tmp/config.json`, unmounts and detaches the USB, then starts HyperBEAM with:
 
 ```text
 HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
 ```
 
-The measured LapEE config is last, so enforced measurement devices and
-the boot measurement hook remain part of the node. Operator-controlled
-keys such as `load-remote-devices` and `trusted-device-signers` are not
-set by the measured base config, so deployments can opt in explicitly
-and have that choice included in boot measurement evidence. Do not put
-secrets in `config.json`: it is public operator policy.
+The measured PermawebOS config is last, so enforced measurement devices and
+the boot measurement hook remain part of the node. Operator-controlled keys
+such as `load-remote-devices` and `trusted-device-signers` are intentionally
+not forced by the base config; deployments choose them and that choice appears
+in measurement evidence.
 
-A small example:
+Use HyperBEAM/AO-Core key spelling directly:
 
 ```json
 {
@@ -124,231 +266,74 @@ A small example:
 }
 ```
 
-Use HyperBEAM/AO-Core key spelling directly in `config.json`:
-hyphenated keys such as `trusted-device-signers` and
-`load-remote-devices`. Signer values are AO/Arweave-style base64url
-addresses. Zone templates and external verifiers can match these node
-message fields according to their deployment policy.
+`zone-allow` controls local zone installation:
 
-`zone-allow` controls whether this node may install zone identities. If
-omitted, the node may initialize or join one zone during the current run. Use
-`0` or `false` to disable zone joins, a positive integer to allow that many
-zones, `true` for no count limit, a list of zone IDs to allow only those zones,
-or a map of zone IDs to bootstrap peer URLs to auto-join those explicit zones
-after HyperBEAM starts. Auto-join still uses normal peer verification, so the
-node must also advertise a reachable `public-url` or `zone-self-url`.
+- `0` or `false`: disable zone joins and initialization.
+- `1` or unset: allow exactly one zone during this node run.
+- positive integer: allow up to that many zones.
+- `true`: allow any number.
+- list of zone IDs: allow only those named zones.
+- map of `ZONE_ID => PEER_URL`: allow only those zones and auto-join each
+  listed peer after the HTTP listener starts.
 
-## Verify A Running Node
+Auto-join still performs normal peer verification. The joining node must
+advertise a reachable `public-url` or `zone-self-url`.
 
-From another machine on the same network. On macOS, install the local
-verifier dependencies first:
+## Secure Boot And Storage Provisioning
 
-```sh
-brew install erlang rebar3 python@3
-```
-
-`git`, `curl`, and network access are also required. Then run:
-
-```sh
-make hb-fetch
-curl -fsS http://<node-ip>:8734/~measurement@1.0/boot
-```
-
-The measurement endpoint returns the node's signed boot evidence.
-
-```text
-build/hyperbeam/src-edge/out/local-capture/<label-slug>/dashboard.html
-```
-
-Useful live endpoints:
-
-```text
-http://<node-ip>:8734/~tpm@2.0a/info
-http://<node-ip>:8734/~measurement@1.0/info
-http://<node-ip>:8734/~measurement@1.0/boot
-http://<node-ip>:8734/~system@1.0/all
-http://<node-ip>:8734/~zone@1.0/status
-http://<node-ip>:8734/~hyperbuddy@1.0/index
-```
-
-## What The Dashboard Checks
-
-The attestation dashboard reports cryptographic checks and policy
-posture separately. A real machine can be useful while still carrying
-warnings that should be understood.
-
-It checks:
-
-- Measurement envelope signatures and device-specific evidence.
-- TPM EK and AK material, when the measurement backend is TPM and the
-  firmware provisions EK certificates.
-- TPM quote signature, nonce, selected PCR values, and PCR digest
-  consistency. A valid quote proves the reported PCR values came from
-  the quoted AK/TPM; accepting those PCRs still requires verifier policy
-  and known-good baselines.
-- SEV-SNP report signatures and report-data binding, when the measurement
-  backend is SNP.
-- Firmware TCG event log replay where firmware exposes the log.
-- AK `authPolicy` over the quoted boot PCRs, including PCR 15, plus
-  runtime PCR-15 replay tying the HyperBEAM boot subject to the AK.
-- Secure Boot state, kernel lockdown, IOMMU/TME hints, CPU/DMI/TPM
-  identity, and measured kernel command line.
-
-Secure Boot off or hash-only admission may be a warning or policy
-limitation. A failed quote signature, missing required TPM proof, or
-PCR/event-log inconsistency is much more serious.
-
-## Security Model
-
-LapEE narrows the machine instead of trying to make a general-purpose
-desktop safe.
-
-In production:
-
-- The laptop is intended to be single-purpose and single-tenant at the
-  OS level.
-- Keyboard, mouse, touchpad, HID, Bluetooth, sound, USB4/Thunderbolt,
-  SysRq, debugfs, `/dev/mem`, kexec, hibernation, and suspend support
-  are disabled in the production kernel profile.
-- The boot USB is treated as an input medium, not a writable runtime
-  store. Init mounts the ESP read-only just long enough to read optional
-  `wifi.conf` and `config.json`, unmounts it, marks/detaches the parent
-  block device, and then starts network and HyperBEAM.
-- HyperBEAM runs with stdin/stdout/stderr on `/dev/null`; the splash is
-  the only intended local output.
-- Verification happens over the network measurement endpoint, not by
-  writing logs back to the USB stick.
-
-This does not protect against every physical attack, malicious firmware,
-or all bugs in HyperBEAM, Linux, drivers, or the TPM stack. It is a
-practical appliance posture for commodity laptops: minimize local
-interaction, make the boot/runtime identity observable, and let AO-Core
-schedule work at the protocol layer.
-
-This is not a hardware USB firewall. Firmware and early kernel boot
-still consume the boot USB/ESP before init deauthorizes USB devices.
-
-## Limitations And Non-Goals
-
-Measurement is evidence, not a TEE guarantee. It does not make firmware
-honest, does not prove HyperBEAM or Linux bug-free, and does not isolate
-mutually distrustful workloads inside the same OS process/kernel
-boundary.
-
-LapEE currently depends on local WiFi credentials or pre-provisioned
-networking, and production USB tethering is intentionally not expected.
-Network hardware coverage is broad but not universal. Secure Boot
-policy is operator/firmware-specific, and verifier acceptance still
-depends on policy and baselines rather than on "TPM present" alone.
-
-## Secure Boot
-
-The runtime image boots a UEFI Unified Kernel Image at
-`\EFI\Boot\BootX64.efi`. A signed release image is intended to be used
-with Secure Boot once the firmware trusts either the signing key or the
-exact UKI hash.
-
-Secure Boot admission is byte-for-byte specific to the UKI. Locally
-adding `wifi.conf` or `config.json` changes the disk image hash, but it
-does not change `\EFI\Boot\BootX64.efi` and therefore does not change
-the UKI signature or enrolled hash. Prefer the firmware's "Enroll EFI
-image/hash" UI by browsing to `BootX64.efi`; do not assume a plain
-`shasum -a 256` file hash is the exact format every firmware UI expects.
-
-For an operator-owned Secure Boot chain, create local keys and keep the
-private half private:
+Generate operator Secure Boot material once:
 
 ```sh
 make signing-keys
 ```
 
-If the firmware has a usable enrollment UI, enroll the public `db`,
-`KEK`, and `PK` artifacts from `secureboot/enrol/`, or enroll the exact
-runtime UKI hash. The signed runtime image and any no-TME test variant
-must be admitted separately, because their measured UKI bytes differ.
+Keep `secureboot/*.key` private. Files under `secureboot/enrol/` are public
+enrollment artifacts.
 
-On Framework firmware, Secure Boot controls usually require setting a
-supervisor/admin password. Enroll `db`, then `KEK`, then `PK`; enrolling
-`PK` exits setup mode. Entering setup mode clears factory Microsoft keys
-and may affect booting other operating systems until factory keys are
-restored.
+If firmware has a usable enrollment UI, enroll the public `db`, `KEK`, and
+`PK` artifacts from `secureboot/enrol/`, or enroll the exact UKI hash. Secure
+Boot admission is byte-for-byte specific to `\EFI\Boot\BootX64.efi`.
 
-Some firmware exposes Secure Boot Setup Mode but does not expose a useful
-UI for enrolling keys or image hashes. For those machines, LapEE can build
-a one-shot provisioning image. This image contains only public enrollment
-artifacts on the ESP and enrolls the operator `db`, `KEK`, then `PK` while
-the firmware is already in Setup Mode. The image selects LapEE's provisioning
-flow by itself, but entering firmware Setup Mode is still a firmware-owner
-operation and usually has to be done from the firmware setup UI:
+For firmware that exposes setup mode but not a usable enrollment UI,
+PermawebOS builds a signed one-shot provisioner:
 
 ```sh
 make provisioner-write DEV=/dev/diskN
 ```
 
-Boot that USB once with firmware in Secure Boot Setup Mode. After the
-`I UNDERSTAND.` confirmation, the provisioner lists writable non-boot disks.
-To prepare one for encrypted zone storage, type `DESTROY N` for the
-listed disk number; to leave persistent storage unconfigured, type `SKIP`.
-`DESTROY N` creates a `ZONE_PRIMARY` GPT partition, which binds to the
-first zone the node successfully joins. To pre-bind the disk to a
-specific zone, type `DESTROY N -> PREFIX`, where `PREFIX` is the first
-characters of that zone's ring address; the partition will be named
-`ZONE_PREFIX`, truncated to fit GPT's partition-name limit.
+Boot it while firmware is in Secure Boot setup mode. The provisioner shows a
+red warning, requires the exact text `I UNDERSTAND.`, enrolls public Secure
+Boot material, and can destructively prepare encrypted zone storage.
 
-Either form destroys the selected disk's partition table and writes a LapEE
-provisioning marker at the start of the new partition. It is not a secure
-erase; the runtime will overwrite the selected partition with LUKS2 before
-use. The runtime image will only first-format a non-LUKS partition when both
-the expected GPT partition name and the LapEE marker are present. The
-provisioner excludes the boot disk and obvious pseudo block devices, then
-rechecks that the selected disk is still a writable non-boot block device
-immediately before modifying it.
+Storage provisioning prompt:
 
-The provisioner should then print the enrollment progress and stop. Some
-firmware still reports `SetupMode=1` until the next power cycle even after
-accepting `PK`. Power off, enable Secure Boot if the firmware did not do so
-automatically, then flash and boot a signed runtime image:
-
-```sh
-make runtime-write DEV=/dev/diskN
+```text
+Type SKIP or DESTROY N[ -> ID].
 ```
 
-Keep `secureboot/*.key` private. They are operator keys and are ignored by
-git. The files under `secureboot/enrol/` are public enrollment artifacts.
-
-Secure Boot controls firmware admission of the UKI. It is related to,
-but separate from, the runtime measurement served by the node.
+`DESTROY N` creates a `ZONE_PRIMARY` partition for the first joined zone.
+`DESTROY N -> PREFIX` creates a `ZONE_PREFIX` partition for a zone whose ring
+address starts with `PREFIX`. Runtime activation only formats a fresh
+partition when the expected GPT partition name and PermawebOS provisioning
+marker are both present. Existing LUKS volumes are opened, not reformatted.
 
 ## Build From Source
 
-The default developer build uses Docker and the host architecture. On
-Apple Silicon, that means a native `linux/arm64` build container that
-cross-compiles the x86_64 laptop target. The operator-facing Makefile
-surface is intentionally small: build or write a signed runtime image,
-optionally build the runtime with the measured no-TME flag for test
-hardware, build the Secure Boot provisioner, apply WiFi/operator config,
-and run QEMU acceptance tests.
-
-Requirements by task on macOS:
+Requirements on macOS:
 
 ```sh
 brew install qemu swtpm erlang rebar3 python@3
 ```
 
-Docker Desktop must be running for the default source-build path and
-for ESP-edit helpers such as `operator-config-apply`. QEMU and swtpm are needed
-for the acceptance harnesses. Erlang/rebar3/Python are needed by the
-attestation dashboard wrapper.
+Docker Desktop is required for the default source build path and ESP editing.
 
-Generate signing keys once, then build with all useful local cores:
+Build all release artifacts except selected architectures:
 
 ```sh
-make signing-keys
-JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
-  make runtime-image
+make all EXCLUDE_ARCH=android,snp
 ```
 
-The architecture-oriented release targets are:
+Build individual artifacts:
 
 ```sh
 make tme
@@ -356,209 +341,131 @@ make no-tme
 make snp
 make provisioner
 make android
-make all EXCLUDE_ARCH=android,snp
 ```
 
-`tme`, `no-tme`, and `snp` share the Linux appliance build; `snp` denotes an
-SNP-capable Linux image rather than a different kernel ABI. `android` builds
-the HandEE Android runtime/APK under `arch/android/`.
-
-The build produces:
+Outputs:
 
 ```text
-build/images/lapee-runtime-tme-signed.img
+build/images/permawebos-tme-signed.img
+build/images/permawebos-no-tme-signed.img
+build/images/permawebos-snp-signed.img
+build/images/lapee-sb-provisioner.img
+arch/android/android/app/build/outputs/apk/...
 ```
 
-With `TME=0`, the signed output is:
-
-```text
-build/images/lapee-runtime-no-tme-signed.img
-```
-
-By default the USB image is auto-sized from the generated UKI and the
-small files staged into the ESP. It is not fixed at 1 GiB. It still
-includes GPT, FAT32 metadata, and a little compatibility margin around
-the payload, so it will be larger than `BootX64.efi` itself. Override
-with `SIZE_MIB=...` only when you deliberately want a larger image.
-
-For release hashes and reproducibility checks, force the reference
-builder:
+The lower-level runtime target remains available:
 
 ```sh
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
-  make runtime-image REFERENCE=1
+  make runtime-image TME=0
 ```
 
-`REFERENCE=1` forces `linux/amd64` Docker for every step. On Apple
-Silicon this uses Rosetta.
-
-For hardware that cannot satisfy TME/SME policy, build a signed no-TME
-test image:
+`runtime-write` rebuilds before writing:
 
 ```sh
-make runtime-image TME=0
+make runtime-write DEV=/dev/diskN TME=0
 ```
 
-The measured `LAPEE_NO_TME=1` flag is part of that image's node
-evidence.
-
-Smoke-test the runtime image in QEMU:
+To write an existing image without rebuilding:
 
 ```sh
+make write-image DEV=/dev/diskN IMAGE=build/images/permawebos-no-tme-signed.img
+```
+
+## Verification And Tests
+
+Useful live endpoints:
+
+```text
+http://<node-ip>:8734/~measurement@1.0/info
+http://<node-ip>:8734/~measurement@1.0/boot
+http://<node-ip>:8734/~system@1.0/all
+http://<node-ip>:8734/~zone@1.0/status
+http://<node-ip>:8734/~meta@1.0/info
+http://<node-ip>:8734/~hyperbuddy@1.0/index
+```
+
+Local checks:
+
+```sh
+make verify-config-invariants
 make qemu TME=0
-```
-
-Smoke-test outbound HTTPS relay/oracle behavior, including the target CA
-bundle and the node signature on the returned response:
-
-```sh
 make qemu-oracle TME=0
-```
-
-Run the measurement-backed multi-node acceptance gate:
-
-```sh
 make qemu-zone
-```
-
-That boots four QEMU+swtpm nodes from the same image. Node 1 initializes
-a named zone from its measured system report. Nodes 2 and 3 join
-that named zone and install the same zone identity; node 4 carries
-a different boot-attested DMI product and must fail admission with
-`template-mismatch` and remain outside the zone.
-
-Run the same gate with encrypted non-volatile disks:
-
-```sh
 make qemu-zone-nonvolatile
-```
-
-That adds a second virtio disk per node, pre-provisioned with the
-`ZONE_PRIMARY` GPT partition name. Admitted nodes initialize or open
-the disk using the zone secret, mount it as their primary HyperBEAM
-store, copy the boot LMDB into it, refresh current-boot pseudo-paths such as
-`~measurement@1.0/boot`, then reboot one node with changed boot evidence
-to prove the existing encrypted volume is reopened rather than reformatted and
-cannot shadow the current boot's measurement.
-
-Run the provisioner storage-selection smoke test:
-
-```sh
 make qemu-provisioner-nonvolatile
-```
-
-That boots the provisioner image with a sacrificial disk, types the real
-`I UNDERSTAND.` and `DESTROY 1 -> test-zone` prompts through QEMU, and
-verifies that the extra disk receives a GPT partition named
-`ZONE_test-zone` and contains the LapEE provisioning marker. The OVMF
-firmware in this test is not expected to complete Secure Boot enrollment; the
-test is only asserting the non-volatile disk preparation path.
-
-Run the operator `config.json` attestation gate:
-
-```sh
 make qemu-operator-config
 ```
 
-That boots QEMU+swtpm nodes from signed runtime images and checks that
-operator config appears in `/~meta@1.0/info`, boot measurement node
-evidence, and PCR15 replay.
-
-Write a freshly built image directly to USB:
+Remote SNP checks:
 
 ```sh
-make runtime-write DEV=/dev/diskN
+make qemu-measurement-remote TARGET=ssh://hb@dev-1.forward.computer
+make qemu-zone-remote-snp TARGET=ssh://hb@dev-1.forward.computer
 ```
 
-`runtime-write` rebuilds and signs the runtime image before writing. To
-write an existing pre-built image without rebuilding, use
-`make write-image DEV=/dev/diskN IMAGE=build/images/lapee-usb.img`.
+Android/AndEE checks:
+
+```sh
+make android
+make android-check
+```
 
 ## What Gets Built
 
-The image contains:
+The Linux image contains:
 
-- Linux 6.19.12 with EFI stub, TPM, lockdown, WiFi, framebuffer, and
-  common laptop networking support.
-- A Buildroot-generated initramfs with busybox, glibc, Erlang/OTP 27,
-  OpenSSL, libtss2, wpa_supplicant, iproute2, iw, zstd, cryptsetup,
-  e2fsprogs, parted, and HyperBEAM.
-- A custom Buildroot `hyperbeam` package that fetches pinned upstream
-  HyperBEAM `edge`, builds stock HyperBEAM, packages PermawebOS-owned
-  measurement, TPM, SNP, zone, and system devices from
-  `devices/common/` with the HyperBEAM Forge, and bakes them into the
-  preloaded device store.
-- A UEFI Unified Kernel Image placed at `\EFI\Boot\BootX64.efi` on a
-  single FAT32 ESP.
+- Linux 6.19.12 with EFI stub, TPM, lockdown, WiFi, framebuffer, common laptop
+  networking, and the PermawebOS memory-probe patch;
+- a Buildroot initramfs with busybox, glibc, Erlang/OTP, OpenSSL, libtss2,
+  wpa_supplicant, iproute2, iw, zstd, cryptsetup, e2fsprogs, parted, and
+  HyperBEAM;
+- stock pinned HyperBEAM built as the kernel runtime;
+- preloaded PermawebOS device packages from `devices/common/`;
+- a signed UEFI Unified Kernel Image at `\EFI\Boot\BootX64.efi`.
 
-If a disk was provisioned with a `ZONE_<ring-address-prefix>` partition,
-the runtime tries that partition first after joining the matching zone.
-If no zone-specific partition exists, it falls back to `ZONE_PRIMARY`.
-Fresh partitions are formatted as LUKS2 plus ext4 with a key derived from the
-zone name, ring address, and zone secret, and the fresh-format path requires
-the LapEE provisioning marker written by the provisioner. Existing encrypted
-volumes are opened and mounted; normal runtime activation never reformats an
-existing LUKS volume. Because the disk key is derived from the zone
-secret, a rebooted node must be able to rejoin a live holder of that same zone
-secret before it can reopen the store.
+The Android image contains:
 
-Before an opened non-volatile LMDB becomes the first HyperBEAM store, LapEE
-rewrites current-boot pseudo-paths such as `~measurement@1.0/boot` into that
-store from the fresh volatile cache. Activation fails closed if those links
-cannot be refreshed, so stale persistent boot evidence cannot shadow the current
-boot after a zone is joined.
+- an Android app/runtime wrapper for HyperBEAM,
+- common PermawebOS devices from `devices/common/`,
+- AndEE-specific Android store, metadata, and service devices from
+  `devices/android/`,
+- Android Keystore/StrongBox measurement support.
 
-The build uses a Buildroot-built target toolchain
-(`BR2_TOOLCHAIN_BUILDROOT=y`). On a fresh build, gcc, binutils, glibc,
-the kernel, target userspace, and HyperBEAM are compiled from source.
+The remaining prebuilt bytes in the Linux boot path are explicit: Debian's x64
+UEFI stub and vendor firmware blobs for WiFi/common USB/Ethernet adapters. The
+target userspace and HyperBEAM release are built from source.
 
-The remaining prebuilt bytes in the shipped boot path are explicit: the
-x64 UEFI stub from Debian's `systemd-boot-efi` package, used to wrap the
-kernel/initramfs as a UKI, and vendor firmware blobs for WiFi and common
-USB/Ethernet adapters. The target Linux userspace and HyperBEAM release
-are built from source.
+## Limitations
 
-## Troubleshooting
+Measurement is evidence, not magic. PermawebOS does not prove firmware honest,
+does not prove Linux or HyperBEAM bug-free, and does not make every hardware
+class equivalent to a full TEE.
 
-- QEMU passes but laptop WiFi does not: recreate `wifi.conf` with
-  `make wifi-creds`, re-apply it with
-  `make operator-config-apply IMAGE=build/images/lapee-usb.img`, and
-  confirm the laptop's wireless hardware is covered by the release
-  firmware set.
-- `~measurement@1.0/boot` fails: inspect `~measurement@1.0/info` and
-  `~system@1.0/all` to confirm backend selection and hardware discovery, then
-  check quote/key policy, EK material, and verifier policy.
-- Use `~measurement@1.0/boot` for live measurement inspection. The old
-  TPM interpretation helper is not part of the v1 runtime surface.
-- macOS asks for a password while writing: the write path uses `sudo dd`
-  against `/dev/rdiskN`.
-- USB tethering is not expected in production builds because production
-  disables local USB device/input surface after the boot ESP read.
+TME lacks memory integrity and rollback protection. No-TME LPDDR deployments
+depend on the physical difficulty of memory interposition and on the
+single-purpose appliance model. AndEE depends on Android's Verified Boot,
+Keystore/StrongBox, and app/kernel isolation. SNP depends on AMD SEV-SNP
+hardware, firmware, and host configuration.
+
+The point is not perfection. The point is measured, explicit, economically
+meaningful security for more hardware than the narrow set traditionally treated
+as "TEE capable."
 
 ## Repo Layout
 
 - `Makefile` - operator and build entry points.
-- `arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/init` -
-  Linux appliance init, production hardening, WiFi, splash, storage, and
-  HyperBEAM startup.
-- `arch/common/linux/buildroot-external/board/lapee/linux-m1-fragment.config` -
-  Linux kernel config fragment for TPM, SNP, networking, framebuffer, and
-  production input-surface reduction.
-- `arch/common/linux/buildroot-external/package/hyperbeam/` - Buildroot
-  package for the pinned stock HyperBEAM release.
-- `arch/android/` - Android HandEE Gradle project, runtime packaging, local
-  Android verifier assets, and Android/emulator harness scripts.
-- `devices/common/` - shared PermawebOS HyperBEAM device package:
-  measurement, TPM, SNP, zone, system, Forge libraries, native Linux helpers,
-  and TPM EK roots baked into the Linux preloaded device store.
-- `devices/android/` - Android HandEE overlay: Android measurement backend,
-  app-private encrypted store, HandEE system/meta devices, and service devices.
-- `scripts/` - image assembly, QEMU boot and zone flows, WiFi and
-  Secure Boot helpers.
-- `paper/` - research paper and design notes.
+- `arch/` - architecture packaging for Linux, SNP, TME/no-TME, and AndEE.
+- `arch/common/linux/` - shared Buildroot Linux appliance.
+- `arch/android/` - AndEE Android app/runtime packaging and emulator harnesses.
+- `devices/common/` - shared HyperBEAM device package: measurement, system,
+  TPM, SNP, AndEE verification, zones, native helpers, and trust roots.
+- `devices/android/` - Android-specific store, metadata, service, and payment
+  devices.
+- `scripts/` - image assembly, QEMU/remote validation, WiFi, and Secure Boot
+  helpers.
+- `wiki/` - feature, device, protocol, and test contracts.
 
-`build/`, `wifi.conf`, `config.json`, and `secureboot/` are
-local/operator artefacts and are intentionally ignored by git. `build/`
-contains generated images, initramfses, QEMU scratch state, splash
-captures, the local HyperBEAM verifier checkout, and attestation
-dashboards.
+`build/`, `wifi.conf`, `config.json`, `secureboot/`, generated images, private
+keys, local Android SDK files, and runtime caches are local/operator artifacts
+and are intentionally ignored by git.

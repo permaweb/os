@@ -2,14 +2,14 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$BUILD_DIR/handee-android-zone-storage"
+OUT="$BUILD_DIR/andee-android-zone-storage"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 HOST_PORT="${HOST_PORT:-28737}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-240}"
-PACKAGE="org.permaweb.handee"
-REMOTE_CONFIG="/data/local/tmp/handee-android-zone-storage.json"
+PACKAGE="org.permaweb.andee"
+REMOTE_CONFIG="/data/local/tmp/andee-android-zone-storage.json"
 RESET_APP_DATA="${RESET_APP_DATA:-1}"
-MARKER="handee-android-zone-storage-$(date +%Y%m%d%H%M%S)"
+MARKER="andee-android-zone-storage-$(date +%Y%m%d%H%M%S)"
 ZONE_NAME="android-storage-$MARKER"
 
 rm -rf "$OUT"
@@ -32,14 +32,14 @@ cat > "$OUT/next-boot-config.json" <<JSON
 {
   "public-url": "http://10.0.2.15:8734/$MARKER",
   "zone-self-url": "http://10.0.2.15:8734/$MARKER",
-  "handee-test-marker": "$MARKER",
+  "andee-test-marker": "$MARKER",
   "encrypted-volumes": true
 }
 JSON
 
 adb shell "run-as $PACKAGE sh -c 'kill \$(pidof beam.smp 2>/dev/null) 2>/dev/null || true; \
     kill \$(pidof erlexec 2>/dev/null) 2>/dev/null || true; \
-    kill \$(pidof libhandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
+    kill \$(pidof libandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
     >/dev/null 2>&1 || true
 adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
 if [ "$RESET_APP_DATA" = "1" ]; then
@@ -61,7 +61,7 @@ adb shell "run-as $PACKAGE sh -c 'mkdir -p no_backup/boot-config; \
 adb shell rm -f "$REMOTE_CONFIG" >/dev/null 2>&1 || true
 
 adb shell am start -W -n "$PACKAGE/.OrnamentActivity" > "$OUT/activity.txt"
-adb shell am start-foreground-service -n "$PACKAGE/.HandeeService" \
+adb shell am start-foreground-service -n "$PACKAGE/.AndeeService" \
     > "$OUT/service-start.txt" 2>&1 || true
 
 STARTED=0
@@ -70,7 +70,7 @@ for _ in $(seq 1 90); do
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \
         > "$OUT/hyperbeam.stderr" 2>/dev/null || true
-    if grep -q "HandEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
+    if grep -q "AndEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
         STARTED=1
         break
     fi
@@ -110,7 +110,7 @@ urlencode() {
 }
 
 ENCODED_ZONE_NAME="$(urlencode "$ZONE_NAME")"
-INIT_PATH="/~zone@1.0/init?name=$ENCODED_ZONE_NAME&self-url=$(urlencode "http://127.0.0.1:$HOST_PORT")&template-measurement-device=handee%401.0"
+INIT_PATH="/~zone@1.0/init?name=$ENCODED_ZONE_NAME&self-url=$(urlencode "http://127.0.0.1:$HOST_PORT")&template-measurement-device=andee%401.0"
 post_json zone-init "$INIT_PATH"
 get_json zone-status "/~zone@1.0/status?name=$ENCODED_ZONE_NAME"
 
@@ -166,7 +166,7 @@ if not isinstance(volume["store-id"], str) or len(volume["store-id"]) != 43:
 if not (out / "store.bin").stat().st_size:
     fail("encrypted store file is empty")
 summary = {
-    "scenario": "android-handee-zone-encrypted-store",
+    "scenario": "android-andee-zone-encrypted-store",
     "passed": True,
     "marker": marker,
     "zone": zone,

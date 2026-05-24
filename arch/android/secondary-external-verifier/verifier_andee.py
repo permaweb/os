@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent verifier for materialized HandEE measurement evidence.
+"""Independent verifier for materialized AndEE measurement evidence.
 
 This verifier intentionally defaults to rejection. Emulator evidence can prove
 that the flow was exercised, but accepted Tier A evidence requires Android
@@ -433,10 +433,10 @@ def verify_measurement(measurement: dict[str, Any], args: argparse.Namespace) ->
 
     checks: list[dict[str, Any]] = [
         check("measurement shape", measurement.get("type") == "lapee-measurement"),
-        check("measurement-device is handee@1.0", measurement.get("measurement-device") == "handee@1.0"),
-        check("evidence shape", evidence.get("type") == "handee-android-evidence"),
-        check("evidence subject shape", subject.get("type") == "handee-evidence-subject"),
-        check("subject device matches", subject.get("measurement-device") == "handee@1.0"),
+        check("measurement-device is andee@1.0", measurement.get("measurement-device") == "andee@1.0"),
+        check("evidence shape", evidence.get("type") == "andee-android-evidence"),
+        check("evidence subject shape", subject.get("type") == "andee-evidence-subject"),
+        check("subject device matches", subject.get("measurement-device") == "andee@1.0"),
     ]
 
     if args.nonce:
@@ -634,7 +634,7 @@ def main() -> int:
     parser.add_argument("measurement", type=pathlib.Path)
     parser.add_argument("--out", type=pathlib.Path, default=None)
     parser.add_argument("--nonce")
-    parser.add_argument("--expected-package", default="org.permaweb.handee")
+    parser.add_argument("--expected-package", default="org.permaweb.andee")
     parser.add_argument(
         "--expected-signing-cert-digest",
         action="append",

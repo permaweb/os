@@ -278,9 +278,9 @@ static const char *relative_to_root(const char *root, const char *path) {
 int main(int argc, char **argv) {
     const char *root = arg_value(argc, argv, "--root");
     const char *config = arg_value(argc, argv, "--config");
-    const char *abi = getenv("HANDEE_ANDROID_ABI");
-    const char *native_env = getenv("HANDEE_NATIVE_LIB_DIR");
-    const char *crypto_socket = getenv("HANDEE_CRYPTO_SOCKET");
+    const char *abi = getenv("ANDEE_ANDROID_ABI");
+    const char *native_env = getenv("ANDEE_NATIVE_LIB_DIR");
+    const char *crypto_socket = getenv("ANDEE_CRYPTO_SOCKET");
     char *native_dir = native_env && native_env[0] != '\0'
         ? xstrdup(native_env)
         : dirname_copy(argv[0]);
@@ -294,7 +294,7 @@ int main(int argc, char **argv) {
         return 64;
     }
     if (abi == NULL || abi[0] == '\0') {
-        fprintf(stderr, "HANDEE_ANDROID_ABI is required\n");
+        fprintf(stderr, "ANDEE_ANDROID_ABI is required\n");
         return 64;
     }
 
@@ -320,7 +320,7 @@ int main(int argc, char **argv) {
     setenv("EMU", "beam", 1);
     setenv("PROGNAME", "erl", 1);
     setenv("HB_CONFIG", hb_config, 1);
-    setenv("HANDEE_RUNTIME_ROOT", root, 1);
+    setenv("ANDEE_RUNTIME_ROOT", root, 1);
     setenv("HOME", home, 1);
     setenv("ERL_LIBS", lib_dir, 1);
     set_path_env(bindir, erlang_root);
@@ -337,9 +337,9 @@ int main(int argc, char **argv) {
     args_add(&args, xstrdup("false"));
     add_ebin_dirs(&args, lib_dir);
     args_add(&args, xstrdup("-eval"));
-    args_add(&args, xstrdup("handee_bootstrap:start()."));
+    args_add(&args, xstrdup("andee_bootstrap:start()."));
 
-    fprintf(stdout, "handee-native-launcher=exec-erlexec\n");
+    fprintf(stdout, "andee-native-launcher=exec-erlexec\n");
     fprintf(stdout, "runtime-root=%s\n", root);
     fprintf(stdout, "erlang-root=%s\n", erlang_root);
     fprintf(stdout, "bindir=%s\n", bindir);

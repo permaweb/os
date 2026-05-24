@@ -9,7 +9,7 @@
         android:largeHeap="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/HandeeTheme">
+        android:theme="@style/AndeeTheme">
         <activity
             android:name=".OrnamentActivity"
             android:exported="true"
@@ -21,7 +21,7 @@
         </activity>
 
         <service
-            android:name=".HandeeService"
+            android:name=".AndeeService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
     </application>

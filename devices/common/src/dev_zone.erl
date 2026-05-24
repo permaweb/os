@@ -644,9 +644,9 @@ install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts) ->
             {ok, ActivatedOpts} -> ActivatedOpts;
             _ -> Opts1
         end,
-    maybe_install_handee_encrypted_volume(Name, RingAddress, AES, Opts, Opts2).
+    maybe_install_andee_encrypted_volume(Name, RingAddress, AES, Opts, Opts2).
 
-maybe_install_handee_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
+maybe_install_andee_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
     case encrypted_volume_supported()
             andalso encrypted_volume_requested(Name, RingAddress, RingOpts) of
         true ->
@@ -656,19 +656,19 @@ maybe_install_handee_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts)
     end.
 
 encrypted_volume_supported() ->
-    case code:ensure_loaded(hb_store_handee_encrypted) of
-        {module, hb_store_handee_encrypted} -> true;
+    case code:ensure_loaded(hb_store_andee_encrypted) of
+        {module, hb_store_andee_encrypted} -> true;
         _ -> false
     end.
 
 install_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
     Store = encrypted_store_spec(Name, RingAddress, RingOpts),
     SecretRef = hb_maps:get(<<"secret-ref">>, Store, undefined, RingOpts),
-    ok = hb_store_handee_encrypted:register_secret(SecretRef, AES),
+    ok = hb_store_andee_encrypted:register_secret(SecretRef, AES),
     try
         case encrypted_store_opened_spec(Store, OldOpts) of
             true ->
-                case hb_store_handee_encrypted:flush(Store) of
+                case hb_store_andee_encrypted:flush(Store) of
                     ok -> ok;
                     FlushExisting ->
                         encrypted_volume_failed(Name, {flush, FlushExisting})
@@ -681,7 +681,7 @@ install_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
                     {ok, _} -> ok;
                     Other -> encrypted_volume_failed(Name, {persist_root, Other})
                 end,
-                case hb_store_handee_encrypted:flush(Store) of
+                case hb_store_andee_encrypted:flush(Store) of
                     ok -> ok;
                     FlushError ->
                         encrypted_volume_failed(Name, {flush, FlushError})
@@ -693,7 +693,7 @@ install_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
         }
     catch
         Class:Reason:Stack ->
-            hb_store_handee_encrypted:forget_secret(SecretRef),
+            hb_store_andee_encrypted:forget_secret(SecretRef),
             catch hb_store:stop(Store),
             erlang:raise(Class, Reason, Stack)
     end.
@@ -730,7 +730,7 @@ encrypted_volume_requested(Name, RingAddress, Opts) ->
 encrypted_store_spec(Name, RingAddress, Opts) ->
     StoreID = encrypted_volume_id(Name, RingAddress),
     #{
-        <<"store-module">> => hb_store_handee_encrypted,
+        <<"store-module">> => hb_store_andee_encrypted,
         <<"name">> => hb_util:bin(filename:join([
             hb_util:list(encrypted_volume_root(Opts)),
             hb_util:list(<<"zone-", StoreID/binary>>)
@@ -746,8 +746,8 @@ encrypted_volume_root(Opts) ->
         Root when is_binary(Root), byte_size(Root) > 0 ->
             Root;
         _ ->
-            case os:getenv("HANDEE_ENCRYPTED_STORE_ROOT") of
-                false -> <<"build/handee-encrypted-zones">>;
+            case os:getenv("ANDEE_ENCRYPTED_STORE_ROOT") of
+                false -> <<"build/andee-encrypted-zones">>;
                 Root -> hb_util:bin(Root)
             end
     end.
@@ -756,7 +756,7 @@ encrypted_volume_id(Name, RingAddress) ->
     hb_util:encode(
         crypto:hash(
             sha256,
-            term_to_binary({handee_encrypted_volume, Name, RingAddress})
+            term_to_binary({andee_encrypted_volume, Name, RingAddress})
         )
     ).
 
@@ -822,8 +822,8 @@ remove_same_store(Stores, Store) ->
     [Existing || Existing <- Stores, not same_store(Existing, Store)].
 
 same_store(
-    #{<<"store-module">> := hb_store_handee_encrypted, <<"name">> := Name},
-    #{<<"store-module">> := hb_store_handee_encrypted, <<"name">> := Name}
+    #{<<"store-module">> := hb_store_andee_encrypted, <<"name">> := Name},
+    #{<<"store-module">> := hb_store_andee_encrypted, <<"name">> := Name}
 ) ->
     true;
 same_store(_, _) ->
@@ -2039,23 +2039,23 @@ zone_allow_policy_test() ->
 alternative_templates_match_first_viable_test() ->
     Measurement = #{
         <<"type">> => <<"lapee-measurement">>,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"body">> => #{
             <<"node">> => #{<<"initialized">> => <<"permanent">>}
         }
     },
-    HandeeTemplate = #{<<"measurement-device">> => <<"handee@1.0">>},
+    AndeeTemplate = #{<<"measurement-device">> => <<"andee@1.0">>},
     {_Template, Candidate} =
         matching_template(
             [
                 #{<<"measurement-device">> => <<"snp@1.0">>},
-                HandeeTemplate
+                AndeeTemplate
             ],
             Measurement,
             <<"test">>,
             #{}
         ),
-    ?assertEqual(<<"handee@1.0">>,
+    ?assertEqual(<<"andee@1.0">>,
                  hb_maps:get(<<"measurement-device">>, Candidate, undefined, #{})).
 
 -endif.

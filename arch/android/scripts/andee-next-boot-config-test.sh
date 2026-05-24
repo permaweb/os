@@ -2,14 +2,14 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$BUILD_DIR/handee-next-boot-config"
+OUT="$BUILD_DIR/andee-next-boot-config"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 HOST_PORT="${HOST_PORT:-28736}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-240}"
-PACKAGE="org.permaweb.handee"
+PACKAGE="org.permaweb.andee"
 RESET_APP_DATA="${RESET_APP_DATA:-0}"
-REMOTE_CONFIG="/data/local/tmp/handee-next-boot-config.json"
-MARKER="handee-next-boot-config-$(date +%Y%m%d%H%M%S)"
+REMOTE_CONFIG="/data/local/tmp/andee-next-boot-config.json"
+MARKER="andee-next-boot-config-$(date +%Y%m%d%H%M%S)"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -21,9 +21,9 @@ fi
 
 cat > "$OUT/next-boot-config.json" <<JSON
 {
-  "public-url": "https://handee-next-boot.example/$MARKER",
-  "handee-test-marker": "$MARKER",
-  "measurement-device": "not-handee@1.0",
+  "public-url": "https://andee-next-boot.example/$MARKER",
+  "andee-test-marker": "$MARKER",
+  "measurement-device": "not-andee@1.0",
   "load-remote-devices": true,
   "store": [
     {
@@ -39,7 +39,7 @@ JSON
 
 adb shell "run-as $PACKAGE sh -c 'kill \$(pidof beam.smp 2>/dev/null) 2>/dev/null || true; \
     kill \$(pidof erlexec 2>/dev/null) 2>/dev/null || true; \
-    kill \$(pidof libhandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
+    kill \$(pidof libandee_hyperbeam.so 2>/dev/null) 2>/dev/null || true'" \
     >/dev/null 2>&1 || true
 adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
 if [ "$RESET_APP_DATA" = "1" ]; then
@@ -67,7 +67,7 @@ for _ in $(seq 1 45); do
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \
         > "$OUT/hyperbeam.stderr" 2>/dev/null || true
-    if grep -q "HandEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
+    if grep -q "AndEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
         STARTED=1
         break
     fi
@@ -140,10 +140,10 @@ if (out / "meta.status").read_text().strip() != "200":
     fail("~meta@1.0/info did not return HTTP 200")
 if (out / "boot.status").read_text().strip() != "200":
     fail("~measurement@1.0/boot did not return HTTP 200")
-if effective.get("handee-test-marker") != marker:
+if effective.get("andee-test-marker") != marker:
     fail("effective config did not include selected next-boot marker")
-if effective.get("measurement-device") != "handee@1.0":
-    fail("effective config did not enforce handee measurement device")
+if effective.get("measurement-device") != "andee@1.0":
+    fail("effective config did not enforce andee measurement device")
 if effective.get("load-remote-devices") is not True:
     fail("effective config did not preserve selected load-remote-devices=true")
 if not isinstance(store, list) or not store:
@@ -159,21 +159,21 @@ if not (
     and first_hook.get("method") == "POST"
 ):
     fail("effective config did not preserve measurement boot hook first")
-if config.get("handee-test-marker") != marker:
+if config.get("andee-test-marker") != marker:
     fail("attested node subject config did not include selected marker")
-if config.get("measurement-device") != "handee@1.0":
-    fail("attested node subject config did not enforce handee measurement device")
+if config.get("measurement-device") != "andee@1.0":
+    fail("attested node subject config did not enforce andee measurement device")
 if config.get("load-remote-devices") not in (True, "true"):
     fail("attested node subject config did not preserve load-remote-devices=true")
 
 verdict = {
-    "scenario": "handee-next-boot-config",
+    "scenario": "andee-next-boot-config",
     "passed": True,
     "marker": marker,
     "meta_status": "200",
     "boot_status": "200",
     "effective_config": "effective.json",
-    "attested_marker": config.get("handee-test-marker"),
+    "attested_marker": config.get("andee-test-marker"),
 }
 (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
 PY
@@ -192,7 +192,7 @@ adb shell input tap "$TAP_X" "$TAP_Y"
 TERMINATED=0
 for _ in $(seq 1 30); do
     adb shell ps -A > "$OUT/post-terminate-ps.txt"
-    if ! grep -Eq "($PACKAGE|beam\\.smp|erlexec|libhandee_hyperbeam\\.so)" \
+    if ! grep -Eq "($PACKAGE|beam\\.smp|erlexec|libandee_hyperbeam\\.so)" \
         "$OUT/post-terminate-ps.txt"; then
         TERMINATED=1
         break
@@ -200,11 +200,11 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 if [ "$TERMINATED" != "1" ]; then
-    echo "HandEE app or BEAM runtime still running after TERMINATE button tap" >&2
+    echo "AndEE app or BEAM runtime still running after TERMINATE button tap" >&2
     exit 1
 fi
 adb shell dumpsys activity activities > "$OUT/post-terminate-activities.txt"
-if grep -q 'topResumedActivity=.*org.permaweb.handee/.OrnamentActivity' \
+if grep -q 'topResumedActivity=.*org.permaweb.andee/.OrnamentActivity' \
     "$OUT/post-terminate-activities.txt"; then
     echo "OrnamentActivity still resumed after TERMINATE button tap" >&2
     exit 1

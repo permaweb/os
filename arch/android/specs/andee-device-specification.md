@@ -1,39 +1,42 @@
-# HandEE Device Interface Specification
+# AndEE Device Interface Specification
 
-Status: implementation specification for the PermawebOS HandEE architecture.
+Status: implementation specification for the PermawebOS AndEE architecture.
 
-Audience: verifier authors, third-party HandEE implementers, and agents adding
+Audience: verifier authors, third-party AndEE implementers, and agents adding
 tests or peer interoperability. This document specifies the public AO-Core
-interfaces implemented by HandEE-specific HyperBEAM devices and the exact
+interfaces implemented by AndEE-specific HyperBEAM devices and the exact
 message bindings that external verifiers must check.
 
 ## 1. Scope
 
-HandEE keeps PermawebOS's public measurement and zone contracts while using
+AndEE keeps PermawebOS's public measurement and zone contracts while using
 Android Keystore/StrongBox evidence as one measurement backend.
 
-The HandEE measurement backend is `~handee@1.0`. It is packaged with the
-shared PermawebOS devices so every architecture can verify HandEE peers. Local
+The AndEE measurement backend is `~andee@1.0`. It is packaged with the
+shared PermawebOS devices so every architecture can verify AndEE peers. Local
 measurement generation requires Android; peer verification is pure BEAM.
+The public architecture name is AndEE; existing wire identifiers, package
+names, and module names still use `andee` where that is the implemented
+AO-Core or Android API.
 
-- `~measurement@1.0`: inherited public attestation envelope, fresh nonce flow,
-  peer verification, and secret activation entry point. In HandEE it selects
-  `handee@1.0` as the only backend.
-- `~handee@1.0`: Android Keystore/StrongBox measurement backend and
+- `~measurement@1.0`: inherited public measurement envelope, fresh nonce flow,
+  peer verification, and secret activation entry point. In AndEE it selects
+  `andee@1.0` as the only backend.
+- `~andee@1.0`: Android Keystore/StrongBox measurement backend and
   secret-recipient implementation. `subject`, `measure`, and `unwrap-secret`
   require the app-private Android crypto agent; `verify` and `wrap-secret`
   are portable.
 - `~system@1.0`: inherited system-report slot, reduced to Android/app/runtime
   facts inserted into the measured subject.
-- `~meta@1.0`: inherited HyperBEAM meta device. HandEE replaces only `info`
+- `~meta@1.0`: inherited HyperBEAM meta device. AndEE replaces only `info`
   with a narrow public node-info facade and delegates the rest.
 - `~zone@1.0`: inherited measurement-backed shared identity admission, adapted
-  to HandEE peer HTTP and volatile Android runtime state.
+  to AndEE peer HTTP and volatile Android runtime state.
 
 `~hyperbuddy@1.0` is included in the runtime as an unchanged formatter device.
 It is not a security boundary and is not part of the attestation protocol.
 
-In the current Android package, `handee_bootstrap` explicitly binds these names
+In the current Android package, `andee_bootstrap` explicitly binds these names
 to local modules because the runtime is a stripped, self-contained HyperBEAM
 release. That bootstrap binding MUST NOT be read as a claim that
 `~measurement@1.0`, `~system@1.0`, or `~zone@1.0` are new public protocols.
@@ -42,7 +45,7 @@ release. That bootstrap binding MUST NOT be read as a claim that
 
 ### 2.1 AO-Core Messages
 
-Every public HandEE value at the HyperBEAM boundary is an AO-Core structured
+Every public AndEE value at the HyperBEAM boundary is an AO-Core structured
 message. Implementations MUST NOT replace these messages with an ad hoc JSON
 protocol. JSON may be used by HTTP clients or by the app-private Android bridge
 only as a transport encoding of the AO-Core message tree.
@@ -65,7 +68,7 @@ Fields that use base64url include nonces, X.509 DER certificates, ECDSA
 signatures, X25519 public keys, AES-GCM inputs/outputs, SHA-256 digests, and
 AO-Core human IDs.
 
-The only hex field in the current HandEE public evidence is
+The only hex field in the current AndEE public evidence is
 `policy-snapshot.release-digest`, which is the Android app's local hex
 SHA-256 digest over the release signing certificate bytes in APK signer order.
 
@@ -78,11 +81,11 @@ using JSON as a transport.
 
 ### 2.4 Links And Materialization
 
-HandEE responses may contain AO-Core links such as `body+link`,
+AndEE responses may contain AO-Core links such as `body+link`,
 `evidence+link`, or nested linked commitments. A verifier that receives linked
 messages MUST materialize the linked values before applying this specification.
 
-For peer HTTP calls, HandEE requests HyperBEAM HTTPSig responses with:
+For peer HTTP calls, AndEE requests HyperBEAM HTTPSig responses with:
 
 ```json
 {
@@ -121,9 +124,9 @@ For non-map values, `stable-id(Value)` is:
 
 Conformant verifiers MUST use the AO-Core ID rule for the following fields:
 
-- `handee-evidence-subject.body-id`;
-- `handee-evidence-subject.secret-recipient-id`;
-- `handee-android-evidence.evidence-subject-id`;
+- `andee-evidence-subject.body-id`;
+- `andee-evidence-subject.secret-recipient-id`;
+- `andee-android-evidence.evidence-subject-id`;
 - `lapee-secret-recipient.binding.binding-id`;
 - `lapee-wrapped-secret.subject-id`;
 - `zone-peer-attestation.peer-scope.*-attestation-id`;
@@ -134,16 +137,16 @@ Using `SHA-256(canonical JSON)` for these fields is non-conformant.
 
 ## 3. Runtime Configuration Invariants
 
-A production HandEE node MUST enforce at least:
+A production AndEE node MUST enforce at least:
 
 ```json
 {
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "load-remote-devices": false,
   "store": [
     {
       "store-module": "hb_store_volatile",
-      "name": "handee-volatile"
+      "name": "andee-volatile"
     }
   ],
   "on": {
@@ -161,13 +164,13 @@ A production HandEE node MUST enforce at least:
 ```
 
 Operator configuration MAY shape public node metadata. It MUST NOT disable the
-HandEE measurement device, enable remote devices, bypass the `on.start` boot
+AndEE measurement device, enable remote devices, bypass the `on.start` boot
 measurement hook, persist the v1 node key, or replace the volatile default
 store as the measured default.
 
-## 4. `~meta@1.0` HandEE Public Node Facade
+## 4. `~meta@1.0` AndEE Public Node Facade
 
-HandEE overrides `~meta@1.0/info` and delegates other meta operations to the
+AndEE overrides `~meta@1.0/info` and delegates other meta operations to the
 upstream HyperBEAM meta device.
 
 ### 4.1 `GET /~meta@1.0/info`
@@ -176,24 +179,24 @@ Returns status `200` and the following body:
 
 ```json
 {
-  "type": "handee-node-info",
+  "type": "andee-node-info",
   "version": "1.0",
   "address": "<node wallet address>",
   "http-server": "<server description or empty>",
-  "handee-node-message-id": "<AO-Core node subject ID>",
+  "andee-node-message-id": "<AO-Core node subject ID>",
   "node-subject": {
-    "device": "handee@1.0",
-    "measurement-device": "handee@1.0",
+    "device": "andee@1.0",
+    "measurement-device": "andee@1.0",
     "method": "android-keystore-attestation",
     "node-address": "<node wallet address>",
     "node-key-scope": "ephemeral-memory",
     "config": {}
   },
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "load-remote-devices": false,
   "store": [
     {
-      "name": "handee-volatile",
+      "name": "andee-volatile",
       "store-module": "hb_store_volatile"
     }
   ],
@@ -208,9 +211,9 @@ Returns status `200` and the following body:
 
 Required semantics:
 
-- `type` MUST be `handee-node-info`.
+- `type` MUST be `andee-node-info`.
 - `version` MUST be `1.0`.
-- `measurement-device` MUST be `handee@1.0`.
+- `measurement-device` MUST be `andee@1.0`.
 - `load-remote-devices` MUST be `false` for accepted production evidence.
 - `runtime.environment` MUST be `android-app-uid`.
 - `runtime.node-key-scope` MUST be `ephemeral-memory`.
@@ -223,7 +226,7 @@ The node facade is one half of the measured body used by `~measurement@1.0`.
 ## 5. `~system@1.0`
 
 `~system@1.0` contributes Android/app/runtime facts to the measurement body.
-Hardware-rooted acceptance lives in `~handee@1.0` evidence, not here.
+Hardware-rooted acceptance lives in `~andee@1.0` evidence, not here.
 
 ### 5.1 `GET /~system@1.0/info`
 
@@ -233,7 +236,7 @@ Returns status `200`:
 {
   "version": "1.0",
   "platform": "android",
-  "measurement-device": "handee@1.0"
+  "measurement-device": "andee@1.0"
 }
 ```
 
@@ -243,7 +246,7 @@ Returns status `200`:
 
 ```json
 {
-  "schema": "handee-system-report@1",
+  "schema": "andee-system-report@1",
   "generated-at-unix": 0,
   "platform": "android",
   "runtime": {
@@ -257,7 +260,7 @@ Returns status `200`:
     "config-source": "app-private"
   },
   "app": {
-    "package-name": "org.permaweb.handee",
+    "package-name": "org.permaweb.andee",
     "version-name": "<version name or unknown>",
     "version-code": "<version code or unknown>",
     "release-digest": "<hex sha256 signer aggregate or unknown>"
@@ -274,21 +277,21 @@ Returns status `200`:
 
 Required semantics:
 
-- `schema` MUST be `handee-system-report@1`.
+- `schema` MUST be `andee-system-report@1`.
 - `platform` MUST be `android`.
 - `runtime.store.default-module` MUST be `hb_store_volatile`.
 - `runtime.store.persistence` MUST be `volatile`.
 - `runtime.app-uid-isolation` MUST be true.
-- `app.package-name` MUST be `org.permaweb.handee` for the release app.
+- `app.package-name` MUST be `org.permaweb.andee` for the release app.
 
 This report is descriptive. Verifiers MUST use the Android evidence policy
 snapshot for acceptance.
 
 ## 6. `~measurement@1.0`
 
-`~measurement@1.0` is the public attestation interface. In HandEE it selects
-`handee@1.0` as the only supported backend and wraps backend evidence in the
-LapEE-compatible measurement envelope.
+`~measurement@1.0` is the public measurement interface. In AndEE it selects
+`andee@1.0` as the only supported backend and wraps backend evidence in the
+PermawebOS-compatible measurement envelope.
 
 ### 6.1 Exports
 
@@ -312,11 +315,11 @@ Returns status `200`:
 ```json
 {
   "version": "1.0",
-  "selected-measurement-device": "handee@1.0",
+  "selected-measurement-device": "andee@1.0",
   "selection-reason": "configured",
   "available-candidates": [
     {
-      "device": "handee@1.0",
+      "device": "andee@1.0",
       "supported": true
     }
   ]
@@ -325,7 +328,7 @@ Returns status `200`:
 
 `selection-reason` is:
 
-- `configured` when node config sets `measurement-device = "handee@1.0"`;
+- `configured` when node config sets `measurement-device = "andee@1.0"`;
 - `auto` when the device was selected from defaults;
 - an error detail if no device is available.
 
@@ -342,7 +345,7 @@ current HyperBEAM VM:
 ```
 
 The body is cached in VM memory after first construction. `body-id` fields in
-HandEE evidence MUST equal `stable-id(body)`.
+AndEE evidence MUST equal `stable-id(body)`.
 
 ### 6.4 Measurement Envelope
 
@@ -354,7 +357,7 @@ shape:
   "type": "lapee-measurement",
   "version": "1.0",
   "issued-at-unix": 0,
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "body": {},
   "evidence": {},
   "secret-recipient": {}
@@ -365,9 +368,9 @@ Required semantics:
 
 - `type` MUST be `lapee-measurement`.
 - `version` MUST be `1.0`.
-- `measurement-device` MUST be `handee@1.0`.
+- `measurement-device` MUST be `andee@1.0`.
 - `body` MUST be the measured body from section 6.3.
-- `evidence` MUST be a `handee-android-evidence` message from section 7.6.
+- `evidence` MUST be a `andee-android-evidence` message from section 7.6.
 - `secret-recipient` MUST be a `lapee-secret-recipient` message from section
   7.5.
 - The envelope SHOULD be AO-Core committed by the node's current commitment
@@ -446,7 +449,7 @@ Response body:
   "verdict": "accepted",
   "checks": [
     {
-      "name": "measurement device is handee@1.0",
+      "name": "measurement device is andee@1.0",
       "ok": true,
       "severity": "core"
     }
@@ -462,7 +465,7 @@ Required semantics:
 
 ### 6.8 `POST /~measurement@1.0/verify-peer`
 
-Performs online verification of another HandEE peer and returns a
+Performs online verification of another AndEE peer and returns a
 `zone-peer-attestation`.
 
 Request fields:
@@ -502,7 +505,7 @@ Response body shape:
   "type": "zone-peer-attestation",
   "version": "1.0",
   "issued-at-unix": 0,
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "secret-method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "validity": {
     "not-before-unix": 0,
@@ -511,7 +514,7 @@ Response body shape:
   "peer-url": "http://host:8734",
   "peer-scope": {
     "peer-url": "http://host:8734",
-    "measurement-device": "handee@1.0",
+    "measurement-device": "andee@1.0",
     "boot-attestation-id": "<AO-Core ID>",
     "fresh-attestation-id": "<AO-Core ID>",
     "secret-recipient-id": "<AO-Core ID>",
@@ -565,14 +568,14 @@ Accepted request shapes:
 Behavior:
 
 - Selects the backend from `credential.measurement-device`.
-- Delegates to `~handee@1.0/unwrap-secret`.
+- Delegates to `~andee@1.0/unwrap-secret`.
 - Returns a committed `lapee-secret-activation` message from section 7.12.
 
-## 7. `~handee@1.0`
+## 7. `~andee@1.0`
 
-`~handee@1.0` is the only measurement backend in HandEE. It constructs Android
+`~andee@1.0` is the only measurement backend in AndEE. It constructs Android
 Keystore evidence, owns the boot/session-local X25519 recipient key, and
-implements LapEE-compatible secret wrapping.
+implements PermawebOS-compatible secret wrapping.
 
 ### 7.1 Exports
 
@@ -590,22 +593,22 @@ The device exports:
 
 ```text
 version = "1.0"
-measurement-device = "handee@1.0"
+measurement-device = "andee@1.0"
 method = "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm"
-evidence-context = "handee-android-evidence-v1"
+evidence-context = "andee-android-evidence-v1"
 default evidence ttl = none; freshness is nonce-bound through `/fresh`
-default Android agent socket = "org.permaweb.handee.crypto"
+default Android agent socket = "org.permaweb.andee.crypto"
 default Android agent timeout = 5000 ms
 ```
 
-### 7.3 `GET /~handee@1.0/info`
+### 7.3 `GET /~andee@1.0/info`
 
 Returns status `200`:
 
 ```json
 {
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "supported": true,
   "policy-accepted": true
@@ -613,19 +616,19 @@ Returns status `200`:
 ```
 
 `supported` is true iff the local Android crypto agent is reachable. This keeps
-non-Android nodes from selecting HandEE for local measurement generation while
-still allowing them to verify HandEE peers. `policy-accepted` is read from the
+non-Android nodes from selecting AndEE for local measurement generation while
+still allowing them to verify AndEE peers. `policy-accepted` is read from the
 agent's `policy-status` action and is evidence only.
 
-### 7.4 `GET|POST /~handee@1.0/supported`
+### 7.4 `GET|POST /~andee@1.0/supported`
 
 Returns the bare AO-Core boolean value `true` only when the local Android
 crypto agent is reachable. It is not wrapped in a `status/body` response by the
 Erlang backend. `~measurement@1.0/info` uses this export to decide whether
-`handee@1.0` is an available local measurement candidate. Non-Android nodes
-normally return `false` here but can still call `~handee@1.0/verify`.
+`andee@1.0` is an available local measurement candidate. Non-Android nodes
+normally return `false` here but can still call `~andee@1.0/verify`.
 
-### 7.5 `POST /~handee@1.0/subject`
+### 7.5 `POST /~andee@1.0/subject`
 
 Constructs the local secret-recipient subject for a measurement body.
 
@@ -634,8 +637,8 @@ Request fields:
 - `body`: optional AO-Core measured body. Defaults to `{}`.
 
 The device keeps one X25519 recipient keypair in VM memory at
-`persistent_term {dev_handee, x25519_keypair}`. It is generated on first use
-with `crypto:generate_key(ecdh, x25519)`. It is never persisted by HandEE v1.
+`persistent_term {dev_andee, x25519_keypair}`. It is generated on first use
+with `crypto:generate_key(ecdh, x25519)`. It is never persisted by AndEE v1.
 
 Response body:
 
@@ -643,22 +646,22 @@ Response body:
 {
   "type": "lapee-secret-recipient",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "key-id": "<base64url sha256 x25519 public key>",
   "public-material": {
     "x25519-public-key": "<base64url raw 32-byte x25519 public key>"
   },
   "binding": {
-    "evidence-context": "handee-android-evidence-v1",
+    "evidence-context": "andee-android-evidence-v1",
     "body-id": "<stable-id(body)>",
-    "measurement-device": "handee@1.0",
+    "measurement-device": "andee@1.0",
     "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
     "node-binding": {
       "node-address": "<HyperBEAM node address or unknown>",
-      "node-message-id": "<HandEE node message ID or unknown>",
+      "node-message-id": "<AndEE node message ID or unknown>",
       "node-key-scope": "ephemeral-memory",
-      "measurement-device": "handee@1.0"
+      "measurement-device": "andee@1.0"
     },
     "binding-id": "<stable-id(binding without binding-id)>"
   }
@@ -673,9 +676,9 @@ Required semantics:
 - `key-id` MUST equal base64url(SHA-256(raw X25519 public key)).
 - `node-binding.node-key-scope` MUST be `ephemeral-memory`.
 
-### 7.6 `POST /~handee@1.0/measure`
+### 7.6 `POST /~andee@1.0/measure`
 
-Constructs HandEE Android evidence for a measurement body.
+Constructs AndEE Android evidence for a measurement body.
 
 Request fields:
 
@@ -689,10 +692,10 @@ The backend first builds an evidence subject:
 
 ```json
 {
-  "type": "handee-evidence-subject",
+  "type": "andee-evidence-subject",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
-  "context": "handee-android-evidence-v1",
+  "measurement-device": "andee@1.0",
+  "context": "andee-android-evidence-v1",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "purpose": "boot",
   "nonce": "<base64url nonce bytes>",
@@ -701,9 +704,9 @@ The backend first builds an evidence subject:
   "secret-recipient-id": "<stable-id(secret-recipient)>",
   "node-binding": {
     "node-address": "<HyperBEAM node address or unknown>",
-    "node-message-id": "<HandEE node message ID or unknown>",
+    "node-message-id": "<AndEE node message ID or unknown>",
     "node-key-scope": "ephemeral-memory",
-    "measurement-device": "handee@1.0"
+    "measurement-device": "andee@1.0"
   }
 }
 ```
@@ -722,9 +725,9 @@ Response body on successful agent response:
 
 ```json
 {
-  "type": "handee-android-evidence",
+  "type": "andee-android-evidence",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "evidence-subject": {},
   "evidence-subject-id": "<stable-id(evidence-subject)>",
@@ -733,7 +736,7 @@ Response body on successful agent response:
     "1": "<base64url DER issuer cert>"
   },
   "keystore-signature": "<base64url ECDSA signature>",
-  "attestation-challenge-subject": "{\"type\":\"handee-android-enrollment-subject\",...}",
+  "attestation-challenge-subject": "{\"type\":\"andee-android-enrollment-subject\",...}",
   "node-key-binding": {},
   "policy-snapshot": {},
   "key-security-level": "STRONGBOX",
@@ -760,9 +763,9 @@ If the agent is unavailable or policy signing fails, the backend returns status
 
 ```json
 {
-  "type": "handee-android-evidence",
+  "type": "andee-android-evidence",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "evidence-subject": {},
   "evidence-subject-id": "<stable-id(evidence-subject)>",
@@ -787,8 +790,8 @@ so third-party Android implementations can match the backend behavior.
 Transport:
 
 - Android filesystem namespace Unix-domain socket.
-- Default socket path/name: `org.permaweb.handee.crypto`, overridden by
-  `handee-agent-socket` or `HANDEE_CRYPTO_SOCKET`.
+- Default socket path/name: `org.permaweb.andee.crypto`, overridden by
+  `andee-agent-socket` or `ANDEE_CRYPTO_SOCKET`.
 - Framing: 4-byte big-endian length prefix followed by UTF-8 JSON.
 - Maximum frame accepted by Android: 1 MiB.
 
@@ -796,7 +799,7 @@ Request:
 
 ```json
 {
-  "type": "handee-agent-request",
+  "type": "andee-agent-request",
   "version": "1.0",
   "action": "sign-evidence",
   "payload": {}
@@ -827,7 +830,7 @@ Actions:
 The Android agent uses:
 
 ```text
-Android Keystore alias = handee_android_attestation_v1
+Android Keystore alias = andee_android_attestation_v1
 key algorithm = EC secp256r1 / P-256
 key purposes = SIGN | VERIFY
 signature algorithm = SHA256withECDSA
@@ -847,11 +850,11 @@ Enrollment challenge subject JSON string:
 
 ```json
 {
-  "type": "handee-android-enrollment-subject",
+  "type": "andee-android-enrollment-subject",
   "version": "1.0",
-  "package-name": "org.permaweb.handee",
+  "package-name": "org.permaweb.andee",
   "release-digest": "<hex sha256 signer aggregate>",
-  "measurement-device": "handee@1.0"
+  "measurement-device": "andee@1.0"
 }
 ```
 
@@ -866,7 +869,7 @@ The policy snapshot body contains:
 {
   "accepted": true,
   "local-policy-accepted": true,
-  "package-name": "org.permaweb.handee",
+  "package-name": "org.permaweb.andee",
   "version-name": "<BuildConfig.VERSION_NAME>",
   "version-code": 1,
   "release-digest": "<hex sha256 signer aggregate>",
@@ -934,9 +937,9 @@ The agent's `accepted` field is:
 local-policy-accepted AND android-attestation.accepted
 ```
 
-### 7.9 `POST /~handee@1.0/verify`
+### 7.9 `POST /~andee@1.0/verify`
 
-Verifies a HandEE measurement envelope.
+Verifies an AndEE measurement envelope.
 
 Request fields:
 
@@ -945,7 +948,7 @@ Request fields:
 
 Core checks performed by the backend:
 
-1. Measurement envelope has `measurement-device = "handee@1.0"`.
+1. Measurement envelope has `measurement-device = "andee@1.0"`.
 2. If request `nonce` exists, it matches
    `evidence.evidence-subject.nonce` after base64url normalization.
 3. `evidence.evidence-subject.body-id == stable-id(measurement.body)` or the
@@ -971,7 +974,7 @@ Response:
   "verdict": "accepted",
   "checks": [
     {
-      "name": "measurement device is handee@1.0",
+      "name": "measurement device is andee@1.0",
       "ok": true,
       "severity": "core"
     },
@@ -997,23 +1000,23 @@ Response:
 ### 7.10 External Verifier Algorithm
 
 An independent verifier MUST apply at least these provenance checks before
-reporting cryptographically verified HandEE evidence:
+reporting cryptographically verified AndEE evidence:
 
 1. Materialize all AO-Core links used by the measurement envelope.
 2. Require envelope:
    - `type = "lapee-measurement"`;
    - `version = "1.0"`;
-   - `measurement-device = "handee@1.0"`;
+   - `measurement-device = "andee@1.0"`;
    - map `body`, `evidence`, and `secret-recipient`.
 3. Require evidence:
-   - `type = "handee-android-evidence"`;
+   - `type = "andee-android-evidence"`;
    - `version = "1.0"`;
-   - `measurement-device = "handee@1.0"`;
+   - `measurement-device = "andee@1.0"`;
    - method equal to the constant in section 7.2.
 4. Require evidence subject:
-   - `type = "handee-evidence-subject"`;
-   - `measurement-device = "handee@1.0"`;
-   - `context = "handee-android-evidence-v1"`;
+   - `type = "andee-evidence-subject"`;
+   - `measurement-device = "andee@1.0"`;
+   - `context = "andee-android-evidence-v1"`;
    - same method as evidence.
 5. Recompute `stable-id(measurement.body)`, or use the verified AO-Core ID
    carried by a materialized bundled body, and compare it to
@@ -1024,7 +1027,7 @@ reporting cryptographically verified HandEE evidence:
    `evidence.evidence-subject-id`.
 8. If verifying `/fresh`, compare verifier nonce to
    `evidence-subject.nonce`.
-9. Do not reject otherwise valid HandEE evidence based on local wall-clock age.
+9. Do not reject otherwise valid AndEE evidence based on local wall-clock age.
    `/boot` is a stable attestation of the app/HB environment that produced it;
    `/fresh` provides nonce-bound liveness when a verifier needs a current
    challenge response.
@@ -1040,7 +1043,7 @@ reporting cryptographically verified HandEE evidence:
     them as facts; do not collapse them into a universal pass/fail policy.
 16. Verify `evidence.keystore-signature` over
     `UTF-8(evidence.evidence-subject-id)` with the leaf certificate public key
-    using ECDSA P-256/SHA-256 for current HandEE.
+    using ECDSA P-256/SHA-256 for current AndEE.
 
 Zone templates or external callers decide whether parsed facts such as
 `keymint-security-level`, `device-locked`, `verified-boot-state`,
@@ -1049,7 +1052,7 @@ digest, and patch levels are acceptable for their deployment. `policy-snapshot`
 and `evidence.accepted` are useful signed-node evidence, but they are not the
 root of cryptographic verification.
 
-### 7.11 `POST /~handee@1.0/wrap-secret`
+### 7.11 `POST /~andee@1.0/wrap-secret`
 
 Backend export for wrapping a secret to a `lapee-secret-recipient`.
 
@@ -1066,7 +1069,7 @@ Algorithm:
 4. Generate 32-byte random salt.
 5. Generate 12-byte random IV.
 6. Compute `subject-id = stable-id(subject)`.
-7. Set `info = "handee-wrap-secret-v1:" || subject-id`.
+7. Set `info = "andee-wrap-secret-v1:" || subject-id`.
 8. Run HKDF-SHA256:
    - extract: `PRK = HMAC-SHA256(salt, shared-secret)`;
    - expand: RFC 5869 style blocks `T(n) = HMAC(PRK, T(n-1) || info || n)`;
@@ -1081,7 +1084,7 @@ Response body:
 {
   "type": "lapee-wrapped-secret",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "subject-id": "<stable-id(subject)>",
   "ephemeral-public-key": "<base64url raw x25519 public key>",
@@ -1092,7 +1095,7 @@ Response body:
 }
 ```
 
-### 7.12 `POST /~handee@1.0/unwrap-secret`
+### 7.12 `POST /~andee@1.0/unwrap-secret`
 
 Unwraps a `lapee-wrapped-secret` using the local VM-memory X25519 recipient key
 and returns an activation proof.
@@ -1112,7 +1115,7 @@ Activation response body before AO-Core commitment:
 {
   "type": "lapee-secret-activation",
   "version": "1.0",
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
   "issued-at-unix": 0,
   "credential-secret-sha256": "<base64url sha256 unwrapped secret>",
@@ -1132,7 +1135,7 @@ where `activation-context` is the exact UTF-8 byte string:
 
 ```text
 lapee-secret-activation-v1
-measurement-device:handee@1.0
+measurement-device:andee@1.0
 method:android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm
 issued-at-unix:<decimal issued-at-unix>
 credential-id:<stable-id(credential)>
@@ -1143,7 +1146,7 @@ There is a newline after every line except the last line.
 ## 8. `~zone@1.0`
 
 `~zone@1.0` forms shared identities whose admission is gated by live
-measurement verification and the HandEE secret-recipient flow.
+measurement verification and the AndEE secret-recipient flow.
 
 ### 8.1 Exports
 
@@ -1547,13 +1550,13 @@ Accepted values:
 
 Activation:
 
-1. Compute `store-id = base64url(SHA-256(term_to_binary({handee_encrypted_volume, name, ring_address})))`.
+1. Compute `store-id = base64url(SHA-256(term_to_binary({andee_encrypted_volume, name, ring_address})))`.
 2. Register the 32-byte zone AES secret in process memory under `store-id`.
 3. Construct a store message:
 
 ```json
 {
-  "store-module": "hb_store_handee_encrypted",
+  "store-module": "hb_store_andee_encrypted",
   "name": "<private encrypted volume directory>",
   "zone": "<zone name>",
   "ring-address": "<zone wallet address>",
@@ -1572,13 +1575,13 @@ Activation:
 The store message MUST NOT contain the AES secret. Implementations MUST treat
 `secret-ref` as an in-memory lookup key, not as key material.
 
-`hb_store_handee_encrypted` holds live state in ETS and persists one
+`hb_store_andee_encrypted` holds live state in ETS and persists one
 `store.bin` append-only log under the private volume directory. It MUST expose
 the normal `hb_store` callbacks without requiring callers to use any
-HandEE-specific read/write API. `write`, `group`, `link`, and `reset` MUST
+AndEE-specific read/write API. `write`, `group`, `link`, and `reset` MUST
 update the live ETS state before returning, enqueue exactly one logical
 operation record, and MUST NOT rewrite the full store image as part of the
-normal operation path. `stop` and the explicit `hb_store_handee_encrypted:flush`
+normal operation path. `stop` and the explicit `hb_store_andee_encrypted:flush`
 helper MUST flush pending records before returning.
 
 The log is a byte stream of frames:
@@ -1592,7 +1595,7 @@ decrypt one encrypted operation payload:
 
 ```erlang
 #{
-  <<"magic">> => <<"handee-encrypted-store-log-v1">>,
+  <<"magic">> => <<"andee-encrypted-store-log-v1">>,
   <<"version">> => 1,
   <<"seq">> => Seq,
   <<"iv">> => IV,
@@ -1632,7 +1635,7 @@ Flush behavior:
 - `flush-interval-ms = 0`: enqueue an immediate owner-process flush message;
 - `sync-on-flush = true`: call `file:sync/1` after a successful append batch;
 - normal `hb_store` writes remain live immediately through ETS and do not block
-  on disk unless a caller explicitly invokes the HandEE flush helper.
+  on disk unless a caller explicitly invokes the AndEE flush helper.
 
 Android runtime root:
 
@@ -1657,8 +1660,8 @@ Device errors are AO-Core response bodies. Common errors:
 | `~measurement@1.0/fresh` | 500 | `measurement-fresh-failed` |
 | `~measurement@1.0/verify-peer` | 400 | `missing-peer-url` |
 | `~measurement@1.0/verify-peer` | 502 | `measurement-verify-peer-failed` |
-| `~handee@1.0/measure` | 500 | `handee-measure-failed` |
-| `~handee@1.0/unwrap-secret` | 500 | `handee-unwrap-secret-failed` |
+| `~andee@1.0/measure` | 500 | `andee-measure-failed` |
+| `~andee@1.0/unwrap-secret` | 500 | `andee-unwrap-secret-failed` |
 | `~zone@1.0/*` expected user/protocol error | 400 | specific zone error |
 | `~zone@1.0/*` unexpected failure | 500 | `zone-failed` |
 
@@ -1693,17 +1696,17 @@ Zone-specific `error` values include:
 Fetch boot evidence:
 
 ```sh
-curl -sS 'http://HANDEE_HOST:8734/~measurement@1.0/boot'
+curl -sS 'http://ANDEE_HOST:8734/~measurement@1.0/boot'
 ```
 
 Fetch nonce-bound fresh evidence:
 
 ```sh
 NONCE="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-curl -sS "http://HANDEE_HOST:8734/~measurement@1.0/fresh?nonce=$NONCE"
+curl -sS "http://ANDEE_HOST:8734/~measurement@1.0/fresh?nonce=$NONCE"
 ```
 
-Verify a peer from another HandEE:
+Verify a peer from another AndEE:
 
 ```sh
 curl -sS -X POST 'http://LOCAL_HOST:8734/~measurement@1.0/verify-peer' \
@@ -1716,7 +1719,7 @@ Initialize a zone:
 ```sh
 curl -sS -X POST 'http://LOCAL_HOST:8734/~zone@1.0/init' \
   -H 'content-type: application/json' \
-  --data '{"name":"example","template":{"measurement-device":"handee@1.0"}}'
+  --data '{"name":"example","template":{"measurement-device":"andee@1.0"}}'
 ```
 
 Join a zone:

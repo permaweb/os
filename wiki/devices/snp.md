@@ -1,6 +1,9 @@
 # `~snp@1.0` Engine Specification
 
-`~snp@1.0` is a measurement backend for AMD SEV-SNP guests.
+`~snp@1.0` is the measurement backend for AMD SEV-SNP guests. It is the
+virtualized PermawebOS security engine: SNP provides guest memory
+confidentiality and integrity inside the AMD SEV-SNP threat model, while
+`~measurement@1.0` provides the common AO-Core envelope.
 
 ## Engine Behavior
 
@@ -13,6 +16,8 @@
   then exposes policy-neutral fields.
 - The device does not enforce debug bit, TCB floor, launch measurement, or host
   policy. It exposes them for templates and callers.
+- Non-SNP architectures still build the verifier path when possible. Local
+  measurement generation must fail softly when real SNP guest support is absent.
 
 ## Secret Wrapping
 

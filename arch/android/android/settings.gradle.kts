@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "HandEE"
+rootProject.name = "AndEE"
 include(":app")

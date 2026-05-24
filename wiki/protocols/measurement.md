@@ -2,7 +2,8 @@
 
 `~measurement@1.0` is the only public hardware measurement orchestration API.
 It standardizes the measured subject and delegates only backend-native
-evidence and secret wrapping to `~tpm@2.0a`, `~snp@1.0`, or future engines.
+evidence and secret wrapping to `~tpm@2.0a`, `~snp@1.0`, `~andee@1.0`
+(AndEE), or future engines.
 
 ## Subject
 
@@ -42,6 +43,10 @@ hardware-rooted measurement. Boot measurements use purpose `boot` and a fixed
 boot sentinel nonce. Fresh measurements use purpose `fresh` and a verifier
 nonce with at least 128 bits of entropy.
 
+`lapee-measurement` is the current wire value for historical compatibility.
+It denotes the PermawebOS measurement envelope, not a TPM-only or laptop-only
+protocol.
+
 ## Public Exports
 
 - `info`: selected device, candidate devices, and version.
@@ -70,8 +75,9 @@ Measurement-capable devices implement:
 - internal `unwrap-secret`: recover a locally addressed secret for trusted local
   callers only.
 
-`auto` selection tries real `snp@1.0`, then real `tpm@2.0a`. Test mocks are
-never selected by production `auto`.
+`auto` selection tries real `snp@1.0`, then real `tpm@2.0a` on Linux. AndEE
+images configure `andee@1.0` directly. Test mocks are never selected by
+production `auto`.
 
 ## Failure Rules
 

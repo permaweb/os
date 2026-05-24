@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$BUILD_DIR/handee-smoke"
+OUT="$BUILD_DIR/andee-smoke"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
@@ -13,32 +13,32 @@ if [ ! -f "$APK" ]; then
 fi
 
 adb logcat -c || true
-adb uninstall org.permaweb.handee >/dev/null 2>&1 || true
+adb uninstall org.permaweb.andee >/dev/null 2>&1 || true
 adb install -r "$APK" | tee "$OUT/install.txt"
-adb shell am start -n org.permaweb.handee/.OrnamentActivity | tee "$OUT/activity.txt"
-adb shell am start-foreground-service -n org.permaweb.handee/.HandeeService \
+adb shell am start -n org.permaweb.andee/.OrnamentActivity | tee "$OUT/activity.txt"
+adb shell am start-foreground-service -n org.permaweb.andee/.AndeeService \
     > "$OUT/service-start.txt" 2>&1 || true
 sleep 5
-adb shell dumpsys activity services org.permaweb.handee > "$OUT/services.txt" || true
-adb shell cmd package list packages -U org.permaweb.handee \
+adb shell dumpsys activity services org.permaweb.andee > "$OUT/services.txt" || true
+adb shell cmd package list packages -U org.permaweb.andee \
     > "$OUT/package-uid.txt" 2>/dev/null || true
 adb shell ps -A -o USER,UID,PID,NAME > "$OUT/app-ps.txt" 2>/dev/null || true
-adb shell run-as org.permaweb.handee ls -R no_backup > "$OUT/no-backup.txt" 2>/dev/null || true
-adb shell run-as org.permaweb.handee cat no_backup/run/hyperbeam.stdout \
+adb shell run-as org.permaweb.andee ls -R no_backup > "$OUT/no-backup.txt" 2>/dev/null || true
+adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stdout \
     > "$OUT/hyperbeam.stdout" 2>/dev/null || true
-adb shell run-as org.permaweb.handee cat no_backup/run/hyperbeam.stderr \
+adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stderr \
     > "$OUT/hyperbeam.stderr" 2>/dev/null || true
-adb logcat -d -s HandeeService RuntimeExtractor HandeeCryptoAgent HyperbeamRuntime \
+adb logcat -d -s AndeeService RuntimeExtractor AndeeCryptoAgent HyperbeamRuntime \
     > "$OUT/logcat.txt" || true
 python3 - <<'PY' "$OUT/policy-frame.bin"
 import json, pathlib, struct, sys
 payload = json.dumps({"action": "policy-status"}, separators=(",", ":")).encode()
 pathlib.Path(sys.argv[1]).write_bytes(struct.pack(">I", len(payload)) + payload)
 PY
-adb push "$OUT/policy-frame.bin" /data/local/tmp/handee-policy-frame.bin >/dev/null 2>&1 || true
-adb shell chmod 644 /data/local/tmp/handee-policy-frame.bin >/dev/null 2>&1 || true
-if adb exec-out run-as org.permaweb.handee sh -c \
-    'toybox nc -U no_backup/run/handee-crypto.sock < /data/local/tmp/handee-policy-frame.bin' \
+adb push "$OUT/policy-frame.bin" /data/local/tmp/andee-policy-frame.bin >/dev/null 2>&1 || true
+adb shell chmod 644 /data/local/tmp/andee-policy-frame.bin >/dev/null 2>&1 || true
+if adb exec-out run-as org.permaweb.andee sh -c \
+    'toybox nc -U no_backup/run/andee-crypto.sock < /data/local/tmp/andee-policy-frame.bin' \
     > "$OUT/policy-response.bin" 2>/dev/null; then
     python3 - <<'PY' "$OUT/policy-response.bin" "$OUT/policy-response.json"
 import json, pathlib, struct, sys
@@ -66,19 +66,19 @@ policy_rejected = "policy rejected" in logcat
 match = re.search(r"uid[:=](\d+)", package_uid)
 uid = match.group(1) if match else None
 runtime_started = (
-    "handee-native-launcher=exec-erlexec" in stdout or
+    "andee-native-launcher=exec-erlexec" in stdout or
     any(uid and uid in line and "beam.smp" in line for line in app_ps.splitlines())
 )
 runtime_extracted = (
-    "handee-runtime" in runtime or
+    "andee-runtime" in runtime or
     "runtime extracted" in logcat or
     "runtime ready" in logcat
 )
 agent_policy_seen = '"policy-snapshot"' in policy
 verdict = {
-    "scenario": "single-android-handee-smoke",
+    "scenario": "single-android-andee-smoke",
     "issued_at_unix": int(time.time()),
-    "service_seen": "HandeeService" in services,
+    "service_seen": "AndeeService" in services,
     "runtime_extracted": runtime_extracted,
     "runtime_started": runtime_started,
     "policy_rejected": policy_rejected,

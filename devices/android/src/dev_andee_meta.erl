@@ -1,9 +1,9 @@
-%%% @doc HandEE public meta facade.
+%%% @doc AndEE public meta facade.
 %%%
 %%% Upstream `~meta@1.0/info' returns the full node message. That is useful on
-%%% a general HyperBEAM node, but HandEE's attested public subject should be the
+%%% a general HyperBEAM node, but AndEE's attested public subject should be the
 %%% small Android-bound node/config identity, not the entire runtime option map.
--module(dev_handee_meta).
+-module(dev_andee_meta).
 
 -export([info/1, info/3, build/3, handle/2, is/2, is/3]).
 -export([is_operator/2, is_operator/3]).
@@ -38,17 +38,17 @@ is_operator(Base, Req, NodeMsg) ->
     dev_meta:is_operator(Base, Req, NodeMsg).
 
 public_node_info(NodeMsg) ->
-    NodeSubject = hb_opts:get(<<"handee-node-subject">>, #{}, NodeMsg),
+    NodeSubject = hb_opts:get(<<"andee-node-subject">>, #{}, NodeMsg),
     #{
-        <<"type">> => <<"handee-node-info">>,
+        <<"type">> => <<"andee-node-info">>,
         <<"version">> => <<"1.0">>,
         <<"address">> => hb_opts:get(<<"address">>, <<>>, NodeMsg),
         <<"http-server">> => hb_opts:get(<<"http-server">>, <<>>, NodeMsg),
-        <<"handee-node-message-id">> =>
-            hb_opts:get(<<"handee-node-message-id">>, <<>>, NodeMsg),
+        <<"andee-node-message-id">> =>
+            hb_opts:get(<<"andee-node-message-id">>, <<>>, NodeMsg),
         <<"node-subject">> => NodeSubject,
         <<"measurement-device">> =>
-            hb_opts:get(<<"measurement-device">>, <<"handee@1.0">>, NodeMsg),
+            hb_opts:get(<<"measurement-device">>, <<"andee@1.0">>, NodeMsg),
         <<"load-remote-devices">> =>
             hb_opts:get(<<"load-remote-devices">>, false, NodeMsg),
         <<"store">> => public_store(hb_opts:get(<<"store">>, [], NodeMsg)),

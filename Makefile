@@ -16,7 +16,7 @@
 #   make tme                - build signed Linux/TME image.
 #   make no-tme             - build signed Linux/no-TME image.
 #   make snp                - build signed Linux/SNP-capable image.
-#   make android            - build Android HandEE APK/runtime.
+#   make android            - build Android AndEE APK/runtime.
 #   make runtime-image      - build a signed runtime disk image.
 #                             TME=0 allows no-TME test hardware.
 #                             DEBUG=1 enables the measured debug console.

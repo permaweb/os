@@ -10,11 +10,11 @@ sdkmanager \
     "emulator" \
     "system-images;android-36.1;google_apis;arm64-v8a"
 
-if ! emulator -list-avds | grep -qx "${AVD_NAME:-handee-api-36-arm64}"; then
-    echo "creating AVD ${AVD_NAME:-handee-api-36-arm64}"
+if ! emulator -list-avds | grep -qx "${AVD_NAME:-andee-api-36-arm64}"; then
+    echo "creating AVD ${AVD_NAME:-andee-api-36-arm64}"
     avdmanager create avd \
         --force \
-        --name "${AVD_NAME:-handee-api-36-arm64}" \
+        --name "${AVD_NAME:-andee-api-36-arm64}" \
         --package "system-images;android-36.1;google_apis;arm64-v8a" \
         --device "pixel_9"
 fi

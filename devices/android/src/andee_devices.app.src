@@ -1,5 +1,5 @@
-{application, handee_devices, [
-    {description, "HandEE HyperBEAM device package"},
+{application, andee_devices, [
+    {description, "AndEE HyperBEAM device package"},
     {vsn, "1.0.0"},
     {registered, []},
     {applications, [kernel, stdlib, crypto, public_key, ssl, inets, hb]},

@@ -2,7 +2,7 @@
 %%%
 %%% This device owns the standard measured subject:
 %%% `#{<<"system">> => ~system@1.0/all, <<"node">> => ~meta@1.0/info}'.
-%%% TPM, SNP, HandEE, and later engines supply only native evidence and
+%%% TPM, SNP, AndEE, and later engines supply only native evidence and
 %%% recipient handling. Policy stays outside the device; measurements expose
 %%% facts and provenance as signed AO-Core messages.
 -module(dev_measurement).
@@ -20,7 +20,7 @@
 -define(BOOT_PATH, <<"~measurement@1.0/boot">>).
 -define(PEER_ATTESTATION_PREFIX,
         <<"~measurement@1.0/peer-attestations">>).
--define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"handee@1.0">>]).
+-define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"andee@1.0">>]).
 -define(DEFAULT_TIMEOUT_MS, 30000).
 
 info(_) ->
@@ -401,7 +401,7 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
             };
         <<"snp@1.0">> ->
             Module:wrap_secret_for_subject(Subject, Secret, Opts);
-        <<"handee@1.0">> ->
+        <<"andee@1.0">> ->
             Module:wrap_secret_for_subject(Subject, Secret, Opts);
         _ ->
             resolve_device_body(
@@ -420,7 +420,7 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     case Device of
         <<"tpm@2.0a">> -> Module:activate_credential_secret(Credential, Opts);
         <<"snp@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
-        <<"handee@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
+        <<"andee@1.0">> -> Module:unwrap_secret_value(Credential, Opts);
         Device ->
             throw({measurement_error,
                    #{<<"unwrap-secret">> =>
@@ -446,7 +446,7 @@ ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
         <<"snp@1.0">> ->
             Module:ensure_secret_activation(
                 Activation, Credential, Expected, Subject, Opts);
-        <<"handee@1.0">> ->
+        <<"andee@1.0">> ->
             Module:ensure_secret_activation(
                 Activation, Credential, Expected, Subject, Opts);
         _ ->

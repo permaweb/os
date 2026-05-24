@@ -17,12 +17,12 @@
     "device": "meta@1.0",
     "path": "info"
   },
-  "measurement-device": "handee@1.0",
+  "measurement-device": "andee@1.0",
   "load-remote-devices": false,
   "store": [
     {
       "store-module": "hb_store_volatile",
-      "name": "handee-volatile"
+      "name": "andee-volatile"
     }
   ],
   "on": {

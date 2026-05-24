@@ -1,12 +1,12 @@
-%%% @doc Android Keystore/StrongBox measurement backend for HandEE.
+%%% @doc Android Keystore/StrongBox measurement backend for AndEE.
 %%%
 %%% This module implements the backend contract consumed by
 %%% `~measurement@1.0'. It keeps all public evidence and secret-recipient
 %%% values as AO-Core-shaped messages. Local generation and secret unwrapping
-%%% use the app-private `HandeeCryptoAgent' Unix-domain socket; verification is
-%%% pure BEAM so Linux/SNP/TPM nodes can validate HandEE peers.
--module(dev_handee).
--implements(<<"handee@1.0">>).
+%%% use the app-private `AndeeCryptoAgent' Unix-domain socket; verification is
+%%% pure BEAM so Linux/SNP/TPM nodes can validate AndEE peers.
+-module(dev_andee).
+-implements(<<"andee@1.0">>).
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          wrap_secret/3, unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
@@ -17,8 +17,8 @@
 
 -define(VERSION, <<"1.0">>).
 -define(METHOD, <<"android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm">>).
--define(EVIDENCE_CONTEXT, <<"handee-android-evidence-v1">>).
--define(DEFAULT_SOCKET, <<"org.permaweb.handee.crypto">>).
+-define(EVIDENCE_CONTEXT, <<"andee-android-evidence-v1">>).
+-define(DEFAULT_SOCKET, <<"org.permaweb.andee.crypto">>).
 -define(DEFAULT_TIMEOUT_MS, 5000).
 -define(ANDROID_ATTESTATION_OID, {1, 3, 6, 1, 4, 1, 11129, 2, 1, 17}).
 -define(ROOTS_PEM, "android-attestation-roots.pem").
@@ -54,18 +54,18 @@ info(_Base, _Req, Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"version">> => ?VERSION,
-            <<"measurement-device">> => <<"handee@1.0">>,
+            <<"measurement-device">> => <<"andee@1.0">>,
             <<"method">> => ?METHOD,
-            <<"supported">> => handee_supported(Opts),
-            <<"policy-accepted">> => handee_policy_accepted(Opts)
+            <<"supported">> => andee_supported(Opts),
+            <<"policy-accepted">> => andee_policy_accepted(Opts)
         }
     }}.
 
 supported(_Base, _Req, Opts) ->
-    {ok, handee_supported(Opts)}.
+    {ok, andee_supported(Opts)}.
 
 subject(_Base, Req, Opts) ->
-    case handee_supported(Opts) of
+    case andee_supported(Opts) of
         true ->
             Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
             {ok, #{
@@ -73,15 +73,15 @@ subject(_Base, Req, Opts) ->
                 <<"body">> => secret_recipient(Body, Opts)
             }};
         false ->
-            error_resp(503, <<"handee-unsupported">>,
-                       <<"Android HandEE crypto agent is unavailable">>)
+            error_resp(503, <<"andee-unsupported">>,
+                       <<"Android AndEE crypto agent is unavailable">>)
     end.
 
 measure(_Base, Req, Opts) ->
-    case handee_supported(Opts) of
+    case andee_supported(Opts) of
         false ->
-            error_resp(503, <<"handee-unsupported">>,
-                       <<"Android HandEE crypto agent is unavailable">>);
+            error_resp(503, <<"andee-unsupported">>,
+                       <<"Android AndEE crypto agent is unavailable">>);
         true ->
             try
                 Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
@@ -107,13 +107,13 @@ measure(_Base, Req, Opts) ->
                         evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts)
                 }}
             catch
-                throw:{handee_policy_error, Reason} ->
+                throw:{andee_policy_error, Reason} ->
                     {ok, #{
                         <<"status">> => 200,
                         <<"body">> => policy_failure_evidence(Reason, Req, Opts)
                     }};
                 Class:Reason ->
-                    error_resp(500, <<"handee-measure-failed">>,
+                    error_resp(500, <<"andee-measure-failed">>,
                                #{<<"class">> => hb_util:bin(Class),
                                  <<"reason">> => reason_to_text(Reason)})
             end
@@ -176,12 +176,12 @@ unwrap_secret(_Base, Req, Opts) ->
         {ok, #{<<"status">> => 200, <<"body">> => Msg}}
     catch
         Class:Reason ->
-            error_resp(500, <<"handee-unwrap-secret-failed">>,
+            error_resp(500, <<"andee-unwrap-secret-failed">>,
                        #{<<"class">> => hb_util:bin(Class),
                          <<"reason">> => reason_to_text(Reason)})
     end.
 
-handee_supported(Opts) ->
+andee_supported(Opts) ->
     case configured_agent_socket(Opts) of
         undefined ->
             false;
@@ -195,7 +195,7 @@ agent_available(Opts) ->
         _ -> false
     end.
 
-handee_policy_accepted(Opts) ->
+andee_policy_accepted(Opts) ->
     case configured_agent_socket(Opts) of
         undefined ->
             false;
@@ -212,7 +212,7 @@ secret_recipient(Body, Opts) ->
     Binding0 = #{
         <<"evidence-context">> => ?EVIDENCE_CONTEXT,
         <<"body-id">> => BodyID,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"node-binding">> => node_binding(Opts)
     },
@@ -220,7 +220,7 @@ secret_recipient(Body, Opts) ->
     Recipient0 = #{
         <<"type">> => <<"lapee-secret-recipient">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"key-id">> => hb_util:encode(crypto:hash(sha256, Public)),
         <<"public-material">> => #{
@@ -233,12 +233,12 @@ secret_recipient(Body, Opts) ->
     Recipient0#{<<"subject-id">> => stable_id(Recipient0, Opts)}.
 
 recipient_keypair() ->
-    case persistent_term:get({dev_handee, x25519_keypair}, undefined) of
+    case persistent_term:get({dev_andee, x25519_keypair}, undefined) of
         {Public, Private} ->
             {Public, Private};
         undefined ->
             {Public, Private} = crypto:generate_key(ecdh, x25519),
-            persistent_term:put({dev_handee, x25519_keypair}, {Public, Private}),
+            persistent_term:put({dev_andee, x25519_keypair}, {Public, Private}),
             {Public, Private}
     end.
 
@@ -247,9 +247,9 @@ evidence_subject(Body, Recipient, Nonce, Purpose, Opts) ->
     BodyID = payload_id(Body, Opts),
     RecipientID = secret_recipient_id(Recipient, Opts),
     Subject0 = #{
-        <<"type">> => <<"handee-evidence-subject">>,
+        <<"type">> => <<"andee-evidence-subject">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"context">> => ?EVIDENCE_CONTEXT,
         <<"method">> => ?METHOD,
         <<"purpose">> => Purpose,
@@ -265,9 +265,9 @@ evidence_subject(Body, Recipient, Nonce, Purpose, Opts) ->
 evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts) ->
     Policy = hb_maps:get(<<"policy-snapshot">>, Agent, #{}, Opts),
     #{
-        <<"type">> => <<"handee-android-evidence">>,
+        <<"type">> => <<"andee-android-evidence">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"evidence-subject">> => EvidenceSubject,
         <<"evidence-subject-id">> => EvidenceSubjectID,
@@ -297,9 +297,9 @@ policy_failure_evidence(Reason, Req, Opts) ->
     {Subject, SubjectID} =
         evidence_subject(Body, #{}, Nonce, Purpose, Opts),
     #{
-        <<"type">> => <<"handee-android-evidence">>,
+        <<"type">> => <<"andee-android-evidence">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"evidence-subject">> => Subject,
         <<"evidence-subject-id">> => SubjectID,
@@ -321,7 +321,7 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
     Salt = crypto:strong_rand_bytes(32),
     IV = crypto:strong_rand_bytes(12),
     SubjectID = stable_id(Subject, Opts),
-    Info = <<"handee-wrap-secret-v1:", SubjectID/binary>>,
+    Info = <<"andee-wrap-secret-v1:", SubjectID/binary>>,
     Key = hkdf_sha256(Shared, Salt, Info, 32),
     AAD = secret_aad(SubjectID),
     {Ciphertext, Tag} =
@@ -330,7 +330,7 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
     #{
         <<"type">> => <<"lapee-wrapped-secret">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"subject-id">> => SubjectID,
         <<"ephemeral-public-key">> => hb_util:encode(EphemeralPublic),
@@ -345,7 +345,7 @@ unwrap_secret_value(Credential, Opts) when is_map(Credential) ->
     PeerPublic = decode_required(<<"ephemeral-public-key">>, Credential, Opts),
     Shared = crypto:compute_key(ecdh, PeerPublic, Private, x25519),
     SubjectID = hb_maps:get(<<"subject-id">>, Credential, <<>>, Opts),
-    Info = <<"handee-wrap-secret-v1:", SubjectID/binary>>,
+    Info = <<"andee-wrap-secret-v1:", SubjectID/binary>>,
     Key = hkdf_sha256(
         Shared,
         decode_required(<<"salt">>, Credential, Opts),
@@ -380,7 +380,7 @@ ensure_secret_activation(Activation, Credential, Expected, _Subject, Opts) ->
     case {GotHash, Proof} of
         {ExpectedHash, ExpectedProof} -> ok;
         _ ->
-            throw({handee_error,
+            throw({andee_error,
                    #{<<"secret-activation">> =>
                         <<"activation proof did not match challenge">>}})
     end.
@@ -390,7 +390,7 @@ secret_activation_public_body(Secret, Credential, Opts) ->
     #{
         <<"type">> => <<"lapee-secret-activation">>,
         <<"version">> => ?VERSION,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => ?METHOD,
         <<"issued-at-unix">> => Now,
         <<"credential-secret-sha256">> =>
@@ -407,7 +407,7 @@ secret_activation_public_body(Secret, Credential, Opts) ->
 
 secret_activation_context(Credential, IssuedAt, Opts) ->
     <<"lapee-secret-activation-v1\n",
-      "measurement-device:handee@1.0\n",
+      "measurement-device:andee@1.0\n",
       "method:", ?METHOD/binary, "\n",
       "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
       "credential-id:", (wrapped_secret_id(Credential, Opts))/binary>>.
@@ -441,11 +441,11 @@ wrapped_secret_identity_keys() ->
 
 check_measurement_device(Measurement, Opts) ->
     safely_check(
-        <<"measurement device is handee@1.0">>,
+        <<"measurement device is andee@1.0">>,
         <<"core">>,
         fun() ->
             case hb_maps:get(<<"measurement-device">>, Measurement, undefined, Opts) of
-                <<"handee@1.0">> -> ok;
+                <<"andee@1.0">> -> ok;
                 Other -> throw(#{<<"measurement-device">> => Other})
             end
         end).
@@ -504,18 +504,18 @@ check_measurement_shape(Measurement, Opts) ->
                              is_map(Recipient) ->
                     ok;
                 _ ->
-                    throw(<<"invalid HandEE measurement envelope">>)
+                    throw(<<"invalid AndEE measurement envelope">>)
             end
         end).
 
 check_evidence_shape(Evidence, Opts) ->
     safely_check(
-        <<"evidence shape is handee-android-evidence">>,
+        <<"evidence shape is andee-android-evidence">>,
         <<"core">>,
         fun() ->
             case {hb_maps:get(<<"type">>, Evidence, undefined, Opts),
                   hb_maps:get(<<"measurement-device">>, Evidence, undefined, Opts)} of
-                {<<"handee-android-evidence">>, <<"handee@1.0">>} -> ok;
+                {<<"andee-android-evidence">>, <<"andee@1.0">>} -> ok;
                 Other -> throw(#{<<"evidence-shape">> => reason_to_text(Other)})
             end
         end).
@@ -671,14 +671,14 @@ require_agent(Action, Msg, Opts) ->
         {ok, Body} ->
             Body;
         {error, Reason} ->
-            throw({handee_policy_error, Reason})
+            throw({andee_policy_error, Reason})
     end.
 
 agent_request(Action, Msg, Opts) ->
     SocketPath = agent_socket(Opts),
     Timeout = agent_timeout(Opts),
     Request = #{
-        <<"type">> => <<"handee-agent-request">>,
+        <<"type">> => <<"andee-agent-request">>,
         <<"version">> => ?VERSION,
         <<"action">> => Action,
         <<"payload">> => Msg
@@ -705,7 +705,7 @@ agent_request(Action, Msg, Opts) ->
     catch
         Class:Reason ->
             {error, #{
-                <<"error">> => <<"handee-agent-unavailable">>,
+                <<"error">> => <<"andee-agent-unavailable">>,
                 <<"socket">> => SocketPath,
                 <<"class">> => hb_util:bin(Class),
                 <<"reason">> => reason_to_text(Reason)
@@ -720,12 +720,12 @@ agent_socket(Opts) ->
 
 configured_agent_socket(Opts) ->
     first_defined([
-        hb_opts:get(<<"handee-agent-socket">>, undefined, Opts),
-        os:getenv("HANDEE_CRYPTO_SOCKET")
+        hb_opts:get(<<"andee-agent-socket">>, undefined, Opts),
+        os:getenv("ANDEE_CRYPTO_SOCKET")
     ]).
 
 agent_timeout(Opts) ->
-    case hb_opts:get(<<"handee-agent-timeout-ms">>, ?DEFAULT_TIMEOUT_MS, Opts) of
+    case hb_opts:get(<<"andee-agent-timeout-ms">>, ?DEFAULT_TIMEOUT_MS, Opts) of
         I when is_integer(I), I > 0 -> I;
         B when is_binary(B) -> binary_to_integer(B);
         _ -> ?DEFAULT_TIMEOUT_MS
@@ -736,9 +736,9 @@ node_binding(Opts) ->
         <<"node-address">> =>
             hb_opts:get(<<"address">>, <<"unknown">>, Opts),
         <<"node-message-id">> =>
-            hb_opts:get(<<"handee-node-message-id">>, <<"unknown">>, Opts),
+            hb_opts:get(<<"andee-node-message-id">>, <<"unknown">>, Opts),
         <<"node-key-scope">> => <<"ephemeral-memory">>,
-        <<"measurement-device">> => <<"handee@1.0">>
+        <<"measurement-device">> => <<"andee@1.0">>
     }.
 
 measurement_nonce(Req) ->
@@ -933,7 +933,7 @@ android_root_ids(Opts) ->
     [hb_util:encode(crypto:hash(sha256, Der)) || Der <- android_root_ders(Opts)].
 
 android_root_ders(Opts) ->
-    case hb_opts:get(<<"handee-android-root-pem">>, undefined, Opts) of
+    case hb_opts:get(<<"andee-android-root-pem">>, undefined, Opts) of
         Pem when is_binary(Pem), byte_size(Pem) > 0 ->
             pem_cert_ders(Pem);
         _ ->
@@ -953,9 +953,9 @@ first_existing_priv_file(Name, Opts) ->
     first_defined(
         [
             device_priv_file([Name], Opts),
-            device_priv_file(["dev_handee", Name], Opts),
-            priv_file(lapee_devices, ["dev_handee", Name]),
-            priv_file(handee_devices, ["dev_handee", Name]),
+            device_priv_file(["dev_andee", Name], Opts),
+            priv_file(lapee_devices, ["dev_andee", Name]),
+            priv_file(andee_devices, ["dev_andee", Name]),
             source_priv_file(Name)
         ]).
 
@@ -987,7 +987,7 @@ source_priv_file(Name) ->
                 filename:join([
                     filename:dirname(Beam),
                     "..", "..", "..", "..", "..", "src", "priv",
-                    "dev_handee", Name
+                    "dev_andee", Name
                 ]))
     end.
 
@@ -1299,14 +1299,14 @@ decode_required(Key, Msg, Opts) when is_map(Msg) ->
     case hb_maps:get(Key, Msg, undefined, Opts) of
         B when is_binary(B), byte_size(B) > 0 -> hb_util:decode(B);
         _ ->
-            throw({handee_error, #{
+            throw({andee_error, #{
                 <<"error">> => <<"missing-field">>,
                 <<"field">> => Key
             }})
     end.
 
 secret_aad(SubjectID) ->
-    <<"handee-wrap-secret-v1:", SubjectID/binary>>.
+    <<"andee-wrap-secret-v1:", SubjectID/binary>>.
 
 hkdf_sha256(IKM, Salt, Info, Length) ->
     PRK = crypto:mac(hmac, sha256, Salt, IKM),

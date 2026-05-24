@@ -1,13 +1,14 @@
 # Common Linux Appliance
 
 This directory contains the shared Buildroot Linux appliance used by the
-current LapEE Linux images:
+current Linux PermawebOS images:
 
-- TME-enforced runtime (`make tme` / `make runtime-image TME=1`).
-- Measured no-TME runtime (`make no-tme` / `make runtime-image TME=0`).
-- SNP-capable Linux runtime (`make snp`).
-- Secure Boot and encrypted-storage provisioner (`make provisioner`).
+- LapEE with TME enforced (`make tme` / `make runtime-image TME=1`).
+- LapEE no-TME, typically used for LPDDR or debugging policy (`make no-tme` /
+  `make runtime-image TME=0`).
+- SNP-capable Linux runtime for AMD SEV-SNP guests (`make snp`).
+- Secure Boot and encrypted-zone-storage provisioner (`make provisioner`).
 
 The Buildroot external tree builds a stock pinned HyperBEAM checkout, then
-preloads the selected PermawebOS device package from `devices/common/`.
-Do not patch the fetched HyperBEAM source from here; package devices instead.
+preloads PermawebOS devices from `devices/common/`. Do not patch the fetched
+HyperBEAM source from here; package devices instead.

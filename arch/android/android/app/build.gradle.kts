@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "org.permaweb.handee"
+    namespace = "org.permaweb.andee"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "org.permaweb.handee"
+        applicationId = "org.permaweb.andee"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -24,16 +24,16 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += setOf("**/libhandee_*.so")
+            keepDebugSymbols += setOf("**/libandee_*.so")
         }
     }
 
     signingConfigs {
         create("releaseLocal") {
-            storeFile = file("${rootProject.projectDir}/handee-release.local.keystore")
-            storePassword = "handee-local"
-            keyAlias = "handee-local"
-            keyPassword = "handee-local"
+            storeFile = file("${rootProject.projectDir}/andee-release.local.keystore")
+            storePassword = "andee-local"
+            keyAlias = "andee-local"
+            keyPassword = "andee-local"
         }
     }
 

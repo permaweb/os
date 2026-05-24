@@ -1,10 +1,10 @@
-# PermawebOS Appliance Feature Contract
+# PermawebOS Feature Contract
 
-PermawebOS is a family of HyperBEAM appliance builds for commodity laptops,
-TEE-backed VMs, and Android devices. The product is not "Linux with many
-hardening knobs"; it is a bootable node that produces useful AO-Core work and
-exposes enough measured evidence for other nodes or users to decide whether to
-trust its results.
+PermawebOS is a family of HyperBEAM operating environments for commodity
+laptops, TEE-backed VMs, and Android devices. The product is not "Linux with
+many hardening knobs"; it is a measured HyperBEAM node that produces useful
+AO-Core work and exposes enough evidence for other nodes or users to decide
+whether to trust its results.
 
 ## End-User Features
 
@@ -17,7 +17,7 @@ trust its results.
 4. Produce fresh nonce-bound measurements on request.
 5. Bind the measurement to the node message, system report, node signing key,
    and hardware measurement backend.
-6. Support TPM 2.0 laptops, AMD SEV-SNP VMs, and Android HandEE devices
+6. Support TPM 2.0 laptops, AMD SEV-SNP VMs, and Android AndEE devices
    through the same public measurement protocol.
 7. Verify peer measurements live and publish signed peer attestations that can
    later be trusted by parties that trust the verifier address.
@@ -32,6 +32,8 @@ trust its results.
 13. Expose policy-neutral system evidence: Secure Boot state, PCR/event-log
     facts, node config, runtime command line, CPU/platform facts, memory/probe
     evidence, ACPI summaries, TPM evidence, and SNP evidence.
+14. Treat hardware security as an economic spectrum: expose how evidence was
+    produced, then leave policy to zones, applications, and users.
 
 ## Non-Features
 
@@ -42,7 +44,7 @@ code implemented them:
 - A TPM-specific peer verification protocol separate from `~measurement@1.0`.
 - Trust scores or device-side policy judgments.
 - Historical catalogue matching for arbitrary operating systems beyond what is
-  needed to explain LapEE evidence.
+  needed to explain PermawebOS evidence.
 - Compatibility shims for pre-v1 message shapes.
 - Runtime debug shells, local input surfaces, or arbitrary protected-identity
   signing endpoints in production images.

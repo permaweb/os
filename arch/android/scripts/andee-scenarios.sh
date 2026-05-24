@@ -2,10 +2,10 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$BUILD_DIR/handee-scenarios"
+OUT="$BUILD_DIR/andee-scenarios"
 mkdir -p "$OUT"/{boot,fresh,peer,zone,rejoin,negative,next-boot-config}
-LIVE_OUT="$BUILD_DIR/handee-runtime-probe"
-NEXT_BOOT_OUT="$BUILD_DIR/handee-next-boot-config"
+LIVE_OUT="$BUILD_DIR/andee-runtime-probe"
+NEXT_BOOT_OUT="$BUILD_DIR/andee-next-boot-config"
 
 python3 - <<'PY' "$OUT"
 import base64, hashlib, json, os, pathlib, time
@@ -17,9 +17,9 @@ def b64(data: bytes) -> str:
 def evidence(name, accepted, nonce=None, reason="emulator-limited"):
     now = int(time.time())
     subject = {
-        "type": "handee-evidence-subject",
+        "type": "andee-evidence-subject",
         "version": "1.0",
-        "measurement-device": "handee@1.0",
+        "measurement-device": "andee@1.0",
         "purpose": name,
         "nonce": nonce or b64(os.urandom(32)),
         "issued-at-unix": now,
@@ -30,24 +30,24 @@ def evidence(name, accepted, nonce=None, reason="emulator-limited"):
         "type": "lapee-measurement",
         "version": "1.0",
         "issued-at-unix": now,
-        "measurement-device": "handee@1.0",
+        "measurement-device": "andee@1.0",
         "body": {
             "system": {
                 "platform": "android",
-                "schema": "handee-system-report@1",
-                "app": {"package-name": "org.permaweb.handee"},
+                "schema": "andee-system-report@1",
+                "app": {"package-name": "org.permaweb.andee"},
             },
             "node": {"address": "emulator-node-" + name},
         },
         "secret-recipient": {
             "type": "lapee-secret-recipient",
-            "measurement-device": "handee@1.0",
+            "measurement-device": "andee@1.0",
             "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
         },
         "evidence": {
-            "type": "handee-android-evidence",
+            "type": "andee-android-evidence",
             "version": "1.0",
-            "measurement-device": "handee@1.0",
+            "measurement-device": "andee@1.0",
             "evidence-subject": subject,
             "evidence-subject-id": b64(hashlib.sha256(json.dumps(subject, sort_keys=True).encode()).digest()),
             "accepted": accepted,
@@ -85,16 +85,16 @@ negative = {
 }, indent=2) + "\n")
 PY
 
-python3 "$HANDEE_VERIFIER_DIR/verifier_handee.py" \
+python3 "$ANDEE_VERIFIER_DIR/verifier_andee.py" \
     "$OUT/boot/boot.json" \
     --out "$OUT/external-verifier" \
     --allow-rejected
 
 if adb get-state >/dev/null 2>&1 && [ -f "$ROOT/android/app/build/outputs/apk/debug/app-debug.apk" ]; then
-    RESET_APP_DATA=1 "$ROOT/scripts/handee-runtime-probe.sh"
+    RESET_APP_DATA=1 "$ROOT/scripts/andee-runtime-probe.sh"
     sleep 8
-    RESET_APP_DATA=1 "$ROOT/scripts/handee-next-boot-config-test.sh"
-    RESET_APP_DATA=1 "$ROOT/scripts/handee-android-zone-storage-smoke.sh"
+    RESET_APP_DATA=1 "$ROOT/scripts/andee-next-boot-config-test.sh"
+    RESET_APP_DATA=1 "$ROOT/scripts/andee-android-zone-storage-smoke.sh"
     mkdir -p "$OUT/live" "$OUT/boot" "$OUT/fresh" "$OUT/android-zone-storage"
     cp "$LIVE_OUT/verdict.json" "$OUT/live/runtime-probe-verdict.json"
     cp "$LIVE_OUT/meta.body" "$OUT/live/meta-http.json"
@@ -109,7 +109,7 @@ if adb get-state >/dev/null 2>&1 && [ -f "$ROOT/android/app/build/outputs/apk/de
     cp "$NEXT_BOOT_OUT/verdict.json" "$OUT/next-boot-config/verdict.json"
     cp "$NEXT_BOOT_OUT/effective.json" "$OUT/next-boot-config/effective.json"
     cp "$NEXT_BOOT_OUT/meta.materialized.json" "$OUT/next-boot-config/meta-materialized.json"
-    cp "$BUILD_DIR/handee-android-zone-storage/summary.json" \
+    cp "$BUILD_DIR/andee-android-zone-storage/summary.json" \
         "$OUT/android-zone-storage/summary.json"
     python3 - <<'PY' "$OUT/summary.json" "$OUT/live/runtime-probe-verdict.json" "$OUT/next-boot-config/verdict.json" "$OUT/android-zone-storage/summary.json"
 import json, pathlib, sys
@@ -142,19 +142,19 @@ PY
 fi
 
 mkdir -p "$OUT/zone-storage"
-if [ "${HANDEE_RUN_HOST_ZONE_STORAGE:-0}" = "1" ]; then
-    "$ROOT/scripts/handee-zone-storage-scenario.sh"
-    cp "$BUILD_DIR/handee-zone-storage/summary.json" \
+if [ "${ANDEE_RUN_HOST_ZONE_STORAGE:-0}" = "1" ]; then
+    "$ROOT/scripts/andee-zone-storage-scenario.sh"
+    cp "$BUILD_DIR/andee-zone-storage/summary.json" \
         "$OUT/zone-storage/summary.json"
 else
     python3 - <<'PY' "$OUT/zone-storage/summary.json"
 import json, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "passed": True,
-    "scenario": "host-handee-zone-encrypted-store-rejoin",
+    "scenario": "host-andee-zone-encrypted-store-rejoin",
     "skipped": True,
     "reason": (
-        "HandEE measurement generation requires the Android crypto agent; "
+        "AndEE measurement generation requires the Android crypto agent; "
         "the portable Linux/host path is verify-only."
     ),
 }, indent=2) + "\n")

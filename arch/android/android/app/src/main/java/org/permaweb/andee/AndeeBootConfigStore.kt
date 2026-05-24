@@ -1,4 +1,4 @@
-package org.permaweb.handee
+package org.permaweb.andee
 
 import android.content.Context
 import android.util.Base64
@@ -8,7 +8,7 @@ import org.json.JSONTokener
 import java.io.File
 import java.security.MessageDigest
 
-object HandeeBootConfigStore {
+object AndeeBootConfigStore {
     fun hasPending(context: Context): Boolean = pendingConfigFile(context).isFile
 
     fun stageNextBootConfig(context: Context, text: String) {
@@ -19,7 +19,7 @@ object HandeeBootConfigStore {
     fun commitPendingForNextBoot(context: Context): Boolean = installPendingIfPresent(context)
 
     fun effectiveConfigFile(context: Context, baseConfig: File): File {
-        require(baseConfig.isFile) { "missing base HandEE config: ${baseConfig.absolutePath}" }
+        require(baseConfig.isFile) { "missing base AndEE config: ${baseConfig.absolutePath}" }
         installPendingIfPresent(context)
         val active = activeConfigFile(context)
         if (!active.isFile) return baseConfig
@@ -61,11 +61,11 @@ object HandeeBootConfigStore {
         val merged = deepMerge(copyObject(base), operator)
         stripPrivateBootKeys(merged)
 
-        merged.put("measurement-device", "handee@1.0")
+        merged.put("measurement-device", "andee@1.0")
         merged.put("store", copyValue(base.getJSONArray("store")))
-        merged.put("handee-config-source", "app-private-next-boot-config")
-        merged.put("handee-operator-config-sha256", base64UrlSha256(operatorText.toByteArray(Charsets.UTF_8)))
-        merged.put("handee-operator-config-bytes", operatorText.toByteArray(Charsets.UTF_8).size)
+        merged.put("andee-config-source", "app-private-next-boot-config")
+        merged.put("andee-operator-config-sha256", base64UrlSha256(operatorText.toByteArray(Charsets.UTF_8)))
+        merged.put("andee-operator-config-bytes", operatorText.toByteArray(Charsets.UTF_8).size)
         if (operator.optBoolean("load-remote-devices", false) && !operator.has("routes")) {
             merged.remove("routes")
         }
@@ -113,8 +113,8 @@ object HandeeBootConfigStore {
     private fun parseConfigObject(text: String): JSONObject {
         val tokener = JSONTokener(text)
         val value = tokener.nextValue()
-        require(value is JSONObject) { "HandEE boot config must be a JSON object" }
-        require(tokener.nextClean().code == 0) { "HandEE boot config must contain exactly one JSON value" }
+        require(value is JSONObject) { "AndEE boot config must be a JSON object" }
+        require(tokener.nextClean().code == 0) { "AndEE boot config must contain exactly one JSON value" }
         return value
     }
 

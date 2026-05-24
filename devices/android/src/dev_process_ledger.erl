@@ -1,6 +1,6 @@
 %%% @doc P4 ledger adapter for AO-Core process-backed token ledgers.
 %%%
-%%% This device exposes the P4 ledger API for the HandEE AO payment profile.
+%%% This device exposes the P4 ledger API for the AndEE AO payment profile.
 %%% The profile still installs the LapEE process ledger for compatibility, but
 %%% Android nodes keep the spendable balance table in the live node message so
 %%% real AO topups and P4 charges do not require evaluating the large Lua ledger

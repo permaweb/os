@@ -1,4 +1,4 @@
-package org.permaweb.handee
+package org.permaweb.andee
 
 import android.content.Context
 import android.util.Log
@@ -19,11 +19,11 @@ class HyperbeamRuntime(
             "HyperBEAM executable is not installed in nativeLibraryDir: ${executable.absolutePath}"
         }
 
-        val baseConfig = File(runtimeRoot, "config/handee.json")
-        require(baseConfig.isFile) { "missing HandEE config: ${baseConfig.absolutePath}" }
-        val config = HandeeBootConfigStore.effectiveConfigFile(context, baseConfig)
+        val baseConfig = File(runtimeRoot, "config/andee.json")
+        require(baseConfig.isFile) { "missing AndEE config: ${baseConfig.absolutePath}" }
+        val config = AndeeBootConfigStore.effectiveConfigFile(context, baseConfig)
 
-        val runDir = HandeePaths.runDir(context)
+        val runDir = AndeePaths.runDir(context)
         runDir.mkdirs()
 
         process = ProcessBuilder(
@@ -37,14 +37,14 @@ class HyperbeamRuntime(
             .redirectOutput(ProcessBuilder.Redirect.appendTo(File(runDir, "hyperbeam.stdout")))
             .redirectError(ProcessBuilder.Redirect.appendTo(File(runDir, "hyperbeam.stderr")))
             .also { builder ->
-                builder.environment()["HANDEE_CRYPTO_SOCKET"] = HandeePaths.cryptoSocketName(context)
-                builder.environment()["HANDEE_RUNTIME_ROOT"] = runtimeRoot.absolutePath
-                builder.environment()["HANDEE_PACKAGE_NAME"] = context.packageName
-                builder.environment()["HANDEE_NATIVE_LIB_DIR"] = context.applicationInfo.nativeLibraryDir
-                builder.environment()["HANDEE_ANDROID_ABI"] = android.os.Build.SUPPORTED_ABIS.first()
-                builder.environment()["HANDEE_BOOT_CONFIG"] = config.absolutePath
-                builder.environment()["HANDEE_ENCRYPTED_STORE_ROOT"] =
-                    HandeePaths.encryptedStoreRoot(context).absolutePath
+                builder.environment()["ANDEE_CRYPTO_SOCKET"] = AndeePaths.cryptoSocketName(context)
+                builder.environment()["ANDEE_RUNTIME_ROOT"] = runtimeRoot.absolutePath
+                builder.environment()["ANDEE_PACKAGE_NAME"] = context.packageName
+                builder.environment()["ANDEE_NATIVE_LIB_DIR"] = context.applicationInfo.nativeLibraryDir
+                builder.environment()["ANDEE_ANDROID_ABI"] = android.os.Build.SUPPORTED_ABIS.first()
+                builder.environment()["ANDEE_BOOT_CONFIG"] = config.absolutePath
+                builder.environment()["ANDEE_ENCRYPTED_STORE_ROOT"] =
+                    AndeePaths.encryptedStoreRoot(context).absolutePath
             }
             .start()
 
@@ -69,11 +69,11 @@ class HyperbeamRuntime(
 
     companion object {
         private const val TAG = "HyperbeamRuntime"
-        private const val EXECUTABLE_NAME = "libhandee_hyperbeam.so"
+        private const val EXECUTABLE_NAME = "libandee_hyperbeam.so"
         private val RUNTIME_PROCESS_NAMES = setOf(
             "beam.smp",
             "erlexec",
-            "libhandee_hyperbeam.so",
+            "libandee_hyperbeam.so",
         )
 
         fun killResidualRuntimeProcesses(context: Context): List<Int> {

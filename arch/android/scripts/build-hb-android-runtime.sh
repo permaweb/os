@@ -2,8 +2,8 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-OUT="$ROOT/android/app/src/main/assets/handee-runtime.zip"
-WORK="$BUILD_DIR/handee-runtime"
+OUT="$ROOT/android/app/src/main/assets/andee-runtime.zip"
+WORK="$BUILD_DIR/andee-runtime"
 JNI_DIR="$ROOT/android/app/src/main/jniLibs"
 NDK_ROOT="${ANDROID_NDK_ROOT:-}"
 
@@ -34,20 +34,20 @@ mkdir -p "$WORK/config" "$WORK/native-links" "$(dirname "$OUT")" \
     "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 rm -f "$OUT"
 
-cp "$HANDEE_CONFIG" "$WORK/config/handee.json"
-if [ -d "$HANDEE_DEVICE_ROOT/priv" ]; then
-    cp -a "$HANDEE_DEVICE_ROOT/priv" "$WORK/priv"
+cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
+if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
+    cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
-(cd "$HANDEE_DEVICE_ROOT" && rebar3 compile)
+(cd "$ANDEE_DEVICE_ROOT" && rebar3 compile)
 
 "$TOOLCHAIN/aarch64-linux-android29-clang" \
     -D_POSIX_C_SOURCE=200809L -fPIE -pie -O2 -Wall -Wextra \
-    "$HANDEE_RUNTIME_SRC/handee_hyperbeam_launcher.c" \
-    -o "$JNI_DIR/arm64-v8a/libhandee_hyperbeam.so"
+    "$ANDEE_RUNTIME_SRC/andee_hyperbeam_launcher.c" \
+    -o "$JNI_DIR/arm64-v8a/libandee_hyperbeam.so"
 "$TOOLCHAIN/x86_64-linux-android29-clang" \
     -D_POSIX_C_SOURCE=200809L -fPIE -pie -O2 -Wall -Wextra \
-    "$HANDEE_RUNTIME_SRC/handee_hyperbeam_launcher.c" \
-    -o "$JNI_DIR/x86_64/libhandee_hyperbeam.so"
+    "$ANDEE_RUNTIME_SRC/andee_hyperbeam_launcher.c" \
+    -o "$JNI_DIR/x86_64/libandee_hyperbeam.so"
 
 python3 - <<'PY' "$ROOT" "$BUILD_DIR" "$WORK" "$JNI_DIR" "$TOOLCHAIN/llvm-strip"
 import os
@@ -99,7 +99,7 @@ for abi in abis:
         if not (is_elf(path) or path.suffix == ".so"):
             continue
         rel = path.relative_to(work).as_posix()
-        native_name = f"libhandee_{sanitize(abi)}_{sanitize(rel)}.so"
+        native_name = f"libandee_{sanitize(abi)}_{sanitize(rel)}.so"
         native_path = jni_dir / abi / native_name
         shutil.copy2(path, native_path)
         try:
@@ -113,7 +113,7 @@ PY
 
 for abi in arm64-v8a x86_64; do
     APP_LIB="$WORK/erlang/$abi/lib"
-    for app in "$HANDEE_DEVICE_ROOT"/_build/default/lib/*; do
+    for app in "$ANDEE_DEVICE_ROOT"/_build/default/lib/*; do
         [ -d "$app/ebin" ] || continue
         name="$(basename "$app")"
         case "$name" in
@@ -141,8 +141,8 @@ for abi in arm64-v8a x86_64; do
                 done
         fi
     done
-    HB_SRC="$HANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
-    HB_APP="$HANDEE_DEVICE_ROOT/_build/default/lib/hb"
+    HB_SRC="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
+    HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
     erlc -pa "$HB_APP/ebin" +'{feature,maybe_expr,enable}' \
         -I "$HB_APP/include" \
         -I "$HB_SRC/core" \
@@ -203,11 +203,11 @@ for abi in arm64-v8a x86_64; do
         "$HB_SRC/preloaded/payment/dev_p4.erl" \
         "$HB_SRC/preloaded/payment/dev_simple_pay.erl" \
         "$HB_SRC/preloaded/payment/dev_metering.erl"
-    erlc -o "$APP_LIB/b64rs/ebin" "$HANDEE_RUNTIME_SRC/erlang-overrides/b64rs.erl"
+    erlc -o "$APP_LIB/b64rs/ebin" "$ANDEE_RUNTIME_SRC/erlang-overrides/b64rs.erl"
 done
 
 (cd "$WORK" && zip -qr "$OUT" .)
-python3 - <<'PY' "$OUT" "$BUILD_DIR/handee-runtime/manifest.json" "$JNI_DIR" "$WORK"
+python3 - <<'PY' "$OUT" "$BUILD_DIR/andee-runtime/manifest.json" "$JNI_DIR" "$WORK"
 import hashlib, json, pathlib, sys
 zip_path = pathlib.Path(sys.argv[1])
 manifest = pathlib.Path(sys.argv[2])
@@ -222,7 +222,7 @@ manifest.parent.mkdir(parents=True, exist_ok=True)
 manifest.write_text(json.dumps({
     "artifact": str(zip_path),
     "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
-    "kind": "android-hyperbeam-erts-handee-runtime",
+    "kind": "android-hyperbeam-erts-andee-runtime",
     "native-payload-count": len(native),
     "native-link-counts": links,
     "native-libraries": native,

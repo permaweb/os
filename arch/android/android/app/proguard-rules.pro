@@ -1,1 +1,1 @@
--keep class org.permaweb.handee.** { *; }
+-keep class org.permaweb.andee.** { *; }

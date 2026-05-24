@@ -1,15 +1,15 @@
-%%% @doc Android entrypoint for HandEE's bundled HyperBEAM node.
+%%% @doc Android entrypoint for AndEE's bundled HyperBEAM node.
 %%%
-%%% The stock HB application entrypoint loads or creates a disk wallet. HandEE's
+%%% The stock HB application entrypoint loads or creates a disk wallet. AndEE's
 %%% node key is deliberately session-local, so the Android native launcher calls
 %%% this module instead: it loads the enforced config, creates an in-memory
 %%% wallet, binds the node/config identity into the measurement context, and
 %%% starts the HTTP node in the foreground VM.
--module(handee_bootstrap).
+-module(andee_bootstrap).
 
 -export([start/0, start/1]).
 
--define(DEFAULT_CONFIG, <<"config/handee.json">>).
+-define(DEFAULT_CONFIG, <<"config/andee.json">>).
 -define(DEFAULT_PORT, 8734).
 
 start() ->
@@ -18,24 +18,24 @@ start() ->
     start(ConfigPath).
 
 start(ConfigPath) ->
-    io:format("handee-bootstrap=load-config path=~ts~n", [hb_util:bin(ConfigPath)]),
+    io:format("andee-bootstrap=load-config path=~ts~n", [hb_util:bin(ConfigPath)]),
     Env = hb_opts:default_message_with_env(),
     Loaded = with_bootstrap_devices(load_config(ConfigPath)),
-    io:format("handee-bootstrap=config-loaded~n"),
+    io:format("andee-bootstrap=config-loaded~n"),
     Merged = hb_maps:merge(Env, Loaded),
     ensure_runtime_applications(),
     hb_http_client:setup_conn(Merged),
-    io:format("handee-bootstrap=start-store~n"),
+    io:format("andee-bootstrap=start-store~n"),
     Store = start_store(Merged),
-    io:format("handee-bootstrap=generate-wallet~n"),
+    io:format("andee-bootstrap=generate-wallet~n"),
     Wallet = ephemeral_wallet(),
-    io:format("handee-bootstrap=derive-address~n"),
+    io:format("andee-bootstrap=derive-address~n"),
     Address = hb_util:human_id(ar_wallet:to_address(Wallet)),
-    io:format("handee-bootstrap=build-node-subject address=~s~n", [Address]),
+    io:format("andee-bootstrap=build-node-subject address=~s~n", [Address]),
     NodeSubject = node_subject(Loaded, Address),
-    io:format("handee-bootstrap=derive-node-message-id~n"),
+    io:format("andee-bootstrap=derive-node-message-id~n"),
     NodeMessageID = hb_message:id(NodeSubject, uncommitted, Merged),
-    io:format("handee-bootstrap=node-message-id id=~s~n", [NodeMessageID]),
+    io:format("andee-bootstrap=node-message-id id=~s~n", [NodeMessageID]),
     NodeMsg =
         Loaded#{
             <<"priv-wallet">> => Wallet,
@@ -43,14 +43,14 @@ start(ConfigPath) ->
             <<"store">> => Store,
             <<"port">> => hb_opts:get(<<"port">>, ?DEFAULT_PORT, Loaded),
             <<"cache-writers">> => [Address],
-            <<"handee-node-message-id">> => NodeMessageID,
-            <<"handee-node-subject">> => NodeSubject
+            <<"andee-node-message-id">> => NodeMessageID,
+            <<"andee-node-subject">> => NodeSubject
         },
-    io:format("handee-bootstrap=start-http port=~p~n",
+    io:format("andee-bootstrap=start-http port=~p~n",
         [hb_opts:get(<<"port">>, ?DEFAULT_PORT, NodeMsg)]),
     {ok, _Listener} = hb_http_server:start(NodeMsg),
     io:format(
-        "HandEE HyperBEAM node started on port ~p as ~s~n",
+        "AndEE HyperBEAM node started on port ~p as ~s~n",
         [hb_opts:get(<<"port">>, ?DEFAULT_PORT, NodeMsg), Address]
     ),
     receive
@@ -72,7 +72,7 @@ start_store(Opts) ->
 load_config(Path) ->
     case file:read_file(Path) of
         {ok, Bin} -> normalize_config(hb_json:decode(Bin));
-        {error, Reason} -> erlang:error({failed_to_load_handee_config, Path, Reason})
+        {error, Reason} -> erlang:error({failed_to_load_andee_config, Path, Reason})
     end.
 
 normalize_config(Config) when is_map(Config) ->
@@ -108,8 +108,8 @@ normalize_store(Store) when is_map(Store) ->
             (<<"store-module">>, <<"hb_store_volatile">>) -> hb_store_volatile;
             (<<"store-module">>, <<"hb_store_lmdb">>) -> hb_store_lmdb;
             (<<"store-module">>, <<"hb_store_fs">>) -> hb_store_fs;
-            (<<"store-module">>, <<"hb_store_handee_encrypted">>) ->
-                hb_store_handee_encrypted;
+            (<<"store-module">>, <<"hb_store_andee_encrypted">>) ->
+                hb_store_andee_encrypted;
             (<<"store-module">>, <<"hb_store_gateway">>) -> hb_store_gateway;
             (<<"store-module">>, <<"hb_store_remote_node">>) -> hb_store_remote_node;
             (<<"store">>, SubStores) -> normalize_stores(SubStores);
@@ -128,7 +128,7 @@ with_bootstrap_devices(Config) ->
 ensure_bootstrap_device_loaded(_Name, Mod) ->
     case code:ensure_loaded(Mod) of
         {module, Mod} -> ok;
-        {error, Reason} -> erlang:error({failed_to_load_handee_bootstrap_device, Mod, Reason})
+        {error, Reason} -> erlang:error({failed_to_load_andee_bootstrap_device, Mod, Reason})
     end.
 
 bootstrap_devices() ->
@@ -145,7 +145,7 @@ bootstrap_devices() ->
         <<"auth-hook@1.0">> => dev_auth_hook,
         <<"http-auth@1.0">> => dev_http_auth,
         <<"secret@1.0">> => dev_secret,
-        <<"meta@1.0">> => dev_handee_meta,
+        <<"meta@1.0">> => dev_andee_meta,
         <<"hyperbuddy@1.0">> => dev_hyperbuddy,
         <<"name@1.0">> => dev_name,
         <<"b32-name@1.0">> => dev_b32_name,
@@ -196,7 +196,7 @@ bootstrap_devices() ->
         <<"router@1.0">> => dev_router,
         <<"tpm@2.0a">> => dev_tpm2,
         <<"snp@1.0">> => dev_lapee_snp,
-        <<"handee@1.0">> => dev_handee,
+        <<"andee@1.0">> => dev_andee,
         <<"measurement@1.0">> => dev_measurement,
         <<"system@1.0">> => dev_system,
         <<"zone@1.0">> => dev_zone
@@ -209,7 +209,7 @@ ensure_runtime_applications() ->
                 {ok, _Started} -> ok;
                 {error, {already_started, _}} -> ok;
                 {error, Reason} ->
-                    erlang:error({failed_to_start_handee_runtime_app, App, Reason})
+                    erlang:error({failed_to_start_andee_runtime_app, App, Reason})
             end
         end,
         [crypto, public_key, ssl, inets, ranch, cowboy, gun, hackney]
@@ -217,8 +217,8 @@ ensure_runtime_applications() ->
 
 node_subject(Config, Address) ->
     #{
-        <<"device">> => <<"handee@1.0">>,
-        <<"measurement-device">> => <<"handee@1.0">>,
+        <<"device">> => <<"andee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
         <<"method">> => <<"android-keystore-attestation">>,
         <<"node-address">> => Address,
         <<"node-key-scope">> => <<"ephemeral-memory">>,
@@ -249,8 +249,8 @@ public_values(hb_store_lmdb) ->
     <<"hb_store_lmdb">>;
 public_values(hb_store_fs) ->
     <<"hb_store_fs">>;
-public_values(hb_store_handee_encrypted) ->
-    <<"hb_store_handee_encrypted">>;
+public_values(hb_store_andee_encrypted) ->
+    <<"hb_store_andee_encrypted">>;
 public_values(Value) ->
     Value.
 

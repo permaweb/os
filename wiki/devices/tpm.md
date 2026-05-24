@@ -6,14 +6,14 @@ kept out of the v1 API.
 
 ## Engine Behavior
 
-- Generate or load an AK whose policy binds PCR 15 after the LapEE subject is
-  extended.
+- Generate or load an AK whose policy binds PCR 15 after the PermawebOS
+  measurement subject is extended.
 - Extend PCR 15 with the boot measurement subject identity before quoting.
 - Fresh measurements must not extend PCRs; they bind nonce through quote
   qualifying data.
 - Quote the selected PCR set with the AK.
 - Include EK certificate material, AK public material, PCR values, quote,
-  signature, event log, and enough chain material for offline verification.
+  signature, TCG event log, and enough chain material for offline verification.
 - Verify EK chain against measured-in roots or peer-provided chains that end in
   known measured-in roots.
 - Verify AK possession through credential activation.

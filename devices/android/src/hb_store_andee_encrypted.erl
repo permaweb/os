@@ -1,11 +1,11 @@
-%%% @doc Zone-unsealed encrypted non-volatile store for HandEE.
+%%% @doc Zone-unsealed encrypted non-volatile store for AndEE.
 %%%
 %%% The store keeps HyperBEAM's normal `hb_store' interface at the boundary,
 %%% keeps live state in ETS, and persists encrypted append-only operation log
 %%% records under app-private storage. The zone AES secret is registered in
 %%% memory by `dev_zone' after successful measurement/secret-recipient
 %%% admission; it is never placed in the store message itself.
--module(hb_store_handee_encrypted).
+-module(hb_store_andee_encrypted).
 
 -export([register_secret/2, forget_secret/1, flush/1]).
 -export([start/3, stop/3, reset/3, scope/0, scope/1]).
@@ -16,7 +16,7 @@
 
 -define(ROOT_GROUP, <<"/">>).
 -define(DATA_FILE, <<"store.bin">>).
--define(MAGIC, <<"handee-encrypted-store-log-v1">>).
+-define(MAGIC, <<"andee-encrypted-store-log-v1">>).
 -define(MAX_REDIRECTS, 32).
 -define(DEFAULT_FLUSH_INTERVAL_MS, 50).
 
@@ -594,9 +594,9 @@ store_key(Opts) ->
 secret(#{<<"secret-ref">> := SecretRef}) ->
     try persistent_term:get(secret_term(SecretRef)) of
         AES when is_binary(AES), byte_size(AES) =:= 32 -> AES;
-        _ -> erlang:error({missing_handee_store_secret, SecretRef})
+        _ -> erlang:error({missing_andee_store_secret, SecretRef})
     catch
-        error:badarg -> erlang:error({missing_handee_store_secret, SecretRef})
+        error:badarg -> erlang:error({missing_andee_store_secret, SecretRef})
     end.
 
 key_context(Opts) ->
@@ -659,10 +659,10 @@ encrypted_store_appends_records_test() ->
     register_secret(SecretRef, AES),
     ok = hb_store:start(Store),
     ok = hb_store:write(Store, #{<<"a">> => <<"one">>}, #{}),
-    ok = hb_store_handee_encrypted:flush(Store),
+    ok = hb_store_andee_encrypted:flush(Store),
     Size1 = filelib:file_size(data_file(Store)),
     ok = hb_store:write(Store, #{<<"b">> => <<"two">>}, #{}),
-    ok = hb_store_handee_encrypted:flush(Store),
+    ok = hb_store_andee_encrypted:flush(Store),
     Size2 = filelib:file_size(data_file(Store)),
     ?assert(Size2 > Size1),
     ok = hb_store:stop(Store),
@@ -682,14 +682,14 @@ encrypted_store_truncates_partial_tail_test() ->
     register_secret(SecretRef, AES),
     ok = hb_store:start(Store),
     ok = hb_store:write(Store, #{<<"a">> => <<"one">>}, #{}),
-    ok = hb_store_handee_encrypted:flush(Store),
+    ok = hb_store_andee_encrypted:flush(Store),
     Size1 = filelib:file_size(File),
     ok = hb_store:stop(Store),
     ok = file:write_file(File, <<0, 0, 0, 100, "partial">>, [append]),
     ok = hb_store:start(Store),
     ?assertEqual(Size1, filelib:file_size(File)),
     ok = hb_store:write(Store, #{<<"b">> => <<"two">>}, #{}),
-    ok = hb_store_handee_encrypted:flush(Store),
+    ok = hb_store_andee_encrypted:flush(Store),
     ok = hb_store:stop(Store),
     ok = hb_store:start(Store),
     ?assertEqual({ok, <<"one">>}, hb_store:read(Store, <<"a">>, #{})),
@@ -712,7 +712,7 @@ test_root(Name) ->
     Base = hb_util:bin(os:getenv("TMPDIR", "/tmp")),
     hb_util:bin(filename:join([
         hb_util:list(Base),
-        "handee-encrypted-store-tests",
+        "andee-encrypted-store-tests",
         hb_util:list(Name)
     ])).
 -endif.

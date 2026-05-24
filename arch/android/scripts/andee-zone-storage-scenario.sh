@@ -9,28 +9,28 @@ require_tool erl
 
 "$ROOT/scripts/stage-android-devices.sh"
 
-OUT="$BUILD_DIR/handee-zone-storage"
-NODE1_PORT="${HANDEE_ZONE_NODE1_PORT:-18746}"
-NODE2_PORT="${HANDEE_ZONE_NODE2_PORT:-18747}"
+OUT="$BUILD_DIR/andee-zone-storage"
+NODE1_PORT="${ANDEE_ZONE_NODE1_PORT:-18746}"
+NODE2_PORT="${ANDEE_ZONE_NODE2_PORT:-18747}"
 NODE1_URL="http://127.0.0.1:$NODE1_PORT"
 NODE2_URL="http://127.0.0.1:$NODE2_PORT"
-ZONE_NAME="${HANDEE_ZONE_NAME:-overnight-storage}"
-COOKIE="handee_zone_storage"
-NODE1_NAME="handee_zone_storage_1"
-NODE2_NAME="handee_zone_storage_2"
-SENTINEL_KEY="data/handee-zone-storage/sentinel"
-SENTINEL_VALUE="handee-zone-storage-sentinel-$(date +%Y%m%d%H%M%S)"
+ZONE_NAME="${ANDEE_ZONE_NAME:-overnight-storage}"
+COOKIE="andee_zone_storage"
+NODE1_NAME="andee_zone_storage_1"
+NODE2_NAME="andee_zone_storage_2"
+SENTINEL_KEY="data/andee-zone-storage/sentinel"
+SENTINEL_VALUE="andee-zone-storage-sentinel-$(date +%Y%m%d%H%M%S)"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-(cd "$HANDEE_DEVICE_ROOT" && rebar3 compile)
+(cd "$ANDEE_DEVICE_ROOT" && rebar3 compile)
 
-HB_SRC="$HANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
-HB_APP="$HANDEE_DEVICE_ROOT/_build/default/lib/hb"
+HB_SRC="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
+HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
 mkdir -p "$OUT/probe-src" "$OUT/probe-ebin"
-cat >"$OUT/probe-src/handee_zone_storage_probe.erl" <<'ERL'
--module(handee_zone_storage_probe).
+cat >"$OUT/probe-src/andee_zone_storage_probe.erl" <<'ERL'
+-module(andee_zone_storage_probe).
 -export([write_read/3, read/2]).
 
 write_read(Server, Key, Value) ->
@@ -47,10 +47,10 @@ flush_encrypted(Opts) ->
     Stores = hb_opts:get(<<"store">>, [], Opts),
     lists:foreach(
         fun
-            (Store = #{<<"store-module">> := hb_store_handee_encrypted}) ->
-                ok = hb_store_handee_encrypted:flush(Store);
-            (Store = #{<<"store-module">> := <<"hb_store_handee_encrypted">>}) ->
-                ok = hb_store_handee_encrypted:flush(Store);
+            (Store = #{<<"store-module">> := hb_store_andee_encrypted}) ->
+                ok = hb_store_andee_encrypted:flush(Store);
+            (Store = #{<<"store-module">> := <<"hb_store_andee_encrypted">>}) ->
+                ok = hb_store_andee_encrypted:flush(Store);
             (_) ->
                 ok
         end,
@@ -61,7 +61,7 @@ flush_encrypted(Opts) ->
     ).
 ERL
 erlc -pa "$HB_APP/ebin" -I "$HB_APP/include" \
-    -o "$OUT/probe-ebin" "$OUT/probe-src/handee_zone_storage_probe.erl"
+    -o "$OUT/probe-ebin" "$OUT/probe-src/andee_zone_storage_probe.erl"
 if ! erlc -pa "$HB_APP/ebin" +'{feature,maybe_expr,enable}' \
     -I "$HB_APP/include" \
     -I "$HB_SRC/core" \
@@ -148,7 +148,7 @@ make_config() {
     local name="$3"
     local encrypted_root="$4"
     local out="$5"
-    python3 - <<'PY' "$HANDEE_CONFIG" "$port" "$url" "$name" "$encrypted_root" "$out"
+    python3 - <<'PY' "$ANDEE_CONFIG" "$port" "$url" "$name" "$encrypted_root" "$out"
 import json, pathlib, sys
 base = json.loads(pathlib.Path(sys.argv[1]).read_text())
 base["port"] = int(sys.argv[2])
@@ -167,12 +167,12 @@ start_node() {
     local config="$2"
     local log="$3"
     (
-        cd "$HANDEE_DEVICE_ROOT"
+        cd "$ANDEE_DEVICE_ROOT"
         exec erl -sname "$node_name" -setcookie "$COOKIE" \
             -pa "$OUT/probe-ebin" \
             -pa _build/default/lib/*/ebin \
             -noshell \
-            -eval "handee_bootstrap:start(<<\"$config\">>)."
+            -eval "andee_bootstrap:start(<<\"$config\">>)."
     ) >"$log" 2>&1 &
     PIDS+=("$!")
 }
@@ -244,15 +244,15 @@ PY
 
 node_address_from_log() {
     local log="$1"
-    sed -n 's/^HandEE HyperBEAM node started on port [0-9][0-9]* as //p' \
+    sed -n 's/^AndEE HyperBEAM node started on port [0-9][0-9]* as //p' \
         "$log" | tail -1
 }
 
 rpc_eval() {
     local eval="$1"
-    local name="handee_zone_probe_${RANDOM}_$$"
+    local name="andee_zone_probe_${RANDOM}_$$"
     (
-        cd "$HANDEE_DEVICE_ROOT"
+        cd "$ANDEE_DEVICE_ROOT"
         exec erl -hidden -noshell -sname "$name" -setcookie "$COOKIE" \
             -pa "$OUT/probe-ebin" \
             -pa _build/default/lib/*/ebin \
@@ -270,7 +270,7 @@ rpc_write_read_sentinel() {
         Server = <<\"$server_id\">>,
         Key = <<\"$SENTINEL_KEY\">>,
         Value = <<\"$SENTINEL_VALUE\">>,
-        case rpc:call(Node, handee_zone_storage_probe, write_read,
+        case rpc:call(Node, andee_zone_storage_probe, write_read,
                       [Server, Key, Value], 10000) of
             {ok, Value} ->
                 io:format(\"~s~n\", [Value]),
@@ -291,7 +291,7 @@ rpc_expect_sentinel_missing() {
         Node = list_to_atom(\"$node_name@\" ++ Host),
         Server = <<\"$server_id\">>,
         Key = <<\"$SENTINEL_KEY\">>,
-        case rpc:call(Node, handee_zone_storage_probe, read,
+        case rpc:call(Node, andee_zone_storage_probe, read,
                       [Server, Key], 10000) of
             {error, not_found} ->
                 io:format(\"missing-before-rejoin~n\"),
@@ -313,7 +313,7 @@ rpc_read_sentinel() {
         Server = <<\"$server_id\">>,
         Key = <<\"$SENTINEL_KEY\">>,
         Value = <<\"$SENTINEL_VALUE\">>,
-        case rpc:call(Node, handee_zone_storage_probe, read,
+        case rpc:call(Node, andee_zone_storage_probe, read,
                       [Server, Key], 10000) of
             {ok, Value} ->
                 io:format(\"~s~n\", [Value]),
@@ -353,9 +353,9 @@ assert_store_file_opaque() {
     printf '%s\n' "$file" >"$OUT/$name.store-file.txt"
 }
 
-make_config "$NODE1_PORT" "$NODE1_URL" "host-handee-zone-storage-1" \
+make_config "$NODE1_PORT" "$NODE1_URL" "host-andee-zone-storage-1" \
     "$OUT/node1-encrypted" "$OUT/node1.json"
-make_config "$NODE2_PORT" "$NODE2_URL" "host-handee-zone-storage-2" \
+make_config "$NODE2_PORT" "$NODE2_URL" "host-andee-zone-storage-2" \
     "$OUT/node2-encrypted" "$OUT/node2.json"
 
 start_node "$NODE1_NAME" "$OUT/node1.json" "$OUT/node1.log"
@@ -363,7 +363,7 @@ start_node "$NODE2_NAME" "$OUT/node2.json" "$OUT/node2.log"
 wait_for_node "$NODE1_URL" node1
 wait_for_node "$NODE2_URL" node2
 
-INIT_URL="$NODE1_URL/~zone@1.0/init?name=$(urlencode "$ZONE_NAME")&self-url=$(urlencode "$NODE1_URL")&template-measurement-device=handee%401.0"
+INIT_URL="$NODE1_URL/~zone@1.0/init?name=$(urlencode "$ZONE_NAME")&self-url=$(urlencode "$NODE1_URL")&template-measurement-device=andee%401.0"
 post_json "$INIT_URL" "$OUT/init.raw.json"
 materialize "$NODE1_URL" "$OUT/init.raw.json" "$OUT/init.materialized.json"
 assert_status_opened "$OUT/init.materialized.json"
@@ -411,12 +411,12 @@ import json, pathlib, sys
 out = pathlib.Path(sys.argv[3])
 summary = {
     "passed": True,
-    "scenario": "host-handee-zone-encrypted-store-rejoin",
+    "scenario": "host-andee-zone-encrypted-store-rejoin",
     "ring_address": sys.argv[2],
     "node1_store_file": (out / "node1.store-file.txt").read_text().strip(),
     "node2_store_file_before_restart": (out / "node2-before-restart.store-file.txt").read_text().strip(),
     "node2_store_file_after_restart": (out / "node2-after-restart.store-file.txt").read_text().strip(),
-    "sentinel_key": "data/handee-zone-storage/sentinel",
+    "sentinel_key": "data/andee-zone-storage/sentinel",
     "sentinel_value": (out / "sentinel-after-rejoin.txt").read_text().strip(),
     "sentinel_missing_before_rejoin": (out / "sentinel-before-rejoin.txt").read_text().strip() == "missing-before-rejoin",
     "evidence": {

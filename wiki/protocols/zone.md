@@ -3,6 +3,11 @@
 `~zone@1.0` creates named shared identities for nodes whose measurements match
 one of the zone's admissible templates.
 
+Zones are how PermawebOS turns many different hardware-security stories into a
+single AO-Core identity. A template may admit SNP nodes, TME nodes, LPDDR
+LapEEs, AndEE nodes, or a deliberate mixture, as long as each candidate's
+measurement matches one of the allowed shapes.
+
 ## Public Exports
 
 - `init`: create a named zone from the local node after verifying that the

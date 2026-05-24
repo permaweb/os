@@ -1,4 +1,4 @@
-package org.permaweb.handee
+package org.permaweb.andee
 
 import android.app.Activity
 import android.content.Intent
@@ -46,7 +46,7 @@ class OrnamentActivity : Activity() {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
-        startForegroundService(Intent(this, HandeeService::class.java))
+        startForegroundService(Intent(this, AndeeService::class.java))
         ornamentView = OrnamentView(
             this,
             object : OrnamentView.Actions {
@@ -60,7 +60,7 @@ class OrnamentActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        startForegroundService(Intent(this, HandeeService::class.java))
+        startForegroundService(Intent(this, AndeeService::class.java))
         hideSystemBars()
     }
 
@@ -94,7 +94,7 @@ class OrnamentActivity : Activity() {
         val uri = data?.data ?: return
         try {
             val text = readPickedText(uri)
-            HandeeBootConfigStore.stageNextBootConfig(this, text)
+            AndeeBootConfigStore.stageNextBootConfig(this, text)
             ornamentView.setNextBootConfigPending(true)
             hideSystemBars()
         } catch (exc: Exception) {
@@ -123,15 +123,15 @@ class OrnamentActivity : Activity() {
 
     private fun terminateApp() {
         try {
-            HandeeBootConfigStore.commitPendingForNextBoot(this)
+            AndeeBootConfigStore.commitPendingForNextBoot(this)
             ornamentView.setNextBootConfigPending(false)
         } catch (exc: Exception) {
             Log.e(TAG, "failed to commit pending boot config before terminate", exc)
             return
         }
         startForegroundService(
-            Intent(this, HandeeService::class.java)
-                .setAction(HandeeService.ACTION_TERMINATE),
+            Intent(this, AndeeService::class.java)
+                .setAction(AndeeService.ACTION_TERMINATE),
         )
         finishAndRemoveTask()
     }
@@ -153,7 +153,7 @@ private class OrnamentView(
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
     private val nodeStatus = AtomicReference(NodeStatus.booting())
-    private val nextBootConfigPending = AtomicBoolean(HandeeBootConfigStore.hasPending(context))
+    private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
     private val pollerRunning = AtomicBoolean(false)
     private var pollerThread: Thread? = null
     private var startedAt = System.nanoTime()
@@ -187,7 +187,7 @@ private class OrnamentView(
         super.onAttachedToWindow()
         startedAt = System.nanoTime()
         if (pollerRunning.compareAndSet(false, true)) {
-            pollerThread = Thread(::pollNode, "HandEE-Ornament-Probe").also {
+            pollerThread = Thread(::pollNode, "AndEE-Ornament-Probe").also {
                 it.isDaemon = true
                 it.start()
             }
@@ -214,7 +214,7 @@ private class OrnamentView(
     private fun pollNode() {
         while (pollerRunning.get()) {
             nodeStatus.set(NodeProbe.snapshot())
-            nextBootConfigPending.set(HandeeBootConfigStore.hasPending(context))
+            nextBootConfigPending.set(AndeeBootConfigStore.hasPending(context))
             postInvalidate()
             try {
                 Thread.sleep(2_000L)

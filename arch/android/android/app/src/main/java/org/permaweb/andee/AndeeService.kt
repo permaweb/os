@@ -1,4 +1,4 @@
-package org.permaweb.handee
+package org.permaweb.andee
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -10,8 +10,8 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 
-class HandeeService : Service() {
-    private var cryptoAgent: HandeeCryptoAgent? = null
+class AndeeService : Service() {
+    private var cryptoAgent: AndeeCryptoAgent? = null
     private var hyperbeamRuntime: HyperbeamRuntime? = null
     private var starterThread: Thread? = null
     @Volatile private var stopping = false
@@ -50,11 +50,11 @@ class HandeeService : Service() {
     private fun startRuntimeIfNeeded() {
         if (hyperbeamRuntime?.isAlive() == true || starterThread?.isAlive == true) return
         Thread {
-            var agent: HandeeCryptoAgent? = null
+            var agent: AndeeCryptoAgent? = null
             var runtime: HyperbeamRuntime? = null
             try {
                 val runtimeRoot = RuntimeExtractor(this).extractIfNeeded()
-                val currentAgent = HandeeCryptoAgent(this).also { it.start() }
+                val currentAgent = AndeeCryptoAgent(this).also { it.start() }
                 agent = currentAgent
                 if (stopping) {
                     currentAgent.close()
@@ -72,9 +72,9 @@ class HandeeService : Service() {
                     return@Thread
                 }
                 hyperbeamRuntime = runtime
-                Log.i(TAG, "HandEE service running")
+                Log.i(TAG, "AndEE service running")
             } catch (exc: Exception) {
-                Log.e(TAG, "failed to start HandEE runtime", exc)
+                Log.e(TAG, "failed to start AndEE runtime", exc)
                 runtime?.close()
                 agent?.close()
                 stopSelf()
@@ -138,7 +138,7 @@ class HandeeService : Service() {
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_handee)
+            .setSmallIcon(R.drawable.ic_stat_andee)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText("Runtime active")
             .setOngoing(true)
@@ -150,10 +150,10 @@ class HandeeService : Service() {
     }
 
     companion object {
-        const val ACTION_STOP = "org.permaweb.handee.action.STOP"
-        const val ACTION_TERMINATE = "org.permaweb.handee.action.TERMINATE"
-        private const val TAG = "HandeeService"
-        private const val CHANNEL_ID = "handee-runtime"
+        const val ACTION_STOP = "org.permaweb.andee.action.STOP"
+        const val ACTION_TERMINATE = "org.permaweb.andee.action.TERMINATE"
+        private const val TAG = "AndeeService"
+        private const val CHANNEL_ID = "andee-runtime"
         private const val NOTIFICATION_ID = 7341
     }
 }

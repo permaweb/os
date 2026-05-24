@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-KEYSTORE="$ROOT/android/handee-release.local.keystore"
+KEYSTORE="$ROOT/android/andee-release.local.keystore"
 
 require_tool keytool
 
@@ -13,12 +13,12 @@ fi
 
 keytool -genkeypair \
     -keystore "$KEYSTORE" \
-    -storepass handee-local \
-    -keypass handee-local \
-    -alias handee-local \
+    -storepass andee-local \
+    -keypass andee-local \
+    -alias andee-local \
     -keyalg EC \
     -groupname secp256r1 \
     -validity 3650 \
-    -dname "CN=HandEE Local Release,O=Permaweb,C=US"
+    -dname "CN=AndEE Local Release,O=Permaweb,C=US"
 
 echo "created local release keystore: $KEYSTORE"

@@ -2,13 +2,13 @@
 
 ## Prompt
 
-Normalize HandEE into the PermawebOS distribution branch, avoid drift between
+Normalize AndEE into the PermawebOS distribution branch, avoid drift between
 Android and Linux protocol devices, build test infrastructure for mixed
 architecture zones, and keep the launch risk low.
 
 ## Issue
 
-The imported HandEE package carried its own `~measurement@1.0` and
+The imported Android package carried its own `~measurement@1.0` and
 `~zone@1.0` implementations. That is acceptable as an import checkpoint but
 wrong as an operating-system architecture: Android, SNP, TPM, TME, and no-TME
 nodes must share one zone and measurement protocol so admission, templates,
@@ -24,7 +24,7 @@ such as `~system@1.0`.
 
 `~measurement@1.0` remains one common protocol device. It selects measurement
 engines by device name, with `auto` probing real available devices. Engines
-such as `~tpm@2.0a`, `~snp@1.0`, and `~handee@1.0` implement the measurement
+such as `~tpm@2.0a`, `~snp@1.0`, and `~andee@1.0` implement the measurement
 backend contract.
 
 `~zone@1.0` remains one common protocol device. It will accept either a single
@@ -36,4 +36,3 @@ same peer boot measurement matches at least one admissible template.
 This keeps protocol semantics in one place, but Android packaging needs a small
 staging step before compile/build. That is preferable to maintaining forked
 zone/measurement modules whose security properties can silently diverge.
-

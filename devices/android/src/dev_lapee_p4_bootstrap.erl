@@ -534,7 +534,7 @@ p4_non_chargable_routes(LedgerID) ->
         #{<<"template">> => <<"/~location@1.0/*">>},
         #{<<"template">> => <<"/~p4@1.0/balance">>},
         #{<<"template">> => <<"/~measurement@1.0/*">>},
-        #{<<"template">> => <<"/~handee@1.0/*">>},
+        #{<<"template">> => <<"/~andee@1.0/*">>},
         #{<<"template">> => <<"/~system@1.0/*">>},
         #{<<"template">> => <<"/~tpm@2.0a/*">>},
         #{<<"template">> => <<"/~meta@1.0/*">>},
