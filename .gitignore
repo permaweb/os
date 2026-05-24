@@ -20,9 +20,9 @@
 /arch/android/android/.gradle/
 /arch/android/android/build/
 /arch/android/android/app/build/
-/arch/android/android/app/src/main/assets/handee-runtime.zip
+/arch/android/android/app/src/main/assets/andee-runtime.zip
 /arch/android/android/app/src/main/jniLibs/
-/arch/android/android/handee-release.local.keystore
+/arch/android/android/andee-release.local.keystore
 
 # Operator-owned secrets and Secure Boot material.
 /wifi.conf
