@@ -26,7 +26,11 @@ GUEST_HOST=${GUEST_HOST:-10.0.2.2}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
 MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-30000}
 MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
+ALLOW_REJECTED_PEER_ATTESTATION=${ALLOW_REJECTED_PEER_ATTESTATION:-0}
 ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
+SNP_CERT_CHAIN_PEM_FILE=${SNP_CERT_CHAIN_PEM_FILE:-}
+SNP_VCEK_DER_FILE=${SNP_VCEK_DER_FILE:-}
+SNP_VCEK_DER_B64=${SNP_VCEK_DER_B64:-}
 NODE1_DMI_PRODUCT=${NODE1_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
 NODE2_DMI_PRODUCT=${NODE2_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
 NODE3_DMI_PRODUCT=${NODE3_DMI_PRODUCT:-LapEE-SNP-Zone-admit}
@@ -87,18 +91,52 @@ prepare_image() {
     local dst="$OUTDIR/nodes/node1/disk.img"
     local cfg="$OUTDIR/nodes/node1/config.json"
     local trace_json=false
+    local allow_rejected=false
+    local snp_cert_chain_pem=""
+    local snp_vcek_der="$SNP_VCEK_DER_B64"
     mkdir -p "$OUTDIR/nodes/node1"
     [[ "$MEASUREMENT_TRACE" == "1" ]] && trace_json=true
+    [[ "$ALLOW_REJECTED_PEER_ATTESTATION" == "1" ]] && allow_rejected=true
+    if [[ -n "$SNP_CERT_CHAIN_PEM_FILE" ]]; then
+        [[ -f "$SNP_CERT_CHAIN_PEM_FILE" ]] || {
+            echo "missing SNP_CERT_CHAIN_PEM_FILE: $SNP_CERT_CHAIN_PEM_FILE" >&2
+            exit 1
+        }
+        snp_cert_chain_pem=$(cat "$SNP_CERT_CHAIN_PEM_FILE")
+    fi
+    if [[ -n "$SNP_VCEK_DER_FILE" ]]; then
+        [[ -f "$SNP_VCEK_DER_FILE" ]] || {
+            echo "missing SNP_VCEK_DER_FILE: $SNP_VCEK_DER_FILE" >&2
+            exit 1
+        }
+        snp_vcek_der=$(
+            python3 - "$SNP_VCEK_DER_FILE" <<'PY'
+import base64, pathlib, sys
+print(base64.urlsafe_b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode().rstrip("="))
+PY
+        )
+    fi
     cp "$IMAGE" "$dst"
     jq -n \
         --argjson trace "$trace_json" \
+        --argjson allow_rejected "$allow_rejected" \
+        --arg snp_cert_chain_pem "$snp_cert_chain_pem" \
+        --arg snp_vcek_der "$snp_vcek_der" \
         --argjson measurement_timeout_ms "$MEASUREMENT_TIMEOUT_MS" '
         {
           "measurement-device": "snp@1.0",
+          "lapee-allow-request-trusted-ca": true,
+          "allow-rejected-peer-attestation": $allow_rejected,
           "peer-http-connect-timeout-ms": 600000,
           "peer-http-timeout-ms": 600000,
           "measurement-timeout-ms": $measurement_timeout_ms
         }
+        + (if $snp_cert_chain_pem != "" then
+             {"snp-cert-chain-pem": $snp_cert_chain_pem}
+           else {} end)
+        + (if $snp_vcek_der != "" then
+             {"snp-vcek-der": $snp_vcek_der}
+           else {} end)
         + (if $trace then {"measurement-trace": true} else {} end)
     ' > "$cfg"
     docker run --rm $DOCKER_PLATFORM \
@@ -383,6 +421,7 @@ require_request() {
 
 generate_requests() {
     ZONE_TEMPLATE_MODE="$ZONE_TEMPLATE_MODE" \
+    ZONE_TEMPLATE_LIST="${ZONE_TEMPLATE_LIST:-}" \
         python3 scripts/qemu-zone-requests.py \
             "$OUTDIR" "$BASE_PORT" "$GUEST_HOST"
     for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
@@ -424,13 +463,15 @@ run_zone_flow() {
         "$OUTDIR/requests/verify2.json" \
         "$OUTDIR/responses/node1-verify2.json"
     jq -e '.status == 200 and .body.type == "zone-peer-attestation" and
-           (.body.verification.verified == true or
-            .body.verification.verified == "true") and
-           (.body.freshness.verified == true or
-            .body.freshness.verified == "true") and
-           .body."peer-scope"."consumer-scope"."ring-address" == "'"$ring_addr"'" and
-           (.body."credential-activation".verified == true or
-            .body."credential-activation".verified == "true")' \
+           (.body."boot-verified" == true or
+            .body."boot-verified" == "true") and
+           (.body."fresh-verified" == true or
+            .body."fresh-verified" == "true") and
+           (.body."freshness-verified" == true or
+            .body."freshness-verified" == "true") and
+           .body."peer-scope-ring-address" == "'"$ring_addr"'" and
+           (.body."credential-activation-verified" == true or
+            .body."credential-activation-verified" == "true")' \
         "$OUTDIR/responses/node1-verify2.json" >/dev/null
 
     remote_post 1 "/~zone@1.0/admit" \
@@ -464,7 +505,8 @@ run_zone_flow() {
         "$OUTDIR/requests/join4.json" \
         "$OUTDIR/responses/node4-join.json"
     if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-                .body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"' \
+                (.body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name" or
+                 any(.body.mismatches[]?; ."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"))' \
             "$OUTDIR/responses/node4-join.json" >/dev/null; then
         echo "node 4 rejection was not the expected template-mismatch" >&2
         cat "$OUTDIR/responses/node4-join.json" >&2

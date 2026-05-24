@@ -12,6 +12,17 @@
 # be huge: images, initramfses, QEMU scratch state, splash captures,
 # local HyperBEAM verifier checkout, and attestation dashboards.
 /build/
+/devices/*/_build/
+/devices/*/cache-http/
+/devices/*/cache-mainnet/
+/devices/*/rebar.lock
+/arch/android/build/
+/arch/android/android/.gradle/
+/arch/android/android/build/
+/arch/android/android/app/build/
+/arch/android/android/app/src/main/assets/handee-runtime.zip
+/arch/android/android/app/src/main/jniLibs/
+/arch/android/android/handee-release.local.keystore
 
 # Operator-owned secrets and Secure Boot material.
 /wifi.conf

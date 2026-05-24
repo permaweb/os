@@ -303,15 +303,19 @@ REMOTE
     if ! {
         jq -e '
             def truthy: . == true or . == "true";
-            .body."boot-verification".verified | truthy
+            .body."boot-verified" | truthy
         ' "$OUTDIR/verify-peer.json" >/dev/null
         jq -e '
             def truthy: . == true or . == "true";
-            .body.verification.verified | truthy
+            .body."fresh-verified" | truthy
         ' "$OUTDIR/verify-peer.json" >/dev/null
         jq -e '
             def truthy: . == true or . == "true";
-            .body."credential-activation".verified | truthy
+            .body."freshness-verified" | truthy
+        ' "$OUTDIR/verify-peer.json" >/dev/null
+        jq -e '
+            def truthy: . == true or . == "true";
+            .body."credential-activation-verified" | truthy
         ' "$OUTDIR/verify-peer.json" >/dev/null
     }; then
         ssh "$host" "tail -200 '$remote_dir/serial.log' 2>/dev/null || true" \

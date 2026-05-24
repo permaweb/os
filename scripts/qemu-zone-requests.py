@@ -78,9 +78,19 @@ def main() -> int:
             "evidence": evidence_template,
         })
 
+    init_template_key = "templates" if os.environ.get("ZONE_TEMPLATE_LIST") else "template"
+    init_template_value = template
+    if init_template_key == "templates":
+        init_template_value = [
+            {"body": {"system": {"firmware": {"dmi": {
+                "fields": {"product-name": "definitely-not-this-node"}
+            }}}}},
+            template,
+        ]
+
     (out / "requests/init.json").write_text(json.dumps({
         "name": "book-shelf",
-        "template": template,
+        init_template_key: init_template_value,
     }))
     (out / "requests/init-device-specific.json").write_text(json.dumps({
         "name": "book-shelf",

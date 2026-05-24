@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">HandEE</string>
+    <string name="notification_channel">HandEE runtime</string>
+    <string name="notification_title">HandEE HyperBEAM node</string>
+</resources>

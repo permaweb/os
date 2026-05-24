@@ -1,9 +1,10 @@
-# LapEE Product Feature Contract
+# PermawebOS Appliance Feature Contract
 
-LapEE is a single-purpose HyperBEAM appliance OS for commodity laptops and
-TEE-backed VMs. The product is not "Linux with many hardening knobs"; it is a
-bootable node that produces useful AO-Core work and exposes enough measured
-evidence for other nodes or users to decide whether to trust its results.
+PermawebOS is a family of HyperBEAM appliance builds for commodity laptops,
+TEE-backed VMs, and Android devices. The product is not "Linux with many
+hardening knobs"; it is a bootable node that produces useful AO-Core work and
+exposes enough measured evidence for other nodes or users to decide whether to
+trust its results.
 
 ## End-User Features
 
@@ -16,8 +17,8 @@ evidence for other nodes or users to decide whether to trust its results.
 4. Produce fresh nonce-bound measurements on request.
 5. Bind the measurement to the node message, system report, node signing key,
    and hardware measurement backend.
-6. Support TPM 2.0 laptops and AMD SEV-SNP VMs through the same public
-   measurement protocol.
+6. Support TPM 2.0 laptops, AMD SEV-SNP VMs, and Android HandEE devices
+   through the same public measurement protocol.
 7. Verify peer measurements live and publish signed peer attestations that can
    later be trusted by parties that trust the verifier address.
 8. Create and join named zones whose templates match normalized measurement

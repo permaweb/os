@@ -10,6 +10,13 @@
 # ============================================================
 # Release artifacts:
 #
+#   make all EXCLUDE_ARCH=android,snp
+#                           - build every architecture artifact except listed
+#                             comma-separated names.
+#   make tme                - build signed Linux/TME image.
+#   make no-tme             - build signed Linux/no-TME image.
+#   make snp                - build signed Linux/SNP-capable image.
+#   make android            - build Android HandEE APK/runtime.
 #   make runtime-image      - build a signed runtime disk image.
 #                             TME=0 allows no-TME test hardware.
 #                             DEBUG=1 enables the measured debug console.
@@ -61,7 +68,7 @@ HOST_OS   := $(shell uname -s)
 HOME_DIR  := $(shell printf '%s' "$$HOME")
 
 # ----- pinned upstream Docker base ----------------------------
-# Bumping = update this line. Same digest in docker/Dockerfile.
+# Bumping = update this line. Same digest in arch/common/linux/docker/Dockerfile.
 DEBIAN_BASE := debian:12-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
 export DEBIAN_BASE
 
@@ -105,10 +112,13 @@ SB_PROVISION_CMDLINE = console=ttyS0 console=tty0 fbcon=nodefer \
                        loglevel=7 panic=10 rdinit=/init \
                        lapee.mode=sb-provision
 HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
-HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' buildroot-external/package/hyperbeam/hyperbeam.mk)
+LINUX_ARCH_DIR ?= $(LAPEE_ROOT)/arch/common/linux
+LINUX_BUILDROOT_EXTERNAL ?= $(LINUX_ARCH_DIR)/buildroot-external
+LINUX_DOCKER_DIR ?= $(LINUX_ARCH_DIR)/docker
+HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exit}' $(LINUX_BUILDROOT_EXTERNAL)/package/hyperbeam/hyperbeam.mk)
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 HYPERBEAM_ALLOW_CLEAN ?= 0
-LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/hyperbeam-devices
+LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/common
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -128,7 +138,14 @@ IMAGE ?= $(RUNTIME_SIGNED_OUT)
 WRITE_IMAGE = $(if $(filter file,$(origin OUT)),$(IMAGE),$(OUT))
 export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET LAPEE_HB_DEVICE_DIR
 
-.PHONY: help runtime-image runtime-write provisioner-image provisioner-write \
+empty :=
+space := $(empty) $(empty)
+comma := ,
+EXCLUDED_ARCHES := $(subst $(comma),$(space),$(EXCLUDE_ARCH))
+ALL_ARCH_TARGETS := $(filter-out $(EXCLUDED_ARCHES),tme no-tme snp android provisioner)
+
+.PHONY: help all tme no-tme snp android android-check provisioner \
+        runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
         qemu qemu-oracle qemu-gui qemu-zone qemu-zone-nonvolatile \
         qemu-provisioner-nonvolatile qemu-operator-config \
@@ -142,7 +159,7 @@ export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET LAPEE_HB_D
         _qemu-provisioner-nonvolatile \
         _qemu-operator-config-zone \
         _qemu-measurement-remote _qemu-zone-remote-snp \
-        all build toolchain \
+        build toolchain \
         kernel buildroot \
         hb-fetch paper clean
 
@@ -288,7 +305,33 @@ _runtime-signed-image:
 
 build: runtime-image
 
-all: runtime-image
+all: $(ALL_ARCH_TARGETS)
+
+tme:
+	$(MAKE) runtime-image TME=1 \
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme.img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme.signed.efi"
+
+no-tme:
+	$(MAKE) runtime-image TME=0 \
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme.img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-no-tme.signed.efi"
+
+snp:
+	$(MAKE) runtime-image TME=0 \
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp.img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-snp.signed.efi"
+
+android:
+	$(MAKE) -C arch/android android-build
+
+android-check:
+	$(MAKE) -C arch/android android-check
+
+provisioner: provisioner-image
 
 paper:
 	$(MAKE) -C paper
@@ -300,7 +343,7 @@ paper:
 toolchain:
 	docker pull $(DOCKER_PLATFORM) $(DEBIAN_BASE)
 	docker build $(DOCKER_PLATFORM) -t $(BUILD_IMAGE) \
-	    -f docker/Dockerfile docker/
+	    -f $(LINUX_DOCKER_DIR)/Dockerfile $(LINUX_DOCKER_DIR)/
 
 # ------------------------------------------------------------
 # Kernel + rootfs build via Buildroot.
@@ -373,8 +416,8 @@ _provisioner-image: toolchain
 	$(MAKE) buildroot \
 	    BUILDROOT_VOLUME=$(SB_PROVISION_BUILDROOT_VOLUME) \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
-	    KERNEL_EXTRA_FRAGMENT="$(LAPEE_ROOT)/buildroot-external/board/lapee/linux-sb-provisioner-fragment.config" \
-	    DEFCONFIG_EXTRA_SNIPPET="$(LAPEE_ROOT)/buildroot-external/configs/lapee-sb-provisioner.extra"
+	    KERNEL_EXTRA_FRAGMENT="$(LINUX_BUILDROOT_EXTERNAL)/board/lapee/linux-sb-provisioner-fragment.config" \
+	    DEFCONFIG_EXTRA_SNIPPET="$(LINUX_BUILDROOT_EXTERNAL)/configs/lapee-sb-provisioner.extra"
 	$(MAKE) _usb-image WIFI=0 \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL="$(SB_PROVISION_KERNEL)" \
@@ -416,7 +459,7 @@ _qemu-zone-remote-snp: toolchain
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \
-	    echo "could not read HYPERBEAM_VERSION from buildroot-external/package/hyperbeam/hyperbeam.mk" >&2; \
+	    echo "could not read HYPERBEAM_VERSION from $(LINUX_BUILDROOT_EXTERNAL)/package/hyperbeam/hyperbeam.mk" >&2; \
 	    exit 1; }
 	@mkdir -p "$(dir $(HYPERBEAM_SRC))"
 	@if [ -f "$(HYPERBEAM_SRC)/rebar.config" ]; then \
