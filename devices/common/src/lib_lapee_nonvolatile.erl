@@ -38,35 +38,27 @@ activate_enabled(Name, RingAddress, AES, Opts) ->
     ).
 
 activate_enabled_locked(Name, RingAddress, AES, Opts) ->
-    case mounted(Opts) of
-        true ->
+    case mounted_binding(Name, RingAddress, Opts) of
+        same ->
             {ok, Opts};
-        false ->
+        {conflict, Status} ->
+            {ok, set_status(Opts, conflict_status(Name, RingAddress, Status))};
+        none ->
             case mapper_mounted_at_default() of
                 true ->
-                    Store = persistent_store(?DEFAULT_MOUNT, Opts),
-                    case prepare_persistent_store(Store, Opts) of
-                        {ok, Migration} ->
-                            Status = mounted_status(
-                                Name,
-                                RingAddress,
-                                mapper_source_partition(),
-                                Store,
-                                false,
-                                false,
-                                Migration
-                            ),
-                            {ok, set_status(install_store(Store, Opts), Status)};
-                        {error, Reason} ->
-                            Status = refresh_error_status(
-                                Name,
-                                RingAddress,
-                                mapper_source_partition(),
-                                Store,
-                                Reason
-                            ),
-                            {ok, set_status(Opts, Status)}
-                    end;
+                    {ok, set_status(
+                        Opts,
+                        conflict_status(
+                            Name,
+                            RingAddress,
+                            #{
+                                <<"mounted">> => true,
+                                <<"zone">> => <<"unknown">>,
+                                <<"ring-address">> => <<"unknown">>,
+                                <<"partition">> => mapper_source_partition()
+                            }
+                        )
+                    )};
                 false ->
                     activate_unmounted(Name, RingAddress, AES, Opts)
             end
@@ -83,11 +75,29 @@ activate_unmounted(Name, RingAddress, AES, Opts) ->
             {ok, set_status(Opts, Status)}
     end.
 
-mounted(Opts) ->
+mounted_binding(Name, RingAddress, Opts) ->
     case status(Opts) of
-        #{ <<"mounted">> := true } -> true;
-        _ -> false
+        #{
+            <<"mounted">> := true,
+            <<"zone">> := Name,
+            <<"ring-address">> := RingAddress
+        } ->
+            same;
+        #{ <<"mounted">> := true } = Status ->
+            {conflict, Status};
+        _ ->
+            none
     end.
+
+conflict_status(Name, RingAddress, Existing) ->
+    #{
+        <<"enabled">> => true,
+        <<"mounted">> => false,
+        <<"zone">> => Name,
+        <<"ring-address">> => RingAddress,
+        <<"error">> => <<"nonvolatile-store-already-bound">>,
+        <<"existing">> => Existing
+    }.
 
 do_activate(Name, RingAddress, AES, Opts) ->
     case select_partition(RingAddress) of
@@ -156,19 +166,6 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
         end
     end).
 
-mounted_status(Name, RingAddress, Partition, Store,
-        LuksFormatted, FsFormatted, Migration) ->
-    mounted_status(
-        Name,
-        RingAddress,
-        partition_label_from_path(Partition),
-        Partition,
-        Store,
-        LuksFormatted,
-        FsFormatted,
-        Migration
-    ).
-
 mounted_status(Name, RingAddress, Label, Partition, Store,
         LuksFormatted, FsFormatted, Migration) ->
     Status0 = #{
@@ -199,26 +196,6 @@ activation_error(Code, Reason) ->
         <<"error">> => Code,
         <<"detail">> => command_reason(Reason)
     }}.
-
-refresh_error_status(Name, RingAddress, Partition, Store, Reason) ->
-    Status0 = #{
-        <<"enabled">> => true,
-        <<"mounted">> => false,
-        <<"zone">> => Name,
-        <<"ring-address">> => RingAddress,
-        <<"partition-label">> => partition_label_from_path(Partition),
-        <<"zone-partition-label">> => zone_partition_label(RingAddress),
-        <<"primary-partition-label">> => ?PRIMARY_LABEL,
-        <<"mapper">> => ?DEFAULT_MAPPER,
-        <<"mount-point">> => ?DEFAULT_MOUNT,
-        <<"store">> => hb_maps:get(<<"name">>, Store, undefined, #{}),
-        <<"error">> => <<"current-boot-refresh-failed">>,
-        <<"detail">> => command_reason(Reason)
-    },
-    case Partition of
-        undefined -> Status0;
-        _ -> Status0#{<<"partition">> => Partition}
-    end.
 
 disk_key(Name, RingAddress, AES) ->
     crypto:hash(
@@ -316,9 +293,6 @@ labeled_partitions() ->
         _ ->
             []
     end.
-
-partition_label(Name) ->
-    element(1, partition_label_with_source(Name)).
 
 partition_label_with_source(Name) ->
     case sysfs_partition_label(Name) of
@@ -515,13 +489,6 @@ uevent_value(Key, UEvent) ->
         [Value | _] -> Value;
         [] -> undefined
     end.
-
-partition_label_from_path(undefined) ->
-    undefined;
-partition_label_from_path(Partition) when is_binary(Partition) ->
-    partition_label_from_path(binary_to_list(Partition));
-partition_label_from_path(Partition) ->
-    partition_label(filename:basename(Partition)).
 
 ensure_luks(Partition, KeyFile) ->
     case run(<<"cryptsetup">>, [<<"isLuks">>, Partition]) of
@@ -1021,3 +988,32 @@ command_reason(Reason) when is_binary(Reason) ->
     Reason;
 command_reason(Reason) ->
     unicode:characters_to_binary(io_lib:format("~p", [Reason])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+mounted_binding_requires_same_zone_and_ring_test() ->
+    Status = #{
+        <<"mounted">> => true,
+        <<"zone">> => <<"alpha">>,
+        <<"ring-address">> => <<"ring-a">>
+    },
+    ?assertEqual(
+        same,
+        mounted_binding(
+            <<"alpha">>,
+            <<"ring-a">>,
+            #{<<"lapee-nonvolatile-status">> => Status}
+        )
+    ),
+    ?assertMatch(
+        {conflict, Status},
+        mounted_binding(
+            <<"beta">>,
+            <<"ring-b">>,
+            #{<<"lapee-nonvolatile-status">> => Status}
+        )
+    ),
+    ?assertEqual(none, mounted_binding(<<"alpha">>, <<"ring-a">>, #{})).
+
+-endif.

@@ -436,7 +436,20 @@ assert_zone_install_allowed(Name, Opts) ->
                 <<"name">> => Name
             }});
         _ ->
+            ok = assert_nonvolatile_install_allowed(Name, Opts),
             assert_zone_allowed(Name, Zones, zone_allow(Opts), Opts)
+    end.
+
+assert_nonvolatile_install_allowed(Name, Opts) ->
+    case lib_lapee_nonvolatile:status(Opts) of
+        #{<<"mounted">> := true} = Existing ->
+            throw({zone_error, #{
+                <<"error">> => <<"nonvolatile-zone-conflict">>,
+                <<"name">> => Name,
+                <<"existing">> => Existing
+            }});
+        _ ->
+            ok
     end.
 
 assert_zone_initialization_allowed(Name, Opts) ->
@@ -2038,6 +2051,24 @@ zone_allow_policy_test() ->
         assert_zone_install_allowed(
             <<"alpha">>,
             #{<<"zone-allow">> => [<<"alpha">>]})).
+
+nonvolatile_store_blocks_different_zone_test() ->
+    Mounted = #{
+        <<"mounted">> => true,
+        <<"zone">> => <<"alpha">>,
+        <<"ring-address">> => <<"ring-a">>
+    },
+    ?assertEqual(
+        ok,
+        assert_zone_install_allowed(<<"beta">>, #{<<"zone-allow">> => 2})),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"nonvolatile-zone-conflict">>}},
+        assert_zone_install_allowed(
+            <<"beta">>,
+            #{
+                <<"zone-allow">> => 2,
+                <<"lapee-nonvolatile-status">> => Mounted
+            })).
 
 zone_init_allow_policy_test() ->
     ?assertThrow(
