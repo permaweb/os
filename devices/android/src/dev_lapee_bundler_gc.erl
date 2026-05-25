@@ -14,6 +14,10 @@
 
 -include_lib("hb/include/hb.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -define(DEFAULT_RETENTION_MS, 15 * 60 * 1000).
 -define(BUNDLER_PREFIX, <<"~bundler@1.0">>).
 
@@ -262,7 +266,7 @@ item_purge_targets(Req, Opts) ->
     case hb_maps:get(<<"body">>, Req, undefined, Opts) of
         Item when is_map(Item) ->
             try
-                ItemID = hb_message:id(Item, signed, Opts),
+                ItemID = cache_item_id(Item, Opts),
                 CacheTargets = cache_purge_targets(Item, Opts),
                 {ok,
                     ItemID,
@@ -275,6 +279,13 @@ item_purge_targets(Req, Opts) ->
             error
     end.
 
+cache_item_id(Item, Opts) ->
+    hb_message:id(
+        cache_identity_msg(Item, Opts),
+        none,
+        Opts#{<<"linkify-mode">> => discard}
+    ).
+
 item_path(ItemID, _Opts) ->
     hb_path:to_binary([
         ?BUNDLER_PREFIX,
@@ -284,29 +295,22 @@ item_path(ItemID, _Opts) ->
     ]).
 
 cache_purge_targets(RawMsg, Opts) when is_map(RawMsg) ->
-    {ok, Msg} = hb_message:with_only_committed(RawMsg, Opts),
-    TABM = hb_message:convert(Msg, tabm, <<"structured@1.0">>, Opts),
-    maps:from_list([{Path, <<>>} || Path <- collect_cache_paths(TABM, Opts)]);
+    maps:from_list([
+        {Path, <<>>}
+     || Path <- collect_cache_paths(cache_identity_msg(RawMsg, Opts), Opts)
+    ]);
 cache_purge_targets(RawMsg, Opts) ->
     maps:from_list([{Path, <<>>} || Path <- collect_cache_paths(RawMsg, Opts)]).
 
 collect_cache_paths(Bin, Opts) when is_binary(Bin) ->
     [<<"data/", (hb_path:hashpath(Bin, Opts))/binary>>];
 collect_cache_paths(List, Opts) when is_list(List) ->
-    collect_cache_paths(
-        hb_message:convert(List, tabm, <<"structured@1.0">>, Opts),
-        Opts
-    );
+    lists:flatmap(fun(Value) -> collect_cache_paths(Value, Opts) end, List);
 collect_cache_paths(Msg, Opts) when is_map(Msg) ->
-    UncommittedID = hb_message:id(
-        Msg,
-        none,
-        Opts#{<<"linkify-mode">> => discard}
-    ),
-    AllIDs = calculate_all_ids(Msg, Opts),
-    AltIDs = AllIDs -- [UncommittedID],
-    MsgHashpathAlg = hb_path:hashpath_alg(Msg, Opts),
-    MessagePaths = [UncommittedID | AltIDs],
+    CacheMsg = cache_identity_msg(Msg, Opts),
+    UncommittedID =
+        hb_message:id(CacheMsg, none, Opts#{<<"linkify-mode">> => discard}),
+    MsgHashpathAlg = hb_path:hashpath_alg(CacheMsg, Opts),
     KeyPaths =
         lists:flatmap(
             fun({Key, Value}) ->
@@ -318,26 +322,10 @@ collect_cache_paths(Msg, Opts) when is_map(Msg) ->
                     Opts
                 )
             end,
-            maps:to_list(maps:without([<<"priv">>], Msg))
+            maps:to_list(CacheMsg)
         ),
-    lists:usort(MessagePaths ++ KeyPaths).
+    lists:usort([UncommittedID | KeyPaths]).
 
-collect_key_paths(Base, <<"commitments">>, _HPAlg, RawCommitments, Opts) ->
-    Commitments = prepare_commitments(RawCommitments, Opts),
-    CommitmentsBase = commitment_path(Base, Opts),
-    CommitmentPaths =
-        lists:flatmap(
-            fun({BaseCommID, Commitment}) ->
-                collect_cache_paths(Commitment, Opts) ++
-                    [<<CommitmentsBase/binary, "/", BaseCommID/binary>>]
-            end,
-            maps:to_list(Commitments)
-        ),
-    [
-        CommitmentsBase,
-        <<Base/binary, "/commitments">>
-        | CommitmentPaths
-    ];
 collect_key_paths(Base, Key, HPAlg, Value, Opts) ->
     KeyHashPath =
         hb_path:hashpath(
@@ -348,33 +336,12 @@ collect_key_paths(Base, Key, HPAlg, Value, Opts) ->
         ),
     [KeyHashPath | collect_cache_paths(Value, Opts)].
 
-prepare_commitments(RawCommitments, Opts) ->
-    Commitments = hb_cache:ensure_all_loaded(RawCommitments, Opts),
-    maps:map(
-        fun(_, StructuredCommitment) ->
-            hb_message:convert(StructuredCommitment, tabm, Opts)
-        end,
-        Commitments
+cache_identity_msg(Msg, Opts) ->
+    hb_maps:without(
+        [<<"commitments">>, <<"priv">>, <<"signature">>, <<"signature-input">>],
+        Msg,
+        Opts
     ).
-
-commitment_path(Base, Opts) ->
-    hb_path:hashpath(<<Base/binary, "/commitments">>, Opts).
-
-calculate_all_ids(Bin, _Opts) when is_binary(Bin) ->
-    [];
-calculate_all_ids(Msg, Opts) ->
-    Commitments =
-        hb_maps:without(
-            [<<"priv">>],
-            hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
-            Opts
-        ),
-    CommIDs = hb_maps:keys(Commitments, Opts),
-    All = hb_message:id(Msg, all, Opts#{<<"linkify-mode">> => discard}),
-    case lists:member(All, CommIDs) of
-        true -> CommIDs;
-        false -> [All | CommIDs]
-    end.
 
 retention_ms(Opts) ->
     opt_int(
@@ -387,3 +354,30 @@ opt_int(Key, Default, Opts) ->
     try hb_util:int(hb_opts:get(Key, Default, Opts))
     catch _:_ -> Default
     end.
+
+-ifdef(TEST).
+
+cache_identity_ignores_forged_commitment_id_test() ->
+    Opts = test_opts(),
+    ForgedID = <<"victim-cache-path">>,
+    Forged = #{
+        <<"body">> => <<"attacker">>,
+        <<"commitments">> => #{ForgedID => #{<<"type">> => <<"hmac-sha256">>}}
+    },
+    ?assertEqual(#{<<"body">> => <<"attacker">>}, cache_identity_msg(Forged, Opts)).
+
+cache_identity_ignores_signature_metadata_test() ->
+    Opts = test_opts(),
+    Item = #{
+        <<"body">> => <<"item">>,
+        <<"signature">> => <<"attacker-signature-field">>,
+        <<"signature-input">> => <<"attacker-signature-input-field">>,
+        <<"commitments">> =>
+            #{<<"attacker-commitment">> => #{<<"type">> => <<"hmac-sha256">>}}
+    },
+    ?assertEqual(#{<<"body">> => <<"item">>}, cache_identity_msg(Item, Opts)).
+
+test_opts() ->
+    #{}.
+
+-endif.
