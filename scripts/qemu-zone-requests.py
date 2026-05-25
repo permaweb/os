@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Generate JSON requests for the QEMU zone cluster harness."""
 
-import base64
 import json
 import os
 import pathlib
@@ -108,13 +107,6 @@ def main() -> int:
         }
     }))
 
-    ca_files = [out / "ca/issuercert.pem", out / "ca/swtpm-localca-rootca-cert.pem"]
-    if all(path.exists() for path in ca_files):
-        ca_bundle = "".join(path.read_text() for path in ca_files).encode()
-        trusted_ca = base64.urlsafe_b64encode(ca_bundle).decode().rstrip("=")
-    else:
-        trusted_ca = None
-
     # Node 3 joins via node 2 -- not via node 1 -- so the harness
     # exercises the multi-hop members propagation path that the
     # `add_member_to_members` bug used to silently break (the
@@ -131,17 +123,12 @@ def main() -> int:
             "name": "book-shelf",
             "joiner-url": f"http://{guest_host}:{base_port + n}",
         }
-        if trusted_ca:
-            join["trusted-ca"] = trusted_ca
-            admit["trusted-ca"] = trusted_ca
         (out / f"requests/join{n}.json").write_text(json.dumps(join))
         (out / f"requests/admit{n}.json").write_text(json.dumps(admit))
 
     verify = {
         "url": f"http://{guest_host}:{base_port + 2}",
     }
-    if trusted_ca:
-        verify["trusted-ca"] = trusted_ca
     (out / "requests/verify2.json").write_text(json.dumps(verify))
 
     return 0

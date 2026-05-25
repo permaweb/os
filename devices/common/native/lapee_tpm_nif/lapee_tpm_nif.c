@@ -22,6 +22,7 @@
 /* Shared HMAC session with AES-CFB parameter encryption for TPM2B-valued
  * sensitive operations. Commands fail closed if this session cannot start. */
 static ESYS_TR g_auth_session = ESYS_TR_NONE;
+static ErlNifMutex *g_esys_lock = NULL;
 static const int g_ak_policy_pcrs[] = {0, 1, 7, 10, 11, 14, 15};
 #define LAPEE_AK_POLICY_PCR_COUNT \
     (sizeof(g_ak_policy_pcrs) / sizeof(g_ak_policy_pcrs[0]))
@@ -53,8 +54,13 @@ lapee_ensure_auth_session(void)
     TPMA_SESSION attrs = TPMA_SESSION_ENCRYPT |
                          TPMA_SESSION_DECRYPT |
                          TPMA_SESSION_CONTINUESESSION;
-    return Esys_TRSess_SetAttributes(g_esys_ctx, g_auth_session,
-                                      attrs, 0xFF);
+    rc = Esys_TRSess_SetAttributes(g_esys_ctx, g_auth_session,
+                                    attrs, 0xFF);
+    if (rc != TSS2_RC_SUCCESS) {
+        Esys_FlushContext(g_esys_ctx, g_auth_session);
+        g_auth_session = ESYS_TR_NONE;
+    }
+    return rc;
 }
 
 static TSS2_RC
@@ -412,6 +418,12 @@ do_load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
 {
     (void)priv_data;
 
+    g_esys_lock = enif_mutex_create("lapee_tpm_esys_lock");
+    if (g_esys_lock == NULL) {
+        fprintf(stderr, "[lapee_tpm_nif] enif_mutex_create failed\n");
+        return 1;
+    }
+
     if (parse_tcti_load_info(env, load_info, g_tcti_conf, sizeof(g_tcti_conf)) != 0) {
         /* Default if not provided. */
         snprintf(g_tcti_conf, sizeof(g_tcti_conf),
@@ -422,6 +434,8 @@ do_load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
     if (rc != TSS2_RC_SUCCESS) {
         fprintf(stderr, "[lapee_tpm_nif] Tss2_TctiLdr_Initialize(%s) failed: 0x%x (%s)\n",
                 g_tcti_conf, rc, Tss2_RC_Decode(rc));
+        enif_mutex_destroy(g_esys_lock);
+        g_esys_lock = NULL;
         return 1;
     }
     rc = Esys_Initialize(&g_esys_ctx, g_tcti_ctx, NULL);
@@ -429,6 +443,8 @@ do_load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
         fprintf(stderr, "[lapee_tpm_nif] Esys_Initialize failed: 0x%x (%s)\n",
                 rc, Tss2_RC_Decode(rc));
         Tss2_TctiLdr_Finalize(&g_tcti_ctx);
+        enif_mutex_destroy(g_esys_lock);
+        g_esys_lock = NULL;
         return 1;
     }
     return 0;
@@ -438,18 +454,24 @@ static void
 do_unload(ErlNifEnv *env, void *priv_data)
 {
     (void)env; (void)priv_data;
+    if (g_esys_lock) enif_mutex_lock(g_esys_lock);
     if (g_auth_session != ESYS_TR_NONE && g_esys_ctx) {
         Esys_FlushContext(g_esys_ctx, g_auth_session);
         g_auth_session = ESYS_TR_NONE;
     }
     if (g_esys_ctx) { Esys_Finalize(&g_esys_ctx); g_esys_ctx = NULL; }
     if (g_tcti_ctx) { Tss2_TctiLdr_Finalize(&g_tcti_ctx); g_tcti_ctx = NULL; }
+    if (g_esys_lock) {
+        enif_mutex_unlock(g_esys_lock);
+        enif_mutex_destroy(g_esys_lock);
+        g_esys_lock = NULL;
+    }
 }
 
 /*-------------------------------- startup/0 ---------------------------------*/
 
 static ERL_NIF_TERM
-nif_startup(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_startup_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc; (void)argv;
     TSS2_RC rc = Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
@@ -466,7 +488,7 @@ nif_startup(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 /*-------------------------------- pcr_extend/2 ------------------------------*/
 
 static ERL_NIF_TERM
-nif_pcr_extend(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_pcr_extend_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
     int idx;
@@ -546,7 +568,7 @@ static const TPM2B_PUBLIC ek_template = {
 };
 
 static ERL_NIF_TERM
-nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_create_primary_ek_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc; (void)argv;
 
@@ -626,7 +648,7 @@ nif_create_primary_ek(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 /*-------------------------------- create_signing_key/0 ----------------------*/
 
 static ERL_NIF_TERM
-nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_create_signing_key_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc; (void)argv;
 
@@ -740,7 +762,7 @@ nif_create_signing_key(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 /*-------------------------------- activate_credential/4 ---------------------*/
 
 static ERL_NIF_TERM
-nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_activate_credential_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
     unsigned ak_tr, ek_tr;
@@ -821,7 +843,7 @@ nif_activate_credential(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 /*-------------------------------- quote/3 -----------------------------------*/
 
 static ERL_NIF_TERM
-nif_quote(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_quote_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
     unsigned esys_tr;
@@ -1027,7 +1049,7 @@ tpm_pt_get(TPM2_PT prop, TSS2_RC *out_rc)
  *   firmware_version_2  -- TPM_PT_FIRMWARE_VERSION_2
  */
 static ERL_NIF_TERM
-nif_tpm_properties(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_tpm_properties_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc; (void)argv;
 
@@ -1141,7 +1163,7 @@ nif_tpm_properties(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
  * surfaced verbatim.
  */
 static ERL_NIF_TERM
-nif_nv_read(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+nif_nv_read_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
     unsigned handle_u;
@@ -1249,6 +1271,30 @@ nif_nv_read(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     }
     return enif_make_tuple2(env, enif_make_atom(env, "ok"), out_bin);
 }
+
+/*-------------------------------- locked entrypoints ------------------------*/
+
+#define DEFINE_LOCKED_NIF(name)                                             \
+static ERL_NIF_TERM                                                          \
+name(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])                   \
+{                                                                           \
+    if (g_esys_lock == NULL) {                                               \
+        return lapee_make_error(env, "tpm_lock_unavailable");               \
+    }                                                                       \
+    enif_mutex_lock(g_esys_lock);                                            \
+    ERL_NIF_TERM ret = name##_impl(env, argc, argv);                         \
+    enif_mutex_unlock(g_esys_lock);                                          \
+    return ret;                                                             \
+}
+
+DEFINE_LOCKED_NIF(nif_startup)
+DEFINE_LOCKED_NIF(nif_pcr_extend)
+DEFINE_LOCKED_NIF(nif_create_primary_ek)
+DEFINE_LOCKED_NIF(nif_create_signing_key)
+DEFINE_LOCKED_NIF(nif_activate_credential)
+DEFINE_LOCKED_NIF(nif_quote)
+DEFINE_LOCKED_NIF(nif_tpm_properties)
+DEFINE_LOCKED_NIF(nif_nv_read)
 
 /*-------------------------------- NIF table ---------------------------------*/
 

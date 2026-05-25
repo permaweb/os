@@ -125,7 +125,6 @@ PY
         --arg measurement_timeout_ms "$MEASUREMENT_TIMEOUT_MS" '
         {
           "measurement-device": "snp@1.0",
-          "lapee-allow-request-trusted-ca": true,
           "allow-rejected-peer-attestation": $allow_rejected,
           "peer-http-connect-timeout-ms": 600000,
           "peer-http-timeout-ms": 600000

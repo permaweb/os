@@ -133,21 +133,25 @@ prepare_qemu_image() {
     local cfg="$OUTDIR/qemu-config.json"
     local dst_rel="${dst#$OUTDIR/}"
     cp "$src" "$dst"
-    python3 - \
-        "arch/common/linux/buildroot-external/board/lapee/rootfs-overlay/etc/lapee/lapee.json" \
-        "$cfg" "$device" <<'PY'
+    python3 - "$cfg" "$device" \
+        "$OUTDIR/ca/issuercert.pem" \
+        "$OUTDIR/ca/swtpm-localca-rootca-cert.pem" <<'PY'
 import json, pathlib, sys
 
-base = json.loads(pathlib.Path(sys.argv[1]).read_text())
 cfg = {
-    "lapee-allow-request-trusted-ca": True,
     "peer-http-connect-timeout-ms": 600000,
     "peer-http-timeout-ms": 600000,
 }
-device = sys.argv[3]
+device = sys.argv[2]
 if device != "auto":
     cfg["measurement-device"] = device
-pathlib.Path(sys.argv[2]).write_text(json.dumps(cfg))
+ca_pems = []
+for path in map(pathlib.Path, sys.argv[3:]):
+    if path.exists():
+        ca_pems.append(path.read_text())
+if ca_pems:
+    cfg["lapee-tpm-ca-pem"] = "".join(ca_pems)
+pathlib.Path(sys.argv[1]).write_text(json.dumps(cfg))
 PY
     docker run --rm $DOCKER_PLATFORM \
         -v "$OUTDIR":/work \
@@ -388,12 +392,12 @@ start_node() {
     local port=$((BASE_PORT + n))
     mkdir -p "$node_dir"
     if [[ "$fresh" = "1" ]]; then
+        cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
+        manufacture_tpm "$n"
         prepare_qemu_image \
             "$img" \
             "$node_dir/disk.img" \
             "$(node_measurement_device "$n")" >/dev/null
-        cp "$OVMF_VARS_TEMPLATE" "$node_dir/vars.fd"
-        manufacture_tpm "$n"
         if [[ "$NONVOLATILE" = "1" ]]; then
             prepare_nonvolatile_disk "$n"
         fi

@@ -217,13 +217,20 @@ allow_request_trusted_ca(Opts) ->
     hb_opts:get(<<"lapee-allow-request-trusted-ca">>, false, Opts) =:= true.
 
 resolve_trusted_ca_from_config(Opts) ->
-    case configured_trusted_ca_path(Opts) of
-        undefined ->
-            resolve_trusted_ca_from_internal_bundle(Opts);
-        Path ->
-            case file:read_file(path_to_list(Path)) of
-                {ok, Pem}  -> {Pem, <<"node-config">>};
-                {error, _} -> {<<>>, <<"node-config-missing">>}
+    case hb_opts:get(<<"lapee-tpm-ca-pem">>, undefined, Opts) of
+        Pem when is_binary(Pem), byte_size(Pem) > 0 ->
+            {Pem, <<"node-config-pem">>};
+        Pem when is_list(Pem), length(Pem) > 0 ->
+            {iolist_to_binary(Pem), <<"node-config-pem">>};
+        _ ->
+            case configured_trusted_ca_path(Opts) of
+                undefined ->
+                    resolve_trusted_ca_from_internal_bundle(Opts);
+                Path ->
+                    case file:read_file(path_to_list(Path)) of
+                        {ok, Pem}  -> {Pem, <<"node-config">>};
+                        {error, _} -> {<<>>, <<"node-config-missing">>}
+                    end
             end
     end.
 

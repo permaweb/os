@@ -1263,8 +1263,8 @@ strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
 strip_trailing_slash(B) ->
     B.
 
-verify_joiner(JoinerURL, Req, RingReference, Opts) ->
-    VerifyReq = Req#{
+verify_joiner(JoinerURL, _Req, RingReference, Opts) ->
+    VerifyReq = #{
         <<"url">> => JoinerURL,
         <<"peer-attestation-scope">> => RingReference
     },
@@ -1607,11 +1607,7 @@ measurement_body(Other, _Opts) ->
     Other.
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
-    Body = maps:with(
-        [<<"trusted-ca">>, <<"allow-rejected-peer-attestation">>],
-        Req
-    ),
-    AdmitReq = Body#{
+    AdmitReq = #{
         <<"name">> => required_name(Req, Opts),
         <<"joiner-url">> => SelfURL,
         <<"admission-nonce">> => AdmissionNonce
