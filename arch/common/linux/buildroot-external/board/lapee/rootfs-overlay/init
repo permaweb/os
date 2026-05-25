@@ -610,7 +610,6 @@ sbp_prompt_nonvolatile_disk() {
 sbp_confirm_enrolment() {
     _sbp_answer=""
     sbp_set_input "$_sbp_answer"
-    sbp_log "Type I UNDERSTAND. to continue."
     _sbp_stty=$(stty -F /dev/console -g 2>/dev/null || true)
     stty -F /dev/console raw -echo 2>/dev/null || true
     while :; do
@@ -643,6 +642,102 @@ sbp_confirm_enrolment() {
     done
 }
 
+sbp_secure_boot_bundle_present() {
+    [ -f /mnt/esp/LAPEE.MARKER ] || return 1
+    [ "$(sed -n '1p' /mnt/esp/LAPEE.MARKER 2>/dev/null)" = "lapee-esp-v1" ] || \
+        return 1
+    [ -f /mnt/esp/db.auth ] && \
+        [ -f /mnt/esp/KEK.auth ] && \
+        [ -f /mnt/esp/PK.auth ]
+}
+
+sbp_collect_secure_boot_bundles() {
+    _candidates=/run/lapee/sb-bundle-candidates
+    : > "$_candidates"
+    for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
+                /dev/nvme[0-9]n[0-9]p[0-9]* \
+                /dev/mmcblk[0-9]p[0-9]*; do
+        [ -b "$_dev" ] || continue
+        umount /mnt/esp 2>/dev/null || true
+        if mount -t vfat -o ro,nosuid,nodev,noexec,noatime \
+                "$_dev" /mnt/esp 2>/dev/null; then
+            if sbp_secure_boot_bundle_present; then
+                printf '%s\n' "$_dev" >> "$_candidates"
+            fi
+            umount /mnt/esp 2>/dev/null || true
+        fi
+    done
+}
+
+sbp_bundle_candidate_count() {
+    wc -l < /run/lapee/sb-bundle-candidates 2>/dev/null | tr -d ' '
+}
+
+sbp_find_secure_boot_bundle() {
+    SBP_ESP_FOUND=""
+    for _i in 1 2 3 4 5 6 7 8 9 10 \
+              11 12 13 14 15 16 17 18 19 20; do
+        sbp_collect_secure_boot_bundles
+        _count=$(sbp_bundle_candidate_count)
+        case "$_count" in
+            0)
+                sbp_log "Still looking for provisioning files ($_i/20)."
+                sleep 1
+                ;;
+            1)
+                sleep 2
+                sbp_collect_secure_boot_bundles
+                _count=$(sbp_bundle_candidate_count)
+                [ "$_count" = "1" ] || break
+                SBP_ESP_FOUND=$(sed -n '1p' /run/lapee/sb-bundle-candidates)
+                if mount -t vfat -o ro,nosuid,nodev,noexec,noatime \
+                        "$SBP_ESP_FOUND" /mnt/esp 2>/dev/null && \
+                   sbp_secure_boot_bundle_present; then
+                    return 0
+                fi
+                umount /mnt/esp 2>/dev/null || true
+                sbp_log "Provisioning bundle changed while settling; retrying."
+                sleep 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    return 1
+}
+
+sbp_secure_boot_fingerprint_line() {
+    _f="$1"
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    _sha=$(sha256sum "/mnt/esp/$_f" 2>/dev/null | awk '{ print $1 }')
+    [ ${#_sha} -eq 64 ] || return 1
+    case "$_sha" in
+        *[!0123456789abcdefABCDEF]*) return 1 ;;
+    esac
+    printf '%s sha256=%s\n' "$_f" "$_sha"
+}
+
+sbp_show_enrolment_confirmation() {
+    : > "$PROVISION_REPORT_FILE" 2>/dev/null || return 1
+    printf 'Type I UNDERSTAND. to continue.\n' \
+        > "$PROVISION_PROMPT_FILE" 2>/dev/null || return 1
+    {
+        printf '%s\n' "Secure Boot enrolment bundle fingerprints:"
+        printf '%s\n' ""
+        for _f in db.auth KEK.auth PK.auth; do
+            sbp_secure_boot_fingerprint_line "$_f" || return 1
+        done
+        printf '%s\n' ""
+        printf '%s\n' "Only continue if these are the expected operator keys."
+    } >> "$PROVISION_REPORT_FILE" || return 1
+    for _f in db.auth KEK.auth PK.auth; do
+        _line=$(sbp_secure_boot_fingerprint_line "$_f") || return 1
+        sbp_log "$_line"
+    done
+    printf 'prompt\n' > "$PROVISION_MODE_FILE" 2>/dev/null || return 1
+}
+
 run_secure_boot_provisioner() {
     sbp_log ""
     sbp_log "Secure Boot provisioning mode."
@@ -656,34 +751,29 @@ run_secure_boot_provisioner() {
     fi
 
     sbp_log "Looking for the LapEE provisioning USB."
-    _esp_found=""
-    for _i in 1 2 3 4 5 6 7 8 9 10 \
-              11 12 13 14 15 16 17 18 19 20; do
-        for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
-                    /dev/nvme[0-9]n[0-9]p[0-9]* \
-                    /dev/mmcblk[0-9]p[0-9]*; do
-            [ -b "$_dev" ] || continue
-            if mount -t vfat -o ro,nosuid,nodev,noexec,noatime "$_dev" /mnt/esp 2>/dev/null; then
-                if [ -f /mnt/esp/LAPEE.MARKER ] && \
-                   [ -f /mnt/esp/db.auth ] && \
-                   [ -f /mnt/esp/KEK.auth ] && \
-                   [ -f /mnt/esp/PK.auth ]; then
-                    _esp_found="$_dev"
-                    break 2
-                fi
-                umount /mnt/esp 2>/dev/null || true
-            fi
-        done
-        sbp_log "Still looking for provisioning files ($_i/20)."
-        sleep 1
-    done
+    if sbp_find_secure_boot_bundle; then
+        _esp_found="$SBP_ESP_FOUND"
+    else
+        _esp_found=""
+    fi
 
     if [ -z "$_esp_found" ]; then
-        sbp_log "ERROR: provisioning files were not found on this USB."
+        _count=$(sbp_bundle_candidate_count)
+        if [ "${_count:-0}" -gt 1 ]; then
+            sbp_log "ERROR: multiple Secure Boot provisioning bundles were found."
+            sbp_log "Remove all decoy or extra provisioning media and boot again."
+        else
+            sbp_log "ERROR: provisioning files were not found on this USB."
+        fi
         exec sh -c 'while :; do sleep 3600; done'
     fi
 
     sbp_log "Found provisioning bundle on $_esp_found."
+    if ! sbp_show_enrolment_confirmation; then
+        sbp_log "ERROR: could not compute Secure Boot key fingerprints."
+        umount /mnt/esp 2>/dev/null || true
+        exec sh -c 'while :; do sleep 3600; done'
+    fi
     sbp_confirm_enrolment
     if ! sbp_prompt_nonvolatile_disk "$_esp_found"; then
         sbp_log ""
