@@ -33,6 +33,7 @@ cat > "$OUT/next-boot-config.json" <<JSON
   "public-url": "http://10.0.2.15:8734/$MARKER",
   "zone-self-url": "http://10.0.2.15:8734/$MARKER",
   "andee-test-marker": "$MARKER",
+  "zone-init-allow": true,
   "encrypted-volumes": true
 }
 JSON

@@ -45,7 +45,7 @@ info(_Base, _Req, _Opts) ->
 init(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
-        ok = assert_zone_install_allowed(Name, Opts),
+        ok = assert_zone_initialization_allowed(Name, Opts),
         Templates = request_templates(Req, Opts),
         reject_supplied_secret_material(Req, Opts),
         {_Template, Self} = self_attestation_body(Templates, Opts),
@@ -439,6 +439,32 @@ assert_zone_install_allowed(Name, Opts) ->
             assert_zone_allowed(Name, Zones, zone_allow(Opts), Opts)
     end.
 
+assert_zone_initialization_allowed(Name, Opts) ->
+    ok = assert_zone_install_allowed(Name, Opts),
+    assert_zone_init_allowed(Name, zone_init_allow(Opts), Opts).
+
+assert_zone_init_allowed(Name, disabled, _Opts) ->
+    throw({zone_error, #{
+        <<"error">> => <<"zone-init-disabled">>,
+        <<"name">> => Name
+    }});
+assert_zone_init_allowed(_Name, unlimited, _Opts) ->
+    ok;
+assert_zone_init_allowed(Name, {names, Names}, _Opts) ->
+    case lists:member(Name, Names) of
+        true -> ok;
+        false ->
+            throw({zone_error, #{
+                <<"error">> => <<"zone-init-not-allowed">>,
+                <<"name">> => Name
+            }})
+    end;
+assert_zone_init_allowed(Name, invalid, _Opts) ->
+    throw({zone_error, #{
+        <<"error">> => <<"invalid-zone-init-allow">>,
+        <<"name">> => Name
+    }}).
+
 assert_zone_allowed(Name, _Zones, disabled, _Opts) ->
     throw({zone_error, #{
         <<"error">> => <<"zone-join-disabled">>,
@@ -482,6 +508,9 @@ assert_zone_allowed(Name, _Zones, invalid, _Opts) ->
 
 zone_allow(Opts) ->
     normalize_zone_allow(hb_opts:get(<<"zone-allow">>, 1, Opts)).
+
+zone_init_allow(Opts) ->
+    normalize_zone_init_allow(hb_opts:get(<<"zone-init-allow">>, false, Opts)).
 
 normalize_zone_allow(false) -> disabled;
 normalize_zone_allow(0) -> disabled;
@@ -527,6 +556,20 @@ is_zone_name(_Other) -> false.
 
 is_bootstrap_url(Bin) when is_binary(Bin), byte_size(Bin) > 0 -> true;
 is_bootstrap_url(_Other) -> false.
+
+normalize_zone_init_allow(false) -> disabled;
+normalize_zone_init_allow(0) -> disabled;
+normalize_zone_init_allow(<<"false">>) -> disabled;
+normalize_zone_init_allow(<<"0">>) -> disabled;
+normalize_zone_init_allow(true) -> unlimited;
+normalize_zone_init_allow(<<"true">>) -> unlimited;
+normalize_zone_init_allow(Names) when is_list(Names) ->
+    case lists:all(fun is_zone_name/1, Names) of
+        true -> {names, Names};
+        false -> invalid
+    end;
+normalize_zone_init_allow(_Other) ->
+    invalid.
 
 start_node_opts(Req, Opts) ->
     case hb_maps:get(<<"body">>, Req, undefined, Opts) of
@@ -1995,6 +2038,31 @@ zone_allow_policy_test() ->
         assert_zone_install_allowed(
             <<"alpha">>,
             #{<<"zone-allow">> => [<<"alpha">>]})).
+
+zone_init_allow_policy_test() ->
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"zone-init-disabled">>}},
+        assert_zone_initialization_allowed(<<"alpha">>, #{})),
+    ?assertEqual(
+        ok,
+        assert_zone_initialization_allowed(
+            <<"alpha">>,
+            #{<<"zone-init-allow">> => true})),
+    ?assertEqual(
+        ok,
+        assert_zone_initialization_allowed(
+            <<"alpha">>,
+            #{<<"zone-init-allow">> => [<<"alpha">>]})),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"zone-init-not-allowed">>}},
+        assert_zone_initialization_allowed(
+            <<"beta">>,
+            #{<<"zone-init-allow">> => [<<"alpha">>]})),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"invalid-zone-init-allow">>}},
+        assert_zone_initialization_allowed(
+            <<"alpha">>,
+            #{<<"zone-init-allow">> => 1})).
 
 alternative_templates_match_first_viable_test() ->
     Measurement = #{

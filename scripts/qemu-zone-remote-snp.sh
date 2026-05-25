@@ -127,7 +127,8 @@ PY
           "measurement-device": "snp@1.0",
           "allow-rejected-peer-attestation": $allow_rejected,
           "peer-http-connect-timeout-ms": 600000,
-          "peer-http-timeout-ms": 600000
+          "peer-http-timeout-ms": 600000,
+          "zone-init-allow": true
         }
         + (if $measurement_timeout_ms != "" then
              {"measurement-timeout-ms": ($measurement_timeout_ms | tonumber)}

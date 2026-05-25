@@ -155,6 +155,7 @@ base["port"] = int(sys.argv[2])
 base["public-url"] = sys.argv[3]
 base["zone-self-url"] = sys.argv[3]
 base["name"] = sys.argv[4]
+base["zone-init-allow"] = True
 base["encrypted-volumes"] = True
 base["encrypted-volume-root"] = sys.argv[5]
 base["allow-rejected-peer-attestation"] = True

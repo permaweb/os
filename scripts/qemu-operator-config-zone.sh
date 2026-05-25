@@ -87,7 +87,10 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 SOCK_DIR=$(mktemp -d /tmp/lapee-config-zone.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
-{"load-remote-devices":true,"trusted-device-signers":["$SIGNER"]}
+{"load-remote-devices":true,"trusted-device-signers":["$SIGNER"],"zone-init-allow":["with-signer"]}
+EOF
+cat > "$OUTDIR/plain-zone-config.json" <<EOF
+{"zone-init-allow":["with-signer"]}
 EOF
 cat > "$OUTDIR/with-signer-init.json" <<EOF
 {"name":"with-signer","template":{"node":{"load-remote-devices":"true","trusted-device-signers":["$SIGNER"]}}}
@@ -129,7 +132,7 @@ prepare_image() {
 WITH_IMG="$OUTDIR/with-signer.img"
 PLAIN_IMG="$OUTDIR/plain.img"
 prepare_image "$IMG" "$WITH_IMG" "$OUTDIR/with-signer-config.json"
-prepare_image "$IMG" "$PLAIN_IMG" ""
+prepare_image "$IMG" "$PLAIN_IMG" "$OUTDIR/plain-zone-config.json"
 
 cat > "$OUTDIR/localca.conf" <<EOF
 statedir = $OUTDIR/ca

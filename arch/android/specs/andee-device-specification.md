@@ -1199,6 +1199,11 @@ selected keys materialized. Otherwise it is matched against the measurement
 
 Initializes a local zone ring.
 
+This endpoint is a state-mutating operator action. It is disabled unless the
+node config sets `zone-init-allow` to `true` or to a list containing the
+requested zone name. `zone-allow` still controls how many zones the node may
+install; it does not by itself allow public callers to initialize a fresh zone.
+
 Request fields:
 
 - `name`: required unless node option `zone-name` is set.

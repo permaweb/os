@@ -141,6 +141,7 @@ import json, pathlib, sys
 cfg = {
     "peer-http-connect-timeout-ms": 600000,
     "peer-http-timeout-ms": 600000,
+    "zone-init-allow": True,
 }
 device = sys.argv[2]
 if device != "auto":
