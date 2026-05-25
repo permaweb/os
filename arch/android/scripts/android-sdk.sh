@@ -7,6 +7,7 @@ sdkmanager \
     "platform-tools" \
     "platforms;android-36" \
     "build-tools;37.0.0" \
+    "ndk;29.0.14206865" \
     "emulator" \
     "system-images;android-36.1;google_apis;arm64-v8a"
 

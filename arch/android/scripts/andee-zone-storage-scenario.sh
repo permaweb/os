@@ -24,7 +24,7 @@ SENTINEL_VALUE="andee-zone-storage-sentinel-$(date +%Y%m%d%H%M%S)"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-(cd "$ANDEE_DEVICE_ROOT" && rebar3 compile)
+(cd "$ANDEE_DEVICE_ROOT" && "$ROOT/scripts/verified-rebar3.sh" compile)
 
 HB_SRC="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
 HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"

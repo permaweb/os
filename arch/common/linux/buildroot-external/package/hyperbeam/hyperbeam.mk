@@ -42,15 +42,28 @@ HYPERBEAM_DEPENDENCIES = host-erlang erlang openssl tpm2-tss gmp
 # across versions; the S3 bucket has been the documented
 # install method for years.)
 HYPERBEAM_REBAR3_URL = https://s3.amazonaws.com/rebar3/rebar3
+HYPERBEAM_REBAR3_SHA256 = af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf
+HYPERBEAM_REBAR3_PLUGINS = {plugins, [{pc, "1.15.0"}, {rebar3_rustler, "0.1.1"}, {rebar_edown_plugin, "0.7.0"}, {rebar3_eunit_start, {git, "https://github.com/permaweb/rebar3_eunit_start.git", {ref, "04ec53fea187039770db0d4459b7aeb01a9021af"}}}]}.
 
 define HYPERBEAM_DOWNLOAD_REBAR3
-	if [ ! -x $(@D)/rebar3 ]; then \
+	if [ -x $(@D)/rebar3 ]; then \
+	    echo '$(HYPERBEAM_REBAR3_SHA256)  $(@D)/rebar3' | sha256sum -c -; \
+	else \
 	    wget -q -O $(@D)/rebar3.tmp '$(HYPERBEAM_REBAR3_URL)' && \
+	    echo '$(HYPERBEAM_REBAR3_SHA256)  $(@D)/rebar3.tmp' | sha256sum -c - && \
 	    chmod +x $(@D)/rebar3.tmp && \
 	    mv $(@D)/rebar3.tmp $(@D)/rebar3; \
 	fi
 endef
 HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
+
+define HYPERBEAM_PIN_REBAR_PLUGINS
+	sed -i \
+	    's|^.*{plugins, \[pc, rebar3_rustler, rebar_edown_plugin, {rebar3_eunit_start,.*$$|$(HYPERBEAM_REBAR3_PLUGINS)|' \
+	    $(@D)/rebar.config
+	grep -F '$(HYPERBEAM_REBAR3_PLUGINS)' $(@D)/rebar.config >/dev/null
+endef
+HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_PIN_REBAR_PLUGINS
 
 HYPERBEAM_DEVICE_DIR ?= /build/common-devices
 
@@ -61,7 +74,7 @@ HYPERBEAM_DEVICE_DIR ?= /build/common-devices
 define HYPERBEAM_CREATE_BUILD_HELPERS
 	mkdir -p $(@D)/.lapee-build
 	printf '%s\n' \
-		'#!/bin/sh' \
+		'#!/usr/bin/env bash' \
 		'if [ "$$1" = rev-parse ] && [ "$$2" = HEAD ]; then' \
 		'    echo "$(HYPERBEAM_VERSION)"; exit 0' \
 		'fi' \
@@ -72,12 +85,29 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		> $(@D)/.lapee-build/git
 	chmod +x $(@D)/.lapee-build/git
 	printf '%s\n' \
-		'#!/bin/sh' \
+		'#!/usr/bin/env bash' \
 		'set -e' \
 		'crate=$$(basename "$$(pwd)")' \
-		'if { [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; } && [ "$${1:-}" = build ]; then' \
+		'args=("$$@")' \
+		'idx=0' \
+		'if [[ "$${args[0]:-}" == +* ]]; then idx=1; fi' \
+		'cmd=$${args[$$idx]:-}' \
+		'case "$$cmd" in' \
+		'    build|metadata|test)' \
+		'        lock=$${LAPEE_CARGO_LOCK_DIR:-}/$$crate.Cargo.lock' \
+		'        if [ -f "$$lock" ]; then' \
+		'            cp "$$lock" Cargo.lock' \
+		'        elif [ ! -f Cargo.lock ]; then' \
+		'            echo "refusing cargo $$cmd without Cargo.lock" >&2; exit 1' \
+		'        else' \
+		'            echo "using upstream Cargo.lock for $$crate" >&2' \
+		'        fi' \
+		'        args=("$${args[@]:0:$$((idx + 1))}" --locked "$${args[@]:$$((idx + 1))}")' \
+		'        ;;' \
+		'esac' \
+		'if { [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; } && [ "$$cmd" = build ]; then' \
 		'    mkdir -p target' \
-		'    /home/builder/.cargo/bin/cargo "$$@" >target/lapee-target-cargo.json' \
+		'    /home/builder/.cargo/bin/cargo "$${args[@]}" >target/lapee-target-cargo.json' \
 		'    target_so=$$(find target ../../target -path "*/$${CARGO_BUILD_TARGET:-__none__}/release/lib$$crate.so" -type f -print -quit 2>/dev/null || true)' \
 		'    if [ -n "$$target_so" ]; then' \
 		'        mkdir -p target/lapee-target/release' \
@@ -97,10 +127,10 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		'        -u CFLAGS -u LDFLAGS \' \
 		'        -u PKG_CONFIG_ALLOW_CROSS -u PKG_CONFIG_SYSROOT_DIR \' \
 		'        -u PKG_CONFIG_PATH -u CMAKE_TOOLCHAIN_FILE \' \
-		'        /home/builder/.cargo/bin/cargo "$$@"' \
+		'        /home/builder/.cargo/bin/cargo "$${args[@]}"' \
 		'    exit 0' \
 		'fi' \
-		'/home/builder/.cargo/bin/cargo "$$@"' \
+		'/home/builder/.cargo/bin/cargo "$${args[@]}"' \
 		'for dir in target/*/release; do' \
 		'    [ -d "$$dir" ] || continue' \
 		'    mkdir -p target/release' \
@@ -204,6 +234,7 @@ HYPERBEAM_BUILD_ENV = \
 	OPENSSL_LIB_DIR="$(STAGING_DIR)/usr/lib" \
 	OPENSSL_INCLUDE_DIR="$(STAGING_DIR)/usr/include" \
 	OPENSSL_NO_VENDOR=1 \
+	LAPEE_CARGO_LOCK_DIR="$(HYPERBEAM_DEVICE_DIR)/cargo-locks" \
 	CMAKE_TOOLCHAIN_FILE="$(@D)/.lapee-build/toolchain.cmake" \
 	CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu \
 	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(@D)/.lapee-build/cc-filter" \
@@ -235,7 +266,7 @@ define HYPERBEAM_BUILD_CMDS
 	cd $(HYPERBEAM_DEVICE_DIR)/src && \
 	    $(HOST_DIR)/bin/erlc -o priv/dev_lapee_snp lapee_snp_nif.erl
 	cd $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif && \
-	    $(HYPERBEAM_BUILD_ENV) cargo build --release
+	    $(HYPERBEAM_BUILD_ENV) cargo build --release --locked
 	cp -af $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
 	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
 	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 release \

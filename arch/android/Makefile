@@ -100,7 +100,7 @@ verify-config-invariants:
 
 erl-compile:
 	./scripts/stage-android-devices.sh
-	cd "$(ANDEE_DEVICE_ROOT)" && rebar3 compile
+	cd "$(ANDEE_DEVICE_ROOT)" && "$(ROOT)/scripts/verified-rebar3.sh" compile
 
 clean:
 	rm -rf "$(BUILD_DIR)" "$(ANDROID_DIR)/app/build" "$(ANDROID_DIR)/build" \

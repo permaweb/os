@@ -6,15 +6,16 @@ OUT="$ROOT/android/app/src/main/assets/andee-runtime.zip"
 WORK="$BUILD_DIR/andee-runtime"
 JNI_DIR="$ROOT/android/app/src/main/jniLibs"
 NDK_ROOT="${ANDROID_NDK_ROOT:-}"
+NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
+REBAR3="$ROOT/scripts/verified-rebar3.sh"
 
 if [ -z "$NDK_ROOT" ]; then
-    NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$(ls -1 "$ANDROID_SDK_ROOT/ndk" | sort | tail -1)"
+    NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
 fi
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 
 require_tool zip
 require_tool python3
-require_tool rebar3
 require_tool erlc
 
 "$ROOT/scripts/stage-android-devices.sh"
@@ -38,7 +39,7 @@ cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
 if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
-(cd "$ANDEE_DEVICE_ROOT" && rebar3 compile)
+(cd "$ANDEE_DEVICE_ROOT" && "$REBAR3" compile)
 
 "$TOOLCHAIN/aarch64-linux-android29-clang" \
     -D_POSIX_C_SOURCE=200809L -fPIE -pie -O2 -Wall -Wextra \

@@ -15,7 +15,6 @@
 /devices/*/_build/
 /devices/*/cache-http/
 /devices/*/cache-mainnet/
-/devices/*/rebar.lock
 /arch/android/build/
 /arch/android/android/.gradle/
 /arch/android/android/build/

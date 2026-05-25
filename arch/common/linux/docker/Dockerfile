@@ -92,13 +92,32 @@ RUN dpkg --add-architecture amd64 && \
 # x86_64-unknown-linux-gnu target lets cargo cross-compile from
 # any host arch to the LapEE x86_64 Linux target.
 ARG RUST_VERSION=1.91.0
-RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh \
-        https://sh.rustup.rs && \
-    sh /tmp/rustup-init.sh -y \
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256_AMD64=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+ARG RUSTUP_SHA256_ARM64=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
+ARG TARGETARCH
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64|x86_64) \
+            rustup_target=x86_64-unknown-linux-gnu; \
+            rustup_sha="$RUSTUP_SHA256_AMD64"; \
+            ;; \
+        arm64|aarch64) \
+            rustup_target=aarch64-unknown-linux-gnu; \
+            rustup_sha="$RUSTUP_SHA256_ARM64"; \
+            ;; \
+        *) echo "unsupported rustup architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init"; \
+    echo "${rustup_sha}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y \
         --default-toolchain ${RUST_VERSION} \
         --profile minimal \
         --target x86_64-unknown-linux-gnu && \
-    rm /tmp/rustup-init.sh
+    rm /tmp/rustup-init
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Buildroot refuses to run as root (host-tar's configure also
