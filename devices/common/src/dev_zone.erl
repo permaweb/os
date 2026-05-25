@@ -1299,25 +1299,11 @@ parse_positive_integer(_, Default) ->
     Default.
 
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
-    VerificationChecks =
-        case allow_rejected_peer_attestation(PeerAttestation, Opts) of
-            true ->
-                [
-                    {field_bool, <<"boot-verified">>},
-                    {field_bool, <<"fresh-verified">>}
-                ];
-            false ->
-                [
-                    {flat_true, <<"boot-verified">>,
-                        <<"boot-verification">>},
-                    {flat_true, <<"fresh-verified">>,
-                        <<"verification">>}
-                ]
-        end,
     Required = [
         {eq, <<"type">>, <<"zone-peer-attestation">>},
-        {field_integer, <<"issued-at-unix">>}
-    ] ++ VerificationChecks ++ [
+        {field_integer, <<"issued-at-unix">>},
+        {flat_true, <<"boot-verified">>, <<"boot-verification">>},
+        {flat_true, <<"fresh-verified">>, <<"verification">>},
         {flat_true, <<"freshness-verified">>, <<"freshness">>},
         {flat_true, <<"credential-activation-verified">>,
             <<"credential-activation">>},
@@ -1328,10 +1314,6 @@ assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
     assert_fields(PeerAttestation, Required, fun bad_peer_attestation/1, Opts),
     assert_peer_attestation_validity(PeerAttestation, Opts),
     assert_peer_attestation_scope(PeerAttestation, RingReference, Opts).
-
-allow_rejected_peer_attestation(PeerAttestation, Opts) ->
-    truthy(hb_maps:get(
-        <<"allow-rejected-peer-attestation">>, PeerAttestation, false, Opts)).
 
 bad_peer_attestation(Key) ->
     throw({zone_error, #{
@@ -2035,5 +2017,33 @@ alternative_templates_match_first_viable_test() ->
         ),
     ?assertEqual(<<"andee@1.0">>,
                  hb_maps:get(<<"measurement-device">>, Candidate, undefined, #{})).
+
+rejected_peer_attestations_never_admit_test() ->
+    Now = erlang:system_time(second),
+    RingReference = #{
+        <<"name">> => <<"book-shelf">>,
+        <<"ring-address">> => <<"ring">>,
+        <<"template-id">> => <<"template">>
+    },
+    Rejected = #{
+        <<"type">> => <<"zone-peer-attestation">>,
+        <<"issued-at-unix">> => Now,
+        <<"validity-not-before-unix">> => Now - 1,
+        <<"validity-expires-at-unix">> => Now + 60,
+        <<"peer-scope-name">> => <<"book-shelf">>,
+        <<"peer-scope-ring-address">> => <<"ring">>,
+        <<"peer-scope-template-id">> => <<"template">>,
+        <<"boot-verified">> => false,
+        <<"fresh-verified">> => false,
+        <<"allow-rejected-peer-attestation">> => true,
+        <<"freshness-verified">> => true,
+        <<"credential-activation-verified">> => true,
+        <<"peer-boot-attestation-id">> => <<"boot">>,
+        <<"peer-fresh-attestation-id">> => <<"fresh">>,
+        <<"peer-credential-subject-id">> => <<"subject">>
+    },
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"peer-attestation-invalid">>}},
+        assert_peer_attestation_body(Rejected, RingReference, #{})).
 
 -endif.
