@@ -100,7 +100,7 @@ http_options(Opts) ->
     [
         {timeout, Timeout},
         {connect_timeout, Timeout},
-        {autoredirect, true},
+        {autoredirect, false},
         {ssl, [
             {verify, verify_peer},
             {cacertfile, certifi:cacertfile()},
@@ -273,16 +273,14 @@ days(Base, Req, Opts) ->
     ).
 
 %% @doc Read configured oracle sources.
-sources(Base, Req, Opts) ->
+sources(Base, _Req, Opts) ->
+    configured_sources(Base, Opts).
+
+configured_sources(Base, Opts) ->
     hb_maps:get(
         <<"oracle-sources">>,
-        Req,
-        hb_maps:get(
-            <<"oracle-sources">>,
-            Base,
-            hb_opts:get(<<"oracle-sources">>, default_sources(), Opts),
-            Opts
-        ),
+        Base,
+        hb_opts:get(<<"oracle-sources">>, default_sources(), Opts),
         Opts
     ).
 
@@ -463,15 +461,12 @@ price_now_mock_sources_test() ->
                 ]
             },
         {ok, Price} =
-            hb_ao:resolve(
-                #{ <<"device">> => <<"simple-oracle@1.0">> },
-                #{
-                    <<"path">> => <<"price-now">>,
-                    <<"ticker">> => <<"AR">>,
-                    <<"oracle-sources">> => Sources
-                },
+            price_now(
+                #{},
+                #{ <<"ticker">> => <<"AR">> },
                 #{
                     <<"relay-http-client">> => httpc,
+                    <<"oracle-sources">> => Sources,
                     <<"oracle-cache-ttl-ms">> => 0
                 }
             ),
@@ -508,18 +503,65 @@ price_now_ignores_bad_source_test() ->
                 ]
             },
         {ok, 8.0} =
-            hb_ao:resolve(
-                #{ <<"device">> => <<"simple-oracle@1.0">> },
-                #{
-                    <<"path">> => <<"price-now">>,
-                    <<"ticker">> => <<"AR">>,
-                    <<"oracle-sources">> => Sources
-                },
+            price_now(
+                #{},
+                #{ <<"ticker">> => <<"AR">> },
                 #{
                     <<"relay-http-client">> => httpc,
+                    <<"oracle-sources">> => Sources,
                     <<"oracle-cache-ttl-ms">> => 0
                 }
             )
+    after
+        hb_mock_server:stop(MockHandle)
+    end.
+
+%% @doc Public requests cannot choose oracle fetch targets.
+price_now_ignores_request_sources_by_default_test() ->
+    {ok, MockURL, MockHandle} =
+        hb_mock_server:start(
+            [
+                {"/configured", configured, {200, <<"{\"prices\":[[1,7.0]]}">>}},
+                {"/request", request, {200, <<"{\"prices\":[[1,1.0]]}">>}}
+            ]
+        ),
+    try
+        ConfiguredSources =
+            #{
+                <<"AR">> => [
+                    #{
+                        <<"shape">> => <<"coingecko-market-chart">>,
+                        <<"url">> => <<MockURL/binary, "/configured">>
+                    }
+                ]
+            },
+        RequestSources =
+            #{
+                <<"AR">> => [
+                    #{
+                        <<"shape">> => <<"coingecko-market-chart">>,
+                        <<"url">> => <<MockURL/binary, "/request">>
+                    }
+                ]
+            },
+        {ok, 7.0} =
+            price_now(
+                #{},
+                #{
+                    <<"ticker">> => <<"AR">>,
+                    <<"oracle-sources">> => RequestSources
+                },
+                #{
+                    <<"relay-http-client">> => httpc,
+                    <<"oracle-sources">> => ConfiguredSources,
+                    <<"oracle-cache-ttl-ms">> => 0
+                }
+            ),
+        ?assertEqual(
+            1,
+            length(hb_mock_server:get_requests(MockHandle, configured))
+        ),
+        ?assertEqual(0, length(hb_mock_server:get_requests(MockHandle, request)))
     after
         hb_mock_server:stop(MockHandle)
     end.
