@@ -368,9 +368,15 @@ jq -e '.status == 200 and (.body.initialized == true or .body.initialized == "tr
 post_json 2 "/~zone@1.0/init" \
     "$OUTDIR/with-signer-init.json" \
     "$OUTDIR/responses/node2-with-signer-init.json"
-jq -e '.status == 400 and .body.error == "template-mismatch" and
-       (.body."mismatch-path" == "/node/load-remote-devices" or
-        (.body."mismatch-path" | startswith("/node/trusted-device-signers")))' \
+jq -e '
+    def mismatch_paths:
+        [.body."mismatch-path"?,
+         (.body.mismatches[]?."mismatch-path"?)]
+        | map(select(type == "string"));
+    .status == 400 and .body.error == "template-mismatch" and
+    any(mismatch_paths[];
+        . == "/node/load-remote-devices" or
+        startswith("/node/trusted-device-signers"))' \
     "$OUTDIR/responses/node2-with-signer-init.json" >/dev/null
 echo ">> only configured node can initialize signer-required zone"
 
