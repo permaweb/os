@@ -137,7 +137,10 @@ quote_bundled_item(Item, Base, Opts) ->
                 {bundled_item_estimate_failed, Class, Reason, {trace, Stack}},
                 Opts
             ),
-            {ok, 0}
+            {error, #{
+                <<"status">> => 402,
+                <<"body">> => <<"Unable to estimate Arweave bundle price.">>
+            }}
     end.
 
 %% @doc Return the ANS-104 serialized size of a bundled item.

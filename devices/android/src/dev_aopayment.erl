@@ -27,24 +27,14 @@ ingest(Base, Req, NodeMsg) ->
     case verify(Base, Req, NodeMsg) of
         {ok, Payment} ->
             PaymentKey = payment_key(Payment),
-            Imports = hb_opts:get(ao_payment_imports, #{}, NodeMsg),
-            case maps:find(PaymentKey, Imports) of
-                {ok, Existing} ->
+            ImportValue = Payment#{<<"status">> => <<"imported">>},
+            case import_payment(Payment, PaymentKey, ImportValue, NodeMsg) of
+                {ok, already_imported, Existing} ->
                     {ok, Existing#{ <<"status">> => <<"already-imported">> }};
-                error ->
-                    case import_payment(Payment, NodeMsg) of
-                        {ok, UpdatedNodeMsg} ->
-                            NewImports = Imports#{
-                                PaymentKey => Payment#{ <<"status">> => <<"imported">> }
-                            },
-                            hb_http_server:set_opts(
-                                #{},
-                                UpdatedNodeMsg#{ <<"ao-payment-imports">> => NewImports }
-                            ),
-                            {ok, Payment#{ <<"status">> => <<"imported">> }};
-                        Error ->
-                            Error
-                    end
+                {ok, imported, _UpdatedNodeMsg} ->
+                    {ok, ImportValue};
+                Error ->
+                    Error
             end;
         Error ->
             Error
@@ -57,25 +47,26 @@ withdraw(Base, Req, NodeMsg) ->
     case validate_withdrawal(Base, Req, NodeMsg) of
         {ok, Withdrawal} ->
             Key = withdrawal_key(Withdrawal),
-            Withdrawals = hb_opts:get(ao_payment_withdrawals, #{}, NodeMsg),
-            case maps:find(Key, Withdrawals) of
-                {ok, Existing} ->
-                    {ok, Existing#{ <<"status">> => <<"already-submitted">> }};
-                error ->
+            case reserve_withdrawal(Key, Withdrawal, NodeMsg) of
+                {ok, reserved} ->
                     case submit_withdrawal(Withdrawal, NodeMsg) of
                         {ok, Result} ->
                             Stored = Result#{ <<"status">> => <<"submitted">> },
-                            hb_http_server:set_opts(
-                                #{},
-                                NodeMsg#{
-                                    <<"ao-payment-withdrawals">> =>
-                                        Withdrawals#{ Key => Stored }
-                                }
-                            ),
+                            record_withdrawal(Key, Stored, NodeMsg),
                             {ok, Stored};
                         Error ->
+                            record_withdrawal(
+                                Key,
+                                Withdrawal#{
+                                    <<"status">> => <<"failed">>,
+                                    <<"error">> => Error
+                                },
+                                NodeMsg
+                            ),
                             Error
-                    end
+                    end;
+                {ok, Existing} ->
+                    existing_withdrawal_result(Existing, NodeMsg)
             end;
         Error ->
             Error
@@ -83,25 +74,26 @@ withdraw(Base, Req, NodeMsg) ->
 
 %% @doc Verify that an AO message produced matching token debit/credit notices.
 verify(_Base, Req, NodeMsg) ->
-    Token = hb_ao:get(<<"token">>, Req, hb_opts:get(ao_payment_token, ?DEFAULT_AO_TOKEN, NodeMsg), NodeMsg),
-    Ledger = hb_ao:get(<<"ledger">>, Req, hb_opts:get(ao_payment_ledger, undefined, NodeMsg), NodeMsg),
+    Token = hb_opts:get(ao_payment_token, ?DEFAULT_AO_TOKEN, NodeMsg),
+    Ledger = hb_opts:get(ao_payment_ledger, undefined, NodeMsg),
     DepositAddress =
-        hb_ao:get(
-            <<"deposit-address">>,
-            Req,
-            hb_opts:get(
-                ao_payment_deposit_address,
-                hb_opts:get(operator, Ledger, NodeMsg),
-                NodeMsg
-            ),
+        hb_opts:get(
+            ao_payment_deposit_address,
+            hb_opts:get(operator, Ledger, NodeMsg),
             NodeMsg
         ),
     MessageID = hb_ao:get(<<"message-id">>, Req, hb_ao:get(<<"id">>, Req, undefined, NodeMsg), NodeMsg),
     Slot = hb_ao:get(<<"slot">>, Req, undefined, NodeMsg),
     Sender = hb_ao:get(<<"sender">>, Req, undefined, NodeMsg),
-    Quantity = hb_util:bin(hb_ao:get(<<"quantity">>, Req, undefined, NodeMsg)),
+    Quantity0 = hb_ao:get(<<"quantity">>, Req, undefined, NodeMsg),
     RequestedRecipient = hb_ao:get(<<"recipient">>, Req, undefined, NodeMsg),
-    case lists:any(fun(V) -> V =:= undefined orelse V =:= <<"undefined">> end,
+    Quantity =
+        case parse_positive_quantity(Quantity0) of
+            {ok, PositiveQuantity} -> integer_to_binary(PositiveQuantity);
+            {error, _} -> undefined
+        end,
+    case lists:any(
+        fun(V) -> V =:= undefined orelse V =:= <<"undefined">> end,
         [Token, Ledger, DepositAddress, MessageID, Slot, Sender, Quantity])
     of
         true ->
@@ -340,6 +332,8 @@ credit_to_payment(CreditMsg, Expected, NodeMsg) ->
                 <<"token">> => hb_maps:get(<<"token">>, Expected, undefined, NodeMsg),
                 <<"message-id">> => hb_maps:get(<<"message-id">>, Expected, undefined, NodeMsg),
                 <<"ledger">> => hb_maps:get(<<"ledger">>, Expected, undefined, NodeMsg),
+                <<"deposit-address">> =>
+                    hb_maps:get(<<"deposit-address">>, Expected, undefined, NodeMsg),
                 <<"sender">> => Sender,
                 <<"recipient">> => Recipient,
                 <<"quantity">> => hb_maps:get(<<"quantity">>, Expected, undefined, NodeMsg),
@@ -353,12 +347,59 @@ credit_to_payment(CreditMsg, Expected, NodeMsg) ->
             }}
     end.
 
-import_payment(Payment, NodeMsg) ->
+import_payment(Payment, PaymentKey, ImportValue, NodeMsg) ->
     Opts = (wallet_opts(NodeMsg))#{ <<"scheduling-mode">> => aggressive },
     Ledger = hb_maps:get(<<"ledger">>, Payment, undefined, NodeMsg),
     Recipient = hb_maps:get(<<"recipient">>, Payment, undefined, NodeMsg),
     Quantity = hb_maps:get(<<"quantity">>, Payment, undefined, NodeMsg),
-    dev_process_ledger:credit(Ledger, Recipient, Quantity, Opts).
+    dev_process_ledger:credit_once(
+        Ledger,
+        Recipient,
+        Quantity,
+        PaymentKey,
+        ImportValue,
+        Opts).
+
+reserve_withdrawal(Key, Withdrawal, NodeMsg) ->
+    with_payment_lock(fun() ->
+        LiveNodeMsg = latest_node_msg(NodeMsg),
+        Withdrawals = hb_opts:get(ao_payment_withdrawals, #{}, LiveNodeMsg),
+        case maps:find(Key, Withdrawals) of
+            {ok, Existing} ->
+                {ok, Existing};
+            error ->
+                Pending = Withdrawal#{<<"status">> => <<"pending">>},
+                hb_http_server:set_opts(
+                    LiveNodeMsg#{
+                        <<"ao-payment-withdrawals">> => Withdrawals#{Key => Pending}
+                    }
+                ),
+                {ok, reserved}
+        end
+    end).
+
+record_withdrawal(Key, Stored, NodeMsg) ->
+    with_payment_lock(fun() ->
+        LiveNodeMsg = latest_node_msg(NodeMsg),
+        Withdrawals = hb_opts:get(ao_payment_withdrawals, #{}, LiveNodeMsg),
+        hb_http_server:set_opts(
+            LiveNodeMsg#{
+                <<"ao-payment-withdrawals">> => Withdrawals#{Key => Stored}
+            }
+        )
+    end).
+
+existing_withdrawal_result(Existing, NodeMsg) ->
+    case hb_maps:get(<<"status">>, Existing, undefined, NodeMsg) of
+        <<"submitted">> ->
+            {ok, Existing#{ <<"status">> => <<"already-submitted">> }};
+        <<"pending">> ->
+            withdraw_error(409, <<"Withdrawal is already pending.">>);
+        <<"failed">> ->
+            withdraw_error(502, <<"Withdrawal previously failed.">>);
+        _ ->
+            {ok, Existing}
+    end.
 
 validate_withdrawal(Base, Req, NodeMsg) ->
     ExpectedSecret = withdraw_secret(NodeMsg),
@@ -580,8 +621,26 @@ wallet_opts(NodeMsg) ->
         <<"operator">> => Operator
     }.
 
+with_payment_lock(Fun) ->
+    global:trans({dev_process_ledger, ao_payment_ledger}, Fun, [node()], infinity).
+
+latest_node_msg(NodeMsg) ->
+    case hb_opts:get(http_server, no_server_ref, NodeMsg) of
+        no_server_ref ->
+            NodeMsg;
+        _ ->
+            try hb_http_server:get_opts(NodeMsg) of
+                no_node_msg -> NodeMsg;
+                CurrentNodeMsg -> CurrentNodeMsg
+            catch
+                _:_ -> NodeMsg
+            end
+    end.
+
 payment_key(Payment) ->
     <<(hb_maps:get(<<"token">>, Payment, undefined, #{}))/binary, ":",
+        (hb_maps:get(<<"ledger">>, Payment, undefined, #{}))/binary, ":",
+        (hb_maps:get(<<"deposit-address">>, Payment, undefined, #{}))/binary, ":",
         (hb_maps:get(<<"message-id">>, Payment, undefined, #{}))/binary>>.
 
 tag_value(Tags, Name, NodeMsg) ->
