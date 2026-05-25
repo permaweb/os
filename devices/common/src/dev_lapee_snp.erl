@@ -23,6 +23,9 @@
 -define(VERSION, <<"1.0">>).
 -define(REPORT_CONTEXT, <<"lapee-measurement-v1">>).
 -define(METHOD, <<"snp-report-data-x25519-hkdf-sha256-aes-256-gcm">>).
+-define(ID_RSASSA_PSS, {1,2,840,113549,1,1,10}).
+-define(ID_MGF1, {1,2,840,113549,1,1,8}).
+-define(ID_SHA384, {2,16,840,1,101,3,4,2,2}).
 
 info(_) ->
     #{
@@ -366,7 +369,7 @@ certificates(Certs, Body, Report, Opts) ->
     Embedded = certificates_from_table(Certs),
     Configured = configured_certificates(Opts),
     Available = unique_certificate_entries(Embedded ++ Configured),
-    Missing = [Type || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>],
+    Missing = [Type || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>],
                        not certificate_type_present(Type, Available, Opts)],
     certificate_entry_map(Available ++ fetched_certificates(Missing, Body, Report, Opts)).
 
@@ -404,7 +407,12 @@ fetched_certificates(Missing, Body, Report, Opts) ->
                 true -> [{<<"vcek">>, fetch_vcek(Product, Report)}];
                 false -> []
             end,
-        [fetched_certificate(Type, Data) || {Type, Data} <- Chain ++ VCEK]
+        CRL =
+            case lists:member(<<"crl">>, Missing) of
+                true -> [{<<"crl">>, fetch_amd_crl(Product)}];
+                false -> []
+            end,
+        [fetched_certificate(Type, Data) || {Type, Data} <- Chain ++ VCEK ++ CRL]
     catch
         Class:Reason ->
             [#{
@@ -534,7 +542,13 @@ resolved_certificates(Report, Body, Evidence, Opts) ->
             VCEK0 when is_binary(VCEK0) -> VCEK0;
             _ -> fetch_vcek(Product, Report)
         end,
-    #{ask => Ask, ark => Ark, vcek => VCEK, source => ChainSource}.
+    CRL =
+        case maps:get(crl, Embedded, undefined) of
+            CRL0 when is_binary(CRL0) -> CRL0;
+            _ -> fetch_amd_crl(Product)
+        end,
+    #{ask => Ask, ark => Ark, vcek => VCEK,
+      crl => CRL, source => ChainSource}.
 
 evidence_certificates(Evidence, Opts) ->
     Certs = evidence_certificate_map(Evidence, Opts),
@@ -543,7 +557,7 @@ evidence_certificates(Evidence, Opts) ->
             {binary_to_atom(Type, utf8), decode_required(<<"data">>, Cert, Opts)}
          || {Type, Cert} <- hb_maps:to_list(Certs, Opts),
             is_map(Cert),
-            lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>])
+            lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>])
         ]).
 
 evidence_certificate_map(Evidence0, Opts) ->
@@ -563,7 +577,7 @@ certificate_map_value(Msg, Opts) when is_map(Msg) ->
         [
             {Type, certificate_entry_value(Cert, Opts)}
          || {Type, Cert} <- hb_maps:to_list(Decoded, Opts),
-            lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>])
+            lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>])
         ],
     case Entries of
         [] ->
@@ -599,7 +613,8 @@ configured_certificates(Opts) ->
                 configured_certificate(
                     <<"ask">>, <<"snp-ask-der">>, <<"snp-ask-pem">>, Opts),
                 configured_certificate(
-                    <<"vcek">>, <<"snp-vcek-der">>, <<"snp-vcek-pem">>, Opts)
+                    <<"vcek">>, <<"snp-vcek-der">>, <<"snp-vcek-pem">>, Opts),
+                configured_crl(Opts)
             ], Cert =/= undefined]).
 
 configured_cert_chain(Opts) ->
@@ -643,6 +658,25 @@ configured_certificate_entry(Type, Data) ->
         <<"data">> => hb_util:encode(Data)
     }.
 
+configured_crl(Opts) ->
+    case hb_opts:get(<<"snp-crl-der">>, undefined, Opts) of
+        Der when is_binary(Der), byte_size(Der) > 0 ->
+            configured_certificate_entry(<<"crl">>, config_binary(Der));
+        _ ->
+            case hb_opts:get(<<"snp-crl-pem">>, undefined, Opts) of
+                Pem when is_binary(Pem), byte_size(Pem) > 0 ->
+                    case pem_crls(Pem) of
+                        [CRL] ->
+                            configured_certificate_entry(<<"crl">>, CRL);
+                        _ ->
+                            throw(#{<<"snp-crl-pem">> =>
+                                <<"expected one PEM CRL">>})
+                    end;
+                _ ->
+                    undefined
+            end
+    end.
+
 unique_certificate_entries(Entries) ->
     [Entry
      || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>,
@@ -675,6 +709,9 @@ config_binary(Bin) ->
 pem_certificates(Pem) ->
     [Der || {'Certificate', Der, _} <- public_key:pem_decode(Pem)].
 
+pem_crls(Pem) ->
+    [Der || {'CertificateList', Der, _} <- public_key:pem_decode(Pem)].
+
 fetch_amd_cert_chain(Product) ->
     URL = <<"https://kdsintf.amd.com/vcek/v1/", Product/binary,
             "/cert_chain">>,
@@ -698,6 +735,10 @@ fetch_vcek(Product, Report) ->
         <<"&ucodeSPL=">>, decimal_param(hb_maps:get(<<"microcode">>, TCB, 0, #{}))
     ]),
     http_get(URL).
+
+fetch_amd_crl(Product) ->
+    http_get_uncached(
+        <<"https://kdsintf.amd.com/vcek/v1/", Product/binary, "/crl">>).
 
 http_get(URL) ->
     case persistent_term:get({dev_lapee_snp, http_get, URL}, undefined) of
@@ -727,6 +768,9 @@ http_get_uncached(URL) ->
                     <<"url">> => URL})
     end.
 
+assert_certificate_chain(#{ark := Ark, ask := Ask, vcek := VCEK, crl := CRL}) ->
+    assert_certificate_chain(#{ark => Ark, ask => Ask, vcek => VCEK}),
+    assert_amd_crl(CRL, Ark, Ask);
 assert_certificate_chain(#{ark := Ark, ask := Ask, vcek := VCEK}) ->
     assert_amd_ark(Ark),
     case public_key:pkix_path_validation(Ark, [Ask, VCEK], []) of
@@ -734,6 +778,133 @@ assert_certificate_chain(#{ark := Ark, ask := Ask, vcek := VCEK}) ->
         {error, Reason} ->
             throw(#{<<"snp-certificate-chain">> => reason_to_text(Reason)})
     end.
+
+assert_amd_crl(CRLDER, ArkDER, AskDER) ->
+    CRL = public_key:der_decode('CertificateList', CRLDER),
+    assert_crl_issuer(CRL, ArkDER),
+    assert_crl_valid_now(CRL),
+    assert_crl_signature(CRL, ArkDER),
+    assert_not_revoked(CRL, AskDER).
+
+assert_crl_issuer(
+    #'CertificateList'{tbsCertList = #'TBSCertList'{issuer = Issuer}},
+    ArkDER) ->
+    case canonical_name(cert_subject(ArkDER)) =:= canonical_name(Issuer) of
+        true -> ok;
+        false -> throw(#{<<"snp-crl-issuer">> => <<"CRL issuer is not ARK">>})
+    end.
+
+assert_crl_valid_now(
+    #'CertificateList'{
+        tbsCertList =
+            #'TBSCertList'{thisUpdate = ThisUpdate, nextUpdate = NextUpdate}}) ->
+    This = x509_time_seconds(ThisUpdate),
+    Next = x509_time_seconds(NextUpdate),
+    case erlang:system_time(second) of
+        Now when This =< Now, Now < Next ->
+            ok;
+        _ ->
+            throw(#{<<"snp-crl-validity">> =>
+                #{<<"this-update">> => This, <<"next-update">> => Next}})
+    end.
+
+assert_not_revoked(
+    #'CertificateList'{
+        tbsCertList =
+            #'TBSCertList'{revokedCertificates = Revoked0}},
+    CertDER) ->
+    Serial = cert_serial(CertDER),
+    case lists:member(Serial, revoked_serials(Revoked0)) of
+        false -> ok;
+        true ->
+            throw(#{<<"snp-certificate-revoked">> =>
+                integer_to_binary(Serial, 16)})
+    end.
+
+assert_crl_signature(
+    #'CertificateList'{
+        tbsCertList = TBS,
+        signatureAlgorithm = Algorithm,
+        signature = Signature},
+    ArkDER) ->
+    Key = cert_public_key_only(ArkDER),
+    TbsDER = public_key:der_encode('TBSCertList', TBS),
+    Params = crl_signature_parameters(Algorithm),
+    case public_key:verify(
+        TbsDER,
+        crl_hash_algorithm(Params),
+        Signature,
+        Key,
+        crl_rsa_pss_options(Params)) of
+        true -> ok;
+        false -> throw(#{<<"snp-crl-signature">> => <<"rejected">>})
+    end;
+assert_crl_signature(_CRL, _ArkDER) ->
+    throw(#{<<"snp-crl-signature">> => <<"unsupported algorithm">>}).
+
+crl_signature_parameters({'AlgorithmIdentifier', ?ID_RSASSA_PSS, ParamsDER})
+        when is_binary(ParamsDER) ->
+    public_key:der_decode('RSASSA-PSS-params', ParamsDER);
+crl_signature_parameters({'CertificateList_algorithmIdentifier',
+                          ?ID_RSASSA_PSS, Params}) ->
+    Params;
+crl_signature_parameters(Algorithm) ->
+    throw(#{<<"snp-crl-signature">> => reason_to_text(Algorithm)}).
+
+crl_hash_algorithm(
+    {'RSASSA-PSS-params', {'HashAlgorithm', ?ID_SHA384, 'NULL'}, _, _, _}) ->
+    sha384;
+crl_hash_algorithm(Params) ->
+    throw(#{<<"snp-crl-hash-algorithm">> => reason_to_text(Params)}).
+
+crl_rsa_pss_options(
+    {'RSASSA-PSS-params',
+        _, {'MaskGenAlgorithm', ?ID_MGF1, {'HashAlgorithm', ?ID_SHA384, 'NULL'}},
+        SaltLength, _}) ->
+    [
+        {rsa_padding, rsa_pkcs1_pss_padding},
+        {rsa_pss_saltlen, SaltLength},
+        {rsa_mgf1_md, sha384}
+    ];
+crl_rsa_pss_options(Params) ->
+    throw(#{<<"snp-crl-mask-algorithm">> => reason_to_text(Params)}).
+
+revoked_serials(asn1_NOVALUE) ->
+    [];
+revoked_serials(Revoked) ->
+    [Serial || #'TBSCertList_revokedCertificates_SEQOF'{
+                   userCertificate = Serial} <- Revoked].
+
+x509_time_seconds({utcTime, Time}) ->
+    [Y1, Y2, M1, M2, D1, D2, H1, H2, I1, I2, S1, S2, $Z] = Time,
+    YY = digits(Y1, Y2),
+    Year =
+        case YY >= 50 of
+            true -> 1900 + YY;
+            false -> 2000 + YY
+        end,
+    calendar:datetime_to_gregorian_seconds(
+        {{Year, digits(M1, M2), digits(D1, D2)},
+         {digits(H1, H2), digits(I1, I2), digits(S1, S2)}}) -
+        calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}});
+x509_time_seconds({generalTime, Time}) ->
+    [Y1, Y2, Y3, Y4, M1, M2, D1, D2, H1, H2, I1, I2, S1, S2, $Z] = Time,
+    Year = digits4(Y1, Y2, Y3, Y4),
+    calendar:datetime_to_gregorian_seconds(
+        {{Year, digits(M1, M2), digits(D1, D2)},
+         {digits(H1, H2), digits(I1, I2), digits(S1, S2)}}) -
+        calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}});
+x509_time_seconds(Other) ->
+    throw(#{<<"x509-time">> => reason_to_text(Other)}).
+
+digits(A, B) ->
+    (digit(A) * 10) + digit(B).
+
+digits4(A, B, C, D) ->
+    (digits(A, B) * 100) + digits(C, D).
+
+digit(N) when is_integer(N), N >= $0, N =< $9 ->
+    N - $0.
 
 assert_amd_ark(Ark) ->
     Hash = hb_util:encode(crypto:hash(sha256, Ark)),
@@ -761,6 +932,48 @@ cert_public_key(Der) ->
                         subjectPublicKey = Key}}} =
         public_key:pkix_decode_cert(Der, otp),
     {Key, Parameters}.
+
+cert_public_key_only(Der) ->
+    {Key, _Parameters} = cert_public_key(Der),
+    Key.
+
+cert_subject(Der) ->
+    #'OTPCertificate'{tbsCertificate =
+        #'OTPTBSCertificate'{subject = Subject}} =
+            public_key:pkix_decode_cert(Der, otp),
+    Subject.
+
+canonical_name({rdnSequence, RDNs}) ->
+    {rdnSequence, [
+        [{OID, canonical_name_value(Value)}
+         || {'AttributeTypeAndValue', OID, Value} <- RDN]
+        || RDN <- RDNs
+    ]}.
+
+canonical_name_value({_, Value}) when is_binary(Value) ->
+    Value;
+canonical_name_value(Value) when is_binary(Value) ->
+    der_string_value(Value);
+canonical_name_value(Value) when is_list(Value) ->
+    unicode:characters_to_binary(Value);
+canonical_name_value(Value) ->
+    Value.
+
+der_string_value(<<_Tag, Length, Value:Length/binary>>)
+        when Length < 128 ->
+    Value;
+der_string_value(<<_Tag, 16#81, Length, Value:Length/binary>>) ->
+    Value;
+der_string_value(<<_Tag, 16#82, Length:16, Value:Length/binary>>) ->
+    Value;
+der_string_value(Value) ->
+    Value.
+
+cert_serial(Der) ->
+    #'OTPCertificate'{tbsCertificate =
+        #'OTPTBSCertificate'{serialNumber = Serial}} =
+            public_key:pkix_decode_cert(Der, otp),
+    Serial.
 
 ecdsa_signature_der(#{<<"r">> := R, <<"s">> := S}) ->
     public_key:der_encode(
@@ -1345,5 +1558,45 @@ raw_measurement_generation_requires_internal_token_test() ->
     ?assertMatch(
         {error, #{<<"status">> := 403}},
         measure(#{}, #{<<"body">> => #{}}, #{})).
+
+snp_certificate_maps_preserve_crls_test() ->
+    CRL = #{<<"type">> => <<"crl">>, <<"data">> => hb_util:encode(<<"crl">>)},
+    Certs = certificate_map_value(#{<<"crl">> => CRL}, #{}),
+    ?assertEqual(CRL, maps:get(<<"crl">>, Certs)),
+    ?assertEqual(#{crl => <<"crl">>}, evidence_certificates(
+        #{<<"certificates">> => #{<<"crl">> => CRL}},
+        #{})).
+
+revoked_serials_extracts_crl_entries_test() ->
+    Revoked = [
+        #'TBSCertList_revokedCertificates_SEQOF'{userCertificate = 16#20001},
+        #'TBSCertList_revokedCertificates_SEQOF'{userCertificate = 16#20002}
+    ],
+    ?assertEqual([16#20001, 16#20002], revoked_serials(Revoked)).
+
+crl_signature_parameters_supports_target_and_host_otp_test() ->
+    Params =
+        {'RSASSA-PSS-params',
+            {'HashAlgorithm', ?ID_SHA384, 'NULL'},
+            {'MaskGenAlgorithm', ?ID_MGF1,
+                {'HashAlgorithm', ?ID_SHA384, 'NULL'}},
+            48,
+            1},
+    ?assertEqual(Params, crl_signature_parameters(
+        {'CertificateList_algorithmIdentifier', ?ID_RSASSA_PSS, Params})),
+    ?assertEqual(Params, crl_signature_parameters(
+        {'AlgorithmIdentifier', ?ID_RSASSA_PSS,
+            public_key:der_encode('RSASSA-PSS-params', Params)})).
+
+canonical_name_matches_raw_and_decoded_x509_strings_test() ->
+    Raw =
+        {rdnSequence, [[
+            {'AttributeTypeAndValue', {2,5,4,3}, <<16#0C, 9, "ARK-Genoa">>}
+        ]]},
+    Decoded =
+        {rdnSequence, [[
+            {'AttributeTypeAndValue', {2,5,4,3}, {utf8String, <<"ARK-Genoa">>}}
+        ]]},
+    ?assertEqual(canonical_name(Decoded), canonical_name(Raw)).
 
 -endif.
