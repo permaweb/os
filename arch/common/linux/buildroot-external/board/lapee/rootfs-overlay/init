@@ -1279,6 +1279,53 @@ copy_operator_config_json() {
         return 1
     fi
 
+    if ! command -v erl >/dev/null 2>&1; then
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: could not validate it."
+        trace "config: config.json rejected: erl missing"
+        return 1
+    fi
+    erl -noshell -eval '
+        [Path] = init:get_plain_arguments(),
+        Reserved = [
+            <<"trusted-devices">>,
+            <<"preloaded-store">>,
+            <<"preloaded-devices-index">>,
+            <<"forge-bootstrap">>,
+            <<"loaded-device-store">>,
+            <<"measurement-device">>,
+            <<"measurement-devices">>
+        ],
+        Canonical = fun(Key) when is_binary(Key) ->
+            Lower = string:lowercase(binary_to_list(Key)),
+            list_to_binary([case Ch of $_ -> $-; _ -> Ch end || Ch <- Lower])
+        end,
+        case file:read_file(Path) of
+            {ok, Bin} ->
+                try json:decode(Bin) of
+                    Obj when is_map(Obj) ->
+                        Keys = [Canonical(Key) || Key <- maps:keys(Obj)],
+                        case [Key || Key <- Keys, lists:member(Key, Reserved)] of
+                            [] -> halt(0);
+                            _ -> halt(2)
+                        end;
+                    _ ->
+                        halt(3)
+                catch
+                    _:_ -> halt(4)
+                end;
+            {error, _} ->
+                halt(5)
+        end.
+    ' -extra "$_f" >/dev/null 2>&1
+    _config_rc=$?
+    if [ "$_config_rc" -ne 0 ]; then
+        write_empty_operator_config_json
+        status "Operator HyperBEAM config was rejected: unsafe or invalid."
+        trace "config: config.json rejected: json/reserved-key check failed (rc=$_config_rc)"
+        return 1
+    fi
+
     if ! cp "$_f" "$OPERATOR_CONFIG_JSON.tmp" 2>/dev/null || \
        ! mv "$OPERATOR_CONFIG_JSON.tmp" "$OPERATOR_CONFIG_JSON" 2>/dev/null; then
         rm -f "$OPERATOR_CONFIG_JSON.tmp" 2>/dev/null || true
