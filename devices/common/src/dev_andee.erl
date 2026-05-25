@@ -166,6 +166,7 @@ verify(Base, Req, Opts) ->
         check_certificate_chain_signatures(Evidence, Opts),
         check_certificate_root_trusted(Evidence, Opts),
         check_android_attestation_extension(Facts),
+        check_reported_attestation_facts(Evidence, Facts, Opts),
         check_attestation_challenge(Evidence, Facts, Opts),
         check_reported_security_level(Evidence, Facts, Opts),
         check_keystore_signature(Evidence, Opts),
@@ -295,7 +296,7 @@ evidence_subject(Body, Recipient, Nonce, Purpose, Opts) ->
 
 evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts) ->
     Policy = hb_maps:get(<<"policy-snapshot">>, Agent, #{}, Opts),
-    #{
+    Evidence0 = #{
         <<"type">> => <<"andee-android-evidence">>,
         <<"version">> => ?VERSION,
         <<"measurement-device">> => <<"andee@1.0">>,
@@ -319,6 +320,10 @@ evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts) ->
         <<"accepted">> => hb_maps:get(<<"accepted">>, Agent, false, Opts),
         <<"verdict">> =>
             hb_maps:get(<<"verdict">>, Agent, <<"policy-failure">>, Opts)
+    },
+    Evidence0#{
+        <<"android-attestation-facts">> =>
+            public_attestation_facts(attestation_facts(Evidence0, Opts))
     }.
 
 policy_failure_evidence(Reason, Req, Opts) ->
@@ -611,6 +616,26 @@ check_android_attestation_extension(Facts) ->
                 #{<<"parsed">> := true} -> ok;
                 #{<<"error">> := Error} -> throw(Error);
                 _ -> throw(<<"missing Android attestation facts">>)
+            end
+        end).
+
+check_reported_attestation_facts(Evidence, Facts, Opts) ->
+    safely_check(
+        <<"reported Android attestation facts match verifier parser">>,
+        <<"core">>,
+        fun() ->
+            Expected = public_attestation_facts(Facts),
+            case hb_maps:get(
+                <<"android-attestation-facts">>, Evidence, undefined, Opts) of
+                Expected ->
+                    ok;
+                undefined ->
+                    throw(<<"missing android-attestation-facts">>);
+                Reported ->
+                    throw(#{
+                        <<"expected">> => Expected,
+                        <<"reported">> => Reported
+                    })
             end
         end).
 
@@ -1466,5 +1491,33 @@ node_subject_ignores_stale_boot_fields_test() ->
     ),
     ?assertNot(maps:is_key(<<"secret">>, Config)),
     ?assert(Subject =/= node_subject(Opts#{<<"public-marker">> => <<"two">>})).
+
+reported_attestation_facts_must_match_verifier_parser_test() ->
+    Facts = #{
+        <<"parsed">> => true,
+        <<"verified-boot-state">> => <<"VERIFIED">>,
+        <<"attestation-application-id">> => #{
+            <<"package-infos">> => [
+                #{<<"package-name">> => <<"org.permaweb.andee">>}
+            ],
+            <<"signature-digests">> => [<<"digest">>]
+        },
+        raw_attestation_challenge => <<"private-challenge">>
+    },
+    Public = public_attestation_facts(Facts),
+    ?assertMatch(
+        #{<<"ok">> := true},
+        check_reported_attestation_facts(
+            #{<<"android-attestation-facts">> => Public}, Facts, #{})),
+    ?assertMatch(
+        #{<<"ok">> := false},
+        check_reported_attestation_facts(
+            #{<<"android-attestation-facts">> =>
+                  Public#{<<"verified-boot-state">> => <<"UNVERIFIED">>}},
+            Facts,
+            #{})),
+    ?assertMatch(
+        #{<<"ok">> := false},
+        check_reported_attestation_facts(#{}, Facts, #{})).
 
 -endif.
