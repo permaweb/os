@@ -16,7 +16,9 @@
 
 -define(ROOT_GROUP, <<"/">>).
 -define(DATA_FILE, <<"store.bin">>).
+-define(HEAD_FILE, <<"store.head">>).
 -define(MAGIC, <<"andee-encrypted-store-log-v1">>).
+-define(HEAD_MAGIC, <<"andee-encrypted-store-head-v1">>).
 -define(MAX_REDIRECTS, 32).
 -define(DEFAULT_FLUSH_INTERVAL_MS, 50).
 
@@ -33,7 +35,7 @@ start(StoreOpts = #{<<"name">> := _Name}, _Req, _NodeOpts) ->
     DataFile = data_file(StoreOpts),
     ok = filelib:ensure_dir(DataFile),
     case load_log(StoreOpts, DataFile) of
-        {ok, Entries, NextSeq, ValidBytes} ->
+        {ok, Entries, NextSeq, ValidBytes, Tip} ->
             case truncate_log(DataFile, ValidBytes) of
                 ok ->
                     Parent = self(),
@@ -60,6 +62,8 @@ start(StoreOpts = #{<<"name">> := _Name}, _Req, _NodeOpts) ->
                                     opts => StoreOpts,
                                     fd => Fd,
                                     next_seq => NextSeq,
+                                    bytes => ValidBytes,
+                                    tip => Tip,
                                     pending => [],
                                     timer => undefined
                                 });
@@ -373,28 +377,34 @@ flush_pending(State = #{pending := [], timer := Timer}) ->
     maybe_cancel_timer(Timer),
     {ok, State#{timer := undefined}};
 flush_pending(State = #{opts := Opts, fd := Fd, pending := Pending0,
-                        next_seq := Seq0}) ->
+                        next_seq := Seq0, bytes := Bytes0, tip := Tip0}) ->
     maybe_cancel_timer(maps:get(timer, State)),
     Pending = lists:reverse(Pending0),
-    {IOData, NextSeq} =
+    {IOData, {NextSeq, Bytes, Tip}} =
         lists:mapfoldl(
-            fun(Op, Seq) ->
-                Frame = encode_log_frame(Opts, Seq, Op),
-                FrameLen = byte_size(Frame),
-                {[<<FrameLen:32/unsigned-big-integer>>, Frame], Seq + 1}
+            fun(Op, {Seq, Offset, PrevTip}) ->
+                {Record, NextTip} = encode_log_record(Opts, Seq, PrevTip, Op),
+                {[Record], {Seq + 1, Offset + iolist_size(Record), NextTip}}
             end,
-            Seq0,
+            {Seq0, Bytes0, Tip0},
             Pending
         ),
     case file:write(Fd, IOData) of
         ok ->
-            case maybe_sync(Fd, Opts) of
+            case sync_before_head(Fd, Opts) of
                 ok ->
-                    {ok, State#{
-                        pending := [],
-                        timer := undefined,
-                        next_seq := NextSeq
-                    }};
+                    case write_head(Opts, Bytes, NextSeq, Tip) of
+                        ok ->
+                            {ok, State#{
+                                pending := [],
+                                timer := undefined,
+                                next_seq := NextSeq,
+                                bytes := Bytes,
+                                tip := Tip
+                            }};
+                        {error, Reason} ->
+                            {{error, Reason}, State}
+                    end;
                 {error, Reason} ->
                     {{error, Reason}, State}
             end;
@@ -408,20 +418,24 @@ maybe_cancel_timer(Timer) ->
     erlang:cancel_timer(Timer),
     ok.
 
-maybe_sync(Fd, Opts) ->
-    case hb_maps:get(<<"sync-on-flush">>, Opts, false, #{}) of
-        true -> file:sync(Fd);
-        _ -> ok
-    end.
+sync_before_head(Fd, _Opts) ->
+    file:sync(Fd).
 
-encode_log_frame(Opts, Seq, Op) ->
+encode_log_record(Opts, Seq, PrevTip, Op) ->
+    Frame = encode_log_frame(Opts, Seq, PrevTip, Op),
+    FrameLen = byte_size(Frame),
+    Record = [<<FrameLen:32/unsigned-big-integer>>, Frame],
+    {Record, log_tip(PrevTip, Record)}.
+
+encode_log_frame(Opts, Seq, PrevTip, Op) ->
     Plain = term_to_binary(#{
         <<"version">> => 1,
         <<"seq">> => Seq,
+        <<"prev-tip">> => PrevTip,
         <<"op">> => Op
     }, [compressed]),
     IV = crypto:strong_rand_bytes(12),
-    AAD = aad(Opts, Seq),
+    AAD = aad(Opts, Seq, PrevTip),
     {CipherText, Tag} =
         crypto:crypto_one_time_aead(
             aes_256_gcm,
@@ -441,11 +455,12 @@ encode_log_frame(Opts, Seq, Op) ->
     }).
 
 load_log(Opts, File) ->
+    Head = load_head(head_file(Opts)),
     case file:read_file(File) of
         {error, enoent} ->
-            {ok, #{}, 1, 0};
+            reconcile_empty_log(Opts, Head);
         {ok, Bin} ->
-            replay_log(Opts, Bin, #{}, 0, 0);
+            reconcile_log(Opts, Head, Bin);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -462,24 +477,30 @@ truncate_log(File, ValidBytes) ->
             {error, Reason}
     end.
 
-replay_log(_Opts, <<>>, Entries, LastSeq, Offset) ->
-    {ok, ensure_root_group(Entries), LastSeq + 1, Offset};
-replay_log(_Opts, Bin, Entries, LastSeq, Offset) when byte_size(Bin) < 4 ->
-    {ok, ensure_root_group(Entries), LastSeq + 1, Offset};
+replay_log(Opts, Bin) ->
+    replay_log(Opts, Bin, #{}, 0, 0, empty_tip(Opts)).
+
+replay_log(_Opts, <<>>, Entries, LastSeq, Offset, Tip) ->
+    {ok, ensure_root_group(Entries), LastSeq + 1, Offset, Tip};
+replay_log(_Opts, Bin, Entries, LastSeq, Offset, Tip) when byte_size(Bin) < 4 ->
+    {ok, ensure_root_group(Entries), LastSeq + 1, Offset, Tip};
 replay_log(_Opts, <<Len:32/unsigned-big-integer, Rest/binary>>, Entries, LastSeq,
-        Offset)
+        Offset, Tip)
         when byte_size(Rest) < Len ->
-    {ok, ensure_root_group(Entries), LastSeq + 1, Offset};
+    {ok, ensure_root_group(Entries), LastSeq + 1, Offset, Tip};
 replay_log(Opts, <<Len:32/unsigned-big-integer, Frame:Len/binary, Rest/binary>>,
-        Entries, LastSeq, Offset) ->
-    case decrypt_log_frame(Opts, Frame) of
+        Entries, LastSeq, Offset, Tip) ->
+    case decrypt_log_frame(Opts, Tip, Frame) of
         {ok, Seq, Op} when Seq =:= LastSeq + 1 ->
+            Record = <<Len:32/unsigned-big-integer, Frame/binary>>,
+            NextTip = log_tip(Tip, Record),
             replay_log(
                 Opts,
                 Rest,
                 apply_logged_op(Op, Entries),
                 max(Seq, LastSeq),
-                Offset + 4 + Len
+                Offset + 4 + Len,
+                NextTip
             );
         {ok, Seq, _Op} ->
             {error, {bad_encrypted_store_log_sequence, LastSeq, Seq}};
@@ -487,7 +508,7 @@ replay_log(Opts, <<Len:32/unsigned-big-integer, Frame:Len/binary, Rest/binary>>,
             Error
     end.
 
-decrypt_log_frame(Opts, Bin) ->
+decrypt_log_frame(Opts, PrevTip, Bin) ->
     try binary_to_term(Bin, [safe]) of
         #{
             <<"magic">> := ?MAGIC,
@@ -502,12 +523,12 @@ decrypt_log_frame(Opts, Bin) ->
                 store_key(Opts),
                 IV,
                 CipherText,
-                aad(Opts, Seq),
+                aad(Opts, Seq, PrevTip),
                 Tag,
                 false
             ) of
                 Plain when is_binary(Plain) ->
-                    decode_log_plaintext(Plain, Seq);
+                    decode_log_plaintext(Plain, Seq, PrevTip);
                 error ->
                     {error, decrypt_failed}
             end;
@@ -517,9 +538,14 @@ decrypt_log_frame(Opts, Bin) ->
         _:_ -> {error, bad_encrypted_store_log}
     end.
 
-decode_log_plaintext(Plain, EnvelopeSeq) ->
+decode_log_plaintext(Plain, EnvelopeSeq, PrevTip) ->
     try binary_to_term(Plain, [safe]) of
-        #{<<"version">> := 1, <<"seq">> := EnvelopeSeq, <<"op">> := Op} ->
+        #{
+            <<"version">> := 1,
+            <<"seq">> := EnvelopeSeq,
+            <<"prev-tip">> := PrevTip,
+            <<"op">> := Op
+        } ->
             {ok, EnvelopeSeq, Op};
         _ ->
             {error, bad_encrypted_store_log}
@@ -606,17 +632,198 @@ key_context(Opts) ->
         hb_maps:get(<<"ring-address">>, Opts, null, #{})
     }).
 
-aad(Opts, Seq) ->
+aad(Opts, Seq, PrevTip) ->
     term_to_binary({
         ?MAGIC,
         hb_maps:get(<<"zone">>, Opts, null, #{}),
         hb_maps:get(<<"ring-address">>, Opts, null, #{}),
         hb_maps:get(<<"store-id">>, Opts, null, #{}),
-        Seq
+        Seq,
+        PrevTip
     }).
+
+load_head(File) ->
+    case file:read_file(File) of
+        {error, enoent} ->
+            no_head;
+        {ok, Bin} ->
+            try binary_to_term(Bin, [safe]) of
+                #{
+                    <<"magic">> := ?HEAD_MAGIC,
+                    <<"version">> := 1,
+                    <<"next-seq">> := NextSeq,
+                    <<"valid-bytes">> := ValidBytes,
+                    <<"tip">> := Tip
+                } when is_integer(NextSeq), NextSeq >= 1,
+                       is_integer(ValidBytes), ValidBytes >= 0,
+                       is_binary(Tip), byte_size(Tip) =:= 32 ->
+                    {ok, #{
+                        <<"next-seq">> => NextSeq,
+                        <<"valid-bytes">> => ValidBytes,
+                        <<"tip">> => Tip
+                    }};
+                _ ->
+                    {error, bad_encrypted_store_head}
+            catch
+                _:_ -> {error, bad_encrypted_store_head}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+reconcile_empty_log(Opts, no_head) ->
+    Tip = empty_tip(Opts),
+    case write_head(Opts, 0, 1, Tip) of
+        ok -> {ok, #{}, 1, 0, Tip};
+        {error, Reason} -> {error, Reason}
+    end;
+reconcile_empty_log(Opts, {ok, Head}) ->
+    assert_committed_head(#{}, 1, 0, empty_tip(Opts), Head);
+reconcile_empty_log(_Opts, {error, Reason}) ->
+    {error, Reason}.
+
+reconcile_log(Opts, no_head, <<>>) ->
+    reconcile_empty_log(Opts, no_head);
+reconcile_log(_Opts, no_head, _Bin) ->
+    {error, encrypted_store_missing_head};
+reconcile_log(_Opts, {error, Reason}, _Bin) ->
+    {error, Reason};
+reconcile_log(Opts, {ok, Head}, Bin) ->
+    HeadBytes = maps:get(<<"valid-bytes">>, Head),
+    case HeadBytes =< byte_size(Bin) of
+        true ->
+            reconcile_committed_head(Opts, Head, Bin, HeadBytes);
+        false ->
+            {error, encrypted_store_rollback_detected}
+    end.
+
+reconcile_committed_head(Opts, Head, Bin, HeadBytes) ->
+    case replay_exact_log(Opts, binary_part(Bin, 0, HeadBytes), HeadBytes) of
+        {ok, Entries, NextSeq, HeadBytes, Tip} ->
+            case assert_committed_head(Entries, NextSeq, HeadBytes, Tip, Head) of
+                {ok, _, _, _, _} ->
+                    recover_valid_tail(Opts, HeadBytes, Bin, Entries, NextSeq, Tip);
+                Error ->
+                    Error
+            end;
+        {ok, _Entries, _NextSeq, _OtherBytes, _Tip} ->
+            {error, bad_encrypted_store_head};
+        {error, _} = Error ->
+            Error
+    end.
+
+recover_valid_tail(Opts, HeadBytes, Bin, Entries, NextSeq, Tip) ->
+    TailBytes = byte_size(Bin) - HeadBytes,
+    Tail = binary_part(Bin, HeadBytes, TailBytes),
+    LastSeq = NextSeq - 1,
+    case replay_uncommitted_tail(Opts, Tail, Entries, LastSeq, HeadBytes, Tip) of
+        {ok, FullEntries, FullNextSeq, FullBytes, FullTip}
+                when FullBytes > HeadBytes ->
+            case write_head(Opts, FullBytes, FullNextSeq, FullTip) of
+                ok ->
+                    {ok, FullEntries, FullNextSeq, FullBytes, FullTip};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        _ ->
+            {ok, Entries, NextSeq, HeadBytes, Tip}
+    end.
+
+replay_uncommitted_tail(_Opts, <<>>, Entries, LastSeq, Offset, Tip) ->
+    {ok, Entries, LastSeq + 1, Offset, Tip};
+replay_uncommitted_tail(_Opts, Bin, Entries, LastSeq, Offset, Tip)
+        when byte_size(Bin) < 4 ->
+    {ok, Entries, LastSeq + 1, Offset, Tip};
+replay_uncommitted_tail(_Opts, <<Len:32/unsigned-big-integer, Rest/binary>>,
+        Entries, LastSeq, Offset, Tip)
+        when byte_size(Rest) < Len ->
+    {ok, Entries, LastSeq + 1, Offset, Tip};
+replay_uncommitted_tail(Opts,
+        <<Len:32/unsigned-big-integer, Frame:Len/binary, Rest/binary>>,
+        Entries, LastSeq, Offset, Tip) ->
+    case decrypt_log_frame(Opts, Tip, Frame) of
+        {ok, Seq, Op} when Seq =:= LastSeq + 1 ->
+            Record = <<Len:32/unsigned-big-integer, Frame/binary>>,
+            NextTip = log_tip(Tip, Record),
+            replay_uncommitted_tail(
+                Opts,
+                Rest,
+                apply_logged_op(Op, Entries),
+                Seq,
+                Offset + 4 + Len,
+                NextTip
+            );
+        _ ->
+            {ok, Entries, LastSeq + 1, Offset, Tip}
+    end.
+
+replay_exact_log(Opts, Bin, ExpectedBytes) ->
+    case replay_log(Opts, Bin) of
+        {ok, _Entries, _NextSeq, ExpectedBytes, _Tip} = OK ->
+            OK;
+        {ok, Entries, NextSeq, OtherBytes, Tip} ->
+            {ok, Entries, NextSeq, OtherBytes, Tip};
+        {error, _} = Error ->
+            Error
+    end.
+
+assert_committed_head(Entries, NextSeq, ValidBytes, Tip, Head) ->
+    case
+        maps:get(<<"next-seq">>, Head) =:= NextSeq andalso
+        maps:get(<<"valid-bytes">>, Head) =:= ValidBytes andalso
+        maps:get(<<"tip">>, Head) =:= Tip
+    of
+        true -> {ok, Entries, NextSeq, ValidBytes, Tip};
+        false -> {error, encrypted_store_head_mismatch}
+    end.
+
+write_head(Opts, ValidBytes, NextSeq, Tip) ->
+    File = head_file(Opts),
+    Tmp = <<File/binary, ".tmp">>,
+    ok = filelib:ensure_dir(File),
+    Head = term_to_binary(#{
+        <<"magic">> => ?HEAD_MAGIC,
+        <<"version">> => 1,
+        <<"next-seq">> => NextSeq,
+        <<"valid-bytes">> => ValidBytes,
+        <<"tip">> => Tip
+    }),
+    case file:open(Tmp, [write, binary, raw]) of
+        {ok, Fd} ->
+            case file:write(Fd, Head) of
+                ok ->
+                    Sync = file:sync(Fd),
+                    Close = file:close(Fd),
+                    case {Sync, Close} of
+                        {ok, ok} -> file:rename(Tmp, File);
+                        {{error, Reason}, _} -> {error, Reason};
+                        {_, {error, Reason}} -> {error, Reason}
+                    end;
+                {error, Reason} ->
+                    file:close(Fd),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+empty_tip(Opts) ->
+    crypto:hash(sha256, term_to_binary({
+        ?HEAD_MAGIC,
+        hb_maps:get(<<"zone">>, Opts, null, #{}),
+        hb_maps:get(<<"ring-address">>, Opts, null, #{}),
+        hb_maps:get(<<"store-id">>, Opts, null, #{}),
+        empty
+    })).
+
+log_tip(PrevTip, Record) ->
+    crypto:hash(sha256, [PrevTip, Record]).
 
 data_file(#{<<"name">> := Name}) ->
     hb_util:bin(filename:join([hb_util:list(Name), hb_util:list(?DATA_FILE)])).
+
+head_file(#{<<"name">> := Name}) ->
+    hb_util:bin(filename:join([hb_util:list(Name), hb_util:list(?HEAD_FILE)])).
 
 secret_term(SecretRef) ->
     {?MODULE, secret, SecretRef}.
@@ -624,6 +831,7 @@ secret_term(SecretRef) ->
 -ifdef(TEST).
 encrypted_store_reopens_with_same_secret_test() ->
     Root = test_root(<<"roundtrip">>),
+    file:del_dir_r(Root),
     SecretRef = <<"test-secret">>,
     AES = crypto:strong_rand_bytes(32),
     Store = test_store(Root, SecretRef),
@@ -640,6 +848,7 @@ encrypted_store_reopens_with_same_secret_test() ->
 
 encrypted_store_rejects_wrong_secret_test() ->
     Root = test_root(<<"wrong-secret">>),
+    file:del_dir_r(Root),
     SecretRef = <<"test-secret-wrong">>,
     Store = test_store(Root, SecretRef),
     register_secret(SecretRef, crypto:strong_rand_bytes(32)),
@@ -653,6 +862,7 @@ encrypted_store_rejects_wrong_secret_test() ->
 
 encrypted_store_appends_records_test() ->
     Root = test_root(<<"append-log">>),
+    file:del_dir_r(Root),
     SecretRef = <<"test-secret-append-log">>,
     AES = crypto:strong_rand_bytes(32),
     Store = test_store(Root, SecretRef),
@@ -675,6 +885,7 @@ encrypted_store_appends_records_test() ->
 
 encrypted_store_truncates_partial_tail_test() ->
     Root = test_root(<<"partial-tail">>),
+    file:del_dir_r(Root),
     SecretRef = <<"test-secret-partial-tail">>,
     AES = crypto:strong_rand_bytes(32),
     Store = test_store(Root, SecretRef),
@@ -694,6 +905,154 @@ encrypted_store_truncates_partial_tail_test() ->
     ok = hb_store:start(Store),
     ?assertEqual({ok, <<"one">>}, hb_store:read(Store, <<"a">>, #{})),
     ?assertEqual({ok, <<"two">>}, hb_store:read(Store, <<"b">>, #{})),
+    ok = hb_store:stop(Store),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_truncates_invalid_uncommitted_tail_test() ->
+    Root = test_root(<<"invalid-tail">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-invalid-tail">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    File = data_file(Store),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    ok = hb_store:write(Store, #{<<"a">> => <<"one">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    Size = filelib:file_size(File),
+    ok = hb_store:stop(Store),
+    ok = file:write_file(File, <<0, 0, 0, 1, 0>>, [append]),
+    ok = hb_store:start(Store),
+    ?assertEqual(Size, filelib:file_size(File)),
+    ?assertEqual({ok, <<"one">>}, hb_store:read(Store, <<"a">>, #{})),
+    ok = hb_store:stop(Store),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_recovers_first_flush_when_empty_head_survives_test() ->
+    Root = test_root(<<"empty-head-recovery">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-empty-head-recovery">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    {ok, EmptyHead} = file:read_file(head_file(Store)),
+    ok = hb_store:write(Store, #{<<"k">> => <<"value">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    ok = hb_store:stop(Store),
+    ok = file:write_file(head_file(Store), EmptyHead),
+    ok = hb_store:start(Store),
+    ?assertEqual({ok, <<"value">>}, hb_store:read(Store, <<"k">>, #{})),
+    ok = hb_store:stop(Store),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_materializes_head_for_empty_file_test() ->
+    Root = test_root(<<"empty-file">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-empty-file">>,
+    Store = test_store(Root, SecretRef),
+    ok = filelib:ensure_dir(data_file(Store)),
+    ok = file:write_file(data_file(Store), <<>>),
+    register_secret(SecretRef, crypto:strong_rand_bytes(32)),
+    ok = hb_store:start(Store),
+    ?assert(filelib:is_regular(head_file(Store))),
+    ok = hb_store:stop(Store),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_rejects_store_bin_rollback_test() ->
+    Root = test_root(<<"rollback">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-rollback">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    File = data_file(Store),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    ok = hb_store:write(Store, #{<<"k">> => <<"old">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    {ok, Prefix} = file:read_file(File),
+    ok = hb_store:write(Store, #{<<"k">> => <<"new">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    ?assertEqual({ok, <<"new">>}, hb_store:read(Store, <<"k">>, #{})),
+    ok = hb_store:stop(Store),
+    ok = file:write_file(File, Prefix),
+    ?assertMatch({failure, encrypted_store_rollback_detected}, start(Store, #{}, #{})),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_rejects_malformed_head_prefix_test() ->
+    Root = test_root(<<"malformed-head">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-malformed-head">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    File = data_file(Store),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    ok = hb_store:write(Store, #{<<"k">> => <<"old">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    Size1 = filelib:file_size(File),
+    ok = hb_store:write(Store, #{<<"k">> => <<"new">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    Size2 = filelib:file_size(File),
+    ok = hb_store:stop(Store),
+    {ok, HeadBin} = file:read_file(head_file(Store)),
+    Head = binary_to_term(HeadBin, [safe]),
+    ok = file:write_file(
+        head_file(Store),
+        term_to_binary(Head#{<<"valid-bytes">> := Size1 + 2})
+    ),
+    ?assertMatch({failure, bad_encrypted_store_head}, start(Store, #{}, #{})),
+    ?assertEqual(Size2, filelib:file_size(File)),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_recovers_head_rollback_when_log_is_current_test() ->
+    Root = test_root(<<"head-rollback">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-head-rollback">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    ok = hb_store:write(Store, #{<<"k">> => <<"old">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    {ok, OldHead} = file:read_file(head_file(Store)),
+    ok = hb_store:write(Store, #{<<"k">> => <<"new">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    ok = hb_store:stop(Store),
+    ok = file:write_file(head_file(Store), OldHead),
+    ok = hb_store:start(Store),
+    ?assertEqual({ok, <<"new">>}, hb_store:read(Store, <<"k">>, #{})),
+    ok = hb_store:stop(Store),
+    forget_secret(SecretRef),
+    file:del_dir_r(Root).
+
+encrypted_store_recovers_valid_tail_before_invalid_tail_test() ->
+    Root = test_root(<<"valid-then-invalid-tail">>),
+    file:del_dir_r(Root),
+    SecretRef = <<"test-secret-valid-then-invalid-tail">>,
+    AES = crypto:strong_rand_bytes(32),
+    Store = test_store(Root, SecretRef),
+    File = data_file(Store),
+    register_secret(SecretRef, AES),
+    ok = hb_store:start(Store),
+    ok = hb_store:write(Store, #{<<"k">> => <<"old">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    {ok, OldHead} = file:read_file(head_file(Store)),
+    ok = hb_store:write(Store, #{<<"k">> => <<"new">>}, #{}),
+    ok = hb_store_andee_encrypted:flush(Store),
+    CurrentSize = filelib:file_size(File),
+    ok = hb_store:stop(Store),
+    ok = file:write_file(head_file(Store), OldHead),
+    ok = file:write_file(File, <<0, 0, 0, 1, 0>>, [append]),
+    ok = hb_store:start(Store),
+    ?assertEqual(CurrentSize, filelib:file_size(File)),
+    ?assertEqual({ok, <<"new">>}, hb_store:read(Store, <<"k">>, #{})),
     ok = hb_store:stop(Store),
     forget_secret(SecretRef),
     file:del_dir_r(Root).
