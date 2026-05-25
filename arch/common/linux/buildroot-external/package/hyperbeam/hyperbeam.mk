@@ -102,7 +102,11 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		'        else' \
 		'            echo "using upstream Cargo.lock for $$crate" >&2' \
 		'        fi' \
-		'        args=("$${args[@]:0:$$((idx + 1))}" --locked "$${args[@]:$$((idx + 1))}")' \
+		'        locked=0' \
+		'        for arg in "$${args[@]}"; do [ "$$arg" = --locked ] && locked=1; done' \
+		'        if [ "$$locked" = 0 ]; then' \
+		'            args=("$${args[@]:0:$$((idx + 1))}" --locked "$${args[@]:$$((idx + 1))}")' \
+		'        fi' \
 		'        ;;' \
 		'esac' \
 		'if { [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; } && [ "$$cmd" = build ]; then' \

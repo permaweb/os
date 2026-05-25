@@ -136,7 +136,19 @@ measure(_Base, Req, Opts) ->
     end.
 
 internal_measurement_request(Req) ->
-    dev_measurement:internal_request(Req).
+    case persistent_term:get(
+        {permawebos_measurement, internal_request_token},
+        undefined) of
+        undefined ->
+            false;
+        Token ->
+            is_map(Req) andalso
+                hb_maps:get(
+                    <<"measurement-internal-token">>,
+                    Req,
+                    undefined,
+                    #{}) =:= Token
+    end.
 
 verify(Base, Req, Opts) ->
     Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),

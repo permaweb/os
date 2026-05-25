@@ -166,6 +166,7 @@ credential_body_from_request(Req, Opts) ->
 generate_measurement(Purpose, Req, Opts) ->
     with_raw_ok(fun() ->
         Body = measurement_body(Opts),
+        BodyID = measurement_body_id(Body, Opts),
         Device = selected_device(Opts),
         Recipient = timed(
             <<"measurement-subject">>,
@@ -173,7 +174,9 @@ generate_measurement(Purpose, Req, Opts) ->
                 resolve_device_body(
                     Device,
                     <<"subject">>,
-                    engine_request(#{<<"body">> => Body}),
+                    engine_request(#{
+                        <<"body-id">> => BodyID
+                    }),
                     Opts)
             end,
             Opts),
@@ -185,6 +188,7 @@ generate_measurement(Purpose, Req, Opts) ->
                     <<"measure">>,
                     engine_request(#{
                         <<"body">> => Body,
+                        <<"body-id">> => BodyID,
                         <<"nonce">> => nonce_for(Purpose, Req, Opts),
                         <<"purpose">> => purpose_name(Purpose),
                         <<"secret-recipient">> => Recipient
@@ -633,14 +637,23 @@ engine_request(Req) ->
     Req#{<<"measurement-internal-token">> => internal_request_token()}.
 
 internal_request(Req) ->
-    maps:get(<<"measurement-internal-token">>, Req, undefined) =:=
-        internal_request_token().
+    case persistent_term:get(internal_request_token_key(), undefined) of
+        undefined ->
+            false;
+        Token ->
+            is_map(Req) andalso
+                hb_maps:get(
+                    <<"measurement-internal-token">>,
+                    Req,
+                    undefined,
+                    #{}) =:= Token
+    end.
 
 internal_request_token() ->
-    case persistent_term:get({dev_measurement, internal_request_token}, undefined) of
+    case persistent_term:get(internal_request_token_key(), undefined) of
         undefined ->
             global:trans(
-                {dev_measurement, internal_request_token},
+                internal_request_token_key(),
                 fun internal_request_token_locked/0,
                 [node()]);
         Token ->
@@ -648,14 +661,17 @@ internal_request_token() ->
     end.
 
 internal_request_token_locked() ->
-    case persistent_term:get({dev_measurement, internal_request_token}, undefined) of
+    case persistent_term:get(internal_request_token_key(), undefined) of
         undefined ->
             Token = make_ref(),
-            persistent_term:put({dev_measurement, internal_request_token}, Token),
+            persistent_term:put(internal_request_token_key(), Token),
             Token;
         Token ->
             Token
     end.
+
+internal_request_token_key() ->
+    {permawebos_measurement, internal_request_token}.
 
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of

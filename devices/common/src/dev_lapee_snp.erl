@@ -51,11 +51,16 @@ supported(_Base, _Req, Opts) ->
 subject(_Base, Req, Opts) ->
     case internal_measurement_request(Req) of
         true ->
-            Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-            {ok, #{
-                <<"status">> => 200,
-                <<"body">> => secret_recipient(Body, Opts)
-            }};
+            case trusted_body_id(Req, Opts) of
+                undefined ->
+                    error_resp(400, <<"missing-measurement-body-id">>,
+                               <<"Internal SNP subject request lacks body-id.">>);
+                BodyID ->
+                    {ok, #{
+                        <<"status">> => 200,
+                        <<"body">> => secret_recipient(#{}, BodyID, Opts)
+                    }}
+            end;
         false ->
             error_resp(403, <<"measurement-engine-internal-only">>,
                        <<"Use ~measurement@1.0 for SNP measurement generation.">>)
@@ -66,33 +71,45 @@ measure(_Base, Req, Opts) ->
         true ->
             try
                 Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-                Recipient = hb_maps:get(
-                    <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
-                Nonce = measurement_nonce(Req),
-                ReportData = report_data(Body, Nonce, Recipient, Opts),
-                case snp_nif() of
-                    {error, Reason} ->
-                        error_resp(500, <<"snp-nif-not-loaded">>,
-                                   reason_to_text(Reason));
-                    Nif ->
-                        case Nif:report(ReportData, vmpl(Opts)) of
-                            {ok, ReportRaw, Certs} ->
-                                Report = decode_report(ReportRaw),
-                                {ok, #{
-                                    <<"status">> => 200,
-                                    <<"body">> =>
-                                        evidence(
-                                            ReportRaw,
-                                            Certs,
-                                            Body,
-                                            Report,
-                                            Nonce,
-                                            ReportData,
-                                            Recipient,
-                                            Opts)
-                                }};
+                case trusted_body_id(Req, Opts) of
+                    undefined ->
+                        error_resp(400, <<"missing-measurement-body-id">>,
+                                   <<"Internal SNP measurement request lacks body-id.">>);
+                    BodyID ->
+                        Recipient = hb_maps:get(
+                            <<"secret-recipient">>,
+                            Req,
+                            secret_recipient(Body, BodyID, Opts),
+                            Opts),
+                        Nonce = measurement_nonce(Req),
+                        ReportData = report_data(Body, Nonce, Recipient, Req, Opts),
+                        case snp_nif() of
                             {error, Reason} ->
-                                error_resp(500, <<"snp-report-failed">>, Reason)
+                                error_resp(500, <<"snp-nif-not-loaded">>,
+                                           reason_to_text(Reason));
+                            Nif ->
+                                case Nif:report(ReportData, vmpl(Opts)) of
+                                    {ok, ReportRaw, Certs} ->
+                                        Report = decode_report(ReportRaw),
+                                        {ok, #{
+                                            <<"status">> => 200,
+                                            <<"body">> =>
+                                                evidence(
+                                                    ReportRaw,
+                                                    Certs,
+                                                    Body,
+                                                    Report,
+                                                    Nonce,
+                                                    ReportData,
+                                                    Recipient,
+                                                    Opts)
+                                        }};
+                                    {error, Reason} ->
+                                        error_resp(
+                                            500,
+                                            <<"snp-report-failed">>,
+                                            Reason)
+                                end
                         end
                 end
             catch
@@ -181,7 +198,19 @@ snp_supported(_Opts) ->
     end.
 
 internal_measurement_request(Req) ->
-    dev_measurement:internal_request(Req).
+    case persistent_term:get(
+        {permawebos_measurement, internal_request_token},
+        undefined) of
+        undefined ->
+            false;
+        Token ->
+            is_map(Req) andalso
+                hb_maps:get(
+                    <<"measurement-internal-token">>,
+                    Req,
+                    undefined,
+                    #{}) =:= Token
+    end.
 
 snp_nif() ->
     case code:is_loaded(lapee_snp_nif) of
@@ -212,9 +241,10 @@ load_priv_module(Module) ->
         {error, {load_priv_module, Class, CatchReason}}
     end.
 
-secret_recipient(Body, Opts) ->
+secret_recipient(Body, undefined, Opts) ->
+    secret_recipient(Body, body_id(Body, Opts), Opts);
+secret_recipient(_Body, BodyID, Opts) ->
     {Public, _Private} = recipient_keypair(),
-    BodyID = body_id(Body, Opts),
     Context = device_context(Opts),
     #{
         <<"type">> => <<"lapee-secret-recipient">>,
@@ -328,7 +358,7 @@ evidence(ReportRaw, Certs, Body, Report, Nonce, ReportData, Recipient, Opts) ->
         <<"report">> => parsed_report_summary(Report),
         <<"certificates">> => certificates(Certs, Body, Report, Opts),
         <<"snp-product">> => snp_product(Body, Opts),
-        <<"secret-recipient-id">> => stable_id(Recipient, Opts),
+        <<"secret-recipient-id">> => recipient_id(Recipient, #{}, Opts),
         <<"device-context">> => device_context(Opts)
     }.
 
@@ -798,9 +828,9 @@ decimal_param(B) when is_binary(B) ->
 decimal_param(_) ->
     <<"0">>.
 
-report_data(Body, Nonce, Recipient, Opts) ->
+report_data(Body, Nonce, Recipient, Req, Opts) ->
     report_data_for_ids(
-        measured_body_id(Body, Recipient, Opts),
+        measured_body_id(Body, Recipient, Req, Opts),
         Nonce,
         recipient_id(Recipient, #{}, Opts),
         measurement_context_digest(Recipient, Opts)).
@@ -817,7 +847,7 @@ report_data_for_ids(BodyID, Nonce, RecipientID, ContextDigest) ->
 recipient_id(Link, _Evidence, _Opts) when ?IS_LINK(Link) ->
     link_id(Link);
 recipient_id(Recipient, Evidence, Opts) ->
-    ID = stable_id(Recipient, Opts),
+    ID = recipient_identity_id(Recipient, Opts),
     case hb_maps:get(<<"secret-recipient-id">>, Evidence, undefined, Opts) of
         undefined ->
             ID;
@@ -825,6 +855,46 @@ recipient_id(Recipient, Evidence, Opts) ->
             ID;
         _ ->
             throw(<<"evidence secret-recipient-id does not match recipient">>)
+    end.
+
+recipient_identity_id(Recipient, Opts) when is_map(Recipient) ->
+    Public = decode_required(
+        <<"x25519-public-key">>,
+        hb_maps:get(<<"public-material">>, Recipient, #{}, Opts),
+        Opts),
+    ExpectedKeyID = hb_util:encode(crypto:hash(sha256, Public)),
+    case hb_maps:get(<<"key-id">>, Recipient, ExpectedKeyID, Opts) of
+        ExpectedKeyID ->
+            ok;
+        _ ->
+            throw(<<"recipient key-id does not match public key">>)
+    end,
+    Method = hb_maps:get(<<"method">>, Recipient, ?METHOD, Opts),
+    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
+    ReportContext =
+        hb_maps:get(<<"report-data-context">>, Binding, ?REPORT_CONTEXT, Opts),
+    BodyID = hb_maps:get(<<"body-id">>, Binding, <<>>, Opts),
+    ContextDigest = measurement_context_digest(Recipient, Opts),
+    hb_util:encode(
+        crypto:hash(
+            sha256,
+            <<"lapee-snp-recipient-v1\n",
+              "method:", Method/binary, "\n",
+              "public-key:", Public/binary, "\n",
+              "key-id:", ExpectedKeyID/binary, "\n",
+              "report-data-context:", ReportContext/binary, "\n",
+              "body-id:", (hb_util:native_id(BodyID))/binary, "\n",
+              "device-context-digest:",
+                  (hb_util:decode(ContextDigest))/binary, "\n">>));
+recipient_identity_id(Recipient, Opts) ->
+    stable_id(Recipient, Opts).
+
+measured_body_id(Body, Recipient, Req, Opts) ->
+    case trusted_measurement_body_id(Recipient, Req, Opts) of
+        undefined ->
+            measured_body_id(Body, Recipient, Opts);
+        BodyID ->
+            BodyID
     end.
 
 measured_body_id(Body, Recipient, Opts) ->
@@ -844,6 +914,33 @@ recipient_body_id(Recipient, Opts) when is_map(Recipient) ->
     end;
 recipient_body_id(_Recipient, _Opts) ->
     undefined.
+
+trusted_measurement_body_id(Recipient, Req, Opts) ->
+    case {internal_measurement_request(Req),
+          trusted_body_id(Req, Opts),
+          recipient_body_id(Recipient, Opts)} of
+        {true, BodyID, BodyID} when is_binary(BodyID) ->
+            BodyID;
+        {true, BodyID, undefined} when is_binary(BodyID) ->
+            BodyID;
+        _ ->
+            undefined
+    end.
+
+trusted_body_id(Req, Opts) ->
+    case hb_maps:get(<<"body-id">>, Req, undefined, Opts) of
+        ID when is_binary(ID), byte_size(ID) =:= 43 ->
+            try hb_util:native_id(ID) of
+                Digest when byte_size(Digest) =:= 32 ->
+                    ID;
+                _ ->
+                    undefined
+            catch
+                _:_ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
 
 measurement_context_digest(Recipient, Opts) ->
     case recipient_binding_value(
@@ -891,7 +988,17 @@ device_context(Opts) ->
     }.
 
 device_context_digest(Context) ->
-    stable_id(Context, #{}).
+    Vmpl = decimal_param(hb_maps:get(<<"vmpl">>, Context, 0, #{})),
+    ReportContext =
+        hb_maps:get(<<"report-data-context">>, Context, ?REPORT_CONTEXT, #{}),
+    Method = hb_maps:get(<<"secret-method">>, Context, ?METHOD, #{}),
+    hb_util:encode(
+        crypto:hash(
+            sha256,
+            <<"lapee-snp-device-context-v1\n",
+              "vmpl:", Vmpl/binary, "\n",
+              "report-data-context:", ReportContext/binary, "\n",
+              "secret-method:", Method/binary, "\n">>)).
 
 vmpl(Opts) ->
     parse_integer(hb_opts:get(<<"snp-vmpl">>, undefined, Opts), 0).

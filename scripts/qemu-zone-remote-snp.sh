@@ -24,7 +24,7 @@ BASE_PORT=${BASE_PORT:-19840}
 TIMEOUT=${TIMEOUT:-900}
 GUEST_HOST=${GUEST_HOST:-10.0.2.2}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
-MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-30000}
+MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-}
 MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
 ALLOW_REJECTED_PEER_ATTESTATION=${ALLOW_REJECTED_PEER_ATTESTATION:-0}
 ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
@@ -122,15 +122,17 @@ PY
         --argjson allow_rejected "$allow_rejected" \
         --arg snp_cert_chain_pem "$snp_cert_chain_pem" \
         --arg snp_vcek_der "$snp_vcek_der" \
-        --argjson measurement_timeout_ms "$MEASUREMENT_TIMEOUT_MS" '
+        --arg measurement_timeout_ms "$MEASUREMENT_TIMEOUT_MS" '
         {
           "measurement-device": "snp@1.0",
           "lapee-allow-request-trusted-ca": true,
           "allow-rejected-peer-attestation": $allow_rejected,
           "peer-http-connect-timeout-ms": 600000,
-          "peer-http-timeout-ms": 600000,
-          "measurement-timeout-ms": $measurement_timeout_ms
+          "peer-http-timeout-ms": 600000
         }
+        + (if $measurement_timeout_ms != "" then
+             {"measurement-timeout-ms": ($measurement_timeout_ms | tonumber)}
+           else {} end)
         + (if $snp_cert_chain_pem != "" then
              {"snp-cert-chain-pem": $snp_cert_chain_pem}
            else {} end)
@@ -362,7 +364,9 @@ assert_security_properties() {
         def props($node; $att): {
             node: $node,
             cmdline: measurement($att).body.system.kernel.cmdline,
-            boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+            boot_image_id: measurement($att).body.system.boot.image.id,
+            boot_image_provenance:
+                measurement($att).body.system.boot.image.provenance,
             node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
                 measurement($att).body.node."access-remote-cache-for-client",
@@ -381,7 +385,7 @@ assert_security_properties() {
         | {
             nodes: .,
             distinct_cmdlines: ([.[].cmdline] | unique | length),
-            distinct_boot_uki_sha256: ([.[].boot_uki_sha256] | unique | length),
+            distinct_boot_image_id: ([.[].boot_image_id] | unique | length),
             distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
             distinct_dmi_products: ([.[].dmi_product] | unique | length),
             distinct_recipient_key_id: ([.[].recipient_key_id] | unique | length),
@@ -390,8 +394,9 @@ assert_security_properties() {
     jq -e '
         def falsy: . == false or . == "false";
         .distinct_cmdlines == 1 and
-        .distinct_boot_uki_sha256 == 1 and
-        all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+        .distinct_boot_image_id == 1 and
+        all(.nodes[]; (.boot_image_id | type == "string" and length > 0) and
+            .boot_image_provenance == "executed-kernel-cmdline" and
             .node_initialized == "permanent" and
             (.access_remote_cache_for_client | falsy) and
             (.load_remote_devices | falsy) and

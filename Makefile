@@ -136,6 +136,8 @@ RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNT
 RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).signed.efi
 IMAGE ?= $(RUNTIME_SIGNED_OUT)
 WRITE_IMAGE = $(if $(filter file,$(origin OUT)),$(IMAGE),$(OUT))
+QEMU_DEFAULT_IMAGE ?= $(BUILD_DIR)/images/lapee-runtime-no-tme-signed.img
+QEMU_IMAGE = $(if $(filter command line environment environment override,$(origin IMAGE)),$(IMAGE),$(QEMU_DEFAULT_IMAGE))
 export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET LAPEE_HB_DEVICE_DIR
 
 empty :=
@@ -438,24 +440,24 @@ _provisioner-write:
 	$(MAKE) _image-write OUT="$(SB_PROVISION_OUT)" DEV="$(DEV)"
 
 _qemu-zone-cluster: toolchain
-	./scripts/qemu-zone-cluster.sh
+	IMG="$(QEMU_IMAGE)" ./scripts/qemu-zone-cluster.sh
 
 _qemu-zone-nonvolatile: toolchain
 	NONVOLATILE=1 OUTDIR="$(BUILD_DIR)/qemu-zone-nonvolatile" \
-	    ./scripts/qemu-zone-cluster.sh
+	    IMG="$(QEMU_IMAGE)" ./scripts/qemu-zone-cluster.sh
 
 _qemu-provisioner-nonvolatile: toolchain
 	OUTDIR="$(BUILD_DIR)/qemu-provisioner-nonvolatile" \
 	    ./scripts/qemu-provisioner-nonvolatile.sh
 
 _qemu-operator-config-zone: toolchain
-	./scripts/qemu-operator-config-zone.sh
+	IMG="$(QEMU_IMAGE)" ./scripts/qemu-operator-config-zone.sh
 
 _qemu-measurement-remote: toolchain
-	./scripts/qemu-measurement-remote.sh
+	IMAGE="$(QEMU_IMAGE)" ./scripts/qemu-measurement-remote.sh
 
 _qemu-zone-remote-snp: toolchain
-	./scripts/qemu-zone-remote-snp.sh
+	IMAGE="$(QEMU_IMAGE)" ./scripts/qemu-zone-remote-snp.sh
 
 hb-fetch:
 	@test -n "$(HYPERBEAM_VERSION)" || { \

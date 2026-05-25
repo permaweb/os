@@ -1093,6 +1093,8 @@ WIFI_PSK=""
 BOOT_ESP_DEV=""
 OPERATOR_CONFIG_JSON=/tmp/config.json
 BOOT_UKI_SHA256=/run/lapee/boot-uki-sha256
+BOOT_UKI_SOURCE=/run/lapee/boot-uki-source
+SYSTEMD_EFI_GUID=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 
 write_empty_operator_config_json() {
     printf '{}\n' > "$OPERATOR_CONFIG_JSON" 2>/dev/null || true
@@ -1103,6 +1105,9 @@ write_empty_operator_config_json
 
 record_boot_uki_hash() {
     _uki="$1"
+    _partuuid="${2:-}"
+    _firmware_partuuid="${3:-}"
+    _firmware_image="${4:-}"
     [ -f "$_uki" ] || return 1
     if ! command -v sha256sum >/dev/null 2>&1; then
         trace "boot-media: sha256sum unavailable; boot UKI hash not recorded"
@@ -1123,6 +1128,15 @@ record_boot_uki_hash() {
     fi
     printf '%s\n' "$_hash" > "$BOOT_UKI_SHA256" 2>/dev/null || return 1
     chmod 600 "$BOOT_UKI_SHA256" 2>/dev/null || true
+    {
+        printf 'source=boot-media-scan\n'
+        printf 'device=%s\n' "$BOOT_ESP_DEV"
+        printf 'partuuid=%s\n' "$_partuuid"
+        printf 'firmware-partuuid=%s\n' "$_firmware_partuuid"
+        printf 'firmware-image-identifier=%s\n' "$_firmware_image"
+        printf 'trusted-as-executed=false\n'
+    } > "$BOOT_UKI_SOURCE" 2>/dev/null || true
+    chmod 600 "$BOOT_UKI_SOURCE" 2>/dev/null || true
     trace "boot-media: recorded boot UKI sha256"
     return 0
 }
@@ -1292,9 +1306,7 @@ copy_operator_config_json() {
             <<"preloaded-store">>,
             <<"preloaded-devices-index">>,
             <<"forge-bootstrap">>,
-            <<"loaded-device-store">>,
-            <<"measurement-device">>,
-            <<"measurement-devices">>
+            <<"loaded-device-store">>
         ],
         Canonical = fun(Key) when is_binary(Key) ->
             Lower = string:lowercase(binary_to_list(Key)),
@@ -1357,6 +1369,58 @@ ensure_unmounted() {
     return 0
 }
 
+efi_utf16_var() {
+    _name="$1"
+    _path="/sys/firmware/efi/efivars/${_name}-${SYSTEMD_EFI_GUID}"
+    [ -f "$_path" ] || return 1
+    dd if="$_path" bs=1 skip=4 2>/dev/null | \
+        tr -d '\000' | tr -d '\r\n'
+}
+
+efi_loaded_partuuid() {
+    for _var in StubDevicePartUUID LoaderDevicePartUUID; do
+        _value=$(efi_utf16_var "$_var" 2>/dev/null | tr 'A-F' 'a-f' || true)
+        case "$_value" in
+            ????????-????-????-????-????????????)
+                printf '%s\n' "$_value"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+efi_loaded_image_identifier() {
+    for _var in StubImageIdentifier LoaderImageIdentifier; do
+        _value=$(efi_utf16_var "$_var" 2>/dev/null || true)
+        if [ -n "$_value" ]; then
+            printf '%s\n' "$_value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+partuuid_for_part() {
+    _devbase=$(basename "$1")
+    _uevent="/sys/class/block/${_devbase}/uevent"
+    [ -f "$_uevent" ] || return 1
+    sed -n 's/^PARTUUID=//p' "$_uevent" 2>/dev/null | \
+        tr 'A-F' 'a-f' | head -n 1
+}
+
+boot_esp_candidate_matches_firmware() {
+    _dev="$1"
+    _expected="$2"
+    [ -n "$_expected" ] || return 0
+    _actual=$(partuuid_for_part "$_dev" || true)
+    if [ "$_actual" = "$_expected" ]; then
+        return 0
+    fi
+    trace "boot-media: skipping marker ESP $_dev with PARTUUID=${_actual:-unknown}; firmware loaded $_expected"
+    return 1
+}
+
 read_boot_media_config() {
     # The boot ESP is input-only. Mount it read-only just long enough
     # to detect the LapEE marker file and, when the measured WiFi gate
@@ -1367,57 +1431,82 @@ read_boot_media_config() {
     # boot continues either way.
     mkdir -p /mnt/esp 2>/dev/null
     status "Looking for the boot USB."
+    _firmware_partuuid=$(efi_loaded_partuuid || true)
+    _firmware_image=$(efi_loaded_image_identifier || true)
+    if [ -n "$_firmware_partuuid" ]; then
+        trace "boot-media: firmware-loaded partition PARTUUID=$_firmware_partuuid"
+    else
+        trace "boot-media: firmware-loaded partition PARTUUID unavailable"
+    fi
     for _i in 1 2 3 4 5 6 7 8 9 10; do
+        _candidate_dev=""
+        _candidate_partuuid=""
+        _candidate_count=0
         for _dev in /dev/sd[a-z][0-9]* /dev/vd[a-z][0-9]* \
                     /dev/nvme[0-9]n[0-9]p[0-9]* \
                     /dev/mmcblk[0-9]p[0-9]*; do
             [ -b "$_dev" ] || continue
-            _probe_disk=$(parent_block_for_part "$_dev")
-            if [ -n "$_probe_disk" ] && [ -w "/sys/block/$_probe_disk/ro" ]; then
-                echo 1 > "/sys/block/$_probe_disk/ro" 2>/dev/null || true
-            fi
             if mount -t vfat -o ro,nosuid,nodev,noexec,noatime "$_dev" /mnt/esp 2>/dev/null; then
                 if [ -f /mnt/esp/EFI/Boot/BootX64.efi ] && \
                    [ -f /mnt/esp/LAPEE.MARKER ]; then
-                    BOOT_ESP_DEV="$_dev"
-                    trace "boot-media: found LapEE ESP at $BOOT_ESP_DEV"
-                    record_boot_uki_hash /mnt/esp/EFI/Boot/BootX64.efi || true
-                    if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
-                        if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
-                            parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true
-                        elif [ -f /mnt/esp/EFI/Boot/wifi.conf ]; then
-                            # Case-insensitive filesystem: FAT32
-                            # preserves on-disk case but allows
-                            # any-case lookup. Accept PE-standard
-                            # `/EFI/Boot/' spelling too.
-                            parse_wifi_conf /mnt/esp/EFI/Boot/wifi.conf || true
-                        else
-                            status "No Wi-Fi settings found on the boot USB."
-                            trace "wifi: no /EFI/boot/wifi.conf on ESP"
+                    if boot_esp_candidate_matches_firmware "$_dev" "$_firmware_partuuid"; then
+                        _candidate_count=$((_candidate_count + 1))
+                        if [ "$_candidate_count" -gt 1 ]; then
+                            umount /mnt/esp 2>/dev/null || true
+                            ensure_unmounted /mnt/esp boot-media \
+                                || halt_boot "duplicate boot ESP stayed mounted after probe"
+                            halt_boot "multiple LapEE ESPs matched the firmware boot partition identity"
                         fi
-                    else
-                        status "Boot USB found."
+                        _candidate_dev="$_dev"
+                        _candidate_partuuid=$(partuuid_for_part "$_dev" || true)
                     fi
-                    if [ -f /mnt/esp/EFI/boot/config.json ]; then
-                        copy_operator_config_json /mnt/esp/EFI/boot/config.json \
-                            || true
-                    elif [ -f /mnt/esp/EFI/Boot/config.json ]; then
-                        copy_operator_config_json /mnt/esp/EFI/Boot/config.json \
-                            || true
-                    else
-                        trace "config: no /EFI/boot/config.json on ESP"
-                    fi
-                    umount /mnt/esp 2>/dev/null || true
-                    ensure_unmounted /mnt/esp boot-media \
-                        || halt_boot "boot ESP stayed mounted after read-only config scan"
-                    status "Finished reading the boot USB."
-                    return 0
                 fi
                 umount /mnt/esp 2>/dev/null || true
                 ensure_unmounted /mnt/esp boot-media \
                     || halt_boot "non-LapEE ESP stayed mounted after probe"
             fi
         done
+        if [ -n "$_candidate_dev" ]; then
+            if mount -t vfat -o ro,nosuid,nodev,noexec,noatime \
+                    "$_candidate_dev" /mnt/esp 2>/dev/null; then
+                BOOT_ESP_DEV="$_candidate_dev"
+                trace "boot-media: found LapEE ESP at $BOOT_ESP_DEV"
+                record_boot_uki_hash \
+                    /mnt/esp/EFI/Boot/BootX64.efi \
+                    "$_candidate_partuuid" \
+                    "$_firmware_partuuid" \
+                    "$_firmware_image" || true
+                if [ "$LAPEE_WIFI_GATE" = "enabled" ]; then
+                    if [ -f /mnt/esp/EFI/boot/wifi.conf ]; then
+                        parse_wifi_conf /mnt/esp/EFI/boot/wifi.conf || true
+                    elif [ -f /mnt/esp/EFI/Boot/wifi.conf ]; then
+                        # Case-insensitive filesystem: FAT32
+                        # preserves on-disk case but allows any-case
+                        # lookup. Accept PE-standard spelling too.
+                        parse_wifi_conf /mnt/esp/EFI/Boot/wifi.conf || true
+                    else
+                        status "No Wi-Fi settings found on the boot USB."
+                        trace "wifi: no /EFI/boot/wifi.conf on ESP"
+                    fi
+                else
+                    status "Boot USB found."
+                fi
+                if [ -f /mnt/esp/EFI/boot/config.json ]; then
+                    copy_operator_config_json /mnt/esp/EFI/boot/config.json \
+                        || true
+                elif [ -f /mnt/esp/EFI/Boot/config.json ]; then
+                    copy_operator_config_json /mnt/esp/EFI/Boot/config.json \
+                        || true
+                else
+                    trace "config: no /EFI/boot/config.json on ESP"
+                fi
+                umount /mnt/esp 2>/dev/null || true
+                ensure_unmounted /mnt/esp boot-media \
+                    || halt_boot "boot ESP stayed mounted after read-only config scan"
+                status "Finished reading the boot USB."
+                return 0
+            fi
+        fi
         status "Looking for the boot USB ($_i/10)."
         sleep 1
     done

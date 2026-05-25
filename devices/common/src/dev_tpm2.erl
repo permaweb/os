@@ -98,6 +98,9 @@ verify(Base, Req, Opts) ->
         safely_run(fun() -> chk_binding(Envelope) end,
                    <<"PCR 15 extension commits to node_message_id">>,
                    <<"core">>),
+        safely_run(fun() -> chk_measurement_body_binding(Envelope, Opts) end,
+                   <<"PCR 15 extension commits to measurement body">>,
+                   <<"core">>),
         safely_run(fun() -> chk_node_msg_shape(Envelope) end,
                    <<"Embedded node_message + id present and correct shape">>,
                    <<"core">>)
@@ -163,6 +166,7 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                 <<"tpm-quote">> => Quote,
                 <<"node-message">> => Node1,
                 <<"node-message-id">> => NodeID,
+                <<"measurement-body">> => Body,
                 <<"wallet-address">> =>
                     case Node1 of
                         M2 when is_map(M2) ->
@@ -1013,6 +1017,54 @@ chk_binding(Envelope) ->
             end
     end.
 
+chk_measurement_body_binding(Envelope, Opts) ->
+    Body = hb_maps:get(
+        <<"measurement-body">>,
+        Envelope,
+        hb_maps:get(<<"body">>, Envelope, undefined, #{}),
+        #{}),
+    ExtendedSubject =
+        hb_maps:get(<<"extended-subject">>, Envelope, undefined, #{}),
+    case {Body, ExtendedSubject} of
+        {M, SubjectID} when is_map(M), is_binary(SubjectID) ->
+            ExpectedID = measurement_body_id(M, Opts),
+            case SubjectID of
+                ExpectedID ->
+                    chk_measurement_body_digest(Envelope, ExpectedID);
+                _ ->
+                    {error, iolist_to_binary(io_lib:format(
+                        "extended_subject ~s does not match body id ~s",
+                        [short_id(SubjectID), short_id(ExpectedID)]))}
+            end;
+        {undefined, _} ->
+            {error, <<"missing measurement body">>};
+        {_, undefined} ->
+            {error, <<"missing extended_subject">>};
+        _ ->
+            {error, <<"measurement body or extended_subject has wrong shape">>}
+    end.
+
+chk_measurement_body_digest(Envelope, SubjectID) ->
+    ExpectedDigest = hb_util:encode(hb_util:native_id(SubjectID)),
+    case hb_maps:get(
+        <<"extended-subject-digest">>,
+        Envelope,
+        ExpectedDigest,
+        #{}) of
+        ExpectedDigest ->
+            {ok, iolist_to_binary(io_lib:format(
+                "measurement body id ~s", [short_id(SubjectID)]))};
+        Other ->
+            {error, iolist_to_binary(io_lib:format(
+                "extended_subject_digest ~s does not match body id digest ~s",
+                [short_id(Other), short_id(ExpectedDigest)]))}
+    end.
+
+short_id(Bin) when is_binary(Bin) ->
+    binary:part(Bin, 0, min(16, byte_size(Bin)));
+short_id(Value) ->
+    to_bin(Value).
+
 chk_node_msg_shape(Envelope) ->
     Nm = hb_maps:get(<<"node-message">>, Envelope, undefined, #{}),
     Id = hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
@@ -1535,8 +1587,7 @@ prepare_measurement_subject(Req, Opts) ->
     {Subject, SubjectID, SubjectDigest} =
         case hb_maps:get(<<"body">>, Req, undefined, Opts) of
             Body when is_map(Body) ->
-                ID = subject_id(Body, Opts),
-                {Body, ID, hb_util:native_id(ID)};
+                subject_identity_from_req(Body, Req, Opts);
             _ ->
                 boot_subject(Opts)
         end,
@@ -1544,6 +1595,51 @@ prepare_measurement_subject(Req, Opts) ->
         {ok, _AkTr} -> {ok, Subject, SubjectID, SubjectDigest};
         {error, _} = E -> E
     end.
+
+subject_identity_from_req(Body, Req, Opts) ->
+    case internal_measurement_request(Req) of
+        true ->
+            case trusted_subject_id(Req, Opts) of
+                {ok, ID, Digest} -> {Body, ID, Digest};
+                error -> recompute_subject_identity(Body, Opts)
+            end;
+        false ->
+            recompute_subject_identity(Body, Opts)
+    end.
+
+internal_measurement_request(Req) ->
+    case persistent_term:get(
+        {permawebos_measurement, internal_request_token},
+        undefined) of
+        undefined ->
+            false;
+        Token ->
+            is_map(Req) andalso
+                hb_maps:get(
+                    <<"measurement-internal-token">>,
+                    Req,
+                    undefined,
+                    #{}) =:= Token
+    end.
+
+trusted_subject_id(Req, Opts) ->
+    case hb_maps:get(<<"body-id">>, Req, undefined, Opts) of
+        ID when is_binary(ID), byte_size(ID) =:= 43 ->
+            try hb_util:native_id(ID) of
+                Digest when byte_size(Digest) =:= 32 ->
+                    {ok, ID, Digest};
+                _ ->
+                    error
+            catch
+                _:_ -> error
+            end;
+        _ ->
+            error
+    end.
+
+recompute_subject_identity(Body, Opts) ->
+    ID = subject_id(Body, Opts),
+    {Body, ID, hb_util:native_id(ID)}.
 
 boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
     Pcrs = ?DEFAULT_QUOTE_PCRS,

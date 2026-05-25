@@ -32,6 +32,7 @@ INLINE_LINKS = {
     "firmware",
     "freshness",
     "fresh-verification",
+    "image",
     "integrity",
     "iommu",
     "kernel",

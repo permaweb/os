@@ -107,7 +107,19 @@ mkdir -p "$BUILD_DIR"
 
 if [[ -n "$PREBUILT_UKI" ]]; then
     cp "$PREBUILT_UKI" "$BUILD_DIR/lapee.efi"
+    PREBUILT_IMAGE_ID=$(
+        python3 - "$BUILD_DIR/lapee.efi" <<'PY'
+import pathlib, re, sys
+ids = sorted(set(re.findall(
+    rb"lapee\.image-id=([A-Za-z0-9_-]{43})",
+    pathlib.Path(sys.argv[1]).read_bytes())))
+if len(ids) != 1:
+    raise SystemExit(1)
+print(ids[0].decode())
+PY
+    ) || die "pre-built UKI must contain exactly one lapee.image-id token"
     echo ">> using pre-built UKI: $PREBUILT_UKI"
+    echo ">> observed executed image id: $PREBUILT_IMAGE_ID"
 else
     echo ">> building UKI from kernel + initramfs"
     cp "$KERNEL"    "$BUILD_DIR/kernel"
@@ -118,6 +130,27 @@ ID=lapee
 VERSION_ID="${LAPEE_VERSION:-dev}"
 PRETTY_NAME="LapEE (${LAPEE_VERSION:-dev})"
 EOF
+    if [[ "$CMDLINE" == *"lapee.image-id="* ]]; then
+        die "do not pass lapee.image-id in --cmdline; build-usb-image computes it"
+    fi
+    IMAGE_ID_HEX=$(
+        {
+            printf 'permawebos-linux-image-v1\n'
+            sha256sum "$KERNEL" | awk '{ print $1 }'
+            sha256sum "$INITRAMFS" | awk '{ print $1 }'
+            printf '%s\n' "$CMDLINE"
+            printf '%s\n' "${LAPEE_VERSION:-dev}"
+        } | sha256sum | awk '{ print $1 }'
+    )
+    IMAGE_ID=$(
+        python3 - "$IMAGE_ID_HEX" <<'PY'
+import base64, binascii, sys
+raw = binascii.unhexlify(sys.argv[1])
+print(base64.urlsafe_b64encode(raw).decode().rstrip("="))
+PY
+    )
+    CMDLINE="$CMDLINE lapee.image-id=$IMAGE_ID"
+    echo ">> embedding executed image id: $IMAGE_ID"
     echo "$CMDLINE" > "$BUILD_DIR/cmdline.txt"
 
     docker run --rm $DOCKER_PLATFORM \

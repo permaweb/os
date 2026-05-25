@@ -31,7 +31,7 @@ DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMG=${IMG:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-zone}
 BASE_PORT=${BASE_PORT:-19080}
-TIMEOUT=${TIMEOUT:-480}
+TIMEOUT=${TIMEOUT:-1200}
 KEEP_RUNNING=${KEEP_RUNNING:-0}
 SWTPM_LOCALCA_OPTIONS=${SWTPM_LOCALCA_OPTIONS:-/opt/homebrew/etc/swtpm-localca.options}
 GUEST_HOST=${GUEST_HOST:-$(ipconfig getifaddr en0 2>/dev/null || echo 10.0.2.2)}
@@ -437,7 +437,9 @@ start_node() {
         -m "$memory_mib" -smp 4
         -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
         -drive "if=pflash,format=raw,file=$node_dir/vars.fd"
-        -drive "file=$node_dir/disk.img,format=raw,if=virtio"
+        -device "qemu-xhci,id=xhci$n"
+        -drive "if=none,id=bootdisk$n,file=$node_dir/disk.img,format=raw"
+        -device "usb-storage,drive=bootdisk$n,removable=on,bootindex=0"
     )
     if [[ "$NONVOLATILE" = "1" ]]; then
         qemu_args+=(
@@ -708,7 +710,9 @@ jq -n \
     def props($node; $att): {
         node: $node,
         cmdline: measurement($att).body.system.kernel.cmdline,
-        boot_uki_sha256: measurement($att).body.system.boot."loaded-uki".sha256,
+        boot_image_id: measurement($att).body.system.boot.image.id,
+        boot_image_provenance:
+            measurement($att).body.system.boot.image.provenance,
         node_initialized: measurement($att).body.node.initialized,
         access_remote_cache_for_client:
             measurement($att).body.node."access-remote-cache-for-client",
@@ -725,7 +729,7 @@ jq -n \
     | {
         nodes: .,
         distinct_cmdlines: ([.[].cmdline] | unique | length),
-        distinct_boot_uki_sha256: ([.[].boot_uki_sha256] | unique | length),
+        distinct_boot_image_id: ([.[].boot_image_id] | unique | length),
         distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
         distinct_dmi_products: ([.[].dmi_product] | unique | length),
         distinct_ek_public: ([.[].ek_public] | unique | length),
@@ -741,8 +745,9 @@ expected_devices=$(jq -n \
 if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; then
     jq -e --argjson expected "$expected_devices" \
         'def falsy: . == false or . == "false";
-         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
-           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+         .distinct_cmdlines == 1 and .distinct_boot_image_id == 1 and
+           all(.nodes[]; (.boot_image_id | type == "string" and length > 0) and
+             .boot_image_provenance == "executed-kernel-cmdline" and
              .node_initialized == "permanent" and
              (.access_remote_cache_for_client | falsy) and
              (.load_remote_devices | falsy) and
@@ -760,8 +765,9 @@ if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; 
 else
     jq -e --argjson expected "$expected_devices" \
         'def falsy: . == false or . == "false";
-         .distinct_cmdlines == 1 and .distinct_boot_uki_sha256 == 1 and
-           all(.nodes[]; (.boot_uki_sha256 | type == "string" and length > 0) and
+         .distinct_cmdlines == 1 and .distinct_boot_image_id == 1 and
+           all(.nodes[]; (.boot_image_id | type == "string" and length > 0) and
+             .boot_image_provenance == "executed-kernel-cmdline" and
              .node_initialized == "permanent" and
              (.access_remote_cache_for_client | falsy) and
              (.load_remote_devices | falsy) and

@@ -19,7 +19,7 @@ def main() -> int:
     evidence = measurement["evidence"]
     cmdline = body["system"]["kernel"]["cmdline"]
     node = body["node"]
-    loaded_uki = body.get("system", {}).get("boot", {}).get("loaded-uki", {})
+    boot_image = body.get("system", {}).get("boot", {}).get("image", {})
     dmi_product = (
         body["system"]["firmware"]["dmi"]["fields"]["product-name"]
     )
@@ -45,14 +45,14 @@ def main() -> int:
     }
 
     if template_mode in ("release", "release-common"):
-        loaded_uki_sha256 = loaded_uki.get("sha256")
-        if not loaded_uki_sha256:
-            raise SystemExit("release template requires body.boot.loaded-uki.sha256")
+        boot_image_id = boot_image.get("id")
+        if not boot_image_id:
+            raise SystemExit("release template requires body.boot.image.id")
         template = {
             "body": {
                 "system": {
                     "boot": {
-                        "loaded-uki": {"sha256": loaded_uki_sha256},
+                        "image": {"id": boot_image_id},
                     },
                     "kernel": {"cmdline": cmdline},
                 },
