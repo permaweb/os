@@ -49,41 +49,61 @@ supported(_Base, _Req, Opts) ->
     {ok, snp_supported(Opts)}.
 
 subject(_Base, Req, Opts) ->
-    Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-    {ok, #{
-        <<"status">> => 200,
-        <<"body">> => secret_recipient(Body, Opts)
-    }}.
+    case internal_measurement_request(Req) of
+        true ->
+            Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
+            {ok, #{
+                <<"status">> => 200,
+                <<"body">> => secret_recipient(Body, Opts)
+            }};
+        false ->
+            error_resp(403, <<"measurement-engine-internal-only">>,
+                       <<"Use ~measurement@1.0 for SNP measurement generation.">>)
+    end.
 
 measure(_Base, Req, Opts) ->
-    try
-        Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-        Recipient = hb_maps:get(
-            <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
-        Nonce = measurement_nonce(Req),
-        ReportData = report_data(Body, Nonce, Recipient, Opts),
-        case snp_nif() of
-            {error, Reason} ->
-                error_resp(500, <<"snp-nif-not-loaded">>, reason_to_text(Reason));
-            Nif ->
-                case Nif:report(ReportData, vmpl(Opts)) of
-                    {ok, ReportRaw, Certs} ->
-                        Report = decode_report(ReportRaw),
-                        {ok, #{
-                            <<"status">> => 200,
-                            <<"body">> =>
-                                evidence(ReportRaw, Certs, Body, Report, Nonce,
-                                         ReportData, Recipient, Opts)
-                        }};
+    case internal_measurement_request(Req) of
+        true ->
+            try
+                Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
+                Recipient = hb_maps:get(
+                    <<"secret-recipient">>, Req, secret_recipient(Body, Opts), Opts),
+                Nonce = measurement_nonce(Req),
+                ReportData = report_data(Body, Nonce, Recipient, Opts),
+                case snp_nif() of
                     {error, Reason} ->
-                        error_resp(500, <<"snp-report-failed">>, Reason)
+                        error_resp(500, <<"snp-nif-not-loaded">>,
+                                   reason_to_text(Reason));
+                    Nif ->
+                        case Nif:report(ReportData, vmpl(Opts)) of
+                            {ok, ReportRaw, Certs} ->
+                                Report = decode_report(ReportRaw),
+                                {ok, #{
+                                    <<"status">> => 200,
+                                    <<"body">> =>
+                                        evidence(
+                                            ReportRaw,
+                                            Certs,
+                                            Body,
+                                            Report,
+                                            Nonce,
+                                            ReportData,
+                                            Recipient,
+                                            Opts)
+                                }};
+                            {error, Reason} ->
+                                error_resp(500, <<"snp-report-failed">>, Reason)
+                        end
                 end
-        end
-    catch
-        Class:CatchReason ->
-            error_resp(500, <<"snp-measure-failed">>,
-                       #{<<"class">> => hb_util:bin(Class),
-                         <<"reason">> => reason_to_text(CatchReason)})
+            catch
+                Class:CatchReason ->
+                    error_resp(500, <<"snp-measure-failed">>,
+                               #{<<"class">> => hb_util:bin(Class),
+                                 <<"reason">> => reason_to_text(CatchReason)})
+            end;
+        false ->
+            error_resp(403, <<"measurement-engine-internal-only">>,
+                       <<"Use ~measurement@1.0 for SNP measurement generation.">>)
     end.
 
 verify(Base, Req, Opts) ->
@@ -159,6 +179,9 @@ snp_supported(_Opts) ->
         ),
         false
     end.
+
+internal_measurement_request(Req) ->
+    dev_measurement:internal_request(Req).
 
 snp_nif() ->
     case code:is_loaded(lapee_snp_nif) of
@@ -794,11 +817,14 @@ report_data_for_ids(BodyID, Nonce, RecipientID, ContextDigest) ->
 recipient_id(Link, _Evidence, _Opts) when ?IS_LINK(Link) ->
     link_id(Link);
 recipient_id(Recipient, Evidence, Opts) ->
+    ID = stable_id(Recipient, Opts),
     case hb_maps:get(<<"secret-recipient-id">>, Evidence, undefined, Opts) of
+        undefined ->
+            ID;
         ID when is_binary(ID), byte_size(ID) > 0 ->
             ID;
         _ ->
-            stable_id(Recipient, Opts)
+            throw(<<"evidence secret-recipient-id does not match recipient">>)
     end.
 
 measured_body_id(Body, Recipient, Opts) ->
@@ -840,13 +866,9 @@ assert_body_id(Link, BodyID, _Opts) when ?IS_LINK(Link) ->
         _ -> throw(<<"recipient body-id does not match measurement body">>)
     end;
 assert_body_id(Body, BodyID, Opts) when is_map(Body) ->
-    case committed_id_present(BodyID, Body) of
-        true -> ok;
-        false ->
-            case body_id(Body, Opts) of
-                BodyID -> ok;
-                _ -> throw(<<"recipient body-id does not match measurement body">>)
-            end
+    case body_id(Body, Opts) of
+        BodyID -> ok;
+        _ -> throw(<<"recipient body-id does not match measurement body">>)
     end;
 assert_body_id(Body, BodyID, Opts) ->
     case body_id(Body, Opts) of
@@ -855,31 +877,11 @@ assert_body_id(Body, BodyID, Opts) ->
     end.
 
 body_id(Body, Opts) when is_map(Body) ->
-    case committed_message_id(Body) of
-        undefined -> stable_id(Body, Opts);
-        ID -> ID
-    end;
+    stable_id(Body, Opts);
 body_id(Link, _Opts) when ?IS_LINK(Link) ->
     link_id(Link);
 body_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
-
-committed_message_id(Msg) ->
-    first_valid_id(maps:keys(maps:get(<<"commitments">>, Msg, #{}))).
-
-committed_id_present(ID, Msg) ->
-    maps:is_key(ID, maps:get(<<"commitments">>, Msg, #{})).
-
-first_valid_id([]) ->
-    undefined;
-first_valid_id([ID | Rest]) when is_binary(ID), byte_size(ID) =:= 43 ->
-    try hb_util:native_id(ID) of
-        Native when byte_size(Native) =:= 32 -> ID;
-        _ -> first_valid_id(Rest)
-    catch _:_ -> first_valid_id(Rest)
-    end;
-first_valid_id([_ | Rest]) ->
-    first_valid_id(Rest).
 
 device_context(Opts) ->
     #{
@@ -1225,3 +1227,16 @@ reason_to_text(B) when is_binary(B) -> B;
 reason_to_text(M) when is_map(M) -> M;
 reason_to_text(A) when is_atom(A) -> atom_to_binary(A, utf8);
 reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+raw_measurement_generation_requires_internal_token_test() ->
+    ?assertMatch(
+        {error, #{<<"status">> := 403}},
+        subject(#{}, #{<<"body">> => #{}}, #{})),
+    ?assertMatch(
+        {error, #{<<"status">> := 403}},
+        measure(#{}, #{<<"body">> => #{}}, #{})).
+
+-endif.

@@ -1548,12 +1548,14 @@ peer_subject_id(_Subject, _Opts) ->
     undefined.
 
 attestation_id(Attestation, Opts) when is_map(Attestation) ->
-    case committed_message_id(Attestation, Opts) of
-        undefined ->
+    case hb_maps:get(<<"type">>, Attestation, undefined, Opts) of
+        <<"lapee-measurement">> ->
+            Module = measurement_module(Opts),
+            Module:measurement_id(Attestation, Opts);
+        _ ->
             stable_uncommitted_id(
                 canonical_authorization_payload(Attestation, Opts),
-                Opts);
-        ID -> ID
+                Opts)
     end;
 attestation_id(Bin, _Opts) when is_binary(Bin), byte_size(Bin) =:= 32 ->
     hb_util:human_id(Bin);
@@ -1563,26 +1565,6 @@ attestation_id(Bin, _Opts) when is_binary(Bin) ->
     hb_util:encode(hb_crypto:sha256(Bin));
 attestation_id(Other, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Other))).
-
-committed_message_id(Msg, Opts) ->
-    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
-    IDs = hb_maps:to_list(Commitments, Opts),
-    first_valid_id(
-        [ID || {ID, Commitment} <- IDs,
-               hb_maps:get(<<"committer">>, Commitment, undefined, Opts)
-                   =/= undefined]
-        ++ [ID || {ID, _Commitment} <- IDs]).
-
-first_valid_id([]) ->
-    undefined;
-first_valid_id([ID0 | Rest]) ->
-    ID = hb_util:bin(ID0),
-    try hb_util:native_id(ID) of
-        Native when byte_size(Native) =:= 32 -> ID;
-        _ -> first_valid_id(Rest)
-    catch _:_ ->
-        first_valid_id(Rest)
-    end.
 
 peer_boot_attestation_body(Templates, PeerAttestation, Opts) ->
     matching_template(

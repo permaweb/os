@@ -11,7 +11,8 @@
 -export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
-         measurement_body/1, measurement_body_id/2, secret_recipient_id/2]).
+         measurement_body/1, measurement_body_id/2, secret_recipient_id/2,
+         measurement_id/2, internal_request/1]).
 
 -include_lib("hb/include/hb.hrl").
 
@@ -172,7 +173,7 @@ generate_measurement(Purpose, Req, Opts) ->
                 resolve_device_body(
                     Device,
                     <<"subject">>,
-                    #{<<"body">> => Body},
+                    engine_request(#{<<"body">> => Body}),
                     Opts)
             end,
             Opts),
@@ -182,12 +183,12 @@ generate_measurement(Purpose, Req, Opts) ->
                 resolve_device_body(
                     Device,
                     <<"measure">>,
-                    #{
+                    engine_request(#{
                         <<"body">> => Body,
                         <<"nonce">> => nonce_for(Purpose, Req, Opts),
                         <<"purpose">> => purpose_name(Purpose),
                         <<"secret-recipient">> => Recipient
-                    },
+                    }),
                     Opts)
             end,
             Opts),
@@ -525,11 +526,7 @@ ensure_subject_matches_measurement(Subject, Measurement, Opts) ->
     end.
 
 store_peer_attestation(Signed, Opts) ->
-    ID =
-        case committed_message_id(Signed, Opts) of
-            undefined -> hb_message:id(Signed, signed, Opts);
-            SignedID -> SignedID
-        end,
+    ID = hb_message:id(Signed, signed, Opts),
     {ok, _} = hb_cache:write(Signed, Opts),
     Path = <<?PEER_ATTESTATION_PREFIX/binary, "/", ID/binary>>,
     ok = hb_cache:link(ID, Path, Opts),
@@ -631,6 +628,34 @@ measurement_export(<<"verify">>) -> verify;
 measurement_export(<<"wrap-secret">>) -> wrap_secret;
 measurement_export(<<"unwrap-secret">>) -> unwrap_secret;
 measurement_export(_Path) -> undefined.
+
+engine_request(Req) ->
+    Req#{<<"measurement-internal-token">> => internal_request_token()}.
+
+internal_request(Req) ->
+    maps:get(<<"measurement-internal-token">>, Req, undefined) =:=
+        internal_request_token().
+
+internal_request_token() ->
+    case persistent_term:get({dev_measurement, internal_request_token}, undefined) of
+        undefined ->
+            global:trans(
+                {dev_measurement, internal_request_token},
+                fun internal_request_token_locked/0,
+                [node()]);
+        Token ->
+            Token
+    end.
+
+internal_request_token_locked() ->
+    case persistent_term:get({dev_measurement, internal_request_token}, undefined) of
+        undefined ->
+            Token = make_ref(),
+            persistent_term:put({dev_measurement, internal_request_token}, Token),
+            Token;
+        Token ->
+            Token
+    end.
 
 resolve_envelope(Base, Req, Opts) when is_map(Base) ->
     case hb_maps:get(<<"envelope">>, Req, undefined, Opts) of
@@ -855,10 +880,7 @@ canonical_payload(Value, _Opts) ->
 measurement_id(Measurement, Opts) ->
     case measurement_envelope(Measurement, Opts) of
         Msg when is_map(Msg) ->
-            case committed_message_id(Msg, Opts) of
-                undefined -> stable_id(Msg, Opts);
-                ID -> ID
-            end;
+            stable_id(Msg, Opts);
         Bin when is_binary(Bin), byte_size(Bin) =:= 32 ->
             hb_util:human_id(Bin);
         Bin when is_binary(Bin), byte_size(Bin) =:= 43 ->
@@ -876,26 +898,6 @@ measurement_envelope(Msg, Opts) when is_map(Msg) ->
     end;
 measurement_envelope(Other, _Opts) ->
     Other.
-
-committed_message_id(Msg, Opts) ->
-    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
-    IDs = hb_maps:to_list(Commitments, Opts),
-    first_valid_id(
-        [ID || {ID, Commitment} <- IDs,
-               hb_maps:get(<<"committer">>, Commitment, undefined, Opts)
-                   =/= undefined]
-        ++ [ID || {ID, _Commitment} <- IDs]).
-
-first_valid_id([]) ->
-    undefined;
-first_valid_id([ID0 | Rest]) ->
-    ID = hb_util:bin(ID0),
-    try hb_util:native_id(ID) of
-        Native when byte_size(Native) =:= 32 -> ID;
-        _ -> first_valid_id(Rest)
-    catch _:_ ->
-        first_valid_id(Rest)
-    end.
 
 first_defined([]) -> undefined;
 first_defined([undefined | Rest]) -> first_defined(Rest);
@@ -946,3 +948,12 @@ reason_to_text(B) when is_binary(B) -> B;
 reason_to_text(M) when is_map(M) -> M;
 reason_to_text(A) when is_atom(A) -> atom_to_binary(A, utf8);
 reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+engine_request_uses_internal_token_test() ->
+    Req = engine_request(#{}),
+    ?assert(internal_request(Req)).
+
+-endif.

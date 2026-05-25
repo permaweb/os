@@ -65,59 +65,78 @@ supported(_Base, _Req, Opts) ->
     {ok, andee_supported(Opts)}.
 
 subject(_Base, Req, Opts) ->
-    case andee_supported(Opts) of
-        true ->
-            Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-            {ok, #{
-                <<"status">> => 200,
-                <<"body">> => secret_recipient(Body, Opts)
-            }};
+    case internal_measurement_request(Req) of
         false ->
-            error_resp(503, <<"andee-unsupported">>,
-                       <<"Android AndEE crypto agent is unavailable">>)
+            error_resp(403, <<"measurement-engine-internal-only">>,
+                       <<"Use ~measurement@1.0 for AndEE measurement generation.">>);
+        true ->
+            case andee_supported(Opts) of
+                true ->
+                    Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
+                    {ok, #{
+                        <<"status">> => 200,
+                        <<"body">> => secret_recipient(Body, Opts)
+                    }};
+                false ->
+                    error_resp(503, <<"andee-unsupported">>,
+                               <<"Android AndEE crypto agent is unavailable">>)
+            end
     end.
 
 measure(_Base, Req, Opts) ->
-    case andee_supported(Opts) of
+    case internal_measurement_request(Req) of
         false ->
-            error_resp(503, <<"andee-unsupported">>,
-                       <<"Android AndEE crypto agent is unavailable">>);
+            error_resp(403, <<"measurement-engine-internal-only">>,
+                       <<"Use ~measurement@1.0 for AndEE measurement generation.">>);
         true ->
-            try
-                Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-                Recipient = hb_maps:get(
-                    <<"secret-recipient">>,
-                    Req,
-                    secret_recipient(Body, Opts),
-                    Opts),
-                Nonce = measurement_nonce(Req),
-                Purpose = hb_maps:get(<<"purpose">>, Req, <<"fresh">>, Opts),
-                {EvidenceSubject, EvidenceSubjectID} =
-                    evidence_subject(Body, Recipient, Nonce, Purpose, Opts),
-                Agent = require_agent(
-                    <<"sign-evidence">>,
-                    #{
-                        <<"evidence-subject">> => EvidenceSubject,
-                        <<"evidence-subject-id">> => EvidenceSubjectID
-                    },
-                    Opts),
-                {ok, #{
-                    <<"status">> => 200,
-                    <<"body">> =>
-                        evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts)
-                }}
-            catch
-                throw:{andee_policy_error, Reason} ->
-                    {ok, #{
-                        <<"status">> => 200,
-                        <<"body">> => policy_failure_evidence(Reason, Req, Opts)
-                    }};
-                Class:Reason ->
-                    error_resp(500, <<"andee-measure-failed">>,
-                               #{<<"class">> => hb_util:bin(Class),
-                                 <<"reason">> => reason_to_text(Reason)})
+            case andee_supported(Opts) of
+                false ->
+                    error_resp(503, <<"andee-unsupported">>,
+                               <<"Android AndEE crypto agent is unavailable">>);
+                true ->
+                    try
+                        Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
+                        Recipient = hb_maps:get(
+                            <<"secret-recipient">>,
+                            Req,
+                            secret_recipient(Body, Opts),
+                            Opts),
+                        Nonce = measurement_nonce(Req),
+                        Purpose = hb_maps:get(<<"purpose">>, Req, <<"fresh">>, Opts),
+                        {EvidenceSubject, EvidenceSubjectID} =
+                            evidence_subject(Body, Recipient, Nonce, Purpose, Opts),
+                        Agent = require_agent(
+                            <<"sign-evidence">>,
+                            #{
+                                <<"evidence-subject">> => EvidenceSubject,
+                                <<"evidence-subject-id">> => EvidenceSubjectID
+                            },
+                            Opts),
+                        {ok, #{
+                            <<"status">> => 200,
+                            <<"body">> =>
+                                evidence(
+                                    EvidenceSubject,
+                                    EvidenceSubjectID,
+                                    Agent,
+                                    Opts)
+                        }}
+                    catch
+                        throw:{andee_policy_error, Reason} ->
+                            {ok, #{
+                                <<"status">> => 200,
+                                <<"body">> => policy_failure_evidence(Reason, Req, Opts)
+                            }};
+                        Class:Reason ->
+                            error_resp(500, <<"andee-measure-failed">>,
+                                       #{<<"class">> => hb_util:bin(Class),
+                                         <<"reason">> => reason_to_text(Reason)})
+                    end
             end
     end.
+
+internal_measurement_request(Req) ->
+    dev_measurement:internal_request(Req).
 
 verify(Base, Req, Opts) ->
     Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),
@@ -827,36 +846,16 @@ stable_id(Value, _Opts) ->
     hb_util:encode(crypto:hash(sha256, term_to_binary(Value))).
 
 payload_id(Msg, Opts) when is_map(Msg) ->
-    case uncommitted_message_id(Msg, Opts) of
-        undefined -> stable_id(Msg, Opts);
-        ID -> ID
-    end;
+    stable_id(Msg, Opts);
 payload_id(Value, Opts) ->
     stable_id(Value, Opts).
 
-uncommitted_message_id(Msg, Opts) ->
-    Commitments = hb_maps:get(<<"commitments">>, Msg, #{}, Opts),
-    first_valid_id(
-        [ID || {ID, Commitment} <- hb_maps:to_list(Commitments, Opts),
-               hb_maps:get(<<"committer">>, Commitment, undefined, Opts)
-                   =:= undefined]
-        ++ [ID || {ID, _Commitment} <- hb_maps:to_list(Commitments, Opts)]).
-
-first_valid_id([]) ->
-    undefined;
-first_valid_id([ID0 | Rest]) ->
-    ID = hb_util:bin(ID0),
-    try hb_util:native_id(ID) of
-        Native when byte_size(Native) =:= 32 -> ID;
-        _ -> first_valid_id(Rest)
-    catch _:_ ->
-        first_valid_id(Rest)
-    end.
-
 secret_recipient_id(Recipient, Opts) when is_map(Recipient) ->
+    ID = stable_id(maps:remove(<<"subject-id">>, Recipient), Opts),
     case hb_maps:get(<<"subject-id">>, Recipient, undefined, Opts) of
-        ID when is_binary(ID), byte_size(ID) > 0 -> ID;
-        _ -> stable_id(Recipient, Opts)
+        undefined -> ID;
+        ID -> ID;
+        _ -> throw(<<"recipient subject-id does not match recipient">>)
     end;
 secret_recipient_id(Recipient, Opts) ->
     stable_id(Recipient, Opts).
@@ -1338,3 +1337,16 @@ reason_to_text(B) when is_binary(B) -> B;
 reason_to_text(M) when is_map(M) -> M;
 reason_to_text(A) when is_atom(A) -> atom_to_binary(A, utf8);
 reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+raw_measurement_generation_requires_internal_token_test() ->
+    ?assertMatch(
+        {error, #{<<"status">> := 403}},
+        subject(#{}, #{<<"body">> => #{}}, #{})),
+    ?assertMatch(
+        {error, #{<<"status">> := 403}},
+        measure(#{}, #{<<"body">> => #{}}, #{})).
+
+-endif.
