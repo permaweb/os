@@ -82,6 +82,10 @@ verify(Base, Req, Opts) ->
         safely_run(fun() -> chk_ek_chain(Envelope, TrustedCaPem, Opts) end,
                    <<"EK certificate chains to trusted TPM vendor root CA">>,
                    <<"core">>),
+        safely_run(fun() -> chk_tpm_public_identity(Envelope, Opts) end,
+                   <<"EK certificate matches EK public material; AK and "
+                     "recipient material are self-consistent">>,
+                   <<"core">>),
         safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
                    <<"TPM2_Quote signature + pcrDigest + nonce all valid">>,
                    <<"core">>),
@@ -150,6 +154,8 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                         end
                 end,
             Quote = hb_maps:get(<<"quote">>, Evidence, #{}, #{}),
+            Recipient =
+                hb_maps:get(<<"secret-recipient">>, Envelope, undefined, #{}),
             Evidence#{
                 <<"lapee-attestation-version">> =>
                     hb_maps:get(<<"lapee-attestation-version">>,
@@ -162,7 +168,8 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                         M2 when is_map(M2) ->
                             hb_maps:get(<<"address">>, M2, null, #{});
                         _ -> null
-                    end
+                    end,
+                <<"secret-recipient">> => Recipient
             };
         _ -> Envelope
     end;
@@ -521,6 +528,202 @@ is_tcg_oid(Oid) when is_tuple(Oid) ->
     lists:prefix([2, 23, 133], tuple_to_list(Oid));
 is_tcg_oid(_) ->
     false.
+
+chk_tpm_public_identity(Envelope, Opts) ->
+    try
+        EkCertDer = required_pem_cert(<<"ek-cert-pem">>, Envelope, Opts),
+        {ok, EkCertRsa} = cert_rsa_public_key(EkCertDer),
+        ok = assert_tpm_public_bundle(<<"ek">>, Envelope, EkCertRsa, Opts),
+        ok = assert_tpm_public_bundle(<<"ak">>, Envelope, undefined, Opts),
+        RecipientDetail = assert_secret_recipient_material(Envelope, Opts),
+        {ok, <<"EK cert public key matches EK TPMT_PUBLIC; TPM Names and "
+               "PEMs agree for EK/AK", RecipientDetail/binary>>}
+    catch
+        throw:{tpm_identity, Detail} ->
+            {error, Detail};
+        error:{badmatch, {error, Why}} ->
+            {error, reason_to_text(Why)};
+        Class:Reason ->
+            {error, reason_to_text({Class, Reason})}
+    end.
+
+assert_tpm_public_bundle(Prefix, Envelope, CertRsa, Opts) ->
+    PublicKey = <<Prefix/binary, "-public">>,
+    PemKey = <<Prefix/binary, "-pub-pem">>,
+    NameKey = <<Prefix/binary, "-name">>,
+    Public = required_decoded_field(PublicKey, Envelope, Opts),
+    {ok, TpmRsa} = tpm_public_rsa_key(Public),
+    {ok, PemRsa} = decode_pem_rsa_pub(
+        required_binary_field(PemKey, Envelope, Opts)),
+    ok = assert_rsa_equal(PemKey, PemRsa, PublicKey, TpmRsa),
+    case CertRsa of
+        undefined -> ok;
+        _ -> assert_rsa_equal(<<"ek-cert-pem">>, CertRsa, PublicKey, TpmRsa)
+    end,
+    {ok, ExpectedName} = tpm_public_name(Public),
+    case required_decoded_field(NameKey, Envelope, Opts) of
+        ExpectedName -> ok;
+        _ -> tpm_identity_error(<<NameKey/binary, " does not match ",
+                                  PublicKey/binary>>)
+    end.
+
+assert_secret_recipient_material(Envelope, Opts) ->
+    case hb_maps:get(<<"secret-recipient">>, Envelope, undefined, Opts) of
+        undefined ->
+            <<" (no secret-recipient in raw TPM evidence)">>;
+        Recipient when is_map(Recipient) ->
+            ok = assert_secret_recipient_material(Envelope, Recipient, Opts),
+            <<"; secret-recipient material agrees with verified TPM evidence">>;
+        _ ->
+            tpm_identity_error(<<"secret-recipient invalid">>)
+    end.
+
+assert_secret_recipient_material(Envelope, Recipient, Opts) ->
+    PublicMaterial =
+        required_map_field(<<"public-material">>, Recipient, Opts),
+    ok = assert_recipient_field(
+        <<"measurement-device">>, Recipient, <<"tpm@2.0a">>, Opts),
+    ok = assert_recipient_field(
+        <<"method">>, Recipient, <<"tpm2-activate-credential">>, Opts),
+    ok = assert_recipient_field(
+        <<"key-id">>, Recipient,
+        required_binary_field(<<"ak-name">>, Envelope, Opts),
+        Opts),
+    lists:foreach(
+        fun(Key) ->
+            ok = assert_recipient_field(
+                Key, Recipient,
+                required_binary_field(Key, Envelope, Opts),
+                Opts),
+            ok = assert_recipient_field(
+                Key, PublicMaterial,
+                required_binary_field(Key, Envelope, Opts),
+                Opts)
+        end,
+        [<<"ek-public">>, <<"ek-pub-pem">>,
+         <<"ak-public">>, <<"ak-pub-pem">>, <<"ak-name">>]),
+    lists:foreach(
+        fun(Key) ->
+            ok = assert_recipient_field(
+                Key, Recipient,
+                required_binary_field(Key, Envelope, Opts),
+                Opts)
+        end,
+        [<<"ek-name">>, <<"ek-qualified-name">>, <<"ak-qualified-name">>]),
+    Binding = required_map_field(<<"binding">>, Recipient, Opts),
+    ok = assert_recipient_field(
+        <<"kind">>, Binding, <<"ak-policy-pcr">>, Opts),
+    ok = assert_recipient_field(
+        <<"pcr">>, Binding, ?NODE_IDENTITY_PCR, Opts),
+    ok = assert_recipient_field(
+        <<"policy-pcrs">>, Binding, ?AK_POLICY_PCRS, Opts),
+    ok.
+
+assert_recipient_field(Key, Msg, Expected, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        Expected -> ok;
+        _ -> tpm_identity_error(<<"secret-recipient.", Key/binary,
+                                  " does not match verified TPM material">>)
+    end.
+
+required_pem_cert(Key, Msg, Opts) ->
+    case decode_pem_cert(required_binary_field(Key, Msg, Opts)) of
+        {ok, Der} -> Der;
+        {error, Why} ->
+            tpm_identity_error(
+                iolist_to_binary(io_lib:format("~s invalid: ~p",
+                                                [Key, Why])))
+    end.
+
+required_binary_field(Key, Msg, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        B when is_binary(B), byte_size(B) > 0 -> B;
+        _ -> tpm_identity_error(<<Key/binary, " missing">>)
+    end.
+
+required_decoded_field(Key, Msg, Opts) ->
+    B = required_binary_field(Key, Msg, Opts),
+    try hb_util:decode(B) of
+        Decoded when is_binary(Decoded), byte_size(Decoded) > 0 ->
+            Decoded;
+        _ ->
+            tpm_identity_error(<<Key/binary, " did not decode to bytes">>)
+    catch
+        _:_ -> tpm_identity_error(<<Key/binary, " is not base64url">>)
+    end.
+
+required_map_field(Key, Msg, Opts) ->
+    case hb_maps:get(Key, Msg, undefined, Opts) of
+        M when is_map(M) -> M;
+        _ -> tpm_identity_error(<<Key/binary, " missing">>)
+    end.
+
+cert_rsa_public_key(Der) ->
+    case cert_public_key(Der) of
+        {#'RSAPublicKey'{} = Rsa, _Params} -> {ok, Rsa};
+        Other -> {error, {unsupported_ek_cert_public_key, Other}}
+    end.
+
+cert_public_key(Der) ->
+    #'OTPCertificate'{
+        tbsCertificate =
+            #'OTPTBSCertificate'{
+                subjectPublicKeyInfo =
+                    #'OTPSubjectPublicKeyInfo'{
+                        algorithm =
+                            #'PublicKeyAlgorithm'{parameters = Parameters},
+                        subjectPublicKey = Key}}} =
+        public_key:pkix_decode_cert(Der, otp),
+    {Key, Parameters}.
+
+assert_rsa_equal(LeftKey, Left, RightKey, Right) ->
+    case rsa_public_key_tuple(Left) =:= rsa_public_key_tuple(Right) of
+        true -> ok;
+        false ->
+            tpm_identity_error(<<LeftKey/binary, " does not match ",
+                                  RightKey/binary>>)
+    end.
+
+rsa_public_key_tuple(#'RSAPublicKey'{modulus = N, publicExponent = E}) ->
+    {N, E}.
+
+tpm_public_rsa_key(Tpm2BPublic) ->
+    try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
+        <<16#0001:16/unsigned-big, _NameAlg:16/unsigned-big,
+          _Attrs:32/unsigned-big, Rest0/binary>> = Public,
+        {_AuthPolicy, Rest1} = tpm2b(Rest0),
+        Rest2 = skip_tpm2_symmetric_def(Rest1),
+        Rest3 = skip_tpm2_rsa_scheme(Rest2),
+        <<_KeyBits:16/unsigned-big, Exponent0:32/unsigned-big,
+          Rest4/binary>> = Rest3,
+        {ModulusBin, _Rest5} = tpm2b(Rest4),
+        Exponent =
+            case Exponent0 of
+                0 -> 65537;
+                _ -> Exponent0
+            end,
+        {ok, #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(ModulusBin),
+            publicExponent = Exponent
+        }}
+    catch
+        _:_ -> {error, bad_tpm2b_public_rsa}
+    end.
+
+tpm_public_name(Tpm2BPublic) ->
+    try
+        {ok, Public} = tpm2b_public_body(Tpm2BPublic),
+        <<_Type:16/unsigned-big, NameAlg:16/unsigned-big, _/binary>> = Public,
+        {ok, Hash} = tpm_name_hash_alg(NameAlg),
+        {ok, <<NameAlg:16/unsigned-big,
+               (crypto:hash(Hash, Public))/binary>>}
+    catch
+        _:_ -> {error, bad_tpm2b_public_name}
+    end.
+
+tpm_identity_error(Detail) when is_binary(Detail) ->
+    throw({tpm_identity, Detail}).
 
 chk_quote(Envelope, ExpectedNonce) ->
     Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
@@ -1014,9 +1217,9 @@ credential_activation_public_body(CertInfo, Credential, Opts) ->
 
 make_credential_for_subject(Subject, Secret) ->
     EkPublic = hb_util:decode(
-        hb_maps:get(<<"ek-public">>, Subject, <<>>, #{})),
+        tpm_subject_field(<<"ek-public">>, Subject)),
     AkName = hb_util:decode(
-        hb_maps:get(<<"ak-name">>, Subject, <<>>, #{})),
+        tpm_subject_field(<<"ak-name">>, Subject)),
     software_make_credential(EkPublic, AkName, Secret).
 
 software_make_credential(EkPublic, AkName, Secret) ->
@@ -1109,6 +1312,16 @@ rsa_symmetric_params(<<16#0010:16/unsigned-big, _Rest/binary>>) ->
 rsa_symmetric_params(_) ->
     throw(bad_tpm2b_public_symmetric).
 
+skip_tpm2_symmetric_def(<<16#0010:16/unsigned-big, Rest/binary>>) ->
+    Rest;
+skip_tpm2_symmetric_def(<<16#0006:16/unsigned-big,
+                          _KeyBits:16/unsigned-big,
+                          _Mode:16/unsigned-big,
+                          Rest/binary>>) ->
+    Rest;
+skip_tpm2_symmetric_def(_) ->
+    throw(bad_tpm2b_public_symmetric).
+
 hash_size(sha) -> 20;
 hash_size(sha256) -> 32;
 hash_size(sha384) -> 48;
@@ -1192,12 +1405,18 @@ ensure_activation_envelope(Activation, Subject, Opts) ->
     case Subject of
         undefined -> ok;
         _ ->
-            ExpectedAk = hb_maps:get(<<"ak-name">>, Subject, <<>>, Opts),
+            ExpectedAk = tpm_subject_field(<<"ak-name">>, Subject),
             case hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts) of
                 ExpectedAk when byte_size(ExpectedAk) > 0 -> ok;
                 _ -> bad_activation(<<"ak-name">>)
             end
     end.
+
+tpm_subject_field(Key, Subject) when is_map(Subject) ->
+    Material = hb_maps:get(<<"public-material">>, Subject, #{}, #{}),
+    hb_maps:get(Key, Material, hb_maps:get(Key, Subject, <<>>, #{}), #{});
+tpm_subject_field(_Key, _Subject) ->
+    <<>>.
 
 ensure_no_activation_error(Activation, Opts) when is_map(Activation) ->
     case first_defined([
@@ -2043,6 +2262,144 @@ wrap_64(Bin) when byte_size(Bin) =< 64 ->
     <<Bin/binary, "\n">>;
 wrap_64(<<Line:64/binary, Rest/binary>>) ->
     <<Line/binary, "\n", (wrap_64(Rest))/binary>>.
+
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+tpm_identity_accepts_consistent_public_material_test() ->
+    ?assertMatch({ok, _}, chk_tpm_public_identity(test_tpm_identity(), #{})).
+
+tpm_identity_rejects_swapped_ek_cert_test() ->
+    Env0 = test_tpm_identity(),
+    {OtherCertDer, _OtherRsa} = test_cert_and_rsa(),
+    Env = Env0#{<<"ek-cert-pem">> => der_to_pem(OtherCertDer)},
+    ?assertMatch({error, _}, chk_tpm_public_identity(Env, #{})).
+
+tpm_identity_rejects_recipient_public_material_substitution_test() ->
+    Env0 = test_tpm_identity(),
+    Recipient0 = maps:get(<<"secret-recipient">>, Env0),
+    Material0 = maps:get(<<"public-material">>, Recipient0),
+    Env = Env0#{
+        <<"secret-recipient">> => Recipient0#{
+            <<"public-material">> => Material0#{
+                <<"ek-public">> => maps:get(<<"ak-public">>, Env0)
+            }
+        }
+    },
+    ?assertMatch({error, _}, chk_tpm_public_identity(Env, #{})).
+
+tpm_identity_rejects_recipient_top_level_substitution_test() ->
+    Env0 = test_tpm_identity(),
+    Recipient0 = maps:get(<<"secret-recipient">>, Env0),
+    Env = Env0#{
+        <<"secret-recipient">> => Recipient0#{
+            <<"ek-public">> => maps:get(<<"ak-public">>, Env0)
+        }
+    },
+    ?assertMatch({error, _}, chk_tpm_public_identity(Env, #{})).
+
+tpm_identity_rejects_recipient_top_level_ak_name_substitution_test() ->
+    Env0 = test_tpm_identity(),
+    Recipient0 = maps:get(<<"secret-recipient">>, Env0),
+    Env = Env0#{
+        <<"secret-recipient">> => Recipient0#{
+            <<"ak-name">> => maps:get(<<"ek-name">>, Env0)
+        }
+    },
+    ?assertMatch({error, _}, chk_tpm_public_identity(Env, #{})).
+
+tpm_identity_accepts_raw_evidence_without_recipient_test() ->
+    Env0 = test_tpm_identity(),
+    ?assertMatch(
+        {ok, _},
+        chk_tpm_public_identity(maps:remove(<<"secret-recipient">>, Env0), #{})).
+
+tpm_public_name_recomputes_from_public_area_test() ->
+    {_CertDer, Rsa} = test_cert_and_rsa(),
+    Public = test_tpm2b_public(Rsa),
+    {ok, <<16#000B:16/unsigned-big, Digest/binary>>} = tpm_public_name(Public),
+    {ok, PublicBody} = tpm2b_public_body(Public),
+    ?assertEqual(crypto:hash(sha256, PublicBody), Digest).
+
+test_tpm_identity() ->
+    {EkCertDer, EkRsa} = test_cert_and_rsa(),
+    {_AkCertDer, AkRsa} = test_cert_and_rsa(),
+    EkPublic = test_tpm2b_public(EkRsa),
+    AkPublic = test_tpm2b_public(AkRsa),
+    {ok, EkName} = tpm_public_name(EkPublic),
+    {ok, AkName} = tpm_public_name(AkPublic),
+    Env0 = #{
+        <<"ek-cert-pem">> => der_to_pem(EkCertDer),
+        <<"ek-pub-pem">> => test_rsa_pem(EkRsa),
+        <<"ek-public">> => hb_util:encode(EkPublic),
+        <<"ek-name">> => hb_util:encode(EkName),
+        <<"ek-qualified-name">> => hb_util:encode(EkName),
+        <<"ak-pub-pem">> => test_rsa_pem(AkRsa),
+        <<"ak-public">> => hb_util:encode(AkPublic),
+        <<"ak-name">> => hb_util:encode(AkName),
+        <<"ak-qualified-name">> => hb_util:encode(AkName)
+    },
+    Env0#{<<"secret-recipient">> => test_tpm_recipient(Env0)}.
+
+test_tpm_recipient(Env) ->
+    maps:merge(
+        #{
+            <<"type">> => <<"lapee-tpm-credential-subject">>,
+            <<"version">> => <<"1.0">>,
+            <<"measurement-device">> => <<"tpm@2.0a">>,
+            <<"method">> => <<"tpm2-activate-credential">>,
+            <<"key-id">> => maps:get(<<"ak-name">>, Env),
+            <<"binding">> => #{
+                <<"kind">> => <<"ak-policy-pcr">>,
+                <<"pcr">> => ?NODE_IDENTITY_PCR,
+                <<"policy-pcrs">> => ?AK_POLICY_PCRS
+            },
+            <<"public-material">> => maps:with(
+                [<<"ek-public">>, <<"ek-pub-pem">>,
+                 <<"ak-public">>, <<"ak-pub-pem">>, <<"ak-name">>],
+                Env)
+        },
+        maps:with(
+            [<<"ek-pub-pem">>, <<"ek-public">>, <<"ek-name">>,
+             <<"ek-qualified-name">>, <<"ak-pub-pem">>, <<"ak-public">>,
+             <<"ak-name">>, <<"ak-qualified-name">>],
+            Env)).
+
+test_cert_and_rsa() ->
+    [{cert, Der} | _] =
+        public_key:pkix_test_data(#{
+            root => [{key, {rsa, 512, 65537}}],
+            peer => [{key, {rsa, 512, 65537}}]
+        }),
+    {ok, Rsa} = cert_rsa_public_key(Der),
+    {Der, Rsa}.
+
+test_rsa_pem(Rsa) ->
+    public_key:pem_encode([public_key:pem_entry_encode('RSAPublicKey', Rsa)]).
+
+test_tpm2b_public(#'RSAPublicKey'{modulus = N, publicExponent = E}) ->
+    Modulus = binary:encode_unsigned(N),
+    Exponent =
+        case E of
+            65537 -> 0;
+            _ -> E
+        end,
+    Public = <<
+        16#0001:16/unsigned-big,
+        16#000B:16/unsigned-big,
+        0:32/unsigned-big,
+        0:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        16#0010:16/unsigned-big,
+        (byte_size(Modulus) * 8):16/unsigned-big,
+        Exponent:32/unsigned-big,
+        (byte_size(Modulus)):16/unsigned-big,
+        Modulus/binary
+    >>,
+    <<(byte_size(Public)):16/unsigned-big, Public/binary>>.
+
+-endif.
 
 
 nif_module() ->
