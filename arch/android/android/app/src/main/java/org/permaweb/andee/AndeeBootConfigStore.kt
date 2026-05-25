@@ -7,6 +7,7 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.File
 import java.security.MessageDigest
+import java.util.Locale
 
 object AndeeBootConfigStore {
     fun hasPending(context: Context): Boolean = pendingConfigFile(context).isFile
@@ -78,10 +79,10 @@ object AndeeBootConfigStore {
 
     private fun mergedStartHooks(base: JSONObject, operator: JSONObject): Any {
         val hooks = JSONArray()
-        for (hook in hookList(base.optJSONObject("on")?.opt("start"))) {
-            hooks.put(copyValue(hook))
-        }
         for (hook in hookList(operator.optJSONObject("on")?.opt("start"))) {
+            hooks.put(copyOperatorValue(hook))
+        }
+        for (hook in hookList(base.optJSONObject("on")?.opt("start"))) {
             hooks.put(copyValue(hook))
         }
         return if (hooks.length() == 1) hooks.get(0) else hooks
@@ -119,7 +120,26 @@ object AndeeBootConfigStore {
     }
 
     private fun stripPrivateBootKeys(value: JSONObject) {
-        for (key in PRIVATE_BOOT_KEYS) value.remove(key)
+        val keys = value.keys().asSequence().toList()
+        for (key in keys) {
+            if (isPrivateBootKey(key)) {
+                value.remove(key)
+            } else {
+                when (val child = value.opt(key)) {
+                    is JSONObject -> stripPrivateBootKeys(child)
+                    is JSONArray -> stripPrivateBootKeys(child)
+                }
+            }
+        }
+    }
+
+    private fun stripPrivateBootKeys(value: JSONArray) {
+        for (index in 0 until value.length()) {
+            when (val child = value.opt(index)) {
+                is JSONObject -> stripPrivateBootKeys(child)
+                is JSONArray -> stripPrivateBootKeys(child)
+            }
+        }
     }
 
     private fun copyObject(value: JSONObject): JSONObject {
@@ -140,6 +160,20 @@ object AndeeBootConfigStore {
             }
             else -> value
         }
+    }
+
+    private fun copyOperatorValue(value: Any?): Any? {
+        val copied = copyValue(value)
+        when (copied) {
+            is JSONObject -> stripPrivateBootKeys(copied)
+            is JSONArray -> stripPrivateBootKeys(copied)
+        }
+        return copied
+    }
+
+    private fun isPrivateBootKey(key: String): Boolean {
+        val canonical = key.lowercase(Locale.US).replace('_', '-')
+        return canonical.startsWith("priv") || canonical in PRIVATE_BOOT_KEYS
     }
 
     private fun writeAtomic(file: File, text: String) {
@@ -170,5 +204,6 @@ object AndeeBootConfigStore {
         "private-key",
         "priv-key-location",
         "secret",
+        "measurement-body-source",
     )
 }

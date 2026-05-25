@@ -32,9 +32,10 @@ start(ConfigPath) ->
     io:format("andee-bootstrap=derive-address~n"),
     Address = hb_util:human_id(ar_wallet:to_address(Wallet)),
     io:format("andee-bootstrap=build-node-subject address=~s~n", [Address]),
-    NodeSubject = node_subject(Loaded, Address),
+    SubjectOpts = Loaded#{<<"address">> => Address},
+    NodeSubject = dev_andee:node_subject(SubjectOpts),
     io:format("andee-bootstrap=derive-node-message-id~n"),
-    NodeMessageID = hb_message:id(NodeSubject, uncommitted, Merged),
+    NodeMessageID = dev_andee:node_message_id(SubjectOpts),
     io:format("andee-bootstrap=node-message-id id=~s~n", [NodeMessageID]),
     NodeMsg =
         Loaded#{
@@ -214,45 +215,6 @@ ensure_runtime_applications() ->
         end,
         [crypto, public_key, ssl, inets, ranch, cowboy, gun, hackney]
     ).
-
-node_subject(Config, Address) ->
-    #{
-        <<"device">> => <<"andee@1.0">>,
-        <<"measurement-device">> => <<"andee@1.0">>,
-        <<"method">> => <<"android-keystore-attestation">>,
-        <<"node-address">> => Address,
-        <<"node-key-scope">> => <<"ephemeral-memory">>,
-        <<"config">> => public_config(Config)
-    }.
-
-public_config(Config) ->
-    public_values(
-        maps:without(
-            [
-                <<"priv-wallet">>,
-                <<"private-key">>,
-                <<"priv-key-location">>,
-                <<"forge-bootstrap">>,
-                <<"secret">>
-            ],
-            Config
-        )
-    ).
-
-public_values(Map) when is_map(Map) ->
-    maps:map(fun(_Key, Value) -> public_values(Value) end, Map);
-public_values(List) when is_list(List) ->
-    [public_values(Value) || Value <- List];
-public_values(hb_store_volatile) ->
-    <<"hb_store_volatile">>;
-public_values(hb_store_lmdb) ->
-    <<"hb_store_lmdb">>;
-public_values(hb_store_fs) ->
-    <<"hb_store_fs">>;
-public_values(hb_store_andee_encrypted) ->
-    <<"hb_store_andee_encrypted">>;
-public_values(Value) ->
-    Value.
 
 ephemeral_wallet() ->
     ar_wallet:new({rsa, 65537}).

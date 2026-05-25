@@ -48,31 +48,41 @@ info(_Base, _Req, Opts) ->
         }
     }}.
 
-boot(_Base, _Req, Opts) ->
-    case persistent_term:get({dev_measurement, boot}, undefined) of
-        Msg when is_map(Msg) ->
+boot(Base, Req, Opts) ->
+    {MeasurementOpts, Force} = boot_measurement_opts(Base, Req, Opts),
+    case {Force, persistent_term:get({dev_measurement, boot}, undefined)} of
+        {false, Msg} when is_map(Msg) ->
             {ok,
                 response_body(
                     publish_cached_measurement(Msg, Opts),
                     Opts
                 )};
-        undefined ->
+        _ ->
             global:trans(
                 {dev_measurement, boot},
-                fun() -> boot_locked(Opts) end,
+                fun() -> boot_locked(MeasurementOpts, Force) end,
                 [node()])
     end.
 
-boot_locked(Opts) ->
-    case persistent_term:get({dev_measurement, boot}, undefined) of
-        Msg when is_map(Msg) ->
+boot_measurement_opts(Base, Req, Opts) ->
+    case {
+        hb_maps:get(<<"measurement-body-source">>, Base, undefined, Opts),
+        hb_maps:get(<<"body">>, Req, undefined, Opts)
+    } of
+        {<<"hook-body">>, NodeMsg} when is_map(NodeMsg) -> {NodeMsg, true};
+        _ -> {Opts, false}
+    end.
+
+boot_locked(Opts, Force) ->
+    case {Force, persistent_term:get({dev_measurement, boot}, undefined)} of
+        {false, Msg} when is_map(Msg) ->
             {ok,
                 response_body(
                     publish_cached_measurement(Msg, Opts),
                     Opts
                 )};
-        undefined ->
-            case generate_measurement(boot, #{}, Opts) of
+        _ ->
+            case generate_measurement(boot, #{}, Opts, Force) of
                 {ok, Signed0} ->
                     Signed = cacheable_measurement(Signed0, Opts),
                     persistent_term:put({dev_measurement, boot}, Signed),
@@ -164,8 +174,11 @@ credential_body_from_request(Req, Opts) ->
     end.
 
 generate_measurement(Purpose, Req, Opts) ->
+    generate_measurement(Purpose, Req, Opts, false).
+
+generate_measurement(Purpose, Req, Opts, Force) ->
     with_raw_ok(fun() ->
-        Body = measurement_body(Opts),
+        Body = measurement_body(Opts, Force),
         BodyID = measurement_body_id(Body, Opts),
         Device = selected_device(Opts),
         Recipient = timed(
@@ -210,17 +223,42 @@ generate_measurement(Purpose, Req, Opts) ->
     end).
 
 measurement_body(Opts) ->
-    case persistent_term:get({dev_measurement, body}, undefined) of
-        Body when is_map(Body) ->
+    measurement_body(Opts, false).
+
+measurement_body(Opts, Force) ->
+    case {Force, persistent_term:get({dev_measurement, body}, undefined)} of
+        {true, _} ->
+            measurement_body_locked(Opts, true);
+        {false, Body} when is_map(Body) ->
             Body;
-        undefined ->
+        {false, undefined} ->
             measurement_body_locked(Opts)
     end.
 
 measurement_body_locked(Opts) ->
-    case persistent_term:get({dev_measurement, body}, undefined) of
-        Body when is_map(Body) ->
+    measurement_body_locked(Opts, false).
+
+measurement_body_locked(Opts, Force) ->
+    case {Force, persistent_term:get({dev_measurement, body}, undefined)} of
+        {false, Body} when is_map(Body) ->
             Body;
+        _ ->
+            Body = build_measurement_body(Opts),
+            persistent_term:put({dev_measurement, body}, Body),
+            persistent_term:put(
+                {dev_measurement, body_id},
+                cached_measurement_body_id(Body, Opts)),
+            Body
+    end.
+
+cached_measurement_body_id(Body, Opts) ->
+    case test_measurement_body(Opts) of
+        undefined -> measurement_body_id(Body, Opts);
+        _Body -> <<"test-body-id">>
+    end.
+
+build_measurement_body(Opts) ->
+    case test_measurement_body(Opts) of
         undefined ->
             System = timed(
                 <<"system-report">>,
@@ -234,15 +272,18 @@ measurement_body_locked(Opts) ->
                     resolve_body(hb_ao:resolve(<<"~meta@1.0/info">>, Opts))
                 end,
                 Opts),
-            Body = canonical_payload(
-                #{<<"system">> => System, <<"node">> => Node0},
-                Opts),
-            persistent_term:put({dev_measurement, body}, Body),
-            persistent_term:put(
-                {dev_measurement, body_id},
-                measurement_body_id(Body, Opts)),
+            canonical_payload(#{<<"system">> => System, <<"node">> => Node0}, Opts);
+        Body ->
             Body
     end.
+
+-ifdef(TEST).
+test_measurement_body(_Opts) ->
+    persistent_term:get({dev_measurement, test_body}, undefined).
+-else.
+test_measurement_body(_Opts) ->
+    undefined.
+-endif.
 
 measurement_body_id(Body, Opts) when is_map(Body) ->
     stable_id(Body, Opts);
@@ -971,5 +1012,47 @@ reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
 engine_request_uses_internal_token_test() ->
     Req = engine_request(#{}),
     ?assert(internal_request(Req)).
+
+boot_measurement_opts_uses_only_marked_hook_body_test() ->
+    Opts = #{<<"marker">> => <<"original">>},
+    HookBody = #{<<"marker">> => <<"hook-body">>},
+    MarkedBase = #{<<"measurement-body-source">> => <<"hook-body">>},
+    ?assertEqual(
+        {HookBody, true},
+        boot_measurement_opts(
+            MarkedBase,
+            #{<<"body">> => HookBody},
+            Opts
+        )
+    ),
+    ?assertEqual(
+        {Opts, false},
+        boot_measurement_opts(#{}, #{<<"body">> => HookBody}, Opts)
+    ),
+    ?assertEqual(
+        {Opts, false},
+        boot_measurement_opts(
+            MarkedBase,
+            #{<<"body">> => <<"not-a-node-message">>},
+            Opts
+        )
+    ).
+
+forced_measurement_body_refreshes_cached_body_test() ->
+    Stale = #{<<"system">> => #{}, <<"node">> => #{<<"mark">> => <<"stale">>}},
+    Fresh = #{<<"system">> => #{}, <<"node">> => #{<<"mark">> => <<"fresh">>}},
+    persistent_term:put({dev_measurement, body}, Stale),
+    persistent_term:put({dev_measurement, test_body}, Fresh),
+    persistent_term:erase({dev_measurement, body_id}),
+    Opts = #{},
+    try
+        ?assertEqual(Stale, measurement_body(Opts)),
+        ?assertEqual(Fresh, measurement_body(Opts, true)),
+        ?assertEqual(Fresh, persistent_term:get({dev_measurement, body}))
+    after
+        persistent_term:erase({dev_measurement, body}),
+        persistent_term:erase({dev_measurement, body_id}),
+        persistent_term:erase({dev_measurement, test_body})
+    end.
 
 -endif.

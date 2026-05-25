@@ -32,6 +32,7 @@
       "path": "boot",
       "method": "POST",
       "target": "body",
+      "measurement-body-source": "hook-body",
       "hook": {
         "result": "ignore"
       }

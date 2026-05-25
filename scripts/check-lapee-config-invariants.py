@@ -23,6 +23,17 @@ BASE_CONFIG = (
     / "lapee"
     / "lapee.json"
 )
+INIT_SCRIPT = (
+    ROOT
+    / "arch"
+    / "common"
+    / "linux"
+    / "buildroot-external"
+    / "board"
+    / "lapee"
+    / "rootfs-overlay"
+    / "init"
+)
 
 
 def fail(path: pathlib.Path, message: str) -> None:
@@ -55,6 +66,7 @@ def is_measurement_boot_hook(hook: Any) -> bool:
         and hook.get("device") == "measurement@1.0"
         and hook.get("path") == "boot"
         and hook.get("method") == "POST"
+        and hook.get("measurement-body-source") == "hook-body"
     )
 
 
@@ -75,7 +87,7 @@ def main() -> int:
     if not is_measurement_boot_hook(hooks[0]):
         fail(
             BASE_CONFIG,
-            "first on.start hook must be measurement@1.0 boot POST",
+            "first on.start hook must be measurement@1.0 boot POST over hook-body",
         )
     if not any(is_zone_start_hook(hook) for hook in hooks[1:]):
         fail(
@@ -86,6 +98,11 @@ def main() -> int:
         fail(BASE_CONFIG, "base config must leave load-remote-devices to operator config")
     if config.get("trusted-device-signers"):
         fail(BASE_CONFIG, "base config must not pin trusted remote device signers")
+    init_text = INIT_SCRIPT.read_text()
+    if '<<"measurement-body-source">>' not in init_text:
+        fail(INIT_SCRIPT, "operator config validator must reserve measurement-body-source")
+    if "UserStart ++ BaseStart" not in init_text:
+        fail(INIT_SCRIPT, "operator on.start hooks must run before base hooks")
     return 0
 
 

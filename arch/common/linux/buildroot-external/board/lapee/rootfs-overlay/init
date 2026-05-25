@@ -1308,17 +1308,37 @@ copy_operator_config_json() {
             <<"forge-bootstrap">>,
             <<"loaded-device-store">>
         ],
+        ReservedAnywhere = [
+            <<"measurement-body-source">>
+        ],
         Canonical = fun(Key) when is_binary(Key) ->
             Lower = string:lowercase(binary_to_list(Key)),
             list_to_binary([case Ch of $_ -> $-; _ -> Ch end || Ch <- Lower])
         end,
+        ContainsReservedAnywhere =
+            fun Recur(Value) when is_map(Value) ->
+                    Keys = [Canonical(Key) || Key <- maps:keys(Value)],
+                    lists:any(
+                        fun(Key) -> lists:member(Key, ReservedAnywhere) end,
+                        Keys
+                    ) orelse lists:any(
+                        fun(Item) -> Recur(Item) end,
+                        maps:values(Value));
+                Recur(Value) when is_list(Value) ->
+                    lists:any(fun(Item) -> Recur(Item) end, Value);
+                Recur(_) ->
+                    false
+            end,
         case file:read_file(Path) of
             {ok, Bin} ->
                 try json:decode(Bin) of
                     Obj when is_map(Obj) ->
                         Keys = [Canonical(Key) || Key <- maps:keys(Obj)],
-                        case [Key || Key <- Keys, lists:member(Key, Reserved)] of
-                            [] -> halt(0);
+                        case {
+                            [Key || Key <- Keys, lists:member(Key, Reserved)],
+                            ContainsReservedAnywhere(Obj)
+                        } of
+                            {[], false} -> halt(0);
                             _ -> halt(2)
                         end;
                     _ ->
@@ -1852,8 +1872,10 @@ fi
 # Config files for HyperBEAM. The operator file is copied out of the
 # read-only ESP into tmpfs and defaults to `{}`. The measured LapEE
 # file wins by default. If operator config supplies on/start, synthesize
-# a final tiny config that appends those startup hooks after the base
-# PCR-15 boot-attestation hook.
+# a final tiny config that runs those startup mutations before the enforced
+# measurement and zone hooks. The base measurement hook explicitly measures
+# the evolving hook body, so the cached boot subject is the final node that
+# HyperBEAM will serve.
 LAPEE_JSON=/etc/lapee/lapee.json
 DEBUG_CONFIG_JSON=/tmp/lapee-debug.json
 MERGED_ON_START_JSON=/run/lapee/on-start-merged.json
@@ -1897,7 +1919,7 @@ write_merged_on_start_config() {
                 BaseStart = ToList(Start(BaseConfig)),
                 On = maps:merge(OnConfig(UserConfig), OnConfig(BaseConfig)),
                 Merged = #{<<"on">> =>
-                    On#{<<"start">> => BaseStart ++ UserStart}},
+                    On#{<<"start">> => UserStart ++ BaseStart}},
                 ok = file:write_file(OutPath,
                     iolist_to_binary(json:encode(Merged)))
         end,
@@ -1908,7 +1930,7 @@ write_merged_on_start_config() {
             mv "$MERGED_ON_START_JSON.tmp" "$MERGED_ON_START_JSON" \
                 2>/dev/null || return 0
             chmod 600 "$MERGED_ON_START_JSON" 2>/dev/null || true
-            trace "config: merged operator on.start after base on.start"
+            trace "config: merged operator on.start before base on.start"
         fi
     else
         rm -f "$MERGED_ON_START_JSON.tmp" 2>/dev/null || true

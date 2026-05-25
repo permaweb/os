@@ -10,7 +10,7 @@
 -export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          wrap_secret/3, unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
-         ensure_secret_activation/5]).
+         ensure_secret_activation/5, node_subject/1, node_message_id/1]).
 
 -include_lib("hb/include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -762,15 +762,85 @@ agent_timeout(Opts) ->
         _ -> ?DEFAULT_TIMEOUT_MS
     end.
 
+node_subject(Opts) ->
+    #{
+        <<"device">> => <<"andee@1.0">>,
+        <<"measurement-device">> => <<"andee@1.0">>,
+        <<"method">> => <<"android-keystore-attestation">>,
+        <<"node-address">> =>
+            hb_opts:get(<<"address">>, <<"unknown">>, Opts),
+        <<"node-key-scope">> => <<"ephemeral-memory">>,
+        <<"config">> => public_config(Opts)
+    }.
+
+node_message_id(Opts) ->
+    hb_message:id(node_subject(Opts), uncommitted, Opts).
+
 node_binding(Opts) ->
     #{
         <<"node-address">> =>
             hb_opts:get(<<"address">>, <<"unknown">>, Opts),
-        <<"node-message-id">> =>
-            hb_opts:get(<<"andee-node-message-id">>, <<"unknown">>, Opts),
+        <<"node-message-id">> => node_message_id(Opts),
         <<"node-key-scope">> => <<"ephemeral-memory">>,
         <<"measurement-device">> => <<"andee@1.0">>
     }.
+
+public_config(Config) ->
+    public_values(Config).
+
+public_values(Map) when is_map(Map) ->
+    maps:fold(
+        fun(Key, Value, Acc) ->
+            case private_config_key(Key) of
+                true -> Acc;
+                false -> Acc#{ Key => public_values(Value) }
+            end
+        end,
+        #{},
+        Map
+    );
+public_values(List) when is_list(List) ->
+    [public_values(Value) || Value <- List];
+public_values(hb_store_volatile) ->
+    <<"hb_store_volatile">>;
+public_values(hb_store_lmdb) ->
+    <<"hb_store_lmdb">>;
+public_values(hb_store_fs) ->
+    <<"hb_store_fs">>;
+public_values(hb_store_andee_encrypted) ->
+    <<"hb_store_andee_encrypted">>;
+public_values(Value) ->
+    Value.
+
+private_config_key(Key) ->
+    Canonical = canonical_config_key(Key),
+    case binary:match(Canonical, <<"priv">>) of
+        {0, _} -> true;
+        _ ->
+            lists:member(
+                Canonical,
+                [
+                    <<"private-key">>,
+                    <<"secret">>,
+                    <<"ao-payment-withdraw-secret">>,
+                    <<"andee-node-message-id">>,
+                    <<"andee-node-subject">>,
+                    <<"http-server">>
+                ]
+            )
+    end.
+
+canonical_config_key(Key) when is_atom(Key) ->
+    canonical_config_key(atom_to_binary(Key, utf8));
+canonical_config_key(Key) when is_list(Key) ->
+    case hb_util:is_string_list(Key) of
+        true -> canonical_config_key(list_to_binary(Key));
+        false -> <<"">>
+    end;
+canonical_config_key(Key) when is_binary(Key) ->
+    hb_util:to_lower(binary:replace(Key, <<"_">>, <<"-">>, [global]));
+canonical_config_key(_) ->
+    <<"">>.
 
 measurement_nonce(Req) ->
     case expected_nonce(Req) of
@@ -1360,5 +1430,41 @@ raw_measurement_generation_requires_internal_token_test() ->
     ?assertMatch(
         {error, #{<<"status">> := 403}},
         measure(#{}, #{<<"body">> => #{}}, #{})).
+
+node_subject_ignores_stale_boot_fields_test() ->
+    Opts = #{
+        <<"address">> => <<"node-address">>,
+        <<"andee-node-message-id">> => <<"stale-id">>,
+        <<"andee-node-subject">> => #{<<"stale">> => true},
+        <<"http-server">> => <<"http://127.0.0.1:8734">>,
+        <<"secret">> => <<"hidden">>,
+        <<"priv">> => #{<<"ao-payment-withdraw-secret">> => <<"hidden">>},
+        <<"nested">> => #{
+            <<"priv-runtime">> => <<"hidden">>,
+            <<"public">> => <<"visible">>
+        },
+        <<"public-marker">> => <<"one">>
+    },
+    Subject = node_subject(Opts),
+    Config = maps:get(<<"config">>, Subject),
+    ?assertEqual(<<"node-address">>, maps:get(<<"node-address">>, Subject)),
+    ?assertNot(maps:is_key(<<"andee-node-message-id">>, Config)),
+    ?assertNot(maps:is_key(<<"andee-node-subject">>, Config)),
+    ?assertNot(maps:is_key(<<"http-server">>, Config)),
+    ?assertNot(maps:is_key(<<"priv">>, Config)),
+    Nested = maps:get(<<"nested">>, Config),
+    ?assertNot(maps:is_key(<<"priv-runtime">>, Nested)),
+    ?assertEqual(<<"visible">>, maps:get(<<"public">>, Nested)),
+    ?assertEqual(
+        Subject,
+        node_subject(
+            Opts#{
+                <<"andee-node-message-id">> => <<"different-stale-id">>,
+                <<"http-server">> => <<"http://127.0.0.1:9999">>
+            }
+        )
+    ),
+    ?assertNot(maps:is_key(<<"secret">>, Config)),
+    ?assert(Subject =/= node_subject(Opts#{<<"public-marker">> => <<"two">>})).
 
 -endif.

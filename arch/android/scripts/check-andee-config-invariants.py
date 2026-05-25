@@ -11,6 +11,18 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASE_CONFIG = ROOT / "config" / "andee.json"
+BOOT_CONFIG_STORE = (
+    ROOT
+    / "android"
+    / "app"
+    / "src"
+    / "main"
+    / "java"
+    / "org"
+    / "permaweb"
+    / "andee"
+    / "AndeeBootConfigStore.kt"
+)
 
 
 def fail(message: str) -> None:
@@ -43,6 +55,7 @@ def is_measurement_boot_hook(hook: Any) -> bool:
         and hook.get("device") == "measurement@1.0"
         and hook.get("path") == "boot"
         and hook.get("method") == "POST"
+        and hook.get("measurement-body-source") == "hook-body"
     )
 
 
@@ -52,7 +65,7 @@ def main() -> int:
     if not hooks:
         fail("base config must define on.start")
     if not is_measurement_boot_hook(hooks[0]):
-        fail("first on.start hook must be measurement@1.0 boot POST")
+        fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
     if config.get("load-remote-devices") is not False:
@@ -62,6 +75,17 @@ def main() -> int:
         fail("store must be a non-empty list")
     if stores[0].get("store-module") != "hb_store_volatile":
         fail("default store must be hb_store_volatile")
+    store_text = BOOT_CONFIG_STORE.read_text()
+    if '"measurement-body-source"' not in store_text:
+        fail("operator config sanitizer must reserve measurement-body-source")
+    operator_loop = 'hookList(operator.optJSONObject("on")?.opt("start"))'
+    base_loop = 'hookList(base.optJSONObject("on")?.opt("start"))'
+    if not (operator_loop in store_text and base_loop in store_text):
+        fail("boot config store must merge operator and base on.start hooks")
+    if store_text.index(operator_loop) > store_text.index(base_loop):
+        fail("operator on.start hooks must run before base hooks")
+    if "copyOperatorValue(hook)" not in store_text:
+        fail("operator on.start hooks must be sanitized before merge")
     return 0
 
 

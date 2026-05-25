@@ -157,8 +157,9 @@ if not (
     first_hook.get("device") == "measurement@1.0"
     and first_hook.get("path") == "boot"
     and first_hook.get("method") == "POST"
+    and first_hook.get("measurement-body-source") == "hook-body"
 ):
-    fail("effective config did not preserve measurement boot hook first")
+    fail("effective config did not preserve measurement boot hook over hook-body first")
 if config.get("andee-test-marker") != marker:
     fail("attested node subject config did not include selected marker")
 if config.get("measurement-device") != "andee@1.0":

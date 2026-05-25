@@ -38,14 +38,14 @@ is_operator(Base, Req, NodeMsg) ->
     dev_meta:is_operator(Base, Req, NodeMsg).
 
 public_node_info(NodeMsg) ->
-    NodeSubject = hb_opts:get(<<"andee-node-subject">>, #{}, NodeMsg),
+    NodeSubject = dev_andee:node_subject(NodeMsg),
+    NodeMessageID = dev_andee:node_message_id(NodeMsg),
     #{
         <<"type">> => <<"andee-node-info">>,
         <<"version">> => <<"1.0">>,
         <<"address">> => hb_opts:get(<<"address">>, <<>>, NodeMsg),
         <<"http-server">> => hb_opts:get(<<"http-server">>, <<>>, NodeMsg),
-        <<"andee-node-message-id">> =>
-            hb_opts:get(<<"andee-node-message-id">>, <<>>, NodeMsg),
+        <<"andee-node-message-id">> => NodeMessageID,
         <<"node-subject">> => NodeSubject,
         <<"measurement-device">> =>
             hb_opts:get(<<"measurement-device">>, <<"andee@1.0">>, NodeMsg),
