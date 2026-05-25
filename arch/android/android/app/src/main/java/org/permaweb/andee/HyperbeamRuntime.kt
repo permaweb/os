@@ -3,6 +3,7 @@ package org.permaweb.andee
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 class HyperbeamRuntime(
@@ -18,6 +19,9 @@ class HyperbeamRuntime(
         require(executable.isFile && executable.canExecute()) {
             "HyperBEAM executable is not installed in nativeLibraryDir: ${executable.absolutePath}"
         }
+        val baseApk = File(context.applicationInfo.sourceDir)
+        val apks = listOfNotNull(context.applicationInfo.sourceDir) +
+            context.applicationInfo.splitSourceDirs.orEmpty().toList()
 
         val baseConfig = File(runtimeRoot, "config/andee.json")
         require(baseConfig.isFile) { "missing AndEE config: ${baseConfig.absolutePath}" }
@@ -43,6 +47,12 @@ class HyperbeamRuntime(
                 builder.environment()["ANDEE_NATIVE_LIB_DIR"] = context.applicationInfo.nativeLibraryDir
                 builder.environment()["ANDEE_ANDROID_ABI"] = android.os.Build.SUPPORTED_ABIS.first()
                 builder.environment()["ANDEE_BOOT_CONFIG"] = config.absolutePath
+                builder.environment()["ANDEE_RUNTIME_ZIP_SHA256"] = runtimeZipSha256()
+                builder.environment()["ANDEE_BASE_APK_SHA256"] = sha256(baseApk)
+                builder.environment()["ANDEE_APK_SET_SHA256"] = digestFileSet(apks.map(::File))
+                builder.environment()["ANDEE_NATIVE_LAUNCHER_SHA256"] = sha256(executable)
+                builder.environment()["ANDEE_NATIVE_LIBRARIES_SHA256"] =
+                    digestFileSet(nativeLibraries())
                 builder.environment()["ANDEE_ENCRYPTED_STORE_ROOT"] =
                     AndeePaths.encryptedStoreRoot(context).absolutePath
             }
@@ -121,6 +131,45 @@ class HyperbeamRuntime(
             }.getOrDefault("")
             if (cmdline.isNotBlank()) return cmdline
             return runCatching { File(procDir, "comm").readText().trim() }.getOrDefault("")
+        }
+
+        private fun sha256(file: File): String =
+            base64Url(MessageDigest.getInstance("SHA-256").digest(file.readBytes()))
+
+        private fun digestFileSet(files: List<File>): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            files.sortedBy { it.name }.forEach { file ->
+                md.update(file.name.toByteArray(Charsets.UTF_8))
+                md.update(0)
+                md.update(file.length().toString().toByteArray(Charsets.UTF_8))
+                md.update(0)
+                md.update(MessageDigest.getInstance("SHA-256").digest(file.readBytes()))
+            }
+            return base64Url(md.digest())
+        }
+
+        private fun base64Url(bytes: ByteArray): String =
+            android.util.Base64.encodeToString(
+                bytes,
+                android.util.Base64.URL_SAFE or
+                    android.util.Base64.NO_PADDING or
+                    android.util.Base64.NO_WRAP,
+            )
+    }
+
+    private fun runtimeZipSha256(): String =
+        base64Url(hexToBytes(AndeePaths.runtimeZipMarker(context).readText().trim()))
+
+    private fun nativeLibraries(): List<File> =
+        File(context.applicationInfo.nativeLibraryDir)
+            .listFiles { file -> file.isFile && file.name.endsWith(".so") }
+            .orEmpty()
+            .toList()
+
+    private fun hexToBytes(hex: String): ByteArray {
+        require(hex.length % 2 == 0) { "bad runtime zip digest marker" }
+        return ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
         }
     }
 }

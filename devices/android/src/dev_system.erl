@@ -57,7 +57,17 @@ runtime_report(Opts) ->
         <<"runtime-root">> =>
             hb_opts:get(<<"andee-runtime-root">>, <<"app-private">>, Opts),
         <<"config-source">> =>
-            hb_opts:get(<<"andee-config-source">>, <<"app-private">>, Opts)
+            hb_opts:get(<<"andee-config-source">>, <<"app-private">>, Opts),
+        <<"android-abi">> =>
+            hb_opts:get(<<"andee-android-abi">>, <<"unknown">>, Opts),
+        <<"artifact-identity">> => #{
+            <<"runtime-zip-sha256">> =>
+                hb_opts:get(<<"andee-runtime-zip-sha256">>, <<"unknown">>, Opts),
+            <<"native-launcher-sha256">> =>
+                hb_opts:get(<<"andee-native-launcher-sha256">>, <<"unknown">>, Opts),
+            <<"native-libraries-sha256">> =>
+                hb_opts:get(<<"andee-native-libraries-sha256">>, <<"unknown">>, Opts)
+        }
     }.
 
 app_report(Opts) ->
@@ -71,7 +81,15 @@ app_report(Opts) ->
         <<"version-code">> =>
             hb_opts:get(<<"andee-version-code">>, <<"unknown">>, Opts),
         <<"release-digest">> =>
-            hb_opts:get(<<"andee-release-digest">>, <<"unknown">>, Opts)
+            hb_opts:get(<<"andee-release-digest">>, <<"unknown">>, Opts),
+        <<"release-digest-kind">> =>
+            <<"apk-signing-certificates-sha256-hex">>,
+        <<"artifact-identity">> => #{
+            <<"base-apk-sha256">> =>
+                hb_opts:get(<<"andee-base-apk-sha256">>, <<"unknown">>, Opts),
+            <<"apk-set-sha256">> =>
+                hb_opts:get(<<"andee-apk-set-sha256">>, <<"unknown">>, Opts)
+        }
     }.
 
 local_policy_report(Opts) ->
@@ -86,3 +104,32 @@ local_policy_report(Opts) ->
         <<"tracer-pid">> =>
             hb_opts:get(<<"andee-tracer-pid">>, <<"unknown">>, Opts)
     }.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+report_exposes_artifact_identity_test() ->
+    Report =
+        report(#{
+            <<"andee-runtime-zip-sha256">> => <<"runtime">>,
+            <<"andee-native-launcher-sha256">> => <<"launcher">>,
+            <<"andee-native-libraries-sha256">> => <<"libs">>,
+            <<"andee-base-apk-sha256">> => <<"base">>,
+            <<"andee-apk-set-sha256">> => <<"set">>
+        }),
+    Runtime = hb_maps:get(<<"runtime">>, Report),
+    App = hb_maps:get(<<"app">>, Report),
+    RuntimeArtifacts = hb_maps:get(<<"artifact-identity">>, Runtime),
+    AppArtifacts = hb_maps:get(<<"artifact-identity">>, App),
+    ?assertEqual(<<"runtime">>,
+        hb_maps:get(<<"runtime-zip-sha256">>, RuntimeArtifacts)),
+    ?assertEqual(<<"launcher">>,
+        hb_maps:get(<<"native-launcher-sha256">>, RuntimeArtifacts)),
+    ?assertEqual(<<"libs">>,
+        hb_maps:get(<<"native-libraries-sha256">>, RuntimeArtifacts)),
+    ?assertEqual(<<"base">>,
+        hb_maps:get(<<"base-apk-sha256">>, AppArtifacts)),
+    ?assertEqual(<<"set">>,
+        hb_maps:get(<<"apk-set-sha256">>, AppArtifacts)).
+
+-endif.

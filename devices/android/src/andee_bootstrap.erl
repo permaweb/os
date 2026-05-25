@@ -20,7 +20,13 @@ start() ->
 start(ConfigPath) ->
     io:format("andee-bootstrap=load-config path=~ts~n", [hb_util:bin(ConfigPath)]),
     Env = hb_opts:default_message_with_env(),
-    Loaded = with_bootstrap_devices(load_config(ConfigPath)),
+    Loaded =
+        hb_maps:merge(
+            without_runtime_environment_keys(
+                with_bootstrap_devices(load_config(ConfigPath))
+            ),
+            runtime_environment()
+        ),
     io:format("andee-bootstrap=config-loaded~n"),
     Merged = hb_maps:merge(Env, Loaded),
     ensure_runtime_applications(),
@@ -203,6 +209,42 @@ bootstrap_devices() ->
         <<"zone@1.0">> => dev_zone
     }.
 
+runtime_environment() ->
+    maps:from_list(
+        [
+            {Key, Value}
+         || {Name, Key} <- runtime_environment_keys(),
+            {ok, Value} <- [env_binary(Name)]
+        ]
+    ).
+
+runtime_environment_keys() ->
+    [
+        {"ANDEE_RUNTIME_ROOT", <<"andee-runtime-root">>},
+        {"ANDEE_PACKAGE_NAME", <<"andee-package-name">>},
+        {"ANDEE_NATIVE_LIB_DIR", <<"andee-native-lib-dir">>},
+        {"ANDEE_ANDROID_ABI", <<"andee-android-abi">>},
+        {"ANDEE_BOOT_CONFIG", <<"andee-boot-config">>},
+        {"ANDEE_RUNTIME_ZIP_SHA256", <<"andee-runtime-zip-sha256">>},
+        {"ANDEE_BASE_APK_SHA256", <<"andee-base-apk-sha256">>},
+        {"ANDEE_APK_SET_SHA256", <<"andee-apk-set-sha256">>},
+        {"ANDEE_NATIVE_LAUNCHER_SHA256", <<"andee-native-launcher-sha256">>},
+        {"ANDEE_NATIVE_LIBRARIES_SHA256", <<"andee-native-libraries-sha256">>}
+    ].
+
+without_runtime_environment_keys(Config) ->
+    lists:foldl(
+        fun({_Name, Key}, Acc) -> maps:remove(Key, Acc) end,
+        Config,
+        runtime_environment_keys()
+    ).
+
+env_binary(Name) ->
+    case os:getenv(Name) of
+        false -> false;
+        Value -> {ok, unicode:characters_to_binary(Value)}
+    end.
+
 ensure_runtime_applications() ->
     lists:foreach(
         fun(App) ->
@@ -218,3 +260,39 @@ ensure_runtime_applications() ->
 
 ephemeral_wallet() ->
     ar_wallet:new({rsa, 65537}).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+runtime_environment_whitelists_artifact_facts_test() ->
+    setenv("ANDEE_RUNTIME_ZIP_SHA256", "runtime-id"),
+    setenv("ANDEE_BASE_APK_SHA256", "apk-id"),
+    setenv("ANDEE_IGNORED_INTERNAL", "do-not-expose"),
+    try
+        Env = runtime_environment(),
+        ?assertEqual(<<"runtime-id">>,
+            hb_maps:get(<<"andee-runtime-zip-sha256">>, Env, undefined)),
+        ?assertEqual(<<"apk-id">>,
+            hb_maps:get(<<"andee-base-apk-sha256">>, Env, undefined)),
+        ?assertEqual(undefined,
+            hb_maps:get(<<"andee-ignored-internal">>, Env, undefined))
+    after
+        os:unsetenv("ANDEE_RUNTIME_ZIP_SHA256"),
+        os:unsetenv("ANDEE_BASE_APK_SHA256"),
+        os:unsetenv("ANDEE_IGNORED_INTERNAL")
+    end.
+
+setenv(Name, Value) ->
+    os:putenv(Name, Value).
+
+runtime_environment_keys_are_reserved_test() ->
+    ?assertEqual(
+        #{<<"other">> => <<"kept">>},
+        without_runtime_environment_keys(#{
+            <<"other">> => <<"kept">>,
+            <<"andee-runtime-zip-sha256">> => <<"forged">>,
+            <<"andee-base-apk-sha256">> => <<"forged">>
+        })
+    ).
+
+-endif.
