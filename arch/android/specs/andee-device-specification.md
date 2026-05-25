@@ -1581,14 +1581,13 @@ The store message MUST NOT contain the AES secret. Implementations MUST treat
 `secret-ref` as an in-memory lookup key, not as key material.
 
 `hb_store_andee_encrypted` holds live state in ETS and persists one
-`store.bin` append-only log plus one `store.head` committed-head file under the
-private volume directory. It MUST expose the normal `hb_store` callbacks without
-requiring callers to use any AndEE-specific read/write API. `write`, `group`,
-`link`, and `reset` MUST update the live ETS state before returning, enqueue
-exactly one logical operation record, and MUST NOT rewrite the full store image
-as part of the normal operation path. `stop` and the explicit
-`hb_store_andee_encrypted:flush` helper MUST flush pending records before
-returning.
+`store.bin` append-only log under the private volume directory. It MUST expose
+the normal `hb_store` callbacks without requiring callers to use any
+AndEE-specific read/write API. `write`, `group`, `link`, and `reset` MUST
+update the live ETS state before returning, enqueue exactly one logical
+operation record, and MUST NOT rewrite the full store image as part of the
+normal operation path. `stop` and the explicit `hb_store_andee_encrypted:flush`
+helper MUST flush pending records before returning.
 
 The log is a byte stream of frames:
 
@@ -1616,7 +1615,6 @@ The encrypted plaintext is:
 #{
   <<"version">> => 1,
   <<"seq">> => Seq,
-  <<"prev-tip">> => PrevTip,
   <<"op">> => reset | {group, Key} | {write, Key, Value} | {link, New, Existing}
 }
 ```
@@ -1628,43 +1626,19 @@ Encryption:
   `HMAC-SHA256(zone_aes, term_to_binary({magic, zone, ring_address}))`;
 - IV: 12 fresh random bytes for every log frame;
 - AAD:
-  `term_to_binary({magic, zone, ring_address, store_id, seq, prev_tip})`;
-- sequence and tip: frames MUST replay from sequence `1` without gaps. Each
-  frame MUST bind the previous committed tip in both plaintext and AAD. The next
-  tip is `SHA-256(prev_tip || serialized_record)`.
-
-The committed head file is an Erlang term:
-
-```erlang
-#{
-  <<"magic">> => <<"andee-encrypted-store-head-v1">>,
-  <<"version">> => 1,
-  <<"next-seq">> => NextSeq,
-  <<"valid-bytes">> => ValidBytes,
-  <<"tip">> => Tip
-}
-```
-
-Startup MUST replay `store.bin`, verify that the committed prefix's `next-seq`,
-`valid-bytes`, and `tip` match `store.head`, and fail closed when the log is
-older than the committed head. A trailing partial frame MAY be ignored as an
-interrupted append. Complete valid frames beyond the committed head MAY be
-recovered and committed by advancing the head; invalid frames beyond the
-committed head MUST be discarded as uncommitted data. The store MUST truncate
-back to the accepted committed head before appending new records.
-
-This local head detects rollback of `store.bin` while current app-private head
-state remains present. It is not a hardware monotonic counter. If an attacker
-can restore or rewrite all AndEE app-private state, including both `store.bin`
-and `store.head`, to an old mutually consistent snapshot, the local store
-cannot distinguish that from current state without an external or
-rollback-resistant freshness anchor.
+  `term_to_binary({magic, zone, ring_address, store_id, seq})`;
+- sequence: frames MUST replay from sequence `1` without gaps. A trailing
+  partial frame MAY be ignored as an interrupted append, but a complete frame
+  that fails decode, authentication, or sequence validation MUST make the store
+  fail to open. If an implementation ignores a trailing partial frame, it MUST
+  truncate the file back to the last complete authenticated frame before
+  appending any new records.
 
 Flush behavior:
 
 - default periodic flush interval: 50 ms;
 - `flush-interval-ms = 0`: enqueue an immediate owner-process flush message;
-- every flush syncs the append log before publishing `store.head`;
+- `sync-on-flush = true`: call `file:sync/1` after a successful append batch;
 - normal `hb_store` writes remain live immediately through ETS and do not block
   on disk unless a caller explicitly invokes the AndEE flush helper.
 
