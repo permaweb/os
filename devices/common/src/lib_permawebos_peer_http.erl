@@ -57,29 +57,17 @@ response_with_status(Status, Response) when is_map(Response) ->
 response_with_status(Status, Body) ->
     #{<<"status">> => Status, <<"body">> => Body}.
 
-semantic_response(Response = #{<<"type">> := _Type}) ->
-    Response;
-semantic_response(#{<<"status">> := Status, <<"body">> := Body})
-        when is_integer(Status), Status >= 200, Status < 300 ->
-    Body;
 semantic_response(Response) ->
     Response.
 
 peer_opts(_BaseURL, Opts) ->
+    PeerClient = hb_opts:get(<<"peer-http-client">>, gun, Opts),
     Base = Opts#{
         http_only_result => false,
         <<"http-only-result">> => false,
         <<"linkify-mode">> => false,
-        http_client =>
-            hb_opts:get(
-                <<"peer-http-client">>,
-                hb_opts:get(<<"http-client">>, gun, Opts),
-                Opts),
-        <<"http-client">> =>
-            hb_opts:get(
-                <<"peer-http-client">>,
-                hb_opts:get(<<"http-client">>, gun, Opts),
-                Opts)
+        http_client => PeerClient,
+        <<"http-client">> => PeerClient
     },
     with_timeout(
         <<"peer-http-connect-timeout-ms">>,
