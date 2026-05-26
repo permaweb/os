@@ -1,5 +1,12 @@
 # PermawebOS
 
+> **alpha release notice:** PermawebOS is an unaudited alpha release. Use it at
+> your own risk. Images, build scripts, devices, support paths, and documented
+> behavior may break or change at any time. The maintainers make no warranties
+> and accept no responsibility for failures, data loss, security issues, broken
+> images, or lack of support. Do not use this release for production workloads,
+> secrets, or value you cannot afford to lose.
+
 Pretty good hardware-supported security for HyperBEAM execution on abundant
 commodity hardware.
 
