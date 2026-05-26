@@ -17,7 +17,7 @@
 %%
 %% The /info probe is a raw gen_tcp HTTP/1.0 round-trip rather than
 %% an inets/httpc call -- the URL contains `~' and `@', which are
-%% lawful per RFC 3986 but trip OTP 27's URL parser. gen_tcp removes
+%% lawful per RFC 3986 but trip OTP's URL parser. gen_tcp removes
 %% the dependency entirely.
 %%
 %% Compiled to a .beam at build time by build-initramfs-hb.sh and
@@ -272,7 +272,7 @@ trim_status(Text0) ->
 %% Speaks HTTP/1.0 over a raw gen_tcp connection rather than going
 %% through inets/httpc. The probe URL contains both `~' and `@'
 %% (e.g. `/~tpm@2.0a/info'); httpc URL parsing throws on that pair
-%% under OTP 27. Raw gen_tcp has no URL parser to throw at all.
+%% under stricter OTP URL parsing. Raw gen_tcp has no URL parser to throw.
 hb_ready() ->
     Host = probe_host(),
     Port = probe_port(),

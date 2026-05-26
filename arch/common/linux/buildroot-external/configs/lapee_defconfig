@@ -72,8 +72,8 @@ BR2_TARGET_ROOTFS_CPIO_ZSTD=y
 BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 
-# Erlang/OTP: target runtime. scripts/build-buildroot.sh pins
-# ERLANG_VERSION=27.x because current HyperBEAM edge uses OTP 27 syntax
+# Erlang/OTP: target runtime. scripts/build-buildroot.sh pins a newer
+# ERLANG_VERSION so all PermawebOS architectures share one BEAM target,
 # while Buildroot 2026.02.1 defaults to OTP 26.
 BR2_PACKAGE_ERLANG=y
 

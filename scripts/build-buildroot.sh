@@ -40,12 +40,11 @@ BUILDROOT_VER=${BUILDROOT_VER:-2026.02.1}
 BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
 BUILDROOT_SHA256=${BUILDROOT_SHA256:-e296791039f806294a4e3e8d708d6b95631ca9fbca2e76a83d6058acaca459b5}
 
-# Current HyperBEAM edge uses OTP 27 syntax (maybe expressions and
-# triple-quoted strings). Buildroot 2026.02.1 still defaults to OTP 26,
-# so pin the package version here while keeping the package recipe
-# itself upstream Buildroot.
-ERLANG_VERSION=${ERLANG_VERSION:-27.3.4.11}
-ERLANG_SHA256=${ERLANG_SHA256:-9d63382d3e7707c058dabe338114e09ff8228d54d29df794d907d3c8dddde5f9}
+# HyperBEAM devices may be distributed as compiled BEAM code. Keep the
+# Linux appliance on the same OTP release used by AndEE so remote
+# packaged devices have one runtime target across PermawebOS arches.
+ERLANG_VERSION=${ERLANG_VERSION:-28.5}
+ERLANG_SHA256=${ERLANG_SHA256:-2c7e8ca23e6864eb20eff5d44738bfa123aed8cd21ed6d98e533d751eee28d9c}
 
 # Buildroot pins linux-firmware to the release current at its own cut.
 # Laptop Wi-Fi support ages faster than the rest of the rootfs, so keep

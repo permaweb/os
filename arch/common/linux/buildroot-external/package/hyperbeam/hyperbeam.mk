@@ -211,7 +211,7 @@ HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_CREATE_BUILD_HELPERS
 # unpatched while Buildroot's cross compiler only sees staged target
 # headers and libraries.
 #
-# Upstream edge's native BEAMR C currently trips GCC 14 against OTP 27
+# Upstream edge's native BEAMR C currently trips GCC 14 against OTP
 # ei.h pointer types. Keep that as a single explicit compiler
 # compatibility boundary instead of mutating upstream HyperBEAM source.
 HYPERBEAM_C_NATIVE_COMPAT_FLAGS = \
