@@ -53,48 +53,8 @@ report_from_root(Root0) ->
 
 boot_report(Root) ->
     #{
-        <<"image">> => boot_image_report(Root),
         <<"loaded-uki">> => loaded_uki_report(Root)
     }.
-
-boot_image_report(Root) ->
-    Source = <<"/proc/cmdline">>,
-    Cmdline = read_trim(Root, binary_to_list(Source)),
-    case cmdline_values(Cmdline, <<"lapee.image-id">>) of
-        [] ->
-            #{
-                <<"available">> => false,
-                <<"source">> => Source,
-                <<"id">> => null,
-                <<"status">> => <<"unavailable">>
-            };
-        [_First, _Second | _] ->
-            #{
-                <<"available">> => false,
-                <<"source">> => Source,
-                <<"id">> => null,
-                <<"status">> => <<"ambiguous-source-value">>
-            };
-        [ImageID] ->
-            case valid_human_id(ImageID) of
-                true ->
-                    #{
-                        <<"available">> => true,
-                        <<"source">> => Source,
-                        <<"id">> => ImageID,
-                        <<"status">> => <<"observed">>,
-                        <<"provenance">> =>
-                            <<"executed-kernel-cmdline">>
-                    };
-                false ->
-                    #{
-                        <<"available">> => false,
-                        <<"source">> => Source,
-                        <<"id">> => null,
-                        <<"status">> => <<"invalid-source-value">>
-                    }
-            end
-    end.
 
 loaded_uki_report(Root) ->
     Source = <<"/run/lapee/boot-uki-sha256">>,
@@ -106,8 +66,7 @@ loaded_uki_report(Root) ->
                 <<"source">> => Source,
                 <<"source-info">> => SourceInfo,
                 <<"sha256">> => null,
-                <<"status">> => <<"unavailable">>,
-                <<"trusted-as-executed">> => false
+                <<"status">> => <<"unavailable">>
             };
         Hex ->
             case sha256_hex_to_id(Hex) of
@@ -117,8 +76,7 @@ loaded_uki_report(Root) ->
                         <<"source">> => Source,
                         <<"source-info">> => SourceInfo,
                         <<"sha256">> => ID,
-                        <<"status">> => <<"boot-media-scan">>,
-                        <<"trusted-as-executed">> => false
+                        <<"status">> => <<"boot-media-scan">>
                     };
                 error ->
                     #{
@@ -126,8 +84,7 @@ loaded_uki_report(Root) ->
                         <<"source">> => Source,
                         <<"source-info">> => SourceInfo,
                         <<"sha256">> => null,
-                        <<"status">> => <<"invalid-source-value">>,
-                        <<"trusted-as-executed">> => false
+                        <<"status">> => <<"invalid-source-value">>
                     }
             end
     end.
@@ -136,13 +93,7 @@ boot_uki_source_report(Root) ->
     case read_file(Root, "/run/lapee/boot-uki-source") of
         {ok, Bin} ->
             maps:fold(
-                fun
-                    (<<"trusted-as-executed">>, Value, Acc) ->
-                        Acc#{<<"trusted-as-executed">> =>
-                            parse_bool_01(Value, false)};
-                    (Key, Value, Acc) ->
-                        Acc#{Key => Value}
-                end,
+                fun(Key, Value, Acc) -> Acc#{Key => Value} end,
                 #{},
                 lines_kv(Bin));
         error ->
@@ -1045,25 +996,6 @@ sha256_hex_to_id(Hex0) ->
             error
     end.
 
-valid_human_id(ID) when is_binary(ID) ->
-    try hb_util:decode(ID) of
-        Raw when is_binary(Raw), byte_size(Raw) =:= 32 ->
-            hb_util:human_id(Raw) =:= ID;
-        _ ->
-            false
-    catch
-        _:_ -> false
-    end.
-
-cmdline_values(null, _Key) ->
-    [];
-cmdline_values(Cmdline, Key) when is_binary(Cmdline), is_binary(Key) ->
-    Prefix = <<Key/binary, "=">>,
-    [binary:part(Word, byte_size(Prefix),
-                 byte_size(Word) - byte_size(Prefix))
-     || Word <- split_words(Cmdline),
-        binary_has_prefix(Word, Prefix)].
-
 lines_kv(Bin) when is_binary(Bin) ->
     lists:foldl(
         fun(Line, Acc) ->
@@ -1210,58 +1142,6 @@ non_empty(Items) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
-boot_image_id_from_cmdline_test() ->
-    ImageID = hb_util:human_id(crypto:hash(sha256, <<"image">>)),
-    with_tmp_root(
-        fun(Root) ->
-            write_root(
-                Root,
-                "/proc/cmdline",
-                <<"rdinit=/init lapee.image-id=", ImageID/binary, "\n">>),
-            Boot = maps:get(<<"boot">>, report_from_root(Root)),
-            Image = maps:get(<<"image">>, Boot),
-            ?assertEqual(true, maps:get(<<"available">>, Image)),
-            ?assertEqual(ImageID, maps:get(<<"id">>, Image)),
-            ?assertEqual(
-                <<"executed-kernel-cmdline">>,
-                maps:get(<<"provenance">>, Image))
-        end).
-
-boot_rejects_invalid_image_id_test() ->
-    with_tmp_root(
-        fun(Root) ->
-            write_root(
-                Root,
-                "/proc/cmdline",
-                <<"rdinit=/init lapee.image-id=not-a-valid-id\n">>),
-            Boot = maps:get(<<"boot">>, report_from_root(Root)),
-            Image = maps:get(<<"image">>, Boot),
-            ?assertEqual(false, maps:get(<<"available">>, Image)),
-            ?assertEqual(null, maps:get(<<"id">>, Image)),
-            ?assertEqual(
-                <<"invalid-source-value">>,
-                maps:get(<<"status">>, Image))
-        end).
-
-boot_rejects_ambiguous_image_id_test() ->
-    ImageID1 = hb_util:human_id(crypto:hash(sha256, <<"image-1">>)),
-    ImageID2 = hb_util:human_id(crypto:hash(sha256, <<"image-2">>)),
-    with_tmp_root(
-        fun(Root) ->
-            write_root(
-                Root,
-                "/proc/cmdline",
-                <<"rdinit=/init lapee.image-id=", ImageID1/binary,
-                  " lapee.image-id=", ImageID2/binary, "\n">>),
-            Boot = maps:get(<<"boot">>, report_from_root(Root)),
-            Image = maps:get(<<"image">>, Boot),
-            ?assertEqual(false, maps:get(<<"available">>, Image)),
-            ?assertEqual(null, maps:get(<<"id">>, Image)),
-            ?assertEqual(
-                <<"ambiguous-source-value">>,
-                maps:get(<<"status">>, Image))
-        end).
-
 loaded_uki_is_scan_only_test() ->
     Hex = <<"000102030405060708090a0b0c0d0e0f",
             "101112131415161718191a1b1c1d1e1f">>,
@@ -1271,11 +1151,10 @@ loaded_uki_is_scan_only_test() ->
             write_root(
                 Root,
                 "/run/lapee/boot-uki-source",
-                <<"source=boot-media-scan\ntrusted-as-executed=false\n">>),
+                <<"source=boot-media-scan\n">>),
             Boot = maps:get(<<"boot">>, report_from_root(Root)),
             Loaded = maps:get(<<"loaded-uki">>, Boot),
             ?assertEqual(true, maps:get(<<"available">>, Loaded)),
-            ?assertEqual(false, maps:get(<<"trusted-as-executed">>, Loaded)),
             ?assertEqual(
                 <<"boot-media-scan">>,
                 maps:get(<<"status">>, Loaded))

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate JSON requests for the QEMU zone cluster harness."""
 
+import copy
 import json
 import os
 import pathlib
@@ -18,7 +19,11 @@ def main() -> int:
     evidence = measurement["evidence"]
     cmdline = body["system"]["kernel"]["cmdline"]
     node = body["node"]
-    boot_image = body.get("system", {}).get("boot", {}).get("image", {})
+    signals = evidence.get("signals", {})
+    secure_boot = signals.get("secure-boot", {})
+    secure_boot_policy = signals.get("secure-boot-policy", {})
+    loaded_image = signals.get("loaded-image", {})
+    snp_report = evidence.get("report", {})
     dmi_product = (
         body["system"]["firmware"]["dmi"]["fields"]["product-name"]
     )
@@ -44,22 +49,36 @@ def main() -> int:
     }
 
     if template_mode in ("release", "release-common"):
-        boot_image_id = boot_image.get("id")
-        if not boot_image_id:
-            raise SystemExit("release template requires body.boot.image.id")
+        signer_digest = secure_boot_policy.get("image-signers-digest")
+        signer_count = secure_boot_policy.get("image-signer-count", 0)
+        snp_measurement = snp_report.get("measurement")
+        secure_boot_enabled = secure_boot.get("enabled") in (True, "true")
+        if signer_digest and signer_count > 0 and secure_boot_enabled:
+            evidence_template = {
+                "signals": {
+                    "secure-boot": {"enabled": True},
+                    "secure-boot-policy": {
+                        "image-signers-digest": signer_digest
+                    },
+                }
+            }
+        elif signer_digest:
+            raise SystemExit(
+                "release template requires Secure Boot enabled "
+                "when matching measured signer policy")
+        elif snp_measurement:
+            evidence_template = {"report": {"measurement": snp_measurement}}
+        else:
+            raise SystemExit(
+                "release template requires measured Secure Boot policy "
+                "or SNP measurement evidence")
         template = {
+            "evidence": evidence_template,
             "body": {
                 "system": {
-                    "boot": {
-                        "image": {"id": boot_image_id},
-                    },
                     "kernel": {"cmdline": cmdline},
                 },
                 "node": {
-                    "ao-types":
-                        "access-remote-cache-for-client=\"atom\", "
-                        "initialized=\"atom\", "
-                        "load-remote-devices=\"atom\"",
                     "initialized": node["initialized"],
                     "access-remote-cache-for-client":
                         node["access-remote-cache-for-client"],
@@ -91,6 +110,13 @@ def main() -> int:
         "name": "book-shelf",
         init_template_key: init_template_value,
     }))
+    if template_mode in ("release", "release-common"):
+        wrong_template = copy.deepcopy(init_template_value)
+        tamper_boot_evidence(wrong_template)
+        (out / "requests/init-wrong-boot-evidence.json").write_text(json.dumps({
+            "name": "book-shelf",
+            init_template_key: wrong_template,
+        }))
     (out / "requests/init-device-specific.json").write_text(json.dumps({
         "name": "book-shelf",
         "template": {
@@ -141,6 +167,29 @@ def measurement_message(att: dict) -> dict:
     if att.get("type") == "lapee-measurement":
         return att
     raise SystemExit("boot attestation did not contain a measurement message")
+
+
+def tamper_boot_evidence(template):
+    if isinstance(template, list):
+        for item in template:
+            tamper_boot_evidence(item)
+        return
+    if not isinstance(template, dict):
+        return
+    evidence = template.get("evidence", {})
+    policy = evidence.get("signals", {}).get("secure-boot-policy", {})
+    if "image-signers-digest" in policy:
+        policy["image-signers-digest"] = (
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        return
+    loaded_image = evidence.get("signals", {}).get("loaded-image", {})
+    if "components-digest" in loaded_image:
+        loaded_image["components-digest"] = (
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        return
+    report = evidence.get("report", {})
+    if "measurement" in report:
+        report["measurement"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
 if __name__ == "__main__":

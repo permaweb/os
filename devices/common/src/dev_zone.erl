@@ -523,7 +523,7 @@ zone_allow(Opts) ->
     normalize_zone_allow(hb_opts:get(<<"zone-allow">>, 1, Opts)).
 
 zone_init_allow(Opts) ->
-    normalize_zone_init_allow(hb_opts:get(<<"zone-init-allow">>, false, Opts)).
+    normalize_zone_init_allow(hb_opts:get(<<"zone-init-allow">>, true, Opts)).
 
 normalize_zone_allow(false) -> disabled;
 normalize_zone_allow(0) -> disabled;
@@ -2071,9 +2071,12 @@ nonvolatile_store_blocks_different_zone_test() ->
             })).
 
 zone_init_allow_policy_test() ->
+    ?assertEqual(ok, assert_zone_initialization_allowed(<<"alpha">>, #{})),
     ?assertThrow(
         {zone_error, #{<<"error">> := <<"zone-init-disabled">>}},
-        assert_zone_initialization_allowed(<<"alpha">>, #{})),
+        assert_zone_initialization_allowed(
+            <<"alpha">>,
+            #{<<"zone-init-allow">> => false})),
     ?assertEqual(
         ok,
         assert_zone_initialization_allowed(

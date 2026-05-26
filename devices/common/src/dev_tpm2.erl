@@ -16,9 +16,9 @@
 %% Default PCR that HyperBEAM extends with the node-message identity.
 -define(NODE_IDENTITY_PCR, 15).
 %% PCRs that gate the AK. PCR 15 carries the LapEE boot subject, so the
--define(AK_POLICY_PCRS, [0, 1, 7, 10, 11, 14, 15]).
+-define(AK_POLICY_PCRS, [0, 1, 4, 7, 10, 11, 14, 15]).
 %% Default PCR selection the quote covers.
--define(DEFAULT_QUOTE_PCRS, [0, 1, 7, 10, 11, 14, 15]).
+-define(DEFAULT_QUOTE_PCRS, [0, 1, 4, 7, 10, 11, 14, 15]).
 -define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
 -define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
 -define(TPM_CC_POLICY_OR, 16#00000171).
@@ -91,6 +91,10 @@ verify(Base, Req, Opts) ->
                    <<"core">>),
         safely_run(fun() -> chk_ak_policy_bound(Envelope) end,
                    <<"AK authPolicy is PCR-bound to the quoted boot state">>,
+                   <<"core">>),
+        safely_run(fun() -> chk_tcg_event_log_replay(Envelope, Opts) end,
+                   <<"TCG measured-boot log replays to quoted loaded-image PCRs "
+                     "and exposed loaded-image evidence">>,
                    <<"core">>),
         safely_run(fun() -> chk_event_log_replay(Envelope) end,
                    <<"Runtime event log replay of PCR 15 matches quoted value">>,
@@ -902,6 +906,172 @@ chk_ak_policy_bound(Envelope) ->
             {error, iolist_to_binary(
                 io_lib:format("bad AK TPMT_PUBLIC authPolicy: ~p", [Why]))}
     end.
+
+chk_tcg_event_log_replay(Envelope, Opts) ->
+    Quote = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Quote, #{}, #{}),
+    TcgLog = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, #{}),
+    LogBin = decode_idish(TcgLog),
+    Replayed = lib_lapee_tpm_tcg:replay_pcrs(
+        LogBin,
+        [4, 11]
+    ),
+    Signals = lib_lapee_tpm_tcg:boot_signals(LogBin),
+    case {hb_maps:get(<<"4">>, PcrMap, undefined, #{}),
+          hb_maps:get(<<"11">>, PcrMap, undefined, #{})} of
+        {undefined, _} ->
+            {error, <<"quote omitted PCR 4 loaded EFI application measurement">>};
+        {_, undefined} ->
+            {error, <<"quote omitted PCR 11 loaded UKI section measurements">>};
+        _ ->
+            case first_error([
+                compare_replayed_pcrs(Replayed, PcrMap),
+                compare_boot_signal(<<"secure-boot">>, Signals, Envelope, Opts),
+                compare_boot_signal(
+                    <<"secure-boot-policy">>, Signals, Envelope, Opts),
+                compare_loaded_image_signal(Signals, Envelope, Opts)
+            ]) of
+                ok ->
+                    {ok, <<"quoted boot PCRs and signals match TCG log">>};
+                {error, _} = E ->
+                    E
+            end
+    end.
+
+first_error([]) ->
+    ok;
+first_error([ok | Rest]) ->
+    first_error(Rest);
+first_error([{error, _} = Error | _Rest]) ->
+    Error.
+
+compare_boot_signal(Key, Signals, Envelope, Opts) ->
+    Expected =
+        hb_maps:get(Key, Signals, undefined, #{}),
+    ActualSignals =
+        ensure_loaded_value(
+            hb_maps:get(<<"signals">>, Envelope, #{}, #{}),
+            Opts),
+    Actual =
+        ensure_loaded_value(
+            hb_maps:get(Key, ActualSignals, undefined, Opts),
+            Opts),
+    case {Expected, Actual} of
+        {undefined, undefined} ->
+            ok;
+        {ExpectedMap, ActualMap}
+                when is_map(ExpectedMap), is_map(ActualMap) ->
+            case {stable_message_id(ExpectedMap, Opts),
+                  stable_message_id(ActualMap, Opts)} of
+                {ID, ID} -> ok;
+                _ ->
+                    {error, <<Key/binary, " signal does not match TCG log">>}
+            end;
+        {undefined, _} ->
+            {error, <<Key/binary, " signal absent from TCG log">>};
+        {_, undefined} ->
+            {error, <<"measurement omitted ", Key/binary, " signal">>};
+        {_, _} ->
+            {error, <<Key/binary, " signal has invalid shape">>}
+    end.
+
+compare_replayed_pcrs(Replayed, PcrMap) ->
+    Compare =
+        maps:fold(
+            fun(Pcr, Expected, Acc) ->
+                Key = integer_to_binary(Pcr),
+                case {hb_maps:get(Key, PcrMap, undefined, #{}), Acc} of
+                    {_, {error, _} = E} ->
+                        E;
+                    {undefined, _} ->
+                        Acc;
+                    {Expected, _} ->
+                        Acc;
+                    {Actual, _} ->
+                        {error, iolist_to_binary(io_lib:format(
+                            "TCG log replay PCR ~B = ~s, quote has ~s",
+                            [Pcr, short_id(Expected), short_id(Actual)]))}
+                end
+            end,
+            ok,
+            Replayed),
+    case Compare of
+        ok -> ok;
+        {error, _} = E -> E
+    end.
+
+compare_loaded_image_signal(Signals, Envelope, Opts) ->
+    Expected =
+        hb_maps:get(<<"loaded-image">>, Signals, undefined, #{}),
+    ActualSignals =
+        ensure_loaded_value(
+            hb_maps:get(<<"signals">>, Envelope, #{}, #{}),
+            Opts),
+    Actual =
+        ensure_loaded_value(
+            hb_maps:get(<<"loaded-image">>, ActualSignals, undefined, Opts),
+            Opts),
+    case {Expected, Actual} of
+        {undefined, undefined} ->
+            ok;
+        {ExpectedMap, ActualMap}
+                when is_map(ExpectedMap), is_map(ActualMap) ->
+            compare_loaded_image_signal_body(ExpectedMap, ActualMap, Opts);
+        {undefined, _} ->
+            {error, <<"measurement exposes loaded-image signal absent from TCG log">>};
+        {_, undefined} ->
+            {error, <<"measurement omitted loaded-image signal from TCG log">>}
+    end.
+
+compare_loaded_image_signal_body(Expected, Actual, Opts) ->
+    ExpectedDigest =
+        hb_maps:get(<<"components-digest">>, Expected, undefined, #{}),
+    ActualDigest =
+        hb_maps:get(<<"components-digest">>, Actual, undefined, Opts),
+    case {ExpectedDigest, ActualDigest} of
+        {Digest, Digest} when is_binary(Digest) ->
+            compare_loaded_image_components(Expected, Actual, Opts);
+        _ ->
+            {error, <<"loaded-image signal digest does not match TCG log">>}
+    end.
+
+compare_loaded_image_components(Expected, Actual, Opts) ->
+    ExpectedComponents =
+        hb_maps:get(<<"components">>, Expected, undefined, #{}),
+    ActualComponents =
+        ensure_loaded_value(
+            hb_maps:get(<<"components">>, Actual, undefined, Opts),
+            Opts),
+    case {ExpectedComponents, ActualComponents} of
+        {undefined, _} ->
+            ok;
+        {_, undefined} ->
+            ok;
+        {ExpectedMap, ActualMap}
+                when is_map(ExpectedMap), is_map(ActualMap) ->
+            case {stable_message_id(ExpectedMap, Opts),
+                  stable_message_id(ActualMap, Opts)} of
+                {ID, ID} -> ok;
+                _ ->
+                    {error, <<"loaded-image signal components do not match TCG log">>}
+            end;
+        {_, _} ->
+            {error, <<"loaded-image signal components have invalid shape">>}
+    end.
+
+ensure_loaded_value(Value, Opts) when ?IS_LINK(Value) ->
+    ensure_loaded_value(hb_cache:ensure_loaded(Value, Opts), Opts);
+ensure_loaded_value(Value, Opts) when is_map(Value) ->
+    hb_cache:ensure_all_loaded(hb_link:decode_all_links(Value), Opts);
+ensure_loaded_value(Value, _Opts) ->
+    Value.
+
+stable_message_id(Msg, Opts) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(Msg, #{}),
+        uncommitted,
+        Opts
+    ).
 
 ak_policy_digest(Pcrs, PcrMap) ->
     PcrPolicy = policy_pcr_digest(Pcrs, PcrMap),
@@ -2352,6 +2522,13 @@ reason_to_text({tss2_rc, Bin}) when is_binary(Bin) -> Bin;
 reason_to_text(Other) ->
     iolist_to_binary(io_lib:format("~p", [Other])).
 
+decode_idish(Bin) when is_binary(Bin) ->
+    try hb_util:decode(Bin)
+    catch _:_ -> Bin
+    end;
+decode_idish(_) ->
+    <<>>.
+
 der_to_pem(Der) when is_binary(Der) ->
     B64 = base64:encode(Der),
     Wrapped = wrap_64(B64),
@@ -2424,6 +2601,25 @@ tpm_public_name_recomputes_from_public_area_test() ->
     {ok, <<16#000B:16/unsigned-big, Digest/binary>>} = tpm_public_name(Public),
     {ok, PublicBody} = tpm2b_public_body(Public),
     ?assertEqual(crypto:hash(sha256, PublicBody), Digest).
+
+loaded_image_signal_rejects_digest_substitution_test() ->
+    Expected = test_loaded_image_signals(<<"good">>),
+    Envelope = test_loaded_image_envelope(<<"bad">>),
+    ?assertMatch(
+        {error, _},
+        compare_loaded_image_signal(Expected, Envelope, #{})).
+
+test_loaded_image_signals(Digest) ->
+    #{
+        <<"loaded-image">> => #{
+            <<"components-digest">> => Digest
+        }
+    }.
+
+test_loaded_image_envelope(Digest) ->
+    #{
+        <<"signals">> => test_loaded_image_signals(Digest)
+    }.
 
 test_tpm_identity() ->
     {EkCertDer, EkRsa} = test_cert_and_rsa(),

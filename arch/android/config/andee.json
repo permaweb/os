@@ -23,6 +23,30 @@
     {
       "store-module": "hb_store_volatile",
       "name": "andee-volatile"
+    },
+    {
+      "store-module": "hb_store_gateway",
+      "subindex": [
+        {
+          "name": "Data-Protocol",
+          "value": "ao"
+        }
+      ],
+      "local-store": [
+        {
+          "store-module": "hb_store_volatile",
+          "name": "andee-volatile"
+        }
+      ]
+    },
+    {
+      "store-module": "hb_store_gateway",
+      "local-store": [
+        {
+          "store-module": "hb_store_volatile",
+          "name": "andee-volatile"
+        }
+      ]
     }
   ],
   "on": {

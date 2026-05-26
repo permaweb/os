@@ -37,21 +37,13 @@ start(ConfigPath) ->
     Wallet = ephemeral_wallet(),
     io:format("andee-bootstrap=derive-address~n"),
     Address = hb_util:human_id(ar_wallet:to_address(Wallet)),
-    io:format("andee-bootstrap=build-node-subject address=~s~n", [Address]),
-    SubjectOpts = Loaded#{<<"address">> => Address},
-    NodeSubject = dev_andee:node_subject(SubjectOpts),
-    io:format("andee-bootstrap=derive-node-message-id~n"),
-    NodeMessageID = dev_andee:node_message_id(SubjectOpts),
-    io:format("andee-bootstrap=node-message-id id=~s~n", [NodeMessageID]),
     NodeMsg =
         Loaded#{
             <<"priv-wallet">> => Wallet,
             <<"address">> => Address,
             <<"store">> => Store,
             <<"port">> => hb_opts:get(<<"port">>, ?DEFAULT_PORT, Loaded),
-            <<"cache-writers">> => [Address],
-            <<"andee-node-message-id">> => NodeMessageID,
-            <<"andee-node-subject">> => NodeSubject
+            <<"cache-writers">> => [Address]
         },
     io:format("andee-bootstrap=start-http port=~p~n",
         [hb_opts:get(<<"port">>, ?DEFAULT_PORT, NodeMsg)]),
@@ -120,11 +112,20 @@ normalize_store(Store) when is_map(Store) ->
             (<<"store-module">>, <<"hb_store_gateway">>) -> hb_store_gateway;
             (<<"store-module">>, <<"hb_store_remote_node">>) -> hb_store_remote_node;
             (<<"store">>, SubStores) -> normalize_stores(SubStores);
+            (<<"local-store">>, SubStores) -> normalize_store_ref(SubStores);
+            (<<"index-store">>, SubStores) -> normalize_store_ref(SubStores);
             (_Key, Value) -> Value
         end,
         Store
     );
 normalize_store(Other) ->
+    Other.
+
+normalize_store_ref(Stores) when is_list(Stores) ->
+    normalize_stores(Stores);
+normalize_store_ref(Store) when is_map(Store) ->
+    normalize_store(Store);
+normalize_store_ref(Other) ->
     Other.
 
 with_bootstrap_devices(Config) ->
@@ -152,7 +153,7 @@ bootstrap_devices() ->
         <<"auth-hook@1.0">> => dev_auth_hook,
         <<"http-auth@1.0">> => dev_http_auth,
         <<"secret@1.0">> => dev_secret,
-        <<"meta@1.0">> => dev_andee_meta,
+        <<"meta@1.0">> => dev_meta,
         <<"hyperbuddy@1.0">> => dev_hyperbuddy,
         <<"name@1.0">> => dev_name,
         <<"b32-name@1.0">> => dev_b32_name,

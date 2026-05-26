@@ -364,9 +364,21 @@ assert_security_properties() {
         def props($node; $att): {
             node: $node,
             cmdline: measurement($att).body.system.kernel.cmdline,
-            boot_image_id: measurement($att).body.system.boot.image.id,
-            boot_image_provenance:
-                measurement($att).body.system.boot.image.provenance,
+            loaded_image_components_digest:
+                measurement($att).evidence.signals."loaded-image"."components-digest",
+            loaded_image_components:
+                measurement($att).evidence.signals."loaded-image".components,
+            secure_boot_enabled:
+                measurement($att).evidence.signals."secure-boot".enabled,
+            image_signers_digest:
+                measurement($att).evidence.signals."secure-boot-policy"."image-signers-digest",
+            image_signer_count:
+                measurement($att).evidence.signals."secure-boot-policy"."image-signer-count",
+            snp_measurement:
+                measurement($att).evidence.report.measurement,
+            boot_evidence:
+                (measurement($att).evidence.signals."secure-boot-policy"."image-signers-digest" //
+                 measurement($att).evidence.report.measurement),
             node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
                 measurement($att).body.node."access-remote-cache-for-client",
@@ -385,7 +397,7 @@ assert_security_properties() {
         | {
             nodes: .,
             distinct_cmdlines: ([.[].cmdline] | unique | length),
-            distinct_boot_image_id: ([.[].boot_image_id] | unique | length),
+            distinct_boot_evidence: ([.[].boot_evidence] | unique | length),
             distinct_memtotal_kb: ([.[].memtotal_kb] | unique | length),
             distinct_dmi_products: ([.[].dmi_product] | unique | length),
             distinct_recipient_key_id: ([.[].recipient_key_id] | unique | length),
@@ -394,9 +406,8 @@ assert_security_properties() {
     jq -e '
         def falsy: . == false or . == "false";
         .distinct_cmdlines == 1 and
-        .distinct_boot_image_id == 1 and
-        all(.nodes[]; (.boot_image_id | type == "string" and length > 0) and
-            .boot_image_provenance == "executed-kernel-cmdline" and
+        .distinct_boot_evidence == 1 and
+        all(.nodes[]; (.boot_evidence != null) and
             .node_initialized == "permanent" and
             (.access_remote_cache_for_client | falsy) and
             (.load_remote_devices | falsy) and
@@ -432,6 +443,9 @@ generate_requests() {
     for req in init verify2 admit2 admit3 admit4 join2 join3 join4; do
         require_request "$req"
     done
+    if [[ "$ZONE_TEMPLATE_MODE" = "release" || "$ZONE_TEMPLATE_MODE" = "release-common" ]]; then
+        require_request init-wrong-boot-evidence
+    fi
 }
 
 pin_ring_address() {
@@ -452,6 +466,15 @@ pin_ring_address() {
 }
 
 run_zone_flow() {
+    if [[ "$ZONE_TEMPLATE_MODE" = "release" || "$ZONE_TEMPLATE_MODE" = "release-common" ]]; then
+        remote_post 1 "/~zone@1.0/init" \
+            "$OUTDIR/requests/init-wrong-boot-evidence.json" \
+            "$OUTDIR/responses/node1-init-wrong-boot-evidence.json"
+        jq -e '.status == 400 and .body.error == "template-mismatch"' \
+            "$OUTDIR/responses/node1-init-wrong-boot-evidence.json" >/dev/null
+        echo ">> node 1 rejected wrong signer-policy template"
+    fi
+
     remote_post 1 "/~zone@1.0/init" \
         "$OUTDIR/requests/init.json" \
         "$OUTDIR/responses/node1-init.json"

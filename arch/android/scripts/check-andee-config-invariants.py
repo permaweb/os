@@ -75,6 +75,17 @@ def main() -> int:
         fail("store must be a non-empty list")
     if stores[0].get("store-module") != "hb_store_volatile":
         fail("default store must be hb_store_volatile")
+    gateway_stores = [
+        store for store in stores
+        if isinstance(store, dict)
+        and store.get("store-module") == "hb_store_gateway"
+    ]
+    if len(gateway_stores) < 2:
+        fail("store must include HyperBEAM gateway stores after volatile store")
+    if any(stores.index(store) == 0 for store in gateway_stores):
+        fail("gateway stores must come after the volatile store")
+    if not any("subindex" in store for store in gateway_stores):
+        fail("store must include the default AO subindexed gateway store")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
         fail("operator config sanitizer must reserve measurement-body-source")

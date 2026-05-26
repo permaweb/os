@@ -126,9 +126,10 @@ def read_json(name):
 
 effective = read_json("effective.json")
 meta = read_json("meta.materialized.json")
-body = meta.get("body", meta)
-subject = body.get("node-subject") or {}
-config = subject.get("config") or {}
+boot = read_json("boot.materialized.json")
+meta_node = meta.get("body", meta)
+measurement = boot.get("body", boot)
+attested_node = measurement.get("node") or {}
 store = effective.get("store")
 hooks = effective.get("on", {}).get("start")
 if isinstance(hooks, dict):
@@ -160,12 +161,14 @@ if not (
     and first_hook.get("measurement-body-source") == "hook-body"
 ):
     fail("effective config did not preserve measurement boot hook over hook-body first")
-if config.get("andee-test-marker") != marker:
-    fail("attested node subject config did not include selected marker")
-if config.get("measurement-device") != "andee@1.0":
-    fail("attested node subject config did not enforce andee measurement device")
-if config.get("load-remote-devices") not in (True, "true"):
-    fail("attested node subject config did not preserve load-remote-devices=true")
+if meta_node.get("andee-test-marker") != marker:
+    fail("stock meta info did not include selected marker")
+if attested_node.get("andee-test-marker") != marker:
+    fail("attested node message did not include selected marker")
+if attested_node.get("measurement-device") != "andee@1.0":
+    fail("attested node message did not enforce andee measurement device")
+if attested_node.get("load-remote-devices") not in (True, "true"):
+    fail("attested node message did not preserve load-remote-devices=true")
 
 verdict = {
     "scenario": "andee-next-boot-config",
@@ -174,7 +177,7 @@ verdict = {
     "meta_status": "200",
     "boot_status": "200",
     "effective_config": "effective.json",
-    "attested_marker": config.get("andee-test-marker"),
+    "attested_marker": attested_node.get("andee-test-marker"),
 }
 (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
 PY

@@ -103,6 +103,8 @@ def main() -> int:
         fail(INIT_SCRIPT, "operator config validator must reserve measurement-body-source")
     if "UserStart ++ BaseStart" not in init_text:
         fail(INIT_SCRIPT, "operator on.start hooks must run before base hooks")
+    if "maps:size(UserOn)" not in init_text:
+        fail(INIT_SCRIPT, "operator on/* hooks must be merged even without on.start")
     return 0
 
 

@@ -1,12 +1,14 @@
 %%% @doc Minimal TCG event-log helpers for LapEE.
 %%%
 %%% LapEE keeps the full firmware log as evidence, but the runtime verifier only
-%%% needs three pieces locally: parse events well enough to replay PCRs, extract
-%%% the measured Secure Boot variable, and decode ACPI table headers for
-%%% `~system@1.0'.  Broader firmware interpretation belongs in external
+%%% needs four pieces locally: parse events well enough to replay PCRs, extract
+%%% the measured Secure Boot variable, summarize measured boot-image events,
+%%% and decode ACPI table headers for `~system@1.0'.  Broader interpretation
+%%% belongs in external
 %%% analysis tools, not in the boot appliance.
 -module(lib_lapee_tpm_tcg).
--export([boot_signals/1, parse_acpi_table/1, parse_acpi_rsdp/1]).
+-export([boot_signals/1, replay_pcrs/2, parse_acpi_table/1,
+         parse_acpi_rsdp/1]).
 
 %%%============================================================================
 %%% Event-log parsing
@@ -187,35 +189,334 @@ decode_event_data(16#80000002, Event) ->
     decode_uefi_variable(Event);
 decode_event_data(16#800000E0, Event) ->
     decode_uefi_variable(Event);
+decode_event_data(16#0000000D, #{<<"event-data">> := Data}) ->
+    #{<<"text">> => event_text(Data)};
+decode_event_data(16#80000007, #{<<"event-data">> := Data}) ->
+    #{<<"text">> => event_text(Data)};
 decode_event_data(_, _) ->
     #{}.
 
 boot_signals(<<>>) ->
     #{};
 boot_signals(LogBin) when is_binary(LogBin) ->
-    Events =
-        [Ev || {_K, Ev} <- lists:sort(maps:to_list(decode_events(parse(LogBin)))),
-               is_map(Ev),
-               not maps:is_key(<<"error">>, Ev)],
+    Events = decoded_events(LogBin),
+    SecureBoot = secure_boot_signal(Events),
+    SecureBootPolicy = secure_boot_policy_signal(Events),
+    LoadedImage = loaded_image_signal(Events),
+    Signals = #{<<"secure-boot">> => SecureBoot},
+    Signals2 = maybe_signal(
+        <<"secure-boot-policy">>, SecureBootPolicy, Signals),
+    maybe_signal(<<"loaded-image">>, LoadedImage, Signals2).
+
+maybe_signal(_Key, Signal, Signals) when map_size(Signal) =:= 0 ->
+    Signals;
+maybe_signal(Key, Signal, Signals) ->
+    Signals#{Key => Signal}.
+
+secure_boot_signal(Events) ->
     case [Ev || Ev <- Events, measured_variable_name(Ev) =:= <<"SecureBoot">>] of
         [] ->
-            #{<<"secure-boot">> => #{<<"enabled">> => <<"unknown">>}};
+            #{<<"enabled">> => <<"unknown">>};
         [Ev | _] ->
             Sem = nested_get(Ev, [<<"parsed">>, <<"semantic">>], #{}),
             #{
-                <<"secure-boot">> => #{
-                    <<"enabled">> =>
-                        maps:get(
-                            <<"secure-boot-enabled">>, Sem, <<"unknown">>),
-                    <<"provenance">> => #{
-                        <<"seq">> => maps:get(<<"seq">>, Ev, null),
-                        <<"pcr">> => maps:get(<<"pcr">>, Ev, null),
-                        <<"event-type-code">> =>
-                            maps:get(<<"event-type-code">>, Ev, null)
-                    }
+                <<"enabled">> =>
+                    maps:get(
+                        <<"secure-boot-enabled">>, Sem, <<"unknown">>),
+                <<"provenance">> => #{
+                    <<"seq">> => maps:get(<<"seq">>, Ev, null),
+                    <<"pcr">> => maps:get(<<"pcr">>, Ev, null),
+                    <<"event-type-code">> =>
+                        maps:get(<<"event-type-code">>, Ev, null)
                 }
             }
     end.
+
+secure_boot_policy_signal(Events) ->
+    Vars = secure_boot_policy_variables(Events),
+    case map_size(Vars) of
+        0 ->
+            #{};
+        _ ->
+            Db = maps:get(<<"db">>, Vars, #{}),
+            ImageSigners = maps:get(<<"signers">>, Db, #{}),
+            Base = #{
+                <<"source">> => <<"tcg-event-log">>,
+                <<"status">> => <<"measured">>,
+                <<"variables">> => Vars,
+                <<"image-signers">> => ImageSigners,
+                <<"image-signer-count">> =>
+                    maps:get(<<"signer-count">>, Db, 0),
+                <<"image-signers-digest">> =>
+                    maps:get(<<"signer-digest">>, Db, stable_digest(#{})),
+                <<"image-signers-digest-algorithm">> =>
+                    <<"ao-core-uncommitted-message-id-v1">>
+            },
+            case maps:get(<<"dbx">>, Vars, undefined) of
+                undefined -> Base;
+                Dbx ->
+                    Base#{<<"revocations-digest">> =>
+                        maps:get(<<"signer-digest">>, Dbx, stable_digest(#{}))}
+            end
+    end.
+
+secure_boot_policy_variables(Events) ->
+    PolicyEvents =
+        [Ev || Ev <- Events,
+               event_pcr(Ev) =:= 7,
+               event_type(Ev) =:= 16#80000001,
+               lists:member(
+                   measured_variable_name(Ev),
+                   [<<"PK">>, <<"KEK">>, <<"db">>, <<"dbx">>])],
+    maps:map(
+        fun(_Name, Ev) -> signature_database_summary(Ev) end,
+        lists:foldl(
+            fun(Ev, Acc) ->
+                Acc#{policy_variable_key(measured_variable_name(Ev)) => Ev}
+            end,
+            #{},
+            PolicyEvents)).
+
+policy_variable_key(<<"PK">>) -> <<"pk">>;
+policy_variable_key(<<"KEK">>) -> <<"kek">>;
+policy_variable_key(Name) -> Name.
+
+signature_database_summary(Ev) ->
+    Data = nested_get(Ev, [<<"parsed">>, <<"variable-data">>], <<>>),
+    Entries = parse_signature_database(Data),
+    Signers = indexed_signers(Entries),
+    #{
+        <<"signer-count">> => length(Entries),
+        <<"signer-digest">> => stable_digest(Signers),
+        <<"signers">> => Signers,
+        <<"provenance">> => #{
+            <<"seq">> => maps:get(<<"seq">>, Ev, null),
+            <<"pcr">> => event_pcr(Ev),
+            <<"event-type-code">> => event_type(Ev),
+            <<"sha256">> => event_sha256(Ev)
+        }
+    }.
+
+parse_signature_database(Bin) when is_binary(Bin) ->
+    parse_signature_lists(Bin, []);
+parse_signature_database(_) ->
+    [].
+
+parse_signature_lists(<<>>, Acc) ->
+    lists:reverse(Acc);
+parse_signature_lists(<<Type:16/binary, ListSize:32/little,
+                        HeaderSize:32/little, SigSize:32/little,
+                        Rest/binary>>, Acc)
+        when ListSize >= 28, SigSize >= 16,
+             ListSize - 28 =< byte_size(Rest),
+             HeaderSize =< ListSize - 28 ->
+    EntriesSize = ListSize - 28 - HeaderSize,
+    case Rest of
+        <<_Header:HeaderSize/binary, EntriesBin:EntriesSize/binary,
+          Tail/binary>> ->
+            parse_signature_lists(
+                Tail,
+                parse_signature_entries(Type, SigSize, EntriesBin, Acc));
+        _ ->
+            lists:reverse(Acc)
+    end;
+parse_signature_lists(_Malformed, Acc) ->
+    lists:reverse(Acc).
+
+parse_signature_entries(_Type, _SigSize, <<>>, Acc) ->
+    Acc;
+parse_signature_entries(Type, SigSize, Bin, Acc)
+        when byte_size(Bin) >= SigSize ->
+    <<Owner:16/binary, Data:(SigSize - 16)/binary, Rest/binary>> = Bin,
+    parse_signature_entries(
+        Type,
+        SigSize,
+        Rest,
+        [signature_entry(Type, Owner, Data) | Acc]);
+parse_signature_entries(_Type, _SigSize, _Tail, Acc) ->
+    Acc.
+
+signature_entry(TypeGuid, OwnerGuid, Data) ->
+    Type = signature_type(guid(TypeGuid)),
+    #{
+        <<"type">> => Type,
+        <<"owner">> => guid(OwnerGuid),
+        <<"size">> => byte_size(Data),
+        <<"sha256">> => hb_util:encode(crypto:hash(sha256, Data))
+    }.
+
+signature_type(<<"A5C059A1-94E4-4AA7-87B5-AB155C2BF072">>) ->
+    <<"x509">>;
+signature_type(<<"C1C41626-504C-4092-ACA9-41F936934328">>) ->
+    <<"sha256">>;
+signature_type(<<"3BD2A492-96C0-4079-B420-FCF98EF103ED">>) ->
+    <<"x509-sha256">>;
+signature_type(<<"E2B36190-879B-4A3D-AD8D-F2E7BBA32784">>) ->
+    <<"rsa2048-sha256">>;
+signature_type(<<"3C5766E8-269C-4E34-AA14-ED776E85B3B6">>) ->
+    <<"rsa2048">>;
+signature_type(Guid) ->
+    Guid.
+
+indexed_signers(Entries) ->
+    maps:from_list(
+        [{integer_to_binary(I), Entry}
+         || {I, Entry} <- lists:zip(lists:seq(1, length(Entries)), Entries)]).
+
+decoded_events(LogBin) ->
+    [Ev || {_K, Ev} <- lists:sort(maps:to_list(decode_events(parse(LogBin)))),
+           is_map(Ev),
+           not maps:is_key(<<"error">>, Ev)].
+
+loaded_image_signal(Events) ->
+    Apps = [Ev || Ev <- Events,
+                  event_pcr(Ev) =:= 4,
+                  has_sha256(Ev)],
+    Uki = [Ev || Ev <- Events,
+                 event_pcr(Ev) =:= 11,
+                 has_sha256(Ev)],
+    case {Apps, Uki} of
+        {[], []} ->
+            #{};
+        _ ->
+            Components = #{
+                <<"efi-application">> =>
+                    last_component(Apps),
+                <<"uki-events">> =>
+                    indexed_components(Uki)
+            },
+            #{
+                <<"components-digest">> => stable_digest(Components),
+                <<"components-digest-algorithm">> =>
+                    <<"ao-core-uncommitted-message-id-v1">>,
+                <<"source">> => <<"tcg-event-log">>,
+                <<"status">> => <<"measured">>,
+                <<"components">> => Components,
+                <<"provenance">> => #{
+                    <<"efi-application-events">> =>
+                        indexed_event_provenance(Apps),
+                    <<"uki-events">> =>
+                        indexed_event_provenance(Uki)
+                }
+            }
+    end.
+
+last_component([]) ->
+    #{};
+last_component(Events) ->
+    event_component(lists:last(Events)).
+
+indexed_components(Events) ->
+    maps:from_list(
+        [{integer_to_binary(I), event_component(Ev)}
+         || {I, Ev} <- lists:zip(lists:seq(1, length(Events)), Events)]).
+
+indexed_event_provenance(Events) ->
+    maps:from_list(
+        [{integer_to_binary(I), event_provenance(Ev)}
+         || {I, Ev} <- lists:zip(lists:seq(1, length(Events)), Events)]).
+
+event_component(Ev) ->
+    Base = #{
+        <<"pcr">> => event_pcr(Ev),
+        <<"event-type-code">> => event_type(Ev),
+        <<"sha256">> => event_sha256(Ev)
+    },
+    case parsed_event_text(Ev) of
+        <<>> -> Base;
+        Text -> Base#{<<"text">> => Text}
+    end.
+
+event_provenance(Ev) ->
+    #{
+        <<"seq">> => maps:get(<<"seq">>, Ev, null),
+        <<"pcr">> => event_pcr(Ev),
+        <<"event-type-code">> => event_type(Ev),
+        <<"sha256">> => event_sha256(Ev),
+        <<"event-data-sha256">> =>
+            hb_util:encode(
+                crypto:hash(
+                    sha256,
+                    maps:get(<<"event-data">>, Ev, <<>>)))
+    }.
+
+stable_digest(Msg) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(Msg, #{}),
+        uncommitted,
+        #{}).
+
+replay_pcrs(LogBin, Pcrs) when is_binary(LogBin), is_list(Pcrs) ->
+    Wanted = maps:from_list([{Pcr, <<0:256>>} || Pcr <- Pcrs]),
+    Replayed =
+        lists:foldl(
+            fun replay_event/2,
+            Wanted,
+            [Ev || Ev <- decoded_events(LogBin), has_sha256(Ev)]),
+    maps:map(fun(_Pcr, Digest) -> hb_util:encode(Digest) end, Replayed);
+replay_pcrs(_, Pcrs) when is_list(Pcrs) ->
+    maps:from_list([{Pcr, hb_util:encode(<<0:256>>)} || Pcr <- Pcrs]).
+
+replay_event(Ev, Acc) ->
+    Pcr = event_pcr(Ev),
+    case {maps:is_key(Pcr, Acc), is_spec_id_event(Ev)} of
+        {true, true} ->
+            Acc;
+        {true, _} ->
+            Old = maps:get(Pcr, Acc),
+            Acc#{Pcr => crypto:hash(sha256, <<Old/binary, (raw_sha256(Ev))/binary>>)};
+        _ ->
+            Acc
+    end.
+
+is_spec_id_event(#{<<"event-data">> := <<"Spec ID Event03", _/binary>>}) ->
+    true;
+is_spec_id_event(_) ->
+    false.
+
+has_sha256(Ev) ->
+    is_binary(raw_sha256(Ev)).
+
+event_sha256(Ev) ->
+    hb_util:encode(raw_sha256(Ev)).
+
+raw_sha256(Ev) ->
+    nested_get(Ev, [<<"digests">>, <<"sha256">>], undefined).
+
+event_pcr(Ev) ->
+    maps:get(<<"pcr">>, Ev, null).
+
+event_type(Ev) ->
+    maps:get(<<"event-type-code">>, Ev, null).
+
+parsed_event_text(Ev) ->
+    nested_get(Ev, [<<"parsed">>, <<"text">>], <<>>).
+
+event_text(Bin) when is_binary(Bin) ->
+    Text = utf16le(Bin),
+    case printable_text(Text) of
+        true -> Text;
+        false -> ascii_text(Bin)
+    end;
+event_text(_) ->
+    <<>>.
+
+ascii_text(Bin) ->
+    Text = strip_zeros(Bin),
+    case printable_text(Text) of
+        true -> Text;
+        false -> <<>>
+    end.
+
+printable_text(<<>>) ->
+    false;
+printable_text(Bin) when is_binary(Bin), byte_size(Bin) =< 128 ->
+    lists:all(
+        fun(C) -> C =:= $\n orelse C =:= $\r orelse C =:= $\t orelse
+                  (C >= 32 andalso C =< 126) end,
+        binary_to_list(Bin));
+printable_text(_) ->
+    false.
 
 measured_variable_name(Event) ->
     nested_get(Event, [<<"parsed">>, <<"variable-name">>], <<>>).

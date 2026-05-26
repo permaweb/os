@@ -268,13 +268,17 @@ Use HyperBEAM/AO-Core key spelling directly:
 
 `zone-allow` controls local zone installation:
 
-- `0` or `false`: disable zone joins and initialization.
+- `0` or `false`: disable zone joins.
 - `1` or unset: allow exactly one zone during this node run.
 - positive integer: allow up to that many zones.
 - `true`: allow any number.
 - list of zone IDs: allow only those named zones.
 - map of `ZONE_ID => PEER_URL`: allow only those zones and auto-join each
   listed peer after the HTTP listener starts.
+
+`zone-init-allow` controls whether the node may create a new zone locally.
+It defaults to `true`; set it to `false`/`0` to disable initialization, or to a
+list of zone IDs to restrict initialization to named zones.
 
 Auto-join still performs normal peer verification. The joining node must
 advertise a reachable `public-url` or `zone-self-url`.

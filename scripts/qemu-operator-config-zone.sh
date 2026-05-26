@@ -87,7 +87,7 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 SOCK_DIR=$(mktemp -d /tmp/lapee-config-zone.XXXXXX)
 
 cat > "$OUTDIR/with-signer-config.json" <<EOF
-{"load-remote-devices":true,"trusted-device-signers":["$SIGNER"],"zone-init-allow":["with-signer"]}
+{"load-remote-devices":true,"trusted-device-signers":["$SIGNER"],"zone-init-allow":["with-signer"],"on":{"request":[]}}
 EOF
 cat > "$OUTDIR/plain-zone-config.json" <<EOF
 {"zone-init-allow":["with-signer"]}
@@ -311,7 +311,9 @@ wait_node 2
 
 jq -e --arg signer "$SIGNER" \
     '."trusted-device-signers" == [$signer] and
-     (."load-remote-devices" == true or ."load-remote-devices" == "true")' \
+     (."load-remote-devices" == true or ."load-remote-devices" == "true") and
+     (."on"."request" == [] or ."on"."request" == {"device":"json@1.0"}) and
+     (."on"."start" | type == "array" and length >= 2)' \
     "$OUTDIR/responses/node1-meta-info.json" >/dev/null
 jq -e '
     def empty_ao_list: . == [] or . == {"device":"json@1.0"};

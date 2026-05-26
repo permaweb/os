@@ -28,8 +28,7 @@ AO-Core or Android API.
   are portable.
 - `~system@1.0`: inherited system-report slot, reduced to Android/app/runtime
   facts inserted into the measured subject.
-- `~meta@1.0`: inherited HyperBEAM meta device. AndEE replaces only `info`
-  with a narrow public node-info facade and delegates the rest.
+- `~meta@1.0`: inherited stock HyperBEAM meta device.
 - `~zone@1.0`: inherited measurement-backed shared identity admission, adapted
   to AndEE peer HTTP and volatile Android runtime state.
 
@@ -168,60 +167,16 @@ AndEE measurement device, enable remote devices, bypass the `on.start` boot
 measurement hook, persist the v1 node key, or replace the volatile default
 store as the measured default.
 
-## 4. `~meta@1.0` AndEE Public Node Facade
+## 4. Stock `~meta@1.0`
 
-AndEE overrides `~meta@1.0/info` and delegates other meta operations to the
-upstream HyperBEAM meta device.
+AndEE uses the stock HyperBEAM `~meta@1.0` device. `GET /~meta@1.0/info`
+therefore returns the public node message after HyperBEAM's normal private-key
+filtering. AndEE-specific Android facts belong in `~system@1.0/all` and
+AndEE cryptographic evidence belongs in `~andee@1.0`; neither requires replacing
+the meta device.
 
-### 4.1 `GET /~meta@1.0/info`
-
-Returns status `200` and the following body:
-
-```json
-{
-  "type": "andee-node-info",
-  "version": "1.0",
-  "address": "<node wallet address>",
-  "http-server": "<server description or empty>",
-  "andee-node-message-id": "<AO-Core node subject ID>",
-  "node-subject": {
-    "device": "andee@1.0",
-    "measurement-device": "andee@1.0",
-    "method": "android-keystore-attestation",
-    "node-address": "<node wallet address>",
-    "node-key-scope": "ephemeral-memory",
-    "config": {}
-  },
-  "measurement-device": "andee@1.0",
-  "load-remote-devices": false,
-  "store": [
-    {
-      "name": "andee-volatile",
-      "store-module": "hb_store_volatile"
-    }
-  ],
-  "port": 8734,
-  "runtime": {
-    "environment": "android-app-uid",
-    "node-key-scope": "ephemeral-memory",
-    "store-default": "volatile"
-  }
-}
-```
-
-Required semantics:
-
-- `type` MUST be `andee-node-info`.
-- `version` MUST be `1.0`.
-- `measurement-device` MUST be `andee@1.0`.
-- `load-remote-devices` MUST be `false` for accepted production evidence.
-- `runtime.environment` MUST be `android-app-uid`.
-- `runtime.node-key-scope` MUST be `ephemeral-memory`.
-- `runtime.store-default` MUST be `volatile`.
-- `node-subject` MUST be public configuration only. It MUST NOT contain private
-  wallet material, secrets, forge bootstrap keys, or signing controls.
-
-The node facade is one half of the measured body used by `~measurement@1.0`.
+The stock meta result is one half of the measured body used by
+`~measurement@1.0`.
 
 ## 5. `~system@1.0`
 
@@ -657,12 +612,6 @@ Response body:
     "body-id": "<stable-id(body)>",
     "measurement-device": "andee@1.0",
     "method": "android-keystore-attestation-x25519-hkdf-sha256-aes-256-gcm",
-    "node-binding": {
-      "node-address": "<HyperBEAM node address or unknown>",
-      "node-message-id": "<AndEE node message ID or unknown>",
-      "node-key-scope": "ephemeral-memory",
-      "measurement-device": "andee@1.0"
-    },
     "binding-id": "<stable-id(binding without binding-id)>"
   }
 }
@@ -674,7 +623,6 @@ Required semantics:
 - `binding.binding-id` MUST equal `stable-id(binding)` before `binding-id` is
   added.
 - `key-id` MUST equal base64url(SHA-256(raw X25519 public key)).
-- `node-binding.node-key-scope` MUST be `ephemeral-memory`.
 
 ### 7.6 `POST /~andee@1.0/measure`
 
@@ -701,13 +649,7 @@ The backend first builds an evidence subject:
   "nonce": "<base64url nonce bytes>",
   "issued-at-unix": 0,
   "body-id": "<stable-id(body)>",
-  "secret-recipient-id": "<stable-id(secret-recipient)>",
-  "node-binding": {
-    "node-address": "<HyperBEAM node address or unknown>",
-    "node-message-id": "<AndEE node message ID or unknown>",
-    "node-key-scope": "ephemeral-memory",
-    "measurement-device": "andee@1.0"
-  }
+  "secret-recipient-id": "<stable-id(secret-recipient)>"
 }
 ```
 
@@ -737,7 +679,6 @@ Response body on successful agent response:
   },
   "keystore-signature": "<base64url ECDSA signature>",
   "attestation-challenge-subject": "{\"type\":\"andee-android-enrollment-subject\",...}",
-  "node-key-binding": {},
   "policy-snapshot": {},
   "key-security-level": "STRONGBOX",
   "accepted": true,
@@ -1199,10 +1140,10 @@ selected keys materialized. Otherwise it is matched against the measurement
 
 Initializes a local zone ring.
 
-This endpoint is a state-mutating operator action. It is disabled unless the
-node config sets `zone-init-allow` to `true` or to a list containing the
-requested zone name. `zone-allow` still controls how many zones the node may
-install; it does not by itself allow public callers to initialize a fresh zone.
+This endpoint is a state-mutating operator action. It is allowed by default.
+Set `zone-init-allow` to `false`/`0` to disable initialization, or to a list
+containing allowed zone names to restrict which zones may be initialized.
+`zone-allow` still controls how many zones the node may install.
 
 Request fields:
 

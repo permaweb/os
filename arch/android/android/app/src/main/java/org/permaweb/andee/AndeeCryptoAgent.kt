@@ -132,9 +132,6 @@ class AndeeCryptoAgent(private val context: Context) : AutoCloseable {
             "policy-status" -> Unit
             "sign-evidence" -> {
                 val payload = request.optJSONObject("payload")
-                val subject = payload?.optJSONObject("evidence-subject")
-                val nodeBinding = subject?.optJSONObject("node-binding")
-                    ?: JSONObject().put("node-key-scope", "ephemeral-memory")
                 val subjectId = payload
                     ?.optString("evidence-subject-id")
                     .orEmpty()
@@ -158,7 +155,6 @@ class AndeeCryptoAgent(private val context: Context) : AutoCloseable {
                             .put("message", exc.message ?: ""),
                     )
                 }
-                body.put("node-key-binding", nodeBinding)
             }
             "verify-evidence" -> {
                 val verification = verifyEvidence(request.optJSONObject("payload"))
