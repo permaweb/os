@@ -134,7 +134,7 @@ class HyperbeamRuntime(
         }
 
         private fun sha256(file: File): String =
-            base64Url(MessageDigest.getInstance("SHA-256").digest(file.readBytes()))
+            base64Url(fileSha256(file))
 
         private fun digestFileSet(files: List<File>): String {
             val md = MessageDigest.getInstance("SHA-256")
@@ -143,9 +143,22 @@ class HyperbeamRuntime(
                 md.update(0)
                 md.update(file.length().toString().toByteArray(Charsets.UTF_8))
                 md.update(0)
-                md.update(MessageDigest.getInstance("SHA-256").digest(file.readBytes()))
+                md.update(fileSha256(file))
             }
             return base64Url(md.digest())
+        }
+
+        private fun fileSha256(file: File): ByteArray {
+            val md = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            file.inputStream().use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    md.update(buffer, 0, read)
+                }
+            }
+            return md.digest()
         }
 
         private fun base64Url(bytes: ByteArray): String =

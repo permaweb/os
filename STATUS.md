@@ -45,12 +45,33 @@ public LapEE/SNP tunnel coordinator:
 
 - [x] Pushed `main` checkpoint `5b7b0a43`.
 - [x] Created working branch `agent/andee-tunnel-payments`.
-- [ ] Reproduce AndEE slowness with emulator and collect event counters.
-- [ ] Minimize root cause and patch only if the fix is local to PermawebOS.
+- [x] Reproduce AndEE slowness with emulator and collect event counters.
+- [x] Minimize root cause and patch only if the fix is local to PermawebOS.
 - [ ] Validate sustained public tunnel from emulator AndEE through smoke node.
 - [ ] Prove payment flows for tunnel, bundler, and oracle.
 - [ ] Publish/deploy fixed `tunnel@1.0` archive.
 - [ ] Final conservative cleanup and launch validation.
+
+
+## AndEE Slowness Finding
+
+Root cause was local to the Android wrapper/config, not tunnel or AO-Core codec
+handling:
+
+- `RuntimeExtractor` loaded the full runtime ZIP into a Java byte array.
+- `HyperbeamRuntime` loaded the APK/native files into Java byte arrays to hash
+  them before launching HyperBEAM.
+- The base AndEE store included read-only gateway stores without `access`, so
+  cache writes attempted unsupported `hb_store_gateway:write/3` calls.
+- The inherited HB default `match-index` pointed at LMDB, which AndEE does not
+  ship.
+
+Validation evidence from a clean install of the rebuilt packaged APK:
+
+- App PSS fell from about 245 MB to about 62 MB; Java heap from about 201 MB
+  to about 12 MB.
+- `GET /~meta@1.0/info/address` fell from 2.7-12.2 s to 25-33 ms steady-state.
+- `~hyperbuddy@1.0/events` no longer included `store_error`.
 
 ## Potential Issues / Improvements Not Yet Acted On
 

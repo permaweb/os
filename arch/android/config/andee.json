@@ -12,6 +12,7 @@
   "trusted-devices": {},
   "preloaded-store": [],
   "loaded-device-store": [],
+  "match-index": false,
   "default-codec": "httpsig@1.0",
   "default-index": {
     "device": "meta@1.0",
@@ -26,6 +27,7 @@
     },
     {
       "store-module": "hb_store_gateway",
+      "access": ["read"],
       "subindex": [
         {
           "name": "Data-Protocol",
@@ -41,6 +43,7 @@
     },
     {
       "store-module": "hb_store_gateway",
+      "access": ["read"],
       "local-store": [
         {
           "store-module": "hb_store_volatile",

@@ -9,8 +9,7 @@ import java.util.zip.ZipInputStream
 class RuntimeExtractor(private val context: Context) {
     fun extractIfNeeded(): File {
         val root = AndeePaths.runtimeRoot(context)
-        val assetBytes = context.assets.open(RUNTIME_ZIP).use { it.readBytes() }
-        val digest = sha256(assetBytes)
+        val digest = runtimeZipSha256()
         val marker = AndeePaths.runtimeZipMarker(context)
         if (root.isDirectory && marker.isFile && marker.readText() == digest) {
             Log.i(TAG, "runtime ready at ${root.absolutePath}")
@@ -20,7 +19,7 @@ class RuntimeExtractor(private val context: Context) {
         val tmp = File(context.noBackupFilesDir, "andee-runtime.tmp")
         tmp.deleteRecursively()
         tmp.mkdirs()
-        ZipInputStream(assetBytes.inputStream()).use { zip ->
+        ZipInputStream(context.assets.open(RUNTIME_ZIP)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 val out = File(tmp, entry.name)
@@ -49,9 +48,17 @@ class RuntimeExtractor(private val context: Context) {
         return root
     }
 
-    private fun sha256(bytes: ByteArray): String {
+    private fun runtimeZipSha256(): String {
         val md = MessageDigest.getInstance("SHA-256")
-        return md.digest(bytes).joinToString("") { "%02x".format(it) }
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        context.assets.open(RUNTIME_ZIP).use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                md.update(buffer, 0, read)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     companion object {

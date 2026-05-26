@@ -70,6 +70,8 @@ def main() -> int:
         fail("measurement-device must be andee@1.0")
     if config.get("load-remote-devices") is not False:
         fail("load-remote-devices must be false")
+    if config.get("match-index") is not False:
+        fail("match-index must be false unless AndEE ships a writable local index store")
     stores = config.get("store")
     if not isinstance(stores, list) or not stores:
         fail("store must be a non-empty list")
@@ -84,6 +86,9 @@ def main() -> int:
         fail("store must include HyperBEAM gateway stores after volatile store")
     if any(stores.index(store) == 0 for store in gateway_stores):
         fail("gateway stores must come after the volatile store")
+    for store in gateway_stores:
+        if store.get("access") != ["read"]:
+            fail("gateway stores must be read-only to avoid cache-write retries")
     if not any("subindex" in store for store in gateway_stores):
         fail("store must include the default AO subindexed gateway store")
     store_text = BOOT_CONFIG_STORE.read_text()
