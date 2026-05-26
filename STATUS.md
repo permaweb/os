@@ -1,81 +1,54 @@
-# STATUS: AndEE Tunnel + Payments Launch Hardening
+# STATUS: v0.1 Gold Release Split
 
-Branch: `agent/andee-tunnel-payments`
+Branch: `main`
 
-Base: `main` at `5b7b0a43` (`Prepare production PermawebOS launch paths`),
-pushed to `arweave://lapee`.
+Gold base: `7493d138c6fe991282536ce95056af86e019c355`
+(`Fix AndEE startup and store retry storms`).
 
-## Commander's Intent
+## Current Decision
 
-Make PermawebOS launch-ready for AndEE nodes that stay reachable through a
-public LapEE/SNP tunnel coordinator:
+`main` is the v0.1 release line. It keeps the production PermawebOS launch
+paths and the AndEE startup/store-storm fix.
 
-1. Find and fix why AndEE becomes extremely slow under live tunnel/zone use.
-2. Prove an emulator AndEE can keep a working public tunnel through
-   `https://www.smoke.solutions`.
-3. Prove real AO-payment flows for tunneling, bundling, and oracle services.
-4. Deploy the fixed `tunnel@1.0` archive from `~/src/devices/tunnel@1.0`
-   once the core AndEE work is stable.
-5. Keep a conservative improvement list for anything not safe to change tonight.
+The unfinished tunnel and late AO-payment edits are parked on
+`feat/andee-tunnels` at
+`7646a5183bb361b4d2448eb0a1db4cea8310d4e0`.
 
-## Current External State
+## Included In Gold
 
-- Smoke SNP node: `https://www.smoke.solutions`, backend on
-  `hb@dev-1.forward.computer:/home/hb/permawebos-smoke-solutions`, host port
-  `2001`.
-- Current smoke node address observed after latest restart:
-  `3rQ3FE_ptqlvJtrlDe8ml6vv6BFIUC-z_cAb_zrtTQ8`.
-- Current trusted `tunnel@1.0` archive:
-  `DJb6D9QKd7tYcggYopvrrln0a0QQhfxWa1H2GQM8NG0`.
-- Remote updater prepared:
-  `/home/hb/permawebos-smoke-solutions/update-tunnel-device.sh NEW_ARCHIVE_ID`.
+- Production PermawebOS launch paths through `5b7b0a43`.
+- Linux appliance OTP 28.5 support.
+- Security-finding fixes already merged before the tunnel/payment branch.
+- AndEE startup and store retry-storm fix:
+  - stream Android runtime/APK hashing instead of loading large files into
+    Java byte arrays;
+  - mark AndEE gateway stores read-only;
+  - disable the LMDB-oriented default `match-index` on AndEE.
 
-## First Hypotheses For AndEE Slowness
+## Excluded From Gold
 
-- Store retry storm observed on real AndEE events endpoint:
-  `store_error.store_call_failed_retrying` was previously around `309915`.
-- Suspect mis-shaped `loaded-devices` / trusted device config may cause repeated
-  remote load attempts or gateway-store misses.
-- Need distinguish:
-  - Android-side store/config issue.
-  - Tunnel registration/call loop issue.
-  - HyperBEAM remote device loading/store materialization issue.
+- `tunnel@1.0` packaging and runtime hooks.
+- Public `smoke.solutions` tunnel deployment work.
+- Tunnel metering and tunnel payment routes.
+- Late AO-payment scheduler-shape and HTTP-client changes from the parked
+  tunnel/payment stack.
+- Any unpublished tunnel device archive IDs.
 
-## Work Log
+## Notes
 
-- [x] Pushed `main` checkpoint `5b7b0a43`.
-- [x] Created working branch `agent/andee-tunnel-payments`.
-- [x] Reproduce AndEE slowness with emulator and collect event counters.
-- [x] Minimize root cause and patch only if the fix is local to PermawebOS.
-- [ ] Validate sustained public tunnel from emulator AndEE through smoke node.
-- [ ] Prove payment flows for tunnel, bundler, and oracle.
-- [ ] Publish/deploy fixed `tunnel@1.0` archive.
-- [ ] Final conservative cleanup and launch validation.
+- The AO-payment changes from the parked branch were not proven necessary for
+  the core paid bundling launch flow. A prior configuration using trusted
+  remote device archives is the safer release path unless targeted validation
+  proves otherwise.
+- `feat/andee-tunnels` has been pushed to `arweave://lapee`.
+- The `Github` remote (`https://github.com/permaweb/os.git`) is configured in
+  this checkout, but this shell has no GitHub HTTPS credentials, no GitHub SSH
+  key access, and no `gh` CLI. GitHub push is blocked until credentials are
+  supplied or the remote is pushed from an authenticated environment.
 
+## Next Validation
 
-## AndEE Slowness Finding
-
-Root cause was local to the Android wrapper/config, not tunnel or AO-Core codec
-handling:
-
-- `RuntimeExtractor` loaded the full runtime ZIP into a Java byte array.
-- `HyperbeamRuntime` loaded the APK/native files into Java byte arrays to hash
-  them before launching HyperBEAM.
-- The base AndEE store included read-only gateway stores without `access`, so
-  cache writes attempted unsupported `hb_store_gateway:write/3` calls.
-- The inherited HB default `match-index` pointed at LMDB, which AndEE does not
-  ship.
-
-Validation evidence from a clean install of the rebuilt packaged APK:
-
-- App PSS fell from about 245 MB to about 62 MB; Java heap from about 201 MB
-  to about 12 MB.
-- `GET /~meta@1.0/info/address` fell from 2.7-12.2 s to 25-33 ms steady-state.
-- `~hyperbuddy@1.0/events` no longer included `store_error`.
-
-## Potential Issues / Improvements Not Yet Acted On
-
-- Manual wildcard certificate renewal for `smoke.solutions` needs operator
-  follow-up before `2026-08-24`, unless DNS automation is added.
-- The smoke SNP QEMU has no persistent HB identity yet; its address changes on
-  reboot. Fine for testing, likely wrong for permanent production service.
+- Build v0.1 gold SNP and no-TME images from `main`.
+- Boot the SNP image on the remote SEV-SNP host.
+- Start a zone on the SNP node.
+- Join with real hardware against the gold zone.
