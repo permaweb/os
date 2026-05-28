@@ -63,7 +63,6 @@ object AndeeBootConfigStore {
         stripPrivateBootKeys(merged)
 
         merged.put("measurement-device", "andee@1.0")
-        merged.put("store", copyValue(base.getJSONArray("store")))
         merged.put("andee-config-source", "app-private-next-boot-config")
         merged.put("andee-operator-config-sha256", base64UrlSha256(operatorText.toByteArray(Charsets.UTF_8)))
         merged.put("andee-operator-config-bytes", operatorText.toByteArray(Charsets.UTF_8).size)
@@ -203,7 +202,11 @@ object AndeeBootConfigStore {
         "priv-wallet",
         "private-key",
         "priv-key-location",
+        "forge-bootstrap",
+        "loaded-device-store",
         "secret",
         "measurement-body-source",
+        "preloaded-devices-index",
+        "preloaded-store",
     )
 }

@@ -2,10 +2,13 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
+source "$ROOT/scripts/andee-preloaded-store.sh"
 
 require_tool curl
 require_tool python3
 require_tool erl
+
+REBAR3="$ROOT/scripts/verified-rebar3.sh"
 
 "$ROOT/scripts/stage-android-devices.sh"
 
@@ -24,9 +27,9 @@ SENTINEL_VALUE="andee-zone-storage-sentinel-$(date +%Y%m%d%H%M%S)"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-(cd "$ANDEE_DEVICE_ROOT" && "$ROOT/scripts/verified-rebar3.sh" compile)
+(cd "$ANDEE_DEVICE_ROOT" && "$REBAR3" compile)
+build_andee_preloaded_store "$ANDEE_DEVICE_ROOT/_build/preloaded-store"
 
-HB_SRC="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
 HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
 mkdir -p "$OUT/probe-src" "$OUT/probe-ebin"
 cat >"$OUT/probe-src/andee_zone_storage_probe.erl" <<'ERL'
@@ -62,69 +65,6 @@ flush_encrypted(Opts) ->
 ERL
 erlc -pa "$HB_APP/ebin" -I "$HB_APP/include" \
     -o "$OUT/probe-ebin" "$OUT/probe-src/andee_zone_storage_probe.erl"
-if ! erlc -pa "$HB_APP/ebin" +'{feature,maybe_expr,enable}' \
-    -I "$HB_APP/include" \
-    -I "$HB_SRC/core" \
-    -o "$HB_APP/ebin" \
-    "$HB_SRC/preloaded/message/dev_message.erl" \
-    "$HB_SRC/preloaded/codec/dev_structured.erl" \
-    "$HB_SRC/preloaded/codec/dev_flat.erl" \
-    "$HB_SRC/preloaded/codec/dev_json.erl" \
-    "$HB_SRC/preloaded/codec/dev_json_iface.erl" \
-    "$HB_SRC/preloaded/codec/dev_httpsig_keyid.erl" \
-    "$HB_SRC/preloaded/codec/dev_httpsig_siginfo.erl" \
-    "$HB_SRC/preloaded/codec/dev_httpsig_conv.erl" \
-    "$HB_SRC/preloaded/codec/dev_httpsig_proxy.erl" \
-    "$HB_SRC/preloaded/codec/dev_httpsig.erl" \
-    "$HB_SRC/preloaded/codec/lib_arweave_common.erl" \
-    "$HB_SRC/preloaded/codec/dev_ans104.erl" \
-    "$HB_SRC/preloaded/codec/dev_tx.erl" \
-    "$HB_SRC/preloaded/auth/dev_cookie_auth.erl" \
-    "$HB_SRC/preloaded/auth/dev_cookie.erl" \
-    "$HB_SRC/preloaded/auth/dev_auth_hook.erl" \
-    "$HB_SRC/preloaded/auth/dev_http_auth.erl" \
-    "$HB_SRC/preloaded/auth/dev_secret.erl" \
-    "$HB_SRC/preloaded/node/dev_meta.erl" \
-    "$HB_SRC/preloaded/node/dev_hyperbuddy.erl" \
-    "$HB_SRC/preloaded/node/dev_cache.erl" \
-    "$HB_SRC/preloaded/node/dev_router.erl" \
-    "$HB_SRC/preloaded/node/dev_node_process.erl" \
-    "$HB_SRC/preloaded/node/dev_location_cache.erl" \
-    "$HB_SRC/preloaded/node/dev_location.erl" \
-    "$HB_SRC/preloaded/node/dev_cron.erl" \
-    "$HB_SRC/preloaded/name/dev_name.erl" \
-    "$HB_SRC/preloaded/name/dev_b32_name.erl" \
-    "$HB_SRC/preloaded/name/dev_local_name.erl" \
-    "$HB_SRC/preloaded/util/dev_relay.erl" \
-    "$HB_SRC/preloaded/util/dev_stack.erl" \
-    "$HB_SRC/preloaded/process/lib_process.erl" \
-    "$HB_SRC/preloaded/process/dev_process_cache.erl" \
-    "$HB_SRC/preloaded/process/dev_scheduler_cache.erl" \
-    "$HB_SRC/preloaded/process/dev_scheduler_formats.erl" \
-    "$HB_SRC/preloaded/process/dev_scheduler_registry.erl" \
-    "$HB_SRC/preloaded/process/dev_scheduler_server.erl" \
-    "$HB_SRC/preloaded/process/dev_process_worker.erl" \
-    "$HB_SRC/preloaded/process/dev_push.erl" \
-    "$HB_SRC/preloaded/process/dev_scheduler.erl" \
-    "$HB_SRC/preloaded/process/dev_process.erl" \
-    "$HB_SRC/preloaded/vm/dev_lua_lib.erl" \
-    "$HB_SRC/preloaded/vm/dev_lua.erl" \
-    "$HB_SRC/preloaded/query/dev_query.erl" \
-    "$HB_SRC/preloaded/query/dev_query_graphql.erl" \
-    "$HB_SRC/preloaded/query/dev_match.erl" \
-    "$HB_SRC/preloaded/arweave/dev_manifest.erl" \
-    "$HB_SRC/preloaded/arweave/dev_arweave.erl" \
-    "$HB_SRC/preloaded/arweave/dev_bundler.erl" \
-    "$HB_SRC/preloaded/arweave/dev_bundler_task.erl" \
-    "$HB_SRC/preloaded/arweave/dev_bundler_cache.erl" \
-    "$HB_SRC/preloaded/arweave/dev_bundler_recovery.erl" \
-    "$HB_SRC/preloaded/payment/dev_p4.erl" \
-    "$HB_SRC/preloaded/payment/dev_simple_pay.erl" \
-    "$HB_SRC/preloaded/payment/dev_metering.erl" \
-        >"$OUT/host-preloaded-compile.log" 2>&1; then
-    cat "$OUT/host-preloaded-compile.log" >&2
-    exit 1
-fi
 
 PIDS=()
 cleanup() {

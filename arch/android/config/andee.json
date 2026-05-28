@@ -2,67 +2,19 @@
   "render-index-page": false,
   "initialized": "permanent",
   "access-remote-cache-for-client": false,
-  "port": 8734,
-  "protocol": "http1",
-  "prometheus": false,
-  "process-sampler": false,
-  "routes": [],
-  "name-resolvers": [],
-  "trusted-device-signers": [],
-  "trusted-devices": {},
-  "preloaded-store": [],
-  "loaded-device-store": [],
-  "match-index": false,
-  "default-codec": "httpsig@1.0",
-  "default-index": {
-    "device": "meta@1.0",
-    "path": "info"
-  },
   "measurement-device": "andee@1.0",
-  "load-remote-devices": false,
-  "store": [
-    {
-      "store-module": "hb_store_volatile",
-      "name": "andee-volatile"
-    },
-    {
-      "store-module": "hb_store_gateway",
-      "access": ["read"],
-      "subindex": [
-        {
-          "name": "Data-Protocol",
-          "value": "ao"
-        }
-      ],
-      "local-store": [
-        {
-          "store-module": "hb_store_volatile",
-          "name": "andee-volatile"
-        }
-      ]
-    },
-    {
-      "store-module": "hb_store_gateway",
-      "access": ["read"],
-      "local-store": [
-        {
-          "store-module": "hb_store_volatile",
-          "name": "andee-volatile"
-        }
-      ]
-    }
-  ],
   "on": {
-    "request": [],
-    "start": {
-      "device": "measurement@1.0",
-      "path": "boot",
-      "method": "POST",
-      "target": "body",
-      "measurement-body-source": "hook-body",
-      "hook": {
-        "result": "ignore"
+    "start": [
+      {
+        "device": "measurement@1.0",
+        "path": "boot",
+        "method": "POST",
+        "target": "body",
+        "measurement-body-source": "hook-body",
+        "hook": {
+          "result": "ignore"
+        }
       }
-    }
+    ]
   }
 }

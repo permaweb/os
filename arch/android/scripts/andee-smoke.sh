@@ -18,16 +18,21 @@ adb install -r "$APK" | tee "$OUT/install.txt"
 adb shell am start -n org.permaweb.andee/.OrnamentActivity | tee "$OUT/activity.txt"
 adb shell am start-foreground-service -n org.permaweb.andee/.AndeeService \
     > "$OUT/service-start.txt" 2>&1 || true
-sleep 5
+for _ in $(seq 1 90); do
+    adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stdout \
+        > "$OUT/hyperbeam.stdout" 2>/dev/null || true
+    adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stderr \
+        > "$OUT/hyperbeam.stderr" 2>/dev/null || true
+    if grep -q "AndEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
+        break
+    fi
+    sleep 1
+done
 adb shell dumpsys activity services org.permaweb.andee > "$OUT/services.txt" || true
 adb shell cmd package list packages -U org.permaweb.andee \
     > "$OUT/package-uid.txt" 2>/dev/null || true
 adb shell ps -A -o USER,UID,PID,NAME > "$OUT/app-ps.txt" 2>/dev/null || true
 adb shell run-as org.permaweb.andee ls -R no_backup > "$OUT/no-backup.txt" 2>/dev/null || true
-adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stdout \
-    > "$OUT/hyperbeam.stdout" 2>/dev/null || true
-adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stderr \
-    > "$OUT/hyperbeam.stderr" 2>/dev/null || true
 adb logcat -d -s AndeeService RuntimeExtractor AndeeCryptoAgent HyperbeamRuntime \
     > "$OUT/logcat.txt" || true
 python3 - <<'PY' "$OUT/policy-frame.bin"
@@ -59,6 +64,7 @@ services = (out / "services.txt").read_text(errors="ignore")
 runtime = (out / "no-backup.txt").read_text(errors="ignore")
 logcat = (out / "logcat.txt").read_text(errors="ignore")
 stdout = (out / "hyperbeam.stdout").read_text(errors="ignore")
+stderr = (out / "hyperbeam.stderr").read_text(errors="ignore")
 app_ps = (out / "app-ps.txt").read_text(errors="ignore")
 package_uid = (out / "package-uid.txt").read_text(errors="ignore")
 policy = (out / "policy-response.json").read_text(errors="ignore") if (out / "policy-response.json").exists() else ""
@@ -66,8 +72,8 @@ policy_rejected = "policy rejected" in logcat
 match = re.search(r"uid[:=](\d+)", package_uid)
 uid = match.group(1) if match else None
 runtime_started = (
-    "andee-native-launcher=exec-erlexec" in stdout or
-    any(uid and uid in line and "beam.smp" in line for line in app_ps.splitlines())
+    "AndEE HyperBEAM node started" in stdout and
+    "Runtime terminating during boot" not in stderr
 )
 runtime_extracted = (
     "andee-runtime" in runtime or

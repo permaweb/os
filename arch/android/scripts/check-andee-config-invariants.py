@@ -68,29 +68,26 @@ def main() -> int:
         fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
-    if config.get("load-remote-devices") is not False:
-        fail("load-remote-devices must be false")
-    if config.get("match-index") is not False:
-        fail("match-index must be false unless AndEE ships a writable local index store")
-    stores = config.get("store")
-    if not isinstance(stores, list) or not stores:
-        fail("store must be a non-empty list")
-    if stores[0].get("store-module") != "hb_store_volatile":
-        fail("default store must be hb_store_volatile")
-    gateway_stores = [
-        store for store in stores
-        if isinstance(store, dict)
-        and store.get("store-module") == "hb_store_gateway"
-    ]
-    if len(gateway_stores) < 2:
-        fail("store must include HyperBEAM gateway stores after volatile store")
-    if any(stores.index(store) == 0 for store in gateway_stores):
-        fail("gateway stores must come after the volatile store")
-    for store in gateway_stores:
-        if store.get("access") != ["read"]:
-            fail("gateway stores must be read-only to avoid cache-write retries")
-    if not any("subindex" in store for store in gateway_stores):
-        fail("store must include the default AO subindexed gateway store")
+    for key in (
+        "default-codec",
+        "default-index",
+        "load-remote-devices",
+        "loaded-device-store",
+        "match-index",
+        "name-resolvers",
+        "port",
+        "preloaded-devices-index",
+        "preloaded-store",
+        "process-sampler",
+        "prometheus",
+        "protocol",
+        "routes",
+        "store",
+        "trusted-device-signers",
+        "trusted-devices",
+    ):
+        if key in config:
+            fail(f"base config should inherit common HyperBEAM default for {key}")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
         fail("operator config sanitizer must reserve measurement-body-source")
@@ -102,6 +99,14 @@ def main() -> int:
         fail("operator on.start hooks must run before base hooks")
     if "copyOperatorValue(hook)" not in store_text:
         fail("operator on.start hooks must be sanitized before merge")
+    for key in (
+        "forge-bootstrap",
+        "loaded-device-store",
+        "preloaded-devices-index",
+        "preloaded-store",
+    ):
+        if f'"{key}"' not in store_text:
+            fail(f"operator config sanitizer must reserve {key}")
     return 0
 
 
