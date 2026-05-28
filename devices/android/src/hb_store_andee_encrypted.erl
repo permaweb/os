@@ -366,7 +366,7 @@ flush_interval_ms(Opts) ->
         <<"flush-interval-ms">>,
         Opts,
         ?DEFAULT_FLUSH_INTERVAL_MS,
-        #{}
+        Opts
     )).
 
 flush_pending(State = #{pending := [], timer := Timer}) ->
@@ -409,7 +409,7 @@ maybe_cancel_timer(Timer) ->
     ok.
 
 maybe_sync(Fd, Opts) ->
-    case hb_maps:get(<<"sync-on-flush">>, Opts, false, #{}) of
+    case hb_maps:get(<<"sync-on-flush">>, Opts, false, Opts) of
         true -> file:sync(Fd);
         _ -> ok
     end.
@@ -602,16 +602,16 @@ secret(#{<<"secret-ref">> := SecretRef}) ->
 key_context(Opts) ->
     term_to_binary({
         ?MAGIC,
-        hb_maps:get(<<"zone">>, Opts, null, #{}),
-        hb_maps:get(<<"ring-address">>, Opts, null, #{})
+        hb_maps:get(<<"zone">>, Opts, null, Opts),
+        hb_maps:get(<<"ring-address">>, Opts, null, Opts)
     }).
 
 aad(Opts, Seq) ->
     term_to_binary({
         ?MAGIC,
-        hb_maps:get(<<"zone">>, Opts, null, #{}),
-        hb_maps:get(<<"ring-address">>, Opts, null, #{}),
-        hb_maps:get(<<"store-id">>, Opts, null, #{}),
+        hb_maps:get(<<"zone">>, Opts, null, Opts),
+        hb_maps:get(<<"ring-address">>, Opts, null, Opts),
+        hb_maps:get(<<"store-id">>, Opts, null, Opts),
         Seq
     }).
 

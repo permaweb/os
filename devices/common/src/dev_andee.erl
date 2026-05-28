@@ -65,7 +65,7 @@ supported(_Base, _Req, Opts) ->
     {ok, andee_supported(Opts)}.
 
 subject(_Base, Req, Opts) ->
-    case internal_measurement_request(Req) of
+    case internal_measurement_request(Req, Opts) of
         false ->
             error_resp(403, <<"measurement-engine-internal-only">>,
                        <<"Use ~measurement@1.0 for AndEE measurement generation.">>);
@@ -84,7 +84,7 @@ subject(_Base, Req, Opts) ->
     end.
 
 measure(_Base, Req, Opts) ->
-    case internal_measurement_request(Req) of
+    case internal_measurement_request(Req, Opts) of
         false ->
             error_resp(403, <<"measurement-engine-internal-only">>,
                        <<"Use ~measurement@1.0 for AndEE measurement generation.">>);
@@ -101,7 +101,7 @@ measure(_Base, Req, Opts) ->
                             Req,
                             secret_recipient(Body, Opts),
                             Opts),
-                        Nonce = measurement_nonce(Req),
+                        Nonce = measurement_nonce(Req, Opts),
                         Purpose = hb_maps:get(<<"purpose">>, Req, <<"fresh">>, Opts),
                         {EvidenceSubject, EvidenceSubjectID} =
                             evidence_subject(Body, Recipient, Nonce, Purpose, Opts),
@@ -135,7 +135,7 @@ measure(_Base, Req, Opts) ->
             end
     end.
 
-internal_measurement_request(Req) ->
+internal_measurement_request(Req, Opts) ->
     case persistent_term:get(
         {permawebos_measurement, internal_request_token},
         undefined) of
@@ -147,7 +147,7 @@ internal_measurement_request(Req) ->
                     <<"measurement-internal-token">>,
                     Req,
                     undefined,
-                    #{}) =:= Token
+                    Opts) =:= Token
     end.
 
 verify(Base, Req, Opts) ->
@@ -324,7 +324,7 @@ evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts) ->
 
 policy_failure_evidence(Reason, Req, Opts) ->
     Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
-    Nonce = measurement_nonce(Req),
+    Nonce = measurement_nonce(Req, Opts),
     Purpose = hb_maps:get(<<"purpose">>, Req, <<"fresh">>, Opts),
     {Subject, SubjectID} =
         evidence_subject(Body, #{}, Nonce, Purpose, Opts),
@@ -450,7 +450,7 @@ wrapped_secret_id(Credential, Opts) when is_map(Credential) ->
             [
                 {Key, Value}
              || Key <- wrapped_secret_identity_keys(),
-                (Value = hb_maps:get(Key, Credential, undefined, #{}))
+                (Value = hb_maps:get(Key, Credential, undefined, Opts))
                     =/= undefined
             ]),
         Opts);
@@ -491,7 +491,7 @@ check_evidence_subject(Measurement, Evidence, Req, Opts) ->
             Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
             Subject = hb_maps:get(<<"evidence-subject">>, Evidence, #{}, Opts),
             SubjectID = hb_maps:get(<<"evidence-subject-id">>, Evidence, <<>>, Opts),
-            case expected_nonce(Req) of
+            case expected_nonce(Req, Opts) of
                 undefined -> ok;
                 Nonce ->
                     ExpectedNonce = hb_util:encode(Nonce),
@@ -783,14 +783,14 @@ agent_timeout(Opts) ->
         _ -> ?DEFAULT_TIMEOUT_MS
     end.
 
-measurement_nonce(Req) ->
-    case expected_nonce(Req) of
+measurement_nonce(Req, Opts) ->
+    case expected_nonce(Req, Opts) of
         undefined -> crypto:strong_rand_bytes(32);
         Nonce -> Nonce
     end.
 
-expected_nonce(Req) ->
-    case hb_maps:get(<<"nonce">>, Req, undefined, #{}) of
+expected_nonce(Req, Opts) ->
+    case hb_maps:get(<<"nonce">>, Req, undefined, Opts) of
         undefined -> undefined;
         B when is_binary(B) ->
             try hb_util:decode(B)

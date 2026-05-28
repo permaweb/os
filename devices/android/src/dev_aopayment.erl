@@ -26,7 +26,7 @@
 ingest(Base, Req, NodeMsg) ->
     case verify(Base, Req, NodeMsg) of
         {ok, Payment} ->
-            PaymentKey = payment_key(Payment),
+            PaymentKey = payment_key(Payment, NodeMsg),
             ImportValue = Payment#{<<"status">> => <<"imported">>},
             case import_payment(Payment, PaymentKey, ImportValue, NodeMsg) of
                 {ok, already_imported, Existing} ->
@@ -46,7 +46,7 @@ ingest(Base, Req, NodeMsg) ->
 withdraw(Base, Req, NodeMsg) ->
     case validate_withdrawal(Base, Req, NodeMsg) of
         {ok, Withdrawal} ->
-            Key = withdrawal_key(Withdrawal),
+            Key = withdrawal_key(Withdrawal, NodeMsg),
             case reserve_withdrawal(Key, Withdrawal, NodeMsg) of
                 {ok, reserved} ->
                     case submit_withdrawal(Withdrawal, NodeMsg) of
@@ -585,12 +585,12 @@ normalize_url(URL0) ->
         _ -> URL
     end.
 
-withdrawal_key(Withdrawal) ->
-    case hb_maps:get(<<"withdraw-id">>, Withdrawal, undefined, #{}) of
+withdrawal_key(Withdrawal, Opts) ->
+    case hb_maps:get(<<"withdraw-id">>, Withdrawal, undefined, Opts) of
         undefined ->
-            <<(hb_maps:get(<<"token">>, Withdrawal, undefined, #{}))/binary, ":",
-                (hb_maps:get(<<"recipient">>, Withdrawal, undefined, #{}))/binary, ":",
-                (hb_util:bin(hb_maps:get(<<"quantity">>, Withdrawal, undefined, #{})))/binary>>;
+            <<(hb_maps:get(<<"token">>, Withdrawal, undefined, Opts))/binary, ":",
+                (hb_maps:get(<<"recipient">>, Withdrawal, undefined, Opts))/binary, ":",
+                (hb_util:bin(hb_maps:get(<<"quantity">>, Withdrawal, undefined, Opts)))/binary>>;
         WithdrawID ->
             hb_util:bin(WithdrawID)
     end.
@@ -637,11 +637,11 @@ latest_node_msg(NodeMsg) ->
             end
     end.
 
-payment_key(Payment) ->
-    <<(hb_maps:get(<<"token">>, Payment, undefined, #{}))/binary, ":",
-        (hb_maps:get(<<"ledger">>, Payment, undefined, #{}))/binary, ":",
-        (hb_maps:get(<<"deposit-address">>, Payment, undefined, #{}))/binary, ":",
-        (hb_maps:get(<<"message-id">>, Payment, undefined, #{}))/binary>>.
+payment_key(Payment, Opts) ->
+    <<(hb_maps:get(<<"token">>, Payment, undefined, Opts))/binary, ":",
+        (hb_maps:get(<<"ledger">>, Payment, undefined, Opts))/binary, ":",
+        (hb_maps:get(<<"deposit-address">>, Payment, undefined, Opts))/binary, ":",
+        (hb_maps:get(<<"message-id">>, Payment, undefined, Opts))/binary>>.
 
 tag_value(Tags, Name, NodeMsg) ->
     case lists:search(

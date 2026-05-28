@@ -52,7 +52,7 @@ supported(_Base, _Req, Opts) ->
     {ok, snp_supported(Opts)}.
 
 subject(_Base, Req, Opts) ->
-    case internal_measurement_request(Req) of
+    case internal_measurement_request(Req, Opts) of
         true ->
             case trusted_body_id(Req, Opts) of
                 undefined ->
@@ -70,7 +70,7 @@ subject(_Base, Req, Opts) ->
     end.
 
 measure(_Base, Req, Opts) ->
-    case internal_measurement_request(Req) of
+    case internal_measurement_request(Req, Opts) of
         true ->
             try
                 Body = hb_maps:get(<<"body">>, Req, #{}, Opts),
@@ -84,7 +84,7 @@ measure(_Base, Req, Opts) ->
                             Req,
                             secret_recipient(Body, BodyID, Opts),
                             Opts),
-                        Nonce = measurement_nonce(Req),
+                        Nonce = measurement_nonce(Req, Opts),
                         ReportData = report_data(Body, Nonce, Recipient, Req, Opts),
                         case snp_nif() of
                             {error, Reason} ->
@@ -130,8 +130,8 @@ verify(Base, Req, Opts) ->
     Measurement = hb_link:decode_all_links(
         response_body(resolve_envelope(Base, Req, Opts), Opts)),
     Evidence = measurement_part(<<"evidence">>, Measurement, Opts),
-    Body = maps:get(<<"body">>, Measurement, #{}),
-    Recipient = maps:get(<<"secret-recipient">>, Measurement, #{}),
+    Body = hb_maps:get(<<"body">>, Measurement, #{}, Opts),
+    Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
     ReportDataCheck = check_report_data(Body, Recipient, Evidence, Req, Opts),
     SignatureCheck = check_report_signature(Body, Evidence, Opts),
     Checks = [
@@ -158,7 +158,7 @@ unwrap_secret(_Base, Req, Opts) ->
         Credential = activation_credential(Req, Opts),
         {ok, Secret} = unwrap_secret_value(Credential, Opts),
         Msg = hb_message:commit(
-            secret_activation_public_body(Secret, Credential),
+            secret_activation_public_body(Secret, Credential, Opts),
             Opts),
         {ok, #{<<"status">> => 200, <<"body">> => Msg}}
     catch
@@ -200,7 +200,7 @@ snp_supported(_Opts) ->
         false
     end.
 
-internal_measurement_request(Req) ->
+internal_measurement_request(Req, Opts) ->
     case persistent_term:get(
         {permawebos_measurement, internal_request_token},
         undefined) of
@@ -212,7 +212,7 @@ internal_measurement_request(Req) ->
                     <<"measurement-internal-token">>,
                     Req,
                     undefined,
-                    #{}) =:= Token
+                    Opts) =:= Token
     end.
 
 snp_nif() ->
@@ -262,7 +262,7 @@ secret_recipient(_Body, BodyID, Opts) ->
             <<"report-data-context">> => ?REPORT_CONTEXT,
             <<"body-id">> => BodyID,
             <<"device-context">> => Context,
-            <<"device-context-digest">> => device_context_digest(Context)
+            <<"device-context-digest">> => device_context_digest(Context, Opts)
         }
     }.
 
@@ -341,7 +341,7 @@ ensure_secret_activation(Activation, Credential, Expected, _Subject, Opts) ->
             hmac,
             sha256,
             Expected,
-            secret_activation_context(Credential, IssuedAt))),
+            secret_activation_context(Credential, IssuedAt, Opts))),
     case {GotHash, Proof} of
         {ExpectedHash, ExpectedProof} ->
             ok;
@@ -368,10 +368,12 @@ evidence(ReportRaw, Certs, Body, Report, Nonce, ReportData, Recipient, Opts) ->
 certificates(Certs, Body, Report, Opts) ->
     Embedded = certificates_from_table(Certs),
     Configured = configured_certificates(Opts),
-    Available = unique_certificate_entries(Embedded ++ Configured),
+    Available = unique_certificate_entries(Embedded ++ Configured, Opts),
     Missing = [Type || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>],
                        not certificate_type_present(Type, Available, Opts)],
-    certificate_entry_map(Available ++ fetched_certificates(Missing, Body, Report, Opts)).
+    certificate_entry_map(
+        Available ++ fetched_certificates(Missing, Body, Report, Opts),
+        Opts).
 
 certificates_from_table(Certs) when is_list(Certs) ->
     [certificate_entry(Guid, Data, <<"platform-certificate-table">>)
@@ -473,7 +475,7 @@ check_report_data(Body, Recipient, Evidence, Req, Opts) ->
         <<"core">>,
         fun() ->
             Nonce = decode_required(<<"nonce">>, Evidence, Opts),
-            case expected_nonce(Req) of
+            case expected_nonce(Req, Opts) of
                 undefined -> ok;
                 Nonce -> ok;
                 _ -> throw(<<"fresh nonce does not match verifier challenge">>)
@@ -615,7 +617,8 @@ configured_certificates(Opts) ->
                 configured_certificate(
                     <<"vcek">>, <<"snp-vcek-der">>, <<"snp-vcek-pem">>, Opts),
                 configured_crl(Opts)
-            ], Cert =/= undefined]).
+            ], Cert =/= undefined],
+        Opts).
 
 configured_cert_chain(Opts) ->
     case hb_opts:get(<<"snp-cert-chain-pem">>, undefined, Opts) of
@@ -677,26 +680,26 @@ configured_crl(Opts) ->
             end
     end.
 
-unique_certificate_entries(Entries) ->
+unique_certificate_entries(Entries, Opts) ->
     [Entry
      || Type <- [<<"ark">>, <<"ask">>, <<"vcek">>,
                  <<"vlek">>, <<"crl">>, <<"other">>],
-        Entry <- take_certificate_type(Type, Entries)].
+        Entry <- take_certificate_type(Type, Entries, Opts)].
 
-certificate_entry_map(Entries) ->
+certificate_entry_map(Entries, Opts) ->
     maps:from_list(
         [
-            {hb_maps:get(<<"type">>, Entry, undefined, #{}), Entry}
+            {hb_maps:get(<<"type">>, Entry, undefined, Opts), Entry}
          || Entry <- Entries,
             lists:member(
-                hb_maps:get(<<"type">>, Entry, undefined, #{}),
+                hb_maps:get(<<"type">>, Entry, undefined, Opts),
                 [<<"ark">>, <<"ask">>, <<"vcek">>, <<"vlek">>,
                  <<"crl">>, <<"other">>])
         ]).
 
-take_certificate_type(Type, Entries) ->
+take_certificate_type(Type, Entries, Opts) ->
     case [Entry || Entry <- Entries,
-                   hb_maps:get(<<"type">>, Entry, undefined, #{}) =:= Type] of
+                   hb_maps:get(<<"type">>, Entry, undefined, Opts) =:= Type] of
         [Entry | _] -> [Entry];
         [] -> []
     end.
@@ -729,10 +732,10 @@ fetch_vcek(Product, Report) ->
         Product,
         <<"/">>,
         hex_lower(report_get(<<"chip-id">>, Report, <<>>)),
-        <<"?blSPL=">>, decimal_param(hb_maps:get(<<"bootloader">>, TCB, 0, #{})),
-        <<"&teeSPL=">>, decimal_param(hb_maps:get(<<"tee">>, TCB, 0, #{})),
-        <<"&snpSPL=">>, decimal_param(hb_maps:get(<<"snp">>, TCB, 0, #{})),
-        <<"&ucodeSPL=">>, decimal_param(hb_maps:get(<<"microcode">>, TCB, 0, #{}))
+        <<"?blSPL=">>, decimal_param(hb_maps:get(<<"bootloader">>, TCB, 0, TCB)),
+        <<"&teeSPL=">>, decimal_param(hb_maps:get(<<"tee">>, TCB, 0, TCB)),
+        <<"&snpSPL=">>, decimal_param(hb_maps:get(<<"snp">>, TCB, 0, TCB)),
+        <<"&ucodeSPL=">>, decimal_param(hb_maps:get(<<"microcode">>, TCB, 0, TCB))
     ]),
     http_get(URL).
 
@@ -1083,7 +1086,7 @@ recipient_identity_id(Recipient, Opts) when is_map(Recipient) ->
             throw(<<"recipient key-id does not match public key">>)
     end,
     Method = hb_maps:get(<<"method">>, Recipient, ?METHOD, Opts),
-    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
+    Binding = load_part(hb_maps:get(<<"binding">>, Recipient, #{}, Opts), Opts),
     ReportContext =
         hb_maps:get(<<"report-data-context">>, Binding, ?REPORT_CONTEXT, Opts),
     BodyID = hb_maps:get(<<"body-id">>, Binding, <<>>, Opts),
@@ -1120,8 +1123,8 @@ measured_body_id(Body, Recipient, Opts) ->
     end.
 
 recipient_body_id(Recipient, Opts) when is_map(Recipient) ->
-    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
-    case maps:get(<<"body-id">>, Binding, undefined) of
+    Binding = load_part(hb_maps:get(<<"binding">>, Recipient, #{}, Opts), Opts),
+    case hb_maps:get(<<"body-id">>, Binding, undefined, Opts) of
         ID when is_binary(ID), byte_size(ID) > 0 -> ID;
         _ -> undefined
     end;
@@ -1129,7 +1132,7 @@ recipient_body_id(_Recipient, _Opts) ->
     undefined.
 
 trusted_measurement_body_id(Recipient, Req, Opts) ->
-    case {internal_measurement_request(Req),
+    case {internal_measurement_request(Req, Opts),
           trusted_body_id(Req, Opts),
           recipient_body_id(Recipient, Opts)} of
         {true, BodyID, BodyID} when is_binary(BodyID) ->
@@ -1161,12 +1164,12 @@ measurement_context_digest(Recipient, Opts) ->
         Digest when is_binary(Digest), byte_size(Digest) > 0 ->
             Digest;
         _ ->
-            device_context_digest(device_context(Opts))
+            device_context_digest(device_context(Opts), Opts)
     end.
 
 recipient_binding_value(Key, Recipient, Opts) when is_map(Recipient) ->
-    Binding = load_part(maps:get(<<"binding">>, Recipient, #{}), Opts),
-    maps:get(Key, Binding, undefined);
+    Binding = load_part(hb_maps:get(<<"binding">>, Recipient, #{}, Opts), Opts),
+    hb_maps:get(Key, Binding, undefined, Opts);
 recipient_binding_value(_Key, _Recipient, _Opts) ->
     undefined.
 
@@ -1200,11 +1203,11 @@ device_context(Opts) ->
         <<"secret-method">> => ?METHOD
     }.
 
-device_context_digest(Context) ->
-    Vmpl = decimal_param(hb_maps:get(<<"vmpl">>, Context, 0, #{})),
+device_context_digest(Context, Opts) ->
+    Vmpl = decimal_param(hb_maps:get(<<"vmpl">>, Context, 0, Opts)),
     ReportContext =
-        hb_maps:get(<<"report-data-context">>, Context, ?REPORT_CONTEXT, #{}),
-    Method = hb_maps:get(<<"secret-method">>, Context, ?METHOD, #{}),
+        hb_maps:get(<<"report-data-context">>, Context, ?REPORT_CONTEXT, Opts),
+    Method = hb_maps:get(<<"secret-method">>, Context, ?METHOD, Opts),
     hb_util:encode(
         crypto:hash(
             sha256,
@@ -1216,14 +1219,14 @@ device_context_digest(Context) ->
 vmpl(Opts) ->
     parse_integer(hb_opts:get(<<"snp-vmpl">>, undefined, Opts), 0).
 
-measurement_nonce(Req) ->
-    case expected_nonce(Req) of
+measurement_nonce(Req, Opts) ->
+    case expected_nonce(Req, Opts) of
         undefined -> crypto:strong_rand_bytes(32);
         Nonce -> Nonce
     end.
 
-expected_nonce(Req) ->
-    case hb_maps:get(<<"nonce">>, Req, undefined, #{}) of
+expected_nonce(Req, Opts) ->
+    case hb_maps:get(<<"nonce">>, Req, undefined, Opts) of
         undefined -> undefined;
         B when is_binary(B) ->
             try hb_util:decode(B)
@@ -1232,7 +1235,7 @@ expected_nonce(Req) ->
         _ -> undefined
     end.
 
-secret_activation_public_body(Secret, Credential) ->
+secret_activation_public_body(Secret, Credential, Opts) ->
     Now = erlang:system_time(second),
     #{
         <<"type">> => <<"lapee-secret-activation">>,
@@ -1249,18 +1252,18 @@ secret_activation_public_body(Secret, Credential) ->
                     hmac,
                     sha256,
                     Secret,
-                    secret_activation_context(Credential, Now)))
+                    secret_activation_context(Credential, Now, Opts)))
     }.
 
-secret_activation_context(Credential, IssuedAt) ->
+secret_activation_context(Credential, IssuedAt, Opts) ->
     <<"lapee-secret-activation-v1\n",
       "measurement-device:snp@1.0\n",
       "method:", ?METHOD/binary, "\n",
       "issued-at-unix:", (integer_to_binary(IssuedAt))/binary, "\n",
-      "credential-id:", (wrapped_secret_id(Credential, #{}))/binary>>.
+      "credential-id:", (wrapped_secret_id(Credential, Opts))/binary>>.
 
 wrapped_secret_id(Credential, Opts) when is_map(Credential) ->
-    case hb_maps:get(<<"credential-id">>, Credential, undefined, #{}) of
+    case hb_maps:get(<<"credential-id">>, Credential, undefined, Opts) of
         ID when is_binary(ID), byte_size(ID) > 0 ->
             ID;
         _ ->
@@ -1269,7 +1272,7 @@ wrapped_secret_id(Credential, Opts) when is_map(Credential) ->
                     [
                         {Key, Value}
                      || Key <- wrapped_secret_identity_keys(),
-                        (Value = hb_maps:get(Key, Credential, undefined, #{}))
+                        (Value = hb_maps:get(Key, Credential, undefined, Opts))
                             =/= undefined
                     ]),
                 uncommitted,
@@ -1395,8 +1398,11 @@ encode_array_field(Key, Report) ->
     hb_util:encode(array_binary(report_get(Key, Report, <<>>))).
 
 report_get(Key, Report, Default) ->
-    case hb_maps:get(Key, Report, undefined, #{}) of
-        undefined -> hb_maps:get(underscore_key(Key), Report, Default, #{});
+    report_get(Key, Report, Default, Report).
+
+report_get(Key, Report, Default, Opts) ->
+    case hb_maps:get(Key, Report, undefined, Opts) of
+        undefined -> hb_maps:get(underscore_key(Key), Report, Default, Opts);
         Value -> Value
     end.
 
@@ -1479,7 +1485,7 @@ response_body(Body, _Opts) ->
     Body.
 
 measurement_part(Key, Measurement, Opts) ->
-    load_part(maps:get(Key, Measurement, #{}), Opts).
+    load_part(hb_maps:get(Key, Measurement, #{}, Opts), Opts).
 
 load_part(Link, Opts) when ?IS_LINK(Link) ->
     load_part(hb_cache:ensure_loaded(Link, Opts), Opts);

@@ -303,8 +303,8 @@ verify_peer_url(Url, Req, Opts) ->
                   (hb_util:encode(FreshNonce))/binary>>,
                 Opts),
             Opts),
-        ok = ensure_measurement_shape(Boot),
-        ok = ensure_measurement_shape(Fresh),
+        ok = ensure_measurement_shape(Boot, Opts),
+        ok = ensure_measurement_shape(Fresh, Opts),
         Subject = secret_recipient(Boot, Opts),
         ok = ensure_same_subject(Boot, Fresh, Opts),
         ok = ensure_subject_matches_measurement(Subject, Boot, Opts),
@@ -439,7 +439,7 @@ wrap_secret_for_subject(Subject, Secret, Opts) when is_map(Subject) ->
     {ok, Module} = hb_device_load:reference(Device, Opts),
     case Device of
         <<"tpm@2.0a">> ->
-            (Module:make_credential_for_subject(Subject, Secret))#{
+            (Module:make_credential_for_subject(Subject, Secret, Opts))#{
                 <<"type">> => <<"lapee-wrapped-secret">>,
                 <<"measurement-device">> => Device,
                 <<"method">> => <<"tpm2-activate-credential">>,
@@ -510,12 +510,12 @@ ensure_secret_activation(Activation, Credential, Expected, Subject, Opts) ->
             end
     end.
 
-ensure_measurement_shape(Measurement) when is_map(Measurement) ->
+ensure_measurement_shape(Measurement, Opts) when is_map(Measurement) ->
     case {
-        hb_maps:get(<<"type">>, Measurement, undefined, #{}),
-        hb_maps:get(<<"body">>, Measurement, undefined, #{}),
-        hb_maps:get(<<"evidence">>, Measurement, undefined, #{}),
-        hb_maps:get(<<"secret-recipient">>, Measurement, undefined, #{})
+        hb_maps:get(<<"type">>, Measurement, undefined, Opts),
+        hb_maps:get(<<"body">>, Measurement, undefined, Opts),
+        hb_maps:get(<<"evidence">>, Measurement, undefined, Opts),
+        hb_maps:get(<<"secret-recipient">>, Measurement, undefined, Opts)
     } of
         {?TYPE, Body, Evidence, Recipient}
                 when (is_map(Body) orelse ?IS_LINK(Body)),
@@ -678,6 +678,9 @@ engine_request(Req) ->
     Req#{<<"measurement-internal-token">> => internal_request_token()}.
 
 internal_request(Req) ->
+    internal_request(Req, Req).
+
+internal_request(Req, Opts) ->
     case persistent_term:get(internal_request_token_key(), undefined) of
         undefined ->
             false;
@@ -687,7 +690,7 @@ internal_request(Req) ->
                     <<"measurement-internal-token">>,
                     Req,
                     undefined,
-                    #{}) =:= Token
+                    Opts) =:= Token
     end.
 
 internal_request_token() ->
@@ -798,14 +801,14 @@ response_body(Body, _Opts) ->
 
 nonce_for(boot, _Req, _Opts) ->
     crypto:strong_rand_bytes(32);
-nonce_for(fresh, Req, _Opts) ->
-    case decoded_nonce(Req) of
+nonce_for(fresh, Req, Opts) ->
+    case decoded_nonce(Req, Opts) of
         undefined -> crypto:strong_rand_bytes(32);
         Nonce -> Nonce
     end.
 
-decoded_nonce(Req) ->
-    case maps:get(<<"nonce">>, Req, undefined) of
+decoded_nonce(Req, Opts) ->
+    case hb_maps:get(<<"nonce">>, Req, undefined, Opts) of
         undefined -> undefined;
         B when is_binary(B) ->
             try hb_util:decode(B)

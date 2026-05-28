@@ -408,7 +408,7 @@ detached_meta_key(_Key) -> false.
 
 stable_uncommitted_id(Msg, Opts) ->
     hb_message:id(
-        hb_message:uncommitted_deep(Msg, #{}),
+        hb_message:uncommitted_deep(Msg, Opts),
         uncommitted,
         Opts
     ).

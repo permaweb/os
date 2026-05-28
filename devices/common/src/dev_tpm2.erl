@@ -8,7 +8,7 @@
 -export([info/1, info/3, supported/3, subject/3, measure/3,
          unwrap_secret/3, activate_credential_secret/2]).
 -export([verify/3]).
--export([make_credential_for_subject/2]).
+-export([make_credential_for_subject/3]).
 -export([ensure_activation_secret/5]).
 -include_lib("hb/include/hb.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -86,26 +86,26 @@ verify(Base, Req, Opts) ->
                    <<"EK certificate matches EK public material; AK and "
                      "recipient material are self-consistent">>,
                    <<"core">>),
-        safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req)) end,
+        safely_run(fun() -> chk_quote(Envelope, expected_nonce(Req, Opts), Opts) end,
                    <<"TPM2_Quote signature + pcrDigest + nonce all valid">>,
                    <<"core">>),
-        safely_run(fun() -> chk_ak_policy_bound(Envelope) end,
+        safely_run(fun() -> chk_ak_policy_bound(Envelope, Opts) end,
                    <<"AK authPolicy is PCR-bound to the quoted boot state">>,
                    <<"core">>),
         safely_run(fun() -> chk_tcg_event_log_replay(Envelope, Opts) end,
                    <<"TCG measured-boot log replays to quoted loaded-image PCRs "
                      "and exposed loaded-image evidence">>,
                    <<"core">>),
-        safely_run(fun() -> chk_event_log_replay(Envelope) end,
+        safely_run(fun() -> chk_event_log_replay(Envelope, Opts) end,
                    <<"Runtime event log replay of PCR 15 matches quoted value">>,
                    <<"core">>),
-        safely_run(fun() -> chk_binding(Envelope) end,
+        safely_run(fun() -> chk_binding(Envelope, Opts) end,
                    <<"PCR 15 extension commits to node_message_id">>,
                    <<"core">>),
         safely_run(fun() -> chk_measurement_body_binding(Envelope, Opts) end,
                    <<"PCR 15 extension commits to measurement body">>,
                    <<"core">>),
-        safely_run(fun() -> chk_node_msg_shape(Envelope) end,
+        safely_run(fun() -> chk_node_msg_shape(Envelope, Opts) end,
                    <<"Embedded node_message + id present and correct shape">>,
                    <<"core">>)
     ],
@@ -144,10 +144,10 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
     } of
         {<<"lapee-measurement">>, <<"tpm@2.0a">>, Body, Evidence}
                 when is_map(Body), is_map(Evidence) ->
-            Node = hb_maps:get(<<"node">>, Envelope, undefined, #{}),
-            Node1 = hb_maps:get(<<"node">>, Body, Node, #{}),
+            Node = hb_maps:get(<<"node">>, Envelope, undefined, Opts),
+            Node1 = hb_maps:get(<<"node">>, Body, Node, Opts),
             ExtendedSubject =
-                hb_maps:get(<<"extended-subject">>, Evidence, undefined, #{}),
+                hb_maps:get(<<"extended-subject">>, Evidence, undefined, Opts),
             NodeID =
                 case ExtendedSubject of
                     B when is_binary(B), byte_size(B) > 0 -> B;
@@ -160,13 +160,13 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                             _ -> undefined
                         end
                 end,
-            Quote = hb_maps:get(<<"quote">>, Evidence, #{}, #{}),
+            Quote = hb_maps:get(<<"quote">>, Evidence, #{}, Opts),
             Recipient =
-                hb_maps:get(<<"secret-recipient">>, Envelope, undefined, #{}),
+                hb_maps:get(<<"secret-recipient">>, Envelope, undefined, Opts),
             Evidence#{
                 <<"lapee-attestation-version">> =>
                     hb_maps:get(<<"lapee-attestation-version">>,
-                                Envelope, <<"1.0">>, #{}),
+                                Envelope, <<"1.0">>, Opts),
                 <<"tpm-quote">> => Quote,
                 <<"node-message">> => Node1,
                 <<"node-message-id">> => NodeID,
@@ -174,7 +174,7 @@ normalise_attestation(Envelope, Opts) when is_map(Envelope) ->
                 <<"wallet-address">> =>
                     case Node1 of
                         M2 when is_map(M2) ->
-                            hb_maps:get(<<"address">>, M2, null, #{});
+                            hb_maps:get(<<"address">>, M2, null, Opts);
                         _ -> null
                     end,
                 <<"secret-recipient">> => Recipient
@@ -242,11 +242,11 @@ configured_trusted_ca_path(Opts) ->
     hb_opts:get(<<"lapee-tpm-ca-cert">>, undefined, Opts).
 
 resolve_trusted_ca_from_internal_bundle(Opts) ->
-    Roots = hb_maps:get(<<"cert-roots">>, lib_hb_db_tpm:load(?MODULE, Opts), [], #{}),
+    Roots = hb_maps:get(<<"cert-roots">>, lib_hb_db_tpm:load(?MODULE, Opts), [], Opts),
     Pem = iolist_to_binary(
         [pem_with_trailing_newline(RootPem)
          || Root <- Roots,
-            RootPem <- [hb_maps:get(<<"pem">>, Root, <<>>, #{})],
+            RootPem <- [hb_maps:get(<<"pem">>, Root, <<>>, Opts)],
             is_binary(RootPem),
             byte_size(RootPem) > 0]),
     case Pem of
@@ -740,16 +740,16 @@ tpm_public_name(Tpm2BPublic) ->
 tpm_identity_error(Detail) when is_binary(Detail) ->
     throw({tpm_identity, Detail}).
 
-chk_quote(Envelope, ExpectedNonce) ->
-    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
-    AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, #{}),
+chk_quote(Envelope, ExpectedNonce, Opts) ->
+    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, Opts),
+    AkPem = hb_maps:get(<<"ak-pub-pem">>, Envelope, <<>>, Opts),
     AkQualifiedName =
-        safe_decode(hb_maps:get(<<"ak-qualified-name">>, Envelope, <<>>, #{})),
-    Quoted = hb_util:decode(hb_maps:get(<<"quoted">>, Q, <<>>, #{})),
-    Sig    = hb_util:decode(hb_maps:get(<<"signature">>, Q, <<>>, #{})),
-    Nonce  = hb_util:decode(hb_maps:get(<<"nonce">>, Q, <<>>, #{})),
-    Sel    = hb_maps:get(<<"pcr-selection">>, Q, [], #{}),
-    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
+        safe_decode(hb_maps:get(<<"ak-qualified-name">>, Envelope, <<>>, Opts)),
+    Quoted = hb_util:decode(hb_maps:get(<<"quoted">>, Q, <<>>, Opts)),
+    Sig    = hb_util:decode(hb_maps:get(<<"signature">>, Q, <<>>, Opts)),
+    Nonce  = hb_util:decode(hb_maps:get(<<"nonce">>, Q, <<>>, Opts)),
+    Sel    = hb_maps:get(<<"pcr-selection">>, Q, [], Opts),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, Opts),
 
     case ExpectedNonce =/= undefined andalso Nonce =/= ExpectedNonce of
         true ->
@@ -761,7 +761,8 @@ chk_quote(Envelope, ExpectedNonce) ->
                         true ->
                             chk_tpms_attest(
                                 Quoted, Nonce, Sel, PcrMap,
-                                AkQualifiedName);
+                                AkQualifiedName,
+                                Opts);
                         false ->
                             {error, <<"RSA-PSS(SHA256) verify of "
                                       "TPMS_ATTEST failed">>}
@@ -773,7 +774,7 @@ chk_quote(Envelope, ExpectedNonce) ->
     end.
 
 chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
-                ExpectedQualifiedSigner) ->
+                ExpectedQualifiedSigner, Opts) ->
     try
         <<16#ff544347:32/unsigned-big, 16#8018:16/unsigned-big,
           Rest0/binary>> = Quoted,
@@ -796,7 +797,7 @@ chk_tpms_attest(Quoted, ExpectedNonce, SelIndices, PcrMap,
                                <<"TPMS_ATTEST PCR selection does not match "
                                  "reported pcr-selection">>})
                 end,
-                Computed = compute_pcr_digest(SignedIndices, PcrMap),
+                Computed = compute_pcr_digest(SignedIndices, PcrMap, Opts),
                 case Computed of
                     PcrDigest ->
                         {ok,
@@ -866,12 +867,12 @@ normalize_pcr_indices(_) ->
 normalize_pcr_index(I) when is_integer(I) -> I;
 normalize_pcr_index(B) when is_binary(B) -> binary_to_integer(B).
 
-compute_pcr_digest(Indices, PcrMap) ->
+compute_pcr_digest(Indices, PcrMap, Opts) ->
     Concat =
         lists:foldl(
             fun(I, Acc) ->
                 Key = integer_to_binary(I),
-                B64 = hb_maps:get(Key, PcrMap, undefined, #{}),
+                B64 = hb_maps:get(Key, PcrMap, undefined, Opts),
                 case B64 of
                     undefined -> throw({missing_pcr, I});
                     _ -> <<Acc/binary, (hb_util:decode(B64))/binary>>
@@ -880,15 +881,15 @@ compute_pcr_digest(Indices, PcrMap) ->
             <<>>, Indices),
     crypto:hash(sha256, Concat).
 
-chk_ak_policy_bound(Envelope) ->
-    AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, #{})),
-    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
-    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, #{}),
+chk_ak_policy_bound(Envelope, Opts) ->
+    AkPublic = safe_decode(hb_maps:get(<<"ak-public">>, Envelope, <<>>, Opts)),
+    Q = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, Opts),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Q, #{}, Opts),
     case tpm2b_public_auth_policy(AkPublic) of
         {ok, <<>>} ->
             {error, <<"AK authPolicy is empty">>};
         {ok, Policy} when byte_size(Policy) =:= 32 ->
-            ExpectedPolicy = ak_policy_digest_result(?AK_POLICY_PCRS, PcrMap),
+            ExpectedPolicy = ak_policy_digest_result(?AK_POLICY_PCRS, PcrMap, Opts),
             case ExpectedPolicy of
                 {ok, Policy} ->
                     {ok, <<"AK authPolicy matches the LapEE PCR policy">>};
@@ -908,24 +909,24 @@ chk_ak_policy_bound(Envelope) ->
     end.
 
 chk_tcg_event_log_replay(Envelope, Opts) ->
-    Quote = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}),
-    PcrMap = hb_maps:get(<<"pcr-values">>, Quote, #{}, #{}),
-    TcgLog = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, #{}),
+    Quote = hb_maps:get(<<"tpm-quote">>, Envelope, #{}, Opts),
+    PcrMap = hb_maps:get(<<"pcr-values">>, Quote, #{}, Opts),
+    TcgLog = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, Opts),
     LogBin = decode_idish(TcgLog),
     Replayed = lib_lapee_tpm_tcg:replay_pcrs(
         LogBin,
         [4, 11]
     ),
-    Signals = lib_lapee_tpm_tcg:boot_signals(LogBin),
-    case {hb_maps:get(<<"4">>, PcrMap, undefined, #{}),
-          hb_maps:get(<<"11">>, PcrMap, undefined, #{})} of
+    Signals = lib_lapee_tpm_tcg:boot_signals(LogBin, Opts),
+    case {hb_maps:get(<<"4">>, PcrMap, undefined, Opts),
+          hb_maps:get(<<"11">>, PcrMap, undefined, Opts)} of
         {undefined, _} ->
             {error, <<"quote omitted PCR 4 loaded EFI application measurement">>};
         {_, undefined} ->
             {error, <<"quote omitted PCR 11 loaded UKI section measurements">>};
         _ ->
             case first_error([
-                compare_replayed_pcrs(Replayed, PcrMap),
+                compare_replayed_pcrs(Replayed, PcrMap, Opts),
                 compare_boot_signal(<<"secure-boot">>, Signals, Envelope, Opts),
                 compare_boot_signal(
                     <<"secure-boot-policy">>, Signals, Envelope, Opts),
@@ -947,10 +948,10 @@ first_error([{error, _} = Error | _Rest]) ->
 
 compare_boot_signal(Key, Signals, Envelope, Opts) ->
     Expected =
-        hb_maps:get(Key, Signals, undefined, #{}),
+        hb_maps:get(Key, Signals, undefined, Opts),
     ActualSignals =
         ensure_loaded_value(
-            hb_maps:get(<<"signals">>, Envelope, #{}, #{}),
+            hb_maps:get(<<"signals">>, Envelope, #{}, Opts),
             Opts),
     Actual =
         ensure_loaded_value(
@@ -975,12 +976,12 @@ compare_boot_signal(Key, Signals, Envelope, Opts) ->
             {error, <<Key/binary, " signal has invalid shape">>}
     end.
 
-compare_replayed_pcrs(Replayed, PcrMap) ->
+compare_replayed_pcrs(Replayed, PcrMap, Opts) ->
     Compare =
         maps:fold(
             fun(Pcr, Expected, Acc) ->
                 Key = integer_to_binary(Pcr),
-                case {hb_maps:get(Key, PcrMap, undefined, #{}), Acc} of
+                case {hb_maps:get(Key, PcrMap, undefined, Opts), Acc} of
                     {_, {error, _} = E} ->
                         E;
                     {undefined, _} ->
@@ -1002,10 +1003,10 @@ compare_replayed_pcrs(Replayed, PcrMap) ->
 
 compare_loaded_image_signal(Signals, Envelope, Opts) ->
     Expected =
-        hb_maps:get(<<"loaded-image">>, Signals, undefined, #{}),
+        hb_maps:get(<<"loaded-image">>, Signals, undefined, Opts),
     ActualSignals =
         ensure_loaded_value(
-            hb_maps:get(<<"signals">>, Envelope, #{}, #{}),
+            hb_maps:get(<<"signals">>, Envelope, #{}, Opts),
             Opts),
     Actual =
         ensure_loaded_value(
@@ -1025,7 +1026,7 @@ compare_loaded_image_signal(Signals, Envelope, Opts) ->
 
 compare_loaded_image_signal_body(Expected, Actual, Opts) ->
     ExpectedDigest =
-        hb_maps:get(<<"components-digest">>, Expected, undefined, #{}),
+        hb_maps:get(<<"components-digest">>, Expected, undefined, Opts),
     ActualDigest =
         hb_maps:get(<<"components-digest">>, Actual, undefined, Opts),
     case {ExpectedDigest, ActualDigest} of
@@ -1037,7 +1038,7 @@ compare_loaded_image_signal_body(Expected, Actual, Opts) ->
 
 compare_loaded_image_components(Expected, Actual, Opts) ->
     ExpectedComponents =
-        hb_maps:get(<<"components">>, Expected, undefined, #{}),
+        hb_maps:get(<<"components">>, Expected, undefined, Opts),
     ActualComponents =
         ensure_loaded_value(
             hb_maps:get(<<"components">>, Actual, undefined, Opts),
@@ -1068,13 +1069,13 @@ ensure_loaded_value(Value, _Opts) ->
 
 stable_message_id(Msg, Opts) ->
     hb_message:id(
-        hb_message:uncommitted_deep(Msg, #{}),
+        hb_message:uncommitted_deep(Msg, Opts),
         uncommitted,
         Opts
     ).
 
-ak_policy_digest(Pcrs, PcrMap) ->
-    PcrPolicy = policy_pcr_digest(Pcrs, PcrMap),
+ak_policy_digest(Pcrs, PcrMap, Opts) ->
+    PcrPolicy = policy_pcr_digest(Pcrs, PcrMap, Opts),
     ActivatePolicy =
         crypto:hash(
             sha256,
@@ -1086,8 +1087,8 @@ ak_policy_digest(Pcrs, PcrMap) ->
         <<0:256, ?TPM_CC_POLICY_OR:32/unsigned-big,
           PcrPolicy/binary, ActivatePolicy/binary>>).
 
-policy_pcr_digest(Pcrs, PcrMap) ->
-    PcrDigest = compute_pcr_digest(Pcrs, PcrMap),
+policy_pcr_digest(Pcrs, PcrMap, Opts) ->
+    PcrDigest = compute_pcr_digest(Pcrs, PcrMap, Opts),
     Selection = policy_pcr_selection(Pcrs),
     crypto:hash(sha256, <<0:256, ?TPM_CC_POLICY_PCR:32/unsigned-big,
                           Selection/binary, PcrDigest/binary>>).
@@ -1108,23 +1109,23 @@ pcr_select_byte(Pcrs, Byte) ->
         0,
         Pcrs).
 
-ak_policy_digest_result(Pcrs, PcrMap) ->
-    try {ok, ak_policy_digest(Pcrs, PcrMap)}
+ak_policy_digest_result(Pcrs, PcrMap, Opts) ->
+    try {ok, ak_policy_digest(Pcrs, PcrMap, Opts)}
     catch
         throw:{missing_pcr, I} -> {missing_pcr, I};
         _:_ -> invalid
     end.
 
-chk_event_log_replay(Envelope) ->
+chk_event_log_replay(Envelope, Opts) ->
     Events = [E || E <- hb_maps:get(<<"runtime-event-log">>, Envelope, [],
-                                    #{}),
-                   int_pcr(hb_maps:get(<<"pcr">>, E, 0, #{})) =:=
+                                    Opts),
+                   int_pcr(hb_maps:get(<<"pcr">>, E, 0, Opts)) =:=
                        ?NODE_IDENTITY_PCR],
     Quoted15 =
         hb_maps:get(<<"15">>,
             hb_maps:get(<<"pcr-values">>,
-                hb_maps:get(<<"tpm-quote">>, Envelope, #{}, #{}), #{}, #{}),
-            undefined, #{}),
+                hb_maps:get(<<"tpm-quote">>, Envelope, #{}, Opts), #{}, Opts),
+            undefined, Opts),
     case {Events, Quoted15} of
         {[], _} ->
             {error, <<"no PCR-15 events in runtime_event_log "
@@ -1136,7 +1137,7 @@ chk_event_log_replay(Envelope) ->
                 lists:foldl(
                     fun(E, Acc) ->
                         Dig = hb_util:decode(
-                                hb_maps:get(<<"digest">>, E, <<>>, #{})),
+                                hb_maps:get(<<"digest">>, E, <<>>, Opts)),
                         crypto:hash(sha256, <<Acc/binary, Dig/binary>>)
                     end,
                     <<0:256>>, Events),
@@ -1155,12 +1156,12 @@ chk_event_log_replay(Envelope) ->
 int_pcr(V) when is_integer(V) -> V;
 int_pcr(V) when is_binary(V)  -> binary_to_integer(V).
 
-chk_binding(Envelope) ->
+chk_binding(Envelope, Opts) ->
     ExpectedId =
-        hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
+        hb_maps:get(<<"node-message-id">>, Envelope, undefined, Opts),
     Events = [E || E <- hb_maps:get(<<"runtime-event-log">>, Envelope, [],
-                                    #{}),
-                   int_pcr(hb_maps:get(<<"pcr">>, E, 0, #{})) =:=
+                                    Opts),
+                   int_pcr(hb_maps:get(<<"pcr">>, E, 0, Opts)) =:=
                        ?NODE_IDENTITY_PCR],
     case {ExpectedId, Events} of
         {undefined, _} -> {error, <<"no node_message_id in envelope">>};
@@ -1174,7 +1175,7 @@ chk_binding(Envelope) ->
                 32 ->
                     Match = [E || E <- Events,
                                   hb_util:decode(
-                                    hb_maps:get(<<"digest">>, E, <<>>, #{}))
+                                    hb_maps:get(<<"digest">>, E, <<>>, Opts))
                                       =:= IdRaw],
                     case Match of
                         [] ->
@@ -1183,7 +1184,7 @@ chk_binding(Envelope) ->
                                 [binary:part(Id, 0,
                                              min(16, byte_size(Id)))]))};
                         [E|_] ->
-                            Seq = hb_maps:get(<<"seq">>, E, <<>>, #{}),
+                            Seq = hb_maps:get(<<"seq">>, E, <<>>, Opts),
                             {ok, iolist_to_binary(io_lib:format(
                                 "match at seq=~p", [Seq]))}
                     end;
@@ -1198,16 +1199,16 @@ chk_measurement_body_binding(Envelope, Opts) ->
     Body = hb_maps:get(
         <<"measurement-body">>,
         Envelope,
-        hb_maps:get(<<"body">>, Envelope, undefined, #{}),
-        #{}),
+        hb_maps:get(<<"body">>, Envelope, undefined, Opts),
+        Opts),
     ExtendedSubject =
-        hb_maps:get(<<"extended-subject">>, Envelope, undefined, #{}),
+        hb_maps:get(<<"extended-subject">>, Envelope, undefined, Opts),
     case {Body, ExtendedSubject} of
         {M, SubjectID} when is_map(M), is_binary(SubjectID) ->
             ExpectedID = measurement_body_id(M, Opts),
             case SubjectID of
                 ExpectedID ->
-                    chk_measurement_body_digest(Envelope, ExpectedID);
+                    chk_measurement_body_digest(Envelope, ExpectedID, Opts);
                 _ ->
                     {error, iolist_to_binary(io_lib:format(
                         "extended_subject ~s does not match body id ~s",
@@ -1221,13 +1222,13 @@ chk_measurement_body_binding(Envelope, Opts) ->
             {error, <<"measurement body or extended_subject has wrong shape">>}
     end.
 
-chk_measurement_body_digest(Envelope, SubjectID) ->
+chk_measurement_body_digest(Envelope, SubjectID, Opts) ->
     ExpectedDigest = hb_util:encode(hb_util:native_id(SubjectID)),
     case hb_maps:get(
         <<"extended-subject-digest">>,
         Envelope,
         ExpectedDigest,
-        #{}) of
+        Opts) of
         ExpectedDigest ->
             {ok, iolist_to_binary(io_lib:format(
                 "measurement body id ~s", [short_id(SubjectID)]))};
@@ -1242,9 +1243,9 @@ short_id(Bin) when is_binary(Bin) ->
 short_id(Value) ->
     to_bin(Value).
 
-chk_node_msg_shape(Envelope) ->
-    Nm = hb_maps:get(<<"node-message">>, Envelope, undefined, #{}),
-    Id = hb_maps:get(<<"node-message-id">>, Envelope, undefined, #{}),
+chk_node_msg_shape(Envelope, Opts) ->
+    Nm = hb_maps:get(<<"node-message">>, Envelope, undefined, Opts),
+    Id = hb_maps:get(<<"node-message-id">>, Envelope, undefined, Opts),
     case {Nm, Id} of
         {undefined, _} -> {error, <<"missing node_message">>};
         {_, undefined} -> {error, <<"missing node_message_id">>};
@@ -1357,7 +1358,7 @@ measure(_Base, Req, Opts) ->
     try
         {ok, Subject, SubjectID, SubjectDigest} =
             prepare_measurement_subject(Req, Opts),
-        Nonce = resolve_nonce(Req),
+        Nonce = resolve_nonce(Req, Opts),
         Tpm = boot_tpm_evidence(
             Subject, SubjectID, SubjectDigest, Nonce, Opts),
         {ok, #{<<"status">> => 200, <<"body">> => Tpm}}
@@ -1441,14 +1442,14 @@ credential_activation_public_body(CertInfo, Credential, Opts) ->
         <<"credential-secret-proof">> =>
             hb_util:encode(
                 credential_activation_proof(
-                    CertInfo, Credential, AkName, Now))
+                    CertInfo, Credential, AkName, Now, Opts))
     }.
 
-make_credential_for_subject(Subject, Secret) ->
+make_credential_for_subject(Subject, Secret, Opts) ->
     EkPublic = hb_util:decode(
-        tpm_subject_field(<<"ek-public">>, Subject)),
+        tpm_subject_field(<<"ek-public">>, Subject, Opts)),
     AkName = hb_util:decode(
-        tpm_subject_field(<<"ak-name">>, Subject)),
+        tpm_subject_field(<<"ak-name">>, Subject, Opts)),
     software_make_credential(EkPublic, AkName, Secret).
 
 software_make_credential(EkPublic, AkName, Secret) ->
@@ -1589,7 +1590,7 @@ ensure_activation_secret(Activation, Credential, Expected, Subject, Opts) ->
     AkName = hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts),
     IssuedAt = hb_maps:get(<<"issued-at-unix">>, Activation, 0, Opts),
     ExpectedProof =
-        credential_activation_proof(Expected, Credential, AkName, IssuedAt),
+        credential_activation_proof(Expected, Credential, AkName, IssuedAt, Opts),
     GotHash = hb_maps:get(
         <<"credential-secret-sha256">>, Activation, <<>>, Opts),
     GotProof = safe_decode(
@@ -1634,17 +1635,17 @@ ensure_activation_envelope(Activation, Subject, Opts) ->
     case Subject of
         undefined -> ok;
         _ ->
-            ExpectedAk = tpm_subject_field(<<"ak-name">>, Subject),
+            ExpectedAk = tpm_subject_field(<<"ak-name">>, Subject, Opts),
             case hb_maps:get(<<"ak-name">>, Activation, <<>>, Opts) of
                 ExpectedAk when byte_size(ExpectedAk) > 0 -> ok;
                 _ -> bad_activation(<<"ak-name">>)
             end
     end.
 
-tpm_subject_field(Key, Subject) when is_map(Subject) ->
-    Material = hb_maps:get(<<"public-material">>, Subject, #{}, #{}),
-    hb_maps:get(Key, Material, hb_maps:get(Key, Subject, <<>>, #{}), #{});
-tpm_subject_field(_Key, _Subject) ->
+tpm_subject_field(Key, Subject, Opts) when is_map(Subject) ->
+    Material = hb_maps:get(<<"public-material">>, Subject, #{}, Opts),
+    hb_maps:get(Key, Material, hb_maps:get(Key, Subject, <<>>, Opts), Opts);
+tpm_subject_field(_Key, _Subject, _Opts) ->
     <<>>.
 
 ensure_no_activation_error(Activation, Opts) when is_map(Activation) ->
@@ -1667,16 +1668,16 @@ bad_activation(Key) ->
            #{<<"credential-activation">> =>
                 <<Key/binary, " invalid">>}}).
 
-credential_activation_proof(Secret, Credential, AkName, IssuedAt) ->
+credential_activation_proof(Secret, Credential, AkName, IssuedAt, Opts) ->
     crypto:mac(
         hmac,
         sha256,
         Secret,
-        credential_activation_proof_context(Credential, AkName, IssuedAt)).
+        credential_activation_proof_context(Credential, AkName, IssuedAt, Opts)).
 
-credential_activation_proof_context(Credential, AkName, IssuedAt) ->
-    Blob = hb_maps:get(<<"credential-blob">>, Credential, <<>>, #{}),
-    EncSecret = hb_maps:get(<<"secret">>, Credential, <<>>, #{}),
+credential_activation_proof_context(Credential, AkName, IssuedAt, Opts) ->
+    Blob = hb_maps:get(<<"credential-blob">>, Credential, <<>>, Opts),
+    EncSecret = hb_maps:get(<<"secret">>, Credential, <<>>, Opts),
     <<"lapee-tpm-credential-activation-v1\n",
       "type:lapee-tpm-credential-activation\n",
       "version:1.0\n",
@@ -1774,7 +1775,7 @@ prepare_measurement_subject(Req, Opts) ->
     end.
 
 subject_identity_from_req(Body, Req, Opts) ->
-    case internal_measurement_request(Req) of
+    case internal_measurement_request(Req, Opts) of
         true ->
             case trusted_subject_id(Req, Opts) of
                 {ok, ID, Digest} -> {Body, ID, Digest};
@@ -1784,7 +1785,7 @@ subject_identity_from_req(Body, Req, Opts) ->
             recompute_subject_identity(Body, Opts)
     end.
 
-internal_measurement_request(Req) ->
+internal_measurement_request(Req, Opts) ->
     case persistent_term:get(
         {permawebos_measurement, internal_request_token},
         undefined) of
@@ -1796,7 +1797,7 @@ internal_measurement_request(Req) ->
                     <<"measurement-internal-token">>,
                     Req,
                     undefined,
-                    #{}) =:= Token
+                    Opts) =:= Token
     end.
 
 trusted_subject_id(Req, Opts) ->
@@ -1854,7 +1855,8 @@ boot_tpm_evidence(Subject, SubjectID, SubjectDigest, Nonce, Opts) ->
                             byte_size(TcgLogBin),
                         <<"tcg-event-log-format">> =>
                             infer_log_format(TcgLogBin),
-                        <<"signals">> => lib_lapee_tpm_tcg:boot_signals(TcgLogBin)
+                        <<"signals">> =>
+                            lib_lapee_tpm_tcg:boot_signals(TcgLogBin, Opts)
                     };
                 {error, Reason} ->
                     throw({boot_attestation_error,
@@ -1916,19 +1918,19 @@ append_event(Pcr, Payload) ->
     ok.
 
 
-resolve_nonce(Req) when is_map(Req) ->
-    case decoded_nonce(Req) of
+resolve_nonce(Req, Opts) when is_map(Req) ->
+    case decoded_nonce(Req, Opts) of
         undefined -> crypto:strong_rand_bytes(32);
         Decoded when byte_size(Decoded) > 64 -> crypto:strong_rand_bytes(32);
         Decoded -> Decoded
     end;
-resolve_nonce(_) -> crypto:strong_rand_bytes(32).
+resolve_nonce(_, _Opts) -> crypto:strong_rand_bytes(32).
 
-expected_nonce(Req) ->
-    decoded_nonce(Req).
+expected_nonce(Req, Opts) ->
+    decoded_nonce(Req, Opts).
 
-decoded_nonce(Req) when is_map(Req) ->
-    case maps:get(<<"nonce">>, Req, undefined) of
+decoded_nonce(Req, Opts) when is_map(Req) ->
+    case hb_maps:get(<<"nonce">>, Req, undefined, Opts) of
         undefined -> undefined;
         B when is_binary(B) ->
             try hb_util:decode(B)
@@ -1936,7 +1938,7 @@ decoded_nonce(Req) when is_map(Req) ->
             end;
         _ -> undefined
     end;
-decoded_nonce(_) ->
+decoded_nonce(_, _Opts) ->
     undefined.
 
 subject_id(Subject, Opts) when is_map(Subject) ->

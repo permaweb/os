@@ -16,7 +16,7 @@ post(BaseURL, Path, Body, Opts) ->
 
 request(BaseURL, Method, Path, Body, Opts) ->
     URL = strip_trailing_slash(BaseURL),
-    Msg = request_message(Method, Path, Body),
+    Msg = request_message(Method, Path, Body, Opts),
     PeerOpts = peer_opts(URL, Opts),
     Res =
         case Method of
@@ -29,7 +29,8 @@ request(BaseURL, Method, Path, Body, Opts) ->
         {error, Response = #{}} ->
             response_with_status(
                 hb_maps:get(<<"status">>, Response, 500, Opts),
-                Response);
+                Response,
+                Opts);
         {error, Reason} ->
             throw({lapee_peer_http_error, #{
                 <<"reason">> =>
@@ -37,24 +38,24 @@ request(BaseURL, Method, Path, Body, Opts) ->
             }})
     end.
 
-request_message(<<"GET">>, Path, _Body) ->
+request_message(<<"GET">>, Path, _Body, _Opts) ->
     #{
         <<"path">> => Path,
         <<"require-codec">> => <<"httpsig@1.0">>,
         <<"accept-bundle">> => true
     };
-request_message(<<"POST">>, Path, Body) ->
+request_message(<<"POST">>, Path, Body, Opts) ->
     hb_maps:merge(
-        request_message(<<"GET">>, Path, #{}),
+        request_message(<<"GET">>, Path, #{}, Opts),
         Body,
-        #{}).
+        Opts).
 
-response_with_status(Status, Response) when is_map(Response) ->
-    case hb_maps:get(<<"status">>, Response, undefined, #{}) of
+response_with_status(Status, Response, Opts) when is_map(Response) ->
+    case hb_maps:get(<<"status">>, Response, undefined, Opts) of
         S when is_integer(S) -> Response;
         _ -> Response#{<<"status">> => Status}
     end;
-response_with_status(Status, Body) ->
+response_with_status(Status, Body, _Opts) ->
     #{<<"status">> => Status, <<"body">> => Body}.
 
 semantic_response(Response) ->

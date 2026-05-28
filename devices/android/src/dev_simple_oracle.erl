@@ -77,7 +77,7 @@ source_average(TickerSources, Days, Opts) ->
 
 %% @doc Fetch and parse a source endpoint through the relay device.
 fetch_source(Source, Days, Opts) ->
-    URL = source_url(Source, Days),
+    URL = source_url(Source, Days, Opts),
     case httpc:request(
         get,
         {binary_to_list(URL), [{"accept", "application/json"}]},
@@ -203,15 +203,15 @@ to_price(_) ->
     false.
 
 %% @doc Build a source URL with a dynamic date range.
-source_url(Source, Days) ->
-    source_url(Source, Days, current_date()).
-source_url(Source, Days, EndDate) ->
+source_url(Source, Days, Opts) ->
+    source_url(Source, Days, current_date(), Opts).
+source_url(Source, Days, EndDate, Opts) ->
     StartDate =
         calendar:gregorian_days_to_date(
             calendar:date_to_gregorian_days(EndDate) - Days
         ),
     replace_all(
-        hb_maps:get(<<"url">>, Source, <<>>, #{}),
+        hb_maps:get(<<"url">>, Source, <<>>, Opts),
         [
             {<<"{{days}}">>, integer_to_binary(Days)},
             {<<"{{start}}">>, date_bin(StartDate)},
@@ -413,7 +413,7 @@ source_url_dynamic_date_test() ->
     ?assertEqual(
         <<"https://example.invalid/history?"
             "start=2026-02-05&end=2026-05-06&days=90">>,
-        source_url(Source, 90, {2026, 5, 6})
+        source_url(Source, 90, {2026, 5, 6}, #{})
     ).
 
 %% @doc Cache table is owned by a singleton process, not a request process.
