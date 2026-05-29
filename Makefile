@@ -57,6 +57,12 @@
 #                           - run a four-node real SNP zone remotely.
 #   make verify-config-invariants
 #                           - check shipped config security invariants.
+#   make smoke-list         - list smoke suites and cases.
+#   make smoke-full         - run the local complete PermawebOS smoke suite.
+#   make smoke-linux        - run Linux QEMU smoke suite.
+#   make smoke-android      - run Android AndEE smoke suite.
+#   make smoke-mixed        - run mixed AndEE + QEMU ring smoke.
+#   make smoke-provisioner  - run Secure Boot provisioner smoke suite.
 #
 # ============================================================
 
@@ -152,7 +158,8 @@ ALL_ARCH_TARGETS := $(filter-out $(EXCLUDED_ARCHES),tme no-tme snp android provi
         qemu qemu-oracle qemu-gui qemu-zone qemu-zone-nonvolatile \
         qemu-provisioner-nonvolatile qemu-operator-config \
         qemu-measurement-remote qemu-zone-remote-snp \
-        verify-config-invariants \
+        verify-config-invariants smoke-list smoke-full smoke-linux \
+        smoke-android smoke-mixed smoke-provisioner smoke \
         _check-runtime-flags _check-signing-keys _check-provisioner-keys \
         _runtime-signed-image _usb-image _image-write _signing-keys \
         _provisioner-image _provisioner-write _wifi-creds \
@@ -261,6 +268,26 @@ qemu-measurement-remote:
 
 qemu-zone-remote-snp:
 	$(MAKE) _qemu-zone-remote-snp
+
+smoke-list:
+	./scripts/smoke.sh --list
+
+smoke-full:
+	./scripts/smoke.sh full
+
+smoke-linux:
+	./scripts/smoke.sh linux
+
+smoke-android:
+	./scripts/smoke.sh android
+
+smoke-mixed:
+	./scripts/smoke.sh mixed
+
+smoke-provisioner:
+	./scripts/smoke.sh provisioner
+
+smoke: smoke-full
 
 _check-runtime-flags:
 	@case "$(TME)" in 0|1) ;; \

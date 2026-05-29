@@ -7,7 +7,7 @@
 %%% belongs in external
 %%% analysis tools, not in the boot appliance.
 -module(lib_lapee_tpm_tcg).
--export([boot_signals/1, replay_pcrs/2, parse_acpi_table/1,
+-export([boot_signals/2, replay_pcrs/2, parse_acpi_table/1,
          parse_acpi_rsdp/1]).
 
 %%%============================================================================
@@ -196,13 +196,13 @@ decode_event_data(16#80000007, #{<<"event-data">> := Data}) ->
 decode_event_data(_, _) ->
     #{}.
 
-boot_signals(<<>>) ->
+boot_signals(<<>>, _Opts) ->
     #{};
-boot_signals(LogBin) when is_binary(LogBin) ->
+boot_signals(LogBin, Opts) when is_binary(LogBin) ->
     Events = decoded_events(LogBin),
     SecureBoot = secure_boot_signal(Events),
-    SecureBootPolicy = secure_boot_policy_signal(Events),
-    LoadedImage = loaded_image_signal(Events),
+    SecureBootPolicy = secure_boot_policy_signal(Events, Opts),
+    LoadedImage = loaded_image_signal(Events, Opts),
     Signals = #{<<"secure-boot">> => SecureBoot},
     Signals2 = maybe_signal(
         <<"secure-boot-policy">>, SecureBootPolicy, Signals),
@@ -232,8 +232,8 @@ secure_boot_signal(Events) ->
             }
     end.
 
-secure_boot_policy_signal(Events) ->
-    Vars = secure_boot_policy_variables(Events),
+secure_boot_policy_signal(Events, Opts) ->
+    Vars = secure_boot_policy_variables(Events, Opts),
     case map_size(Vars) of
         0 ->
             #{};
@@ -248,7 +248,7 @@ secure_boot_policy_signal(Events) ->
                 <<"image-signer-count">> =>
                     maps:get(<<"signer-count">>, Db, 0),
                 <<"image-signers-digest">> =>
-                    maps:get(<<"signer-digest">>, Db, stable_digest(#{})),
+                    maps:get(<<"signer-digest">>, Db, stable_digest(#{}, Opts)),
                 <<"image-signers-digest-algorithm">> =>
                     <<"ao-core-uncommitted-message-id-v1">>
             },
@@ -256,11 +256,12 @@ secure_boot_policy_signal(Events) ->
                 undefined -> Base;
                 Dbx ->
                     Base#{<<"revocations-digest">> =>
-                        maps:get(<<"signer-digest">>, Dbx, stable_digest(#{}))}
+                        maps:get(
+                            <<"signer-digest">>, Dbx, stable_digest(#{}, Opts))}
             end
     end.
 
-secure_boot_policy_variables(Events) ->
+secure_boot_policy_variables(Events, Opts) ->
     PolicyEvents =
         [Ev || Ev <- Events,
                event_pcr(Ev) =:= 7,
@@ -269,7 +270,7 @@ secure_boot_policy_variables(Events) ->
                    measured_variable_name(Ev),
                    [<<"PK">>, <<"KEK">>, <<"db">>, <<"dbx">>])],
     maps:map(
-        fun(_Name, Ev) -> signature_database_summary(Ev) end,
+        fun(_Name, Ev) -> signature_database_summary(Ev, Opts) end,
         lists:foldl(
             fun(Ev, Acc) ->
                 Acc#{policy_variable_key(measured_variable_name(Ev)) => Ev}
@@ -281,13 +282,13 @@ policy_variable_key(<<"PK">>) -> <<"pk">>;
 policy_variable_key(<<"KEK">>) -> <<"kek">>;
 policy_variable_key(Name) -> Name.
 
-signature_database_summary(Ev) ->
+signature_database_summary(Ev, Opts) ->
     Data = nested_get(Ev, [<<"parsed">>, <<"variable-data">>], <<>>),
     Entries = parse_signature_database(Data),
     Signers = indexed_signers(Entries),
     #{
         <<"signer-count">> => length(Entries),
-        <<"signer-digest">> => stable_digest(Signers),
+        <<"signer-digest">> => stable_digest(Signers, Opts),
         <<"signers">> => Signers,
         <<"provenance">> => #{
             <<"seq">> => maps:get(<<"seq">>, Ev, null),
@@ -368,7 +369,7 @@ decoded_events(LogBin) ->
            is_map(Ev),
            not maps:is_key(<<"error">>, Ev)].
 
-loaded_image_signal(Events) ->
+loaded_image_signal(Events, Opts) ->
     Apps = [Ev || Ev <- Events,
                   event_pcr(Ev) =:= 4,
                   has_sha256(Ev)],
@@ -386,7 +387,7 @@ loaded_image_signal(Events) ->
                     indexed_components(Uki)
             },
             #{
-                <<"components-digest">> => stable_digest(Components),
+                <<"components-digest">> => stable_digest(Components, Opts),
                 <<"components-digest-algorithm">> =>
                     <<"ao-core-uncommitted-message-id-v1">>,
                 <<"source">> => <<"tcg-event-log">>,
@@ -440,11 +441,11 @@ event_provenance(Ev) ->
                     maps:get(<<"event-data">>, Ev, <<>>)))
     }.
 
-stable_digest(Msg) ->
+stable_digest(Msg, Opts) ->
     hb_message:id(
-        hb_message:uncommitted_deep(Msg, #{}),
+        hb_message:uncommitted_deep(Msg, Opts),
         uncommitted,
-        #{}).
+        Opts).
 
 replay_pcrs(LogBin, Pcrs) when is_binary(LogBin), is_list(Pcrs) ->
     Wanted = maps:from_list([{Pcr, <<0:256>>} || Pcr <- Pcrs]),

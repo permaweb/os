@@ -148,7 +148,8 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
                                             Store,
                                             EffectiveLuksFormatted,
                                             FsFormatted,
-                                            Migration
+                                            Migration,
+                                            Opts
                                         )};
                                     {error, Reason} ->
                                         activation_error(
@@ -167,7 +168,7 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
     end).
 
 mounted_status(Name, RingAddress, Label, Partition, Store,
-        LuksFormatted, FsFormatted, Migration) ->
+        LuksFormatted, FsFormatted, Migration, Opts) ->
     Status0 = #{
         <<"enabled">> => true,
         <<"mounted">> => true,
@@ -178,7 +179,7 @@ mounted_status(Name, RingAddress, Label, Partition, Store,
         <<"primary-partition-label">> => ?PRIMARY_LABEL,
         <<"mapper">> => ?DEFAULT_MAPPER,
         <<"mount-point">> => ?DEFAULT_MOUNT,
-        <<"store">> => hb_maps:get(<<"name">>, Store, undefined, #{}),
+        <<"store">> => hb_maps:get(<<"name">>, Store, undefined, Opts),
         <<"volume-id">> => ensure_volume_id(?DEFAULT_MOUNT),
         <<"formatted-luks">> => LuksFormatted,
         <<"formatted-filesystem">> => FsFormatted,
@@ -770,7 +771,7 @@ ensure_volume_id(Mount) ->
 primary_lmdb_store(Opts) ->
     Stores = hb_opts:get(store, [], Opts),
     case [Store || Store <- store_list(Stores),
-                   hb_maps:get(<<"store-module">>, Store, undefined, #{}) =:=
+                   hb_maps:get(<<"store-module">>, Store, undefined, Opts) =:=
                        hb_store_lmdb] of
         [Store | _] -> Store;
         [] -> #{<<"name">> => <<"cache-mainnet/lmdb">>,
@@ -783,8 +784,8 @@ store_list(_) -> [].
 
 migrate_primary_lmdb(PersistentStore, Opts) ->
     SourceStore = primary_lmdb_store(Opts),
-    SourceName = hb_maps:get(<<"name">>, SourceStore, undefined, #{}),
-    DestName = hb_maps:get(<<"name">>, PersistentStore, undefined, #{}),
+    SourceName = hb_maps:get(<<"name">>, SourceStore, undefined, Opts),
+    DestName = hb_maps:get(<<"name">>, PersistentStore, undefined, Opts),
     case {SourceName, DestName} of
         {undefined, _} ->
             #{<<"status">> => <<"skipped">>, <<"reason">> => <<"no-source">>};
@@ -889,18 +890,18 @@ refresh_current_boot_paths_unchecked(Store, Opts) ->
 install_store(Store, Opts) ->
     Stores = hb_opts:get(store, [], Opts),
     MatchIndex = hb_opts:get(<<"match-index">>, [], Opts),
-    StoreName = hb_maps:get(<<"name">>, Store, undefined, #{}),
+    StoreName = hb_maps:get(<<"name">>, Store, undefined, Opts),
     Opts#{
-        <<"store">> => [Store | remove_store_name(StoreName, store_list(Stores))],
+        <<"store">> => [Store | remove_store_name(StoreName, store_list(Stores), Opts)],
         <<"match-index">> =>
-            [Store | remove_store_name(StoreName, store_list(MatchIndex))]
+            [Store | remove_store_name(StoreName, store_list(MatchIndex), Opts)]
     }.
 
-remove_store_name(undefined, Stores) ->
+remove_store_name(undefined, Stores, _Opts) ->
     Stores;
-remove_store_name(Name, Stores) ->
+remove_store_name(Name, Stores, Opts) ->
     [Store || Store <- Stores,
-              hb_maps:get(<<"name">>, Store, undefined, #{}) =/= Name].
+              hb_maps:get(<<"name">>, Store, undefined, Opts) =/= Name].
 
 set_status(Opts, Status) ->
     Opts#{<<"lapee-nonvolatile-status">> => Status}.

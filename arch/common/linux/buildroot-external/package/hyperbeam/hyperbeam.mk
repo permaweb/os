@@ -28,7 +28,7 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= 8c19c6adb45fc658e1ac06e6555efd916fd305e5
+HYPERBEAM_VERSION ?= 312988c2b36ddebc1585ad7fae9a1b63d1152bd3
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -43,7 +43,7 @@ HYPERBEAM_DEPENDENCIES = host-erlang erlang openssl tpm2-tss gmp
 # install method for years.)
 HYPERBEAM_REBAR3_URL = https://s3.amazonaws.com/rebar3/rebar3
 HYPERBEAM_REBAR3_SHA256 = af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf
-HYPERBEAM_REBAR3_PLUGINS = {plugins, [{pc, "1.15.0"}, {rebar3_rustler, "0.1.1"}, {rebar_edown_plugin, "0.7.0"}, {rebar3_eunit_start, {git, "https://github.com/permaweb/rebar3_eunit_start.git", {ref, "04ec53fea187039770db0d4459b7aeb01a9021af"}}}]}.
+HYPERBEAM_REBAR3_PLUGINS = {plugins, [{pc, "1.15.0"}, {rebar_edown_plugin, "0.7.0"}, {rebar3_eunit_start, {git, "https://github.com/permaweb/rebar3_eunit_start.git", {ref, "04ec53fea187039770db0d4459b7aeb01a9021af"}}}]}.
 
 define HYPERBEAM_DOWNLOAD_REBAR3
 	if [ -x $(@D)/rebar3 ]; then \
@@ -59,7 +59,7 @@ HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_DOWNLOAD_REBAR3
 
 define HYPERBEAM_PIN_REBAR_PLUGINS
 	sed -i \
-	    's|^.*{plugins, \[pc, rebar3_rustler, rebar_edown_plugin, {rebar3_eunit_start,.*$$|$(HYPERBEAM_REBAR3_PLUGINS)|' \
+	    's|^{plugins, \[.*$$|$(HYPERBEAM_REBAR3_PLUGINS)|' \
 	    $(@D)/rebar.config
 	grep -F '$(HYPERBEAM_REBAR3_PLUGINS)' $(@D)/rebar.config >/dev/null
 endef
@@ -288,6 +288,7 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam
 	cp -a $(@D)/_build/default/rel/hb/. $(TARGET_DIR)/usr/lib/hyperbeam/
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/_build
+	rm -rf $(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
 	cp -a $(@D)/_build/preloaded-store \
 		$(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
 	cp -a $(@D)/_build/hb_preloaded_index.hrl \

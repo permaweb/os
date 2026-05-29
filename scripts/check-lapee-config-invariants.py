@@ -34,6 +34,12 @@ INIT_SCRIPT = (
     / "rootfs-overlay"
     / "init"
 )
+DEVICE_LOADING_INTERNALS = (
+    "forge-bootstrap",
+    "loaded-device-store",
+    "preloaded-devices-index",
+    "preloaded-store",
+)
 
 
 def fail(path: pathlib.Path, message: str) -> None:
@@ -98,9 +104,15 @@ def main() -> int:
         fail(BASE_CONFIG, "base config must leave load-remote-devices to operator config")
     if config.get("trusted-device-signers"):
         fail(BASE_CONFIG, "base config must not pin trusted remote device signers")
+    for key in DEVICE_LOADING_INTERNALS:
+        if key in config:
+            fail(BASE_CONFIG, f"base config must not set {key}")
     init_text = INIT_SCRIPT.read_text()
     if '<<"measurement-body-source">>' not in init_text:
         fail(INIT_SCRIPT, "operator config validator must reserve measurement-body-source")
+    for key in DEVICE_LOADING_INTERNALS:
+        if f'<<"{key}">>' not in init_text:
+            fail(INIT_SCRIPT, f"operator config validator must reserve {key}")
     if "UserStart ++ BaseStart" not in init_text:
         fail(INIT_SCRIPT, "operator on.start hooks must run before base hooks")
     if "maps:size(UserOn)" not in init_text:

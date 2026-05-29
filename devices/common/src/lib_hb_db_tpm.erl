@@ -41,7 +41,7 @@ cert_roots(DeviceModule, Opts) ->
                 read_cert_roots(filename:join([Dir, ?DB_SUBDIR, "root-cas"]))
              || Dir <- priv_dirs(DeviceModule, Opts)
             ]),
-    unique_roots(Roots).
+    unique_roots(Roots, Opts).
 
 priv_dirs(DeviceModule, Opts) ->
     unique_dirs(
@@ -106,8 +106,8 @@ existing_dir(Dir) ->
 unique_dirs(Dirs) ->
     unique_by(fun filename:absname/1, Dirs).
 
-unique_roots(Roots) ->
-    unique_by(fun(Root) -> hb_maps:get(<<"pem">>, Root, <<>>, #{}) end, Roots).
+unique_roots(Roots, Opts) ->
+    unique_by(fun(Root) -> hb_maps:get(<<"pem">>, Root, <<>>, Opts) end, Roots).
 
 unique_by(F, Values) ->
     {Out, _Seen} =

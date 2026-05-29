@@ -33,7 +33,7 @@
 %%% for offline / locked-down deployments. The chain validator then
 %%% falls back to local-corpus-only behaviour.
 -module(lib_lapee_aia).
--export([caissuers_urls/1, fetch_issuer/1, fetch_issuer/2,
+-export([caissuers_urls/1, fetch_issuer/2,
          enabled/1]).
 -include_lib("public_key/include/public_key.hrl").
 
@@ -90,9 +90,6 @@ enabled(Opts) ->
 %% `persistent_term' for the lifetime of the BEAM so repeated
 %% admissions of peers that share the same SoC family hit the URL
 %% exactly once.
--spec fetch_issuer(binary()) -> {ok, binary()} | {error, term()}.
-fetch_issuer(Url) -> fetch_issuer(Url, #{}).
-
 -spec fetch_issuer(binary(), map()) -> {ok, binary()} | {error, term()}.
 fetch_issuer(Url, Opts) when is_binary(Url) ->
     case enabled(Opts) of

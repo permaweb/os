@@ -149,8 +149,8 @@ if effective.get("load-remote-devices") is not True:
     fail("effective config did not preserve selected load-remote-devices=true")
 if not isinstance(store, list) or not store:
     fail("effective config store is not a non-empty list")
-if store[0].get("store-module") != "hb_store_volatile":
-    fail("effective config did not preserve volatile default store")
+if store[0].get("store-module") != "hb_store_fs":
+    fail("effective config did not preserve selected operator store")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]

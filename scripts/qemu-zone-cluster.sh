@@ -53,6 +53,9 @@ NODE2_MEASUREMENT_DEVICE=${NODE2_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 NODE3_MEASUREMENT_DEVICE=${NODE3_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 NODE4_MEASUREMENT_DEVICE=${NODE4_MEASUREMENT_DEVICE:-$MEASUREMENT_DEVICE}
 ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
+QEMU_ZONE_PHASE=${QEMU_ZONE_PHASE:-full}
+QEMU_ZONE_NODE_COUNT=${QEMU_ZONE_NODE_COUNT:-4}
+ALLOW_REJECTED_PEER_ATTESTATION=${ALLOW_REJECTED_PEER_ATTESTATION:-0}
 
 while (($# > 0)); do
     case "$1" in
@@ -133,7 +136,7 @@ prepare_qemu_image() {
     local cfg="$OUTDIR/qemu-config.json"
     local dst_rel="${dst#$OUTDIR/}"
     cp "$src" "$dst"
-    python3 - "$cfg" "$device" \
+    python3 - "$cfg" "$device" "$ALLOW_REJECTED_PEER_ATTESTATION" \
         "$OUTDIR/ca/issuercert.pem" \
         "$OUTDIR/ca/swtpm-localca-rootca-cert.pem" <<'PY'
 import json, pathlib, sys
@@ -144,10 +147,13 @@ cfg = {
     "zone-init-allow": True,
 }
 device = sys.argv[2]
+allow_rejected = sys.argv[3].lower() in ("1", "true", "yes")
 if device != "auto":
     cfg["measurement-device"] = device
+if allow_rejected:
+    cfg["allow-rejected-peer-attestation"] = True
 ca_pems = []
-for path in map(pathlib.Path, sys.argv[3:]):
+for path in map(pathlib.Path, sys.argv[4:]):
     if path.exists():
         ca_pems.append(path.read_text())
 if ca_pems:
@@ -193,6 +199,9 @@ echo "qemu image: $IMG"
 echo "measurement devices: $(node_measurement_device 1), $(node_measurement_device 2), $(node_measurement_device 3), $(node_measurement_device 4)"
 echo "zone template mode: $ZONE_TEMPLATE_MODE"
 echo "zone template list: ${ZONE_TEMPLATE_LIST:-0}"
+echo "phase: $QEMU_ZONE_PHASE"
+echo "node count: $QEMU_ZONE_NODE_COUNT"
+echo "allow rejected peer attestation: $ALLOW_REJECTED_PEER_ATTESTATION"
 echo "nonvolatile: $NONVOLATILE"
 ls -lhT "$IMG" 2>/dev/null || ls -lh "$IMG"
 
@@ -695,12 +704,27 @@ raise SystemExit("ZONE_PRIMARY partition not found")
 PY
 }
 
-start_node 1 "$IMG"
-start_node 2 "$IMG"
-start_node 3 "$IMG"
-start_node 4 "$IMG"
+for n in $(seq 1 "$QEMU_ZONE_NODE_COUNT"); do
+    start_node "$n" "$IMG"
+done
 
-for n in 1 2 3 4; do wait_node "$n"; done
+for n in $(seq 1 "$QEMU_ZONE_NODE_COUNT"); do
+    wait_node "$n"
+done
+
+if [[ "$QEMU_ZONE_PHASE" = "boot-only" ]]; then
+    touch "$OUTDIR/ready"
+    echo "=== zone QEMU boot-only READY ==="
+    echo "out: $OUTDIR"
+    while :; do
+        sleep 3600
+    done
+fi
+
+if [[ "$QEMU_ZONE_NODE_COUNT" != "4" ]]; then
+    echo "full qemu-zone requires QEMU_ZONE_NODE_COUNT=4" >&2
+    exit 1
+fi
 
 jq -n \
     --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \

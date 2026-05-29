@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
+source "$ROOT/scripts/andee-preloaded-store.sh"
 
 OUT="$ROOT/android/app/src/main/assets/andee-runtime.zip"
 WORK="$BUILD_DIR/andee-runtime"
@@ -17,6 +18,8 @@ TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 require_tool zip
 require_tool python3
 require_tool erlc
+require_tool cargo
+require_tool rustc
 
 "$ROOT/scripts/stage-android-devices.sh"
 
@@ -27,6 +30,84 @@ for clang in aarch64-linux-android29-clang x86_64-linux-android29-clang llvm-str
     fi
 done
 
+rust_target_for_abi() {
+    case "$1" in
+        arm64-v8a) echo "aarch64-linux-android" ;;
+        x86_64) echo "x86_64-linux-android" ;;
+        *)
+            echo "unsupported Android ABI for Rust: $1" >&2
+            exit 1
+            ;;
+    esac
+}
+
+clang_for_abi() {
+    case "$1" in
+        arm64-v8a) echo "aarch64-linux-android29-clang" ;;
+        x86_64) echo "x86_64-linux-android29-clang" ;;
+        *)
+            echo "unsupported Android ABI for clang: $1" >&2
+            exit 1
+            ;;
+    esac
+}
+
+sanitize_native_name() {
+    printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_' '_'
+}
+
+build_android_elmdb_nif() {
+    local abi="$1"
+    local target clang target_var target_upper rust_libdir rust_src
+    target="$(rust_target_for_abi "$abi")"
+    clang="$(clang_for_abi "$abi")"
+    target_var="$(printf '%s' "$target" | tr '-' '_')"
+    target_upper="$(printf '%s' "$target" | tr '[:lower:]-' '[:upper:]_')"
+    rust_libdir="$(rustc --print sysroot)/lib/rustlib/$target/lib"
+    rust_src="$(rustc --print sysroot)/lib/rustlib/src/rust/library/std"
+
+    local cargo_extra=()
+    local rust_env=()
+    if [ ! -e "$rust_libdir/libcore.rlib" ]; then
+        if [ ! -d "$rust_src" ]; then
+            echo "missing Rust std for $target and no rust-src fallback at $rust_src" >&2
+            exit 1
+        fi
+        cargo_extra=(-Z build-std=std,panic_abort)
+        rust_env=(RUSTC_BOOTSTRAP=1)
+    fi
+
+    (
+        cd "$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb/native/elmdb_nif"
+        env "${rust_env[@]}" \
+            "CC_${target_var}=$TOOLCHAIN/$clang" \
+            "AR_${target_var}=$TOOLCHAIN/llvm-ar" \
+            "CARGO_TARGET_${target_upper}_LINKER=$TOOLCHAIN/$clang" \
+            cargo build "${cargo_extra[@]}" --release --locked --target "$target"
+    )
+}
+
+stage_native_payload() {
+    local abi="$1"
+    local rel="$2"
+    local source="$3"
+    local native_name native_path
+    native_name="libandee_$(sanitize_native_name "$abi")_$(sanitize_native_name "$rel").so"
+    native_path="$JNI_DIR/$abi/$native_name"
+    mkdir -p "$(dirname "$native_path")"
+    cp "$source" "$native_path"
+    try_strip "$native_path"
+    rm -f "$source"
+    printf '%s|%s\n' "$rel" "$native_name" >>"$WORK/native-links/$abi.txt"
+}
+
+try_strip() {
+    local path="$1"
+    if ! "$TOOLCHAIN/llvm-strip" --strip-unneeded "$path"; then
+        "$TOOLCHAIN/llvm-strip" "$path"
+    fi
+}
+
 ABI=arm64-v8a "$ROOT/scripts/build-android-erts.sh"
 ABI=x86_64 "$ROOT/scripts/build-android-erts.sh"
 
@@ -35,11 +116,16 @@ mkdir -p "$WORK/config" "$WORK/native-links" "$(dirname "$OUT")" \
     "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 rm -f "$OUT"
 
-cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
 if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
 (cd "$ANDEE_DEVICE_ROOT" && "$REBAR3" compile)
+rm -rf "$WORK/_build"
+build_andee_preloaded_store "$WORK/_build/preloaded-store"
+cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
+for abi in arm64-v8a x86_64; do
+    build_android_elmdb_nif "$abi"
+done
 
 "$TOOLCHAIN/aarch64-linux-android29-clang" \
     -D_POSIX_C_SOURCE=200809L -fPIE -pie -O2 -Wall -Wextra \
@@ -117,14 +203,8 @@ for abi in arm64-v8a x86_64; do
     for app in "$ANDEE_DEVICE_ROOT"/_build/default/lib/*; do
         [ -d "$app/ebin" ] || continue
         name="$(basename "$app")"
-        case "$name" in
-            elmdb)
-                continue
-                ;;
-        esac
         mkdir -p "$APP_LIB/$name/ebin"
         find "$app/ebin" -type f \
-            ! -name 'hb_store_lmdb.beam' \
             ! -name 'hb_snp_nif.beam' \
             | while IFS= read -r ebin_file; do
                 cp "$ebin_file" "$APP_LIB/$name/ebin/"
@@ -142,69 +222,19 @@ for abi in arm64-v8a x86_64; do
                 done
         fi
     done
-    HB_SRC="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/src"
-    HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
-    erlc -pa "$HB_APP/ebin" +'{feature,maybe_expr,enable}' \
-        -I "$HB_APP/include" \
-        -I "$HB_SRC/core" \
-        -o "$APP_LIB/hb/ebin" \
-        "$HB_SRC/core/http/hb_http.erl" \
-        "$HB_SRC/preloaded/message/dev_message.erl" \
-        "$HB_SRC/preloaded/codec/dev_structured.erl" \
-        "$HB_SRC/preloaded/codec/dev_flat.erl" \
-        "$HB_SRC/preloaded/codec/dev_json.erl" \
-        "$HB_SRC/preloaded/codec/dev_json_iface.erl" \
-        "$HB_SRC/preloaded/codec/dev_httpsig_keyid.erl" \
-        "$HB_SRC/preloaded/codec/dev_httpsig_siginfo.erl" \
-        "$HB_SRC/preloaded/codec/dev_httpsig_conv.erl" \
-        "$HB_SRC/preloaded/codec/dev_httpsig_proxy.erl" \
-        "$HB_SRC/preloaded/codec/dev_httpsig.erl" \
-        "$HB_SRC/preloaded/codec/lib_arweave_common.erl" \
-        "$HB_SRC/preloaded/codec/dev_ans104.erl" \
-        "$HB_SRC/preloaded/codec/dev_tx.erl" \
-        "$HB_SRC/preloaded/auth/dev_cookie_auth.erl" \
-        "$HB_SRC/preloaded/auth/dev_cookie.erl" \
-        "$HB_SRC/preloaded/auth/dev_auth_hook.erl" \
-        "$HB_SRC/preloaded/auth/dev_http_auth.erl" \
-        "$HB_SRC/preloaded/auth/dev_secret.erl" \
-        "$HB_SRC/preloaded/node/dev_meta.erl" \
-        "$HB_SRC/preloaded/node/dev_hyperbuddy.erl" \
-        "$HB_SRC/preloaded/node/dev_cache.erl" \
-        "$HB_SRC/preloaded/node/dev_router.erl" \
-        "$HB_SRC/preloaded/node/dev_node_process.erl" \
-        "$HB_SRC/preloaded/node/dev_location_cache.erl" \
-        "$HB_SRC/preloaded/node/dev_location.erl" \
-        "$HB_SRC/preloaded/node/dev_cron.erl" \
-        "$HB_SRC/preloaded/name/dev_name.erl" \
-        "$HB_SRC/preloaded/name/dev_b32_name.erl" \
-        "$HB_SRC/preloaded/name/dev_local_name.erl" \
-        "$HB_SRC/preloaded/util/dev_relay.erl" \
-        "$HB_SRC/preloaded/util/dev_stack.erl" \
-        "$HB_SRC/preloaded/process/lib_process.erl" \
-        "$HB_SRC/preloaded/process/dev_process_cache.erl" \
-        "$HB_SRC/preloaded/process/dev_scheduler_cache.erl" \
-        "$HB_SRC/preloaded/process/dev_scheduler_formats.erl" \
-        "$HB_SRC/preloaded/process/dev_scheduler_registry.erl" \
-        "$HB_SRC/preloaded/process/dev_scheduler_server.erl" \
-        "$HB_SRC/preloaded/process/dev_process_worker.erl" \
-        "$HB_SRC/preloaded/process/dev_push.erl" \
-        "$HB_SRC/preloaded/process/dev_scheduler.erl" \
-        "$HB_SRC/preloaded/process/dev_process.erl" \
-        "$HB_SRC/preloaded/vm/dev_lua_lib.erl" \
-        "$HB_SRC/preloaded/vm/dev_lua.erl" \
-        "$HB_SRC/preloaded/query/dev_query.erl" \
-        "$HB_SRC/preloaded/query/dev_query_graphql.erl" \
-        "$HB_SRC/preloaded/query/dev_match.erl" \
-        "$HB_SRC/preloaded/arweave/dev_manifest.erl" \
-        "$HB_SRC/preloaded/arweave/dev_arweave.erl" \
-        "$HB_SRC/preloaded/arweave/dev_bundler.erl" \
-        "$HB_SRC/preloaded/arweave/dev_bundler_task.erl" \
-        "$HB_SRC/preloaded/arweave/dev_bundler_cache.erl" \
-        "$HB_SRC/preloaded/arweave/dev_bundler_recovery.erl" \
-        "$HB_SRC/preloaded/payment/dev_p4.erl" \
-        "$HB_SRC/preloaded/payment/dev_simple_pay.erl" \
-        "$HB_SRC/preloaded/payment/dev_metering.erl"
     erlc -o "$APP_LIB/b64rs/ebin" "$ANDEE_RUNTIME_SRC/erlang-overrides/b64rs.erl"
+    ELMDB_TARGET="$(rust_target_for_abi "$abi")"
+    ELMDB_NIF="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb/native/elmdb_nif/target/$ELMDB_TARGET/release/libelmdb_nif.so"
+    if [ ! -f "$ELMDB_NIF" ]; then
+        echo "missing Android elmdb NIF for $abi: $ELMDB_NIF" >&2
+        exit 1
+    fi
+    mkdir -p "$APP_LIB/elmdb/priv"
+    cp "$ELMDB_NIF" "$APP_LIB/elmdb/priv/libelmdb_nif.so"
+    stage_native_payload \
+        "$abi" \
+        "erlang/$abi/lib/elmdb/priv/libelmdb_nif.so" \
+        "$APP_LIB/elmdb/priv/libelmdb_nif.so"
 done
 
 (cd "$WORK" && zip -qr "$OUT" .)
