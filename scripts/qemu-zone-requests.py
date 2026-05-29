@@ -22,6 +22,7 @@ def main() -> int:
     signals = evidence.get("signals", {})
     secure_boot = signals.get("secure-boot", {})
     secure_boot_policy = signals.get("secure-boot-policy", {})
+    publisher = signals.get("publisher", {})
     loaded_image = signals.get("loaded-image", {})
     snp_report = evidence.get("report", {})
     dmi_product = (
@@ -51,6 +52,8 @@ def main() -> int:
     if template_mode in ("release", "release-common"):
         signer_digest = secure_boot_policy.get("image-signers-digest")
         signer_count = secure_boot_policy.get("image-signer-count", 0)
+        publisher_digest = publisher.get("signers-digest")
+        publisher_count = publisher.get("signer-count", 0)
         snp_measurement = snp_report.get("measurement")
         secure_boot_enabled = secure_boot.get("enabled") in (True, "true")
         if signer_digest and signer_count > 0 and secure_boot_enabled:
@@ -66,12 +69,20 @@ def main() -> int:
             raise SystemExit(
                 "release template requires Secure Boot enabled "
                 "when matching measured signer policy")
+        elif publisher_digest and publisher_count > 0:
+            evidence_template = {
+                "signals": {
+                    "publisher": {
+                        "signers-digest": publisher_digest
+                    },
+                },
+            }
         elif snp_measurement:
             evidence_template = {"report": {"measurement": snp_measurement}}
         else:
             raise SystemExit(
                 "release template requires measured Secure Boot policy "
-                "or SNP measurement evidence")
+                "or publisher/SNP measurement evidence")
         template = {
             "evidence": evidence_template,
             "body": {
@@ -180,6 +191,11 @@ def tamper_boot_evidence(template):
     policy = evidence.get("signals", {}).get("secure-boot-policy", {})
     if "image-signers-digest" in policy:
         policy["image-signers-digest"] = (
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        return
+    publisher = evidence.get("signals", {}).get("publisher", {})
+    if "signers-digest" in publisher:
+        publisher["signers-digest"] = (
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         return
     loaded_image = evidence.get("signals", {}).get("loaded-image", {})

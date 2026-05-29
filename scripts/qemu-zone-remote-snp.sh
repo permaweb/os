@@ -15,7 +15,9 @@ DOCKER_PLATFORM=${DOCKER_PLATFORM:-}
 IMAGE=${IMAGE:-$BUILD_DIR/images/lapee-runtime-no-tme-signed.img}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-zone-remote-snp}
 TARGET=${TARGET:-ssh://hb@dev-1.forward.computer}
-REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests/zone-snp}
+REMOTE_WORKDIR=${REMOTE_WORKDIR:-/home/hb/lapee-measurement-tests/zone-snp-$(date +%Y%m%d%H%M%S)-$$}
+REMOTE_WORKDIR_ALLOW_REUSE=${REMOTE_WORKDIR_ALLOW_REUSE:-0}
+REMOTE_RUN_ID=${REMOTE_RUN_ID:-lapee-remote-snp-$(date +%Y%m%d%H%M%S)-$$}
 REMOTE_QEMU=${REMOTE_QEMU:-/home/hb/hb-os/build/snp-release/usr/local/bin/qemu-system-x86_64}
 REMOTE_OVMF=${REMOTE_OVMF:-/home/hb/hb-os/release/DIRECT_BOOT_OVMF.fd}
 REMOTE_CBITPOS=${REMOTE_CBITPOS:-51}
@@ -28,6 +30,7 @@ MEASUREMENT_TIMEOUT_MS=${MEASUREMENT_TIMEOUT_MS:-}
 MEASUREMENT_TRACE=${MEASUREMENT_TRACE:-0}
 ALLOW_REJECTED_PEER_ATTESTATION=${ALLOW_REJECTED_PEER_ATTESTATION:-0}
 ZONE_TEMPLATE_MODE=${ZONE_TEMPLATE_MODE:-device}
+SNP_ID_BLOCK_MODE=${SNP_ID_BLOCK_MODE:-auto}
 SNP_CERT_CHAIN_PEM_FILE=${SNP_CERT_CHAIN_PEM_FILE:-}
 SNP_VCEK_DER_FILE=${SNP_VCEK_DER_FILE:-}
 SNP_VCEK_DER_B64=${SNP_VCEK_DER_B64:-}
@@ -58,12 +61,16 @@ case "$TARGET" in
     ssh://*) HOST=${TARGET#ssh://};;
     *) echo "TARGET must be ssh://user@host" >&2; exit 2;;
 esac
+case "$REMOTE_WORKDIR" in
+    *"'"*) echo "REMOTE_WORKDIR must not contain a single quote" >&2; exit 2;;
+esac
 
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"/{nodes,requests,responses}
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 TIMINGS="$OUTDIR/timings.tsv"
 printf 'step\tstart_unix\tend_unix\tseconds\n' > "$TIMINGS"
+REMOTE_CLEANUP_ARMED=0
 
 time_step() {
     local name=$1
@@ -161,8 +168,22 @@ PY
         '
 }
 
+prepare_remote_workdir() {
+    ssh "$HOST" "set -euo pipefail
+if [[ -e '$REMOTE_WORKDIR' ]]; then
+    if [[ '$REMOTE_WORKDIR_ALLOW_REUSE' != '1' ||
+          ! -f '$REMOTE_WORKDIR/.lapee-remote-snp-run' ]]; then
+        echo 'remote workdir already exists and was not freshly allocated by this run: $REMOTE_WORKDIR' >&2
+        echo 'choose a new REMOTE_WORKDIR or set REMOTE_WORKDIR_ALLOW_REUSE=1 for an owned leftover only' >&2
+        exit 3
+    fi
+fi
+mkdir -p '$REMOTE_WORKDIR/nodes'
+printf '%s\n' '$REMOTE_RUN_ID' > '$REMOTE_WORKDIR/.lapee-remote-snp-run'"
+}
+
 install_remote_helper() {
-    ssh "$HOST" "mkdir -p '$REMOTE_WORKDIR/nodes'"
+    prepare_remote_workdir
     scp scripts/materialize-hb-json.py \
         "$HOST:$REMOTE_WORKDIR/materialize-hb-json.py" >/dev/null
     ssh "$HOST" "cat > '$REMOTE_WORKDIR/run-snp-cluster.sh'" <<'REMOTE'
@@ -176,7 +197,26 @@ stop_node() {
     local node=$1
     local node_dir="$workdir/nodes/node$node"
     local pidfile="$node_dir/qemu.pid"
-    local monitor="$node_dir/qemu.mon"
+    local monitor_id
+    monitor_id=$(printf '%s' "$workdir" | sha256sum | awk '{print substr($1,1,16)}')
+    local monitor="/tmp/lapee-snp-${monitor_id}-${node}.mon"
+    owned_pid() {
+        local pid=$1
+        local cmdline
+        [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+        cmdline=$(sudo python3 - "$pid" <<'PY' 2>/dev/null || true
+import pathlib, sys
+try:
+    data = pathlib.Path(f"/proc/{int(sys.argv[1])}/cmdline").read_bytes()
+except Exception:
+    data = b""
+sys.stdout.write(data.replace(b"\0", b" ").decode("utf-8", "replace"))
+PY
+)
+        [[ "$cmdline" == *qemu-system* &&
+           "$cmdline" == *"$node_dir/disk.img"* &&
+           "$cmdline" == *"$monitor"* ]]
+    }
     if [[ -S "$monitor" ]]; then
         python3 - "$monitor" 2>/dev/null <<'PY' || true
 import socket, sys
@@ -188,12 +228,19 @@ s.close()
 PY
     fi
     if [[ -s "$pidfile" ]]; then
-        sudo kill "$(cat "$pidfile")" 2>/dev/null || true
+        pid=$(cat "$pidfile")
+        if ! owned_pid "$pid"; then
+            echo "ignoring stale or foreign pidfile: $pidfile" >&2
+            rm -f "$pidfile" "$monitor"
+            return
+        fi
+        sudo kill "$pid" 2>/dev/null || true
         for _ in $(seq 1 50); do
-            sudo kill -0 "$(cat "$pidfile")" 2>/dev/null || break
+            sudo kill -0 "$pid" 2>/dev/null || break
+            owned_pid "$pid" || break
             sleep 0.2
         done
-        sudo kill -KILL "$(cat "$pidfile")" 2>/dev/null || true
+        owned_pid "$pid" && sudo kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$pidfile" "$monitor"
 }
@@ -227,10 +274,17 @@ case "$cmd" in
         dmi_product=${9:?dmi-product}
         node_dir="$workdir/nodes/node$node"
         disk="$node_dir/disk.img"
-        monitor="$node_dir/qemu.mon"
+        monitor_id=$(printf '%s' "$workdir" | sha256sum | awk '{print substr($1,1,16)}')
+        monitor="/tmp/lapee-snp-${monitor_id}-${node}.mon"
         serial="$node_dir/serial.log"
+        sev_snp_object="sev-snp-guest,id=sev0,policy=0x30000,cbitpos=${cbitpos},reduced-phys-bits=1"
         mkdir -p "$node_dir"
         [[ -f "$disk" ]] || { echo "missing disk: $disk" >&2; exit 1; }
+        if [[ -s "$node_dir/id-block.b64" && -s "$node_dir/id-auth.b64" ]]; then
+            id_block=$(tr -d '\n\r' < "$node_dir/id-block.b64")
+            id_auth=$(tr -d '\n\r' < "$node_dir/id-auth.b64")
+            sev_snp_object="${sev_snp_object},id-block=${id_block},id-auth=${id_auth},author-key-enabled=true"
+        fi
         stop_node "$node"
         rm -f "$serial" "$monitor" "$node_dir/qemu.log"
         sudo "$qemu" \
@@ -241,7 +295,7 @@ case "$cmd" in
             -smp 2,maxcpus=2 \
             -object "memory-backend-memfd,id=ram${node},size=${memory_mib}M,share=true,prealloc=false" \
             -machine "memory-backend=ram${node}" \
-            -object "sev-snp-guest,id=sev0,policy=0x30000,cbitpos=${cbitpos},reduced-phys-bits=1" \
+            -object "$sev_snp_object" \
             -bios "$ovmf" \
             -smbios "type=1,product=${dmi_product}" \
             -drive "file=$disk,if=none,id=disk0,format=raw" \
@@ -263,6 +317,7 @@ case "$cmd" in
 esac
 REMOTE
     ssh "$HOST" "chmod +x '$REMOTE_WORKDIR/run-snp-cluster.sh'"
+    REMOTE_CLEANUP_ARMED=1
 }
 
 copy_images() {
@@ -278,7 +333,16 @@ copy_images() {
     done
 }
 
+copy_snp_id_blocks() {
+    for n in 1 2 3 4; do
+        scp "$OUTDIR/nodes/node$n/id-block.b64" \
+            "$OUTDIR/nodes/node$n/id-auth.b64" \
+            "$HOST:$REMOTE_WORKDIR/nodes/node$n/" >/dev/null
+    done
+}
+
 remote_stop_all() {
+    [[ "$REMOTE_CLEANUP_ARMED" = "1" ]] || return 0
     ssh "$HOST" "'$REMOTE_WORKDIR/run-snp-cluster.sh' stop-all '$REMOTE_WORKDIR'" \
         >/dev/null 2>&1 || true
 }
@@ -351,16 +415,82 @@ wait_all_nodes() {
     done
 }
 
+prime_snp_id_blocks() {
+    case "$SNP_ID_BLOCK_MODE" in
+        auto|1|true) ;;
+        off|0|false|none)
+            echo ">> SNP_ID_BLOCK_MODE=$SNP_ID_BLOCK_MODE; skipping SNP ID block priming"
+            mkdir -p "$OUTDIR/snp-id-blocks"
+            jq -n '{
+                "id-key-digest": null,
+                "author-key-digest": null,
+                "nodes": []
+            }' > "$OUTDIR/snp-id-blocks/publisher.json"
+            return
+            ;;
+        *)
+            echo "unknown SNP_ID_BLOCK_MODE: $SNP_ID_BLOCK_MODE" >&2
+            exit 2
+            ;;
+    esac
+    echo ">> collecting launch digests for SNP ID blocks"
+    remote_start_nodes
+    wait_all_nodes
+    mkdir -p "$OUTDIR/snp-id-blocks/keys"
+    for n in 1 2 3 4; do
+        scripts/snp-id-block.py \
+            --attestation "$OUTDIR/responses/node$n-boot-attestation.json" \
+            --out-dir "$OUTDIR/nodes/node$n" \
+            --key-dir "$OUTDIR/snp-id-blocks/keys"
+    done
+    jq -s '{
+        "id-key-digest": .[0]."id-key-digest",
+        "author-key-digest": .[0]."author-key-digest",
+        "nodes": .
+    }' "$OUTDIR"/nodes/node*/metadata.json \
+        > "$OUTDIR/snp-id-blocks/publisher.json"
+    remote_stop_all
+    copy_snp_id_blocks
+    echo ">> SNP ID blocks generated with shared publisher key digests"
+    jq -c '{id_key_digest: ."id-key-digest",
+            author_key_digest: ."author-key-digest"}' \
+        "$OUTDIR/snp-id-blocks/publisher.json"
+}
+
 assert_security_properties() {
+    local publisher_required=true
+    case "$SNP_ID_BLOCK_MODE" in
+        off|0|false|none) publisher_required=false;;
+    esac
     jq -n \
+        --argjson publisher_required "$publisher_required" \
+        --slurpfile publisher "$OUTDIR/snp-id-blocks/publisher.json" \
         --slurpfile n1 "$OUTDIR/responses/node1-boot-attestation.json" \
         --slurpfile n2 "$OUTDIR/responses/node2-boot-attestation.json" \
         --slurpfile n3 "$OUTDIR/responses/node3-boot-attestation.json" \
         --slurpfile n4 "$OUTDIR/responses/node4-boot-attestation.json" '
+        def publisher_expected:
+            ($publisher[0] // {});
         def measurement($att):
             if $att.body.type == "lapee-measurement" then $att.body
             elif $att.type == "lapee-measurement" then $att
             else $att end;
+        def signer_sha384s($signers):
+            if ($signers | type) == "array" then
+                $signers | map(.sha384)
+            elif ($signers | type) == "object" then
+                $signers
+                | to_entries
+                | map(
+                    select(
+                        (.key | test("^signer-[0-9]+$")) and
+                        (.value | type) == "object"
+                    )
+                    | .value.sha384
+                  )
+            else [] end
+            | map(select(. != null))
+            | sort;
         def props($node; $att): {
             node: $node,
             cmdline: measurement($att).body.system.kernel.cmdline,
@@ -374,10 +504,24 @@ assert_security_properties() {
                 measurement($att).evidence.signals."secure-boot-policy"."image-signers-digest",
             image_signer_count:
                 measurement($att).evidence.signals."secure-boot-policy"."image-signer-count",
+            publisher_signers_digest:
+                measurement($att).evidence.signals.publisher."signers-digest",
+            publisher_signer_count:
+                measurement($att).evidence.signals.publisher."signer-count",
+            publisher_source_status:
+                measurement($att).evidence.signals.publisher."source-status",
+            publisher_signers:
+                measurement($att).evidence.signals.publisher.signers,
+            publisher_signer_sha384s:
+                signer_sha384s(
+                    measurement($att).evidence.signals.publisher.signers),
+            expected_id_key_digest: publisher_expected."id-key-digest",
+            expected_author_key_digest: publisher_expected."author-key-digest",
             snp_measurement:
                 measurement($att).evidence.report.measurement,
             boot_evidence:
                 (measurement($att).evidence.signals."secure-boot-policy"."image-signers-digest" //
+                 measurement($att).evidence.signals.publisher."signers-digest" //
                  measurement($att).evidence.report.measurement),
             node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
@@ -403,16 +547,25 @@ assert_security_properties() {
             distinct_recipient_key_id: ([.[].recipient_key_id] | unique | length),
             distinct_recipient_public: ([.[].recipient_public] | unique | length)
           }' > "$OUTDIR/responses/security-properties.json"
-    jq -e '
+    jq -e --argjson publisher_required "$publisher_required" '
         def falsy: . == false or . == "false";
         .distinct_cmdlines == 1 and
         .distinct_boot_evidence == 1 and
-        all(.nodes[]; (.boot_evidence != null) and
-            .node_initialized == "permanent" and
-            (.access_remote_cache_for_client | falsy) and
-            (.load_remote_devices | falsy) and
-            ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
-        all(.nodes[]; (.memtotal_kb | type == "number" and . > 0)) and
+        all(.nodes[]; . as $node |
+            ($node.boot_evidence != null) and
+            (if $publisher_required then
+                ($node.publisher_signers_digest != null) and
+                (($node.publisher_signer_count | type) == "number" and
+                    $node.publisher_signer_count > 0) and
+                ($node.publisher_source_status == "reported") and
+                (($node.publisher_signer_sha384s | index($node.expected_id_key_digest)) != null) and
+                (($node.publisher_signer_sha384s | index($node.expected_author_key_digest)) != null)
+             else true end) and
+            $node.node_initialized == "permanent" and
+            ($node.access_remote_cache_for_client | falsy) and
+            ($node.load_remote_devices | falsy) and
+            (($node.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
+        all(.nodes[]; ((.memtotal_kb | type) == "number" and .memtotal_kb > 0)) and
         .distinct_dmi_products == 2 and
         .distinct_recipient_key_id == 4 and
         .distinct_recipient_public == 4 and
@@ -529,20 +682,29 @@ run_zone_flow() {
         "$OUTDIR/responses/node2-init-second-zone.json" >/dev/null
     echo ">> node 2 cannot install a second zone by default"
 
+    local admitted_nodes=(1 2 3)
     remote_post 4 "/~zone@1.0/join" \
         "$OUTDIR/requests/join4.json" \
         "$OUTDIR/responses/node4-join.json"
-    if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
-                (.body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name" or
-                 any(.body.mismatches[]?; ."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"))' \
-            "$OUTDIR/responses/node4-join.json" >/dev/null; then
-        echo "node 4 rejection was not the expected template-mismatch" >&2
-        cat "$OUTDIR/responses/node4-join.json" >&2
-        exit 1
+    if [[ "$ZONE_TEMPLATE_MODE" = "release-common" ]]; then
+        jq -e '.status == 200 and
+               (.body.initialized == true or .body.initialized == "true")' \
+            "$OUTDIR/responses/node4-join.json" >/dev/null
+        admitted_nodes=(1 2 3 4)
+        echo ">> node 4 joined under release-common signer template"
+    else
+        if ! jq -e '.status == 400 and .body.error == "template-mismatch" and
+                    (.body."mismatch-path" == "/body/system/firmware/dmi/fields/product-name" or
+                     any(.body.mismatches[]?; ."mismatch-path" == "/body/system/firmware/dmi/fields/product-name"))' \
+                "$OUTDIR/responses/node4-join.json" >/dev/null; then
+            echo "node 4 rejection was not the expected template-mismatch" >&2
+            cat "$OUTDIR/responses/node4-join.json" >&2
+            exit 1
+        fi
+        echo ">> node 4 rejected as expected"
     fi
-    echo ">> node 4 rejected as expected"
 
-    for n in 1 2 3; do
+    for n in "${admitted_nodes[@]}"; do
         remote_get "$n" "/~zone@1.0/status?name=book-shelf" \
             "$OUTDIR/responses/node$n-status.json"
         jq -e --arg addr "$ring_addr" \
@@ -551,21 +713,23 @@ run_zone_flow() {
              .body."zone"."ring-address" == $addr' \
             "$OUTDIR/responses/node$n-status.json" >/dev/null
     done
-    remote_get 4 "/~zone@1.0/status" \
-        "$OUTDIR/responses/node4-status.json"
-    jq -e \
-        '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
-         (.body."zones" | has("book-shelf") | not)' \
-        "$OUTDIR/responses/node4-status.json" >/dev/null
-    echo ">> node 4 status has no zone identity"
+    if [[ "$ZONE_TEMPLATE_MODE" != "release-common" ]]; then
+        remote_get 4 "/~zone@1.0/status" \
+            "$OUTDIR/responses/node4-status.json"
+        jq -e \
+            '.status == 200 and (.body.initialized == false or .body.initialized == "false") and
+             (.body."zones" | has("book-shelf") | not)' \
+            "$OUTDIR/responses/node4-status.json" >/dev/null
+        echo ">> node 4 status has no zone identity"
 
-    remote_get 4 "/~zone@1.0/member=book-shelf" \
-        "$OUTDIR/responses/node4-member.json"
-    jq -e '.status == 400 and .body.error == "zone-not-initialized"' \
-        "$OUTDIR/responses/node4-member.json" >/dev/null
-    echo ">> node 4 cannot produce a zone membership proof"
+        remote_get 4 "/~zone@1.0/member=book-shelf" \
+            "$OUTDIR/responses/node4-member.json"
+        jq -e '.status == 400 and .body.error == "zone-not-initialized"' \
+            "$OUTDIR/responses/node4-member.json" >/dev/null
+        echo ">> node 4 cannot produce a zone membership proof"
+    fi
 
-    for n in 1 2 3; do
+    for n in "${admitted_nodes[@]}"; do
         member_addr=$(jq -r '
             def measurement:
                 if .body.type == "lapee-measurement" then .body
@@ -618,6 +782,7 @@ total_start=$(date +%s)
 time_step "prepare-local-images" prepare_image
 time_step "install-remote-helper" install_remote_helper
 time_step "copy-images-to-remote" copy_images
+time_step "prime-snp-id-blocks" prime_snp_id_blocks
 time_step "start-remote-snp-nodes" remote_start_nodes
 time_step "wait-measurement-boot" wait_all_nodes
 time_step "assert-security-properties" assert_security_properties

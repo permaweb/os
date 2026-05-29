@@ -116,7 +116,7 @@ verify(Base, Req, Opts) ->
     resolve_device_response(
         Device,
         <<"verify">>,
-        Req#{<<"envelope">> => Measurement},
+        set_message_key(Req, <<"envelope">>, Measurement, Opts),
         Opts).
 
 verify_peer(_Base, Req, Opts) ->
@@ -315,7 +315,7 @@ verify_peer_url(Url, Req, Opts) ->
         FreshVerify = verify_measurement_body(
             <<"fresh-verification">>,
             Fresh,
-            Req#{<<"nonce">> => hb_util:encode(FreshNonce)},
+            set_message_key(Req, <<"nonce">>, hb_util:encode(FreshNonce), Opts),
             AllowRejected,
             Opts),
         Challenge = crypto:strong_rand_bytes(32),
@@ -394,7 +394,10 @@ normalize_key(Key) -> Key.
 
 verify_measurement_body(Label, Measurement, Req, AllowRejected, Opts) ->
     {ok, #{<<"status">> := 200, <<"body">> := Body}} =
-        verify(Measurement, Req#{<<"envelope">> => Measurement}, Opts),
+        verify(
+            Measurement,
+            set_message_key(Req, <<"envelope">>, Measurement, Opts),
+            Opts),
     case hb_maps:get(<<"verified">>, Body, false, Opts) of
         true -> Body;
         false when AllowRejected ->
@@ -656,13 +659,13 @@ resolve_device_response(Device, Path, Req, Opts) ->
                 {error, _} ->
                     hb_ao:resolve(
                         #{<<"device">> => Device},
-                        Req#{<<"path">> => Path},
+                        set_message_key(Req, <<"path">>, Path, Opts),
                         Opts)
             end;
         _ ->
             hb_ao:resolve(
                 #{<<"device">> => Device},
-                Req#{<<"path">> => Path},
+                set_message_key(Req, <<"path">>, Path, Opts),
                 Opts)
     end.
 
@@ -675,7 +678,11 @@ measurement_export(<<"unwrap-secret">>) -> unwrap_secret;
 measurement_export(_Path) -> undefined.
 
 engine_request(Req) ->
-    Req#{<<"measurement-internal-token">> => internal_request_token()}.
+    set_message_key(
+        Req,
+        <<"measurement-internal-token">>,
+        internal_request_token(),
+        #{}).
 
 internal_request(Req) ->
     internal_request(Req, Req).
@@ -994,6 +1001,9 @@ with_raw_ok(Fun) ->
                 <<"stack">> => reason_to_text(Stack)
             }}
     end.
+
+set_message_key(Msg, Key, Value, Opts) ->
+    hb_maps:put(Key, Value, hb_message:uncommitted(Msg, Opts), Opts).
 
 error_resp(Status, Err, Reason) ->
     {error, #{

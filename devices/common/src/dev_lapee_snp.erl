@@ -134,9 +134,11 @@ verify(Base, Req, Opts) ->
     Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
     ReportDataCheck = check_report_data(Body, Recipient, Evidence, Req, Opts),
     SignatureCheck = check_report_signature(Body, Evidence, Opts),
+    PublisherCheck = check_publisher_signal(Body, Evidence, Opts),
     Checks = [
         ReportDataCheck,
-        SignatureCheck
+        SignatureCheck,
+        PublisherCheck
     ],
     Verified = lists:all(
         fun(#{<<"ok">> := Ok, <<"severity">> := Severity}) ->
@@ -352,7 +354,7 @@ ensure_secret_activation(Activation, Credential, Expected, _Subject, Opts) ->
     end.
 
 evidence(ReportRaw, Certs, Body, Report, Nonce, ReportData, Recipient, Opts) ->
-    #{
+    Evidence0 = #{
         <<"type">> => <<"lapee-snp-evidence">>,
         <<"version">> => ?VERSION,
         <<"nonce">> => hb_util:encode(Nonce),
@@ -363,6 +365,11 @@ evidence(ReportRaw, Certs, Body, Report, Nonce, ReportData, Recipient, Opts) ->
         <<"snp-product">> => snp_product(Body, Opts),
         <<"secret-recipient-id">> => recipient_id(Recipient, #{}, Opts),
         <<"device-context">> => device_context(Opts)
+    },
+    Evidence0#{
+        <<"signals">> => #{
+            <<"publisher">> => publisher_signal(Body, Evidence0, Report, Opts)
+        }
     }.
 
 certificates(Certs, Body, Report, Opts) ->
@@ -458,6 +465,10 @@ parsed_report_summary(Report) ->
             report_get(<<"signature-algorithm">>, Report, null),
         <<"platform-info">> => report_get(<<"platform-info">>, Report, null),
         <<"measurement">> => encode_array_field(<<"measurement">>, Report),
+        <<"host-data">> => encode_array_field(<<"host-data">>, Report),
+        <<"id-key-digest">> => encode_array_field(<<"id-key-digest">>, Report),
+        <<"author-key-digest">> =>
+            encode_array_field(<<"author-key-digest">>, Report),
         <<"reported-tcb">> =>
             report_get(<<"reported-tcb">>, Report, null),
         <<"committed-tcb">> =>
@@ -505,6 +516,144 @@ check_report_signature(Body, Evidence, Opts) ->
         fun() ->
             assert_report_signature(Body, Evidence, Opts)
         end).
+
+check_publisher_signal(Body, Evidence, Opts) ->
+    safely_check(
+        <<"publisher signer signal matches SNP report identity">>,
+        <<"core">>,
+        fun() ->
+            Report = evidence_report(Evidence, Opts),
+            Expected = publisher_signal(Body, Evidence, Report, Opts),
+            Signals = hb_maps:get(<<"signals">>, Evidence, #{}, Opts),
+            case hb_maps:get(<<"publisher">>, Signals, undefined, Opts) of
+                undefined -> throw(<<"missing publisher signal">>);
+                Reported ->
+                    case {publisher_signal_id(Expected, Opts),
+                          publisher_signal_id(Reported, Opts)} of
+                        {ID, ID} -> ok;
+                        {ExpectedID, ReportedID} ->
+                            throw(#{
+                                <<"expected-id">> => ExpectedID,
+                                <<"reported-id">> => ReportedID,
+                                <<"expected">> => Expected,
+                                <<"reported">> => Reported
+                            })
+                    end
+            end
+        end).
+
+publisher_signal(Body, Evidence, Report, Opts) ->
+    Signers = indexed_publisher_signers(snp_publisher_entries(Report)),
+    #{
+        <<"source">> => <<"snp-report">>,
+        <<"source-status">> =>
+            case map_size(Signers) of
+                0 -> <<"unavailable">>;
+                _ -> <<"reported">>
+            end,
+        <<"signers">> => Signers,
+        <<"signer-count">> => map_size(Signers),
+        <<"signers-digest">> => publisher_digest(Signers, Opts),
+        <<"signers-digest-algorithm">> =>
+            <<"ao-core-uncommitted-message-id-v1">>,
+        <<"artifact">> => snp_publisher_artifact(Body, Evidence, Report, Opts)
+    }.
+
+snp_publisher_entries(Report) ->
+    AuthorKeyEnabled =
+        report_get(<<"author-key-enabled">>, Report, false),
+    AuthorKeyDigest =
+        array_binary(report_get(<<"author-key-digest">>, Report, <<>>)),
+    IDKeyDigest =
+        array_binary(report_get(<<"id-key-digest">>, Report, <<>>)),
+    Entries0 =
+        case {AuthorKeyEnabled, nonzero_binary(AuthorKeyDigest)} of
+            {true, true} ->
+                [#{
+                    <<"type">> => <<"snp-author-key-digest">>,
+                    <<"role">> => <<"author-key">>,
+                    <<"sha384">> => hb_util:encode(AuthorKeyDigest)
+                }];
+            _ ->
+                []
+        end,
+    Entries1 =
+        case nonzero_binary(IDKeyDigest) of
+            true ->
+                Entries0 ++ [#{
+                    <<"type">> => <<"snp-id-key-digest">>,
+                    <<"role">> => <<"id-key">>,
+                    <<"sha384">> => hb_util:encode(IDKeyDigest)
+                }];
+            false ->
+                Entries0
+        end,
+    Entries1.
+
+indexed_publisher_signers(Entries) ->
+    maps:from_list(
+        [
+            {publisher_signer_key(I), Entry#{<<"source">> => <<"snp-report">>}}
+         || {I, Entry} <- lists:zip(lists:seq(1, length(Entries)), Entries)
+        ]).
+
+publisher_signer_key(I) ->
+    iolist_to_binary([<<"signer-">>, integer_to_binary(I)]).
+
+snp_publisher_artifact(Body, Evidence, Report, Opts) ->
+    #{
+        <<"measurement">> => encode_array_field(<<"measurement">>, Report),
+        <<"family-id">> => encode_array_field(<<"family-id">>, Report),
+        <<"image-id">> => encode_array_field(<<"image-id">>, Report),
+        <<"guest-svn">> => report_get(<<"guest-svn">>, Report, null),
+        <<"policy">> => report_get(<<"policy">>, Report, null),
+        <<"vmpl">> => report_get(<<"vmpl">>, Report, null),
+        <<"author-key-enabled">> =>
+            report_get(<<"author-key-enabled">>, Report, false),
+        <<"id-key-digest">> => encode_array_field(<<"id-key-digest">>, Report),
+        <<"author-key-digest">> =>
+            encode_array_field(<<"author-key-digest">>, Report),
+        <<"reported-tcb">> => report_get(<<"reported-tcb">>, Report, null),
+        <<"committed-tcb">> => report_get(<<"committed-tcb">>, Report, null),
+        <<"launch-tcb">> => report_get(<<"launch-tcb">>, Report, null),
+        <<"snp-product">> => snp_product(Body, Evidence, Opts),
+        <<"signature-algorithm">> =>
+            report_get(<<"signature-algorithm">>, Report, null),
+        <<"platform-info">> =>
+            report_get(<<"platform-info">>, Report, null)
+    }.
+
+nonzero_binary(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    lists:any(fun(Byte) -> Byte =/= 0 end, binary_to_list(Bin));
+nonzero_binary(_Other) ->
+    false.
+
+-ifdef(TEST).
+publisher_digest(Msg, Opts) when map_size(Opts) =:= 0 ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Msg)));
+publisher_digest(Msg, Opts) ->
+    stable_id(Msg, Opts).
+-else.
+publisher_digest(Msg, Opts) ->
+    stable_id(Msg, Opts).
+-endif.
+
+-ifdef(TEST).
+publisher_signal_id(Msg, Opts) when map_size(Opts) =:= 0 ->
+    hb_util:encode(
+        crypto:hash(sha256, term_to_binary(canonical_payload(Msg, Opts))));
+publisher_signal_id(Msg, Opts) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
+        uncommitted,
+        Opts).
+-else.
+publisher_signal_id(Msg, Opts) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
+        uncommitted,
+        Opts).
+-endif.
 
 assert_report_signature(Body, Evidence, Opts) ->
     Raw = decode_required(<<"report-raw">>, Evidence, Opts),
@@ -1455,11 +1604,11 @@ link_id({link, ID, _LinkOpts}) ->
 canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_payload(response_body(Link, Opts), Opts);
 canonical_payload(Msg, Opts) when is_map(Msg) ->
-    Loaded = hb_cache:ensure_all_loaded(hb_link:decode_all_links(Msg), Opts),
+    Decoded = hb_link:decode_all_links(Msg),
     maps:from_list(
         [
             {Key, canonical_payload(Value, Opts)}
-         || {Key, Value} <- hb_maps:to_list(Loaded, Opts),
+         || {Key, Value} <- hb_maps:to_list(Decoded, Opts),
             Key =/= <<"commitments">>,
             Key =/= <<"ao-types">>
         ]);
@@ -1604,5 +1753,42 @@ canonical_name_matches_raw_and_decoded_x509_strings_test() ->
             {'AttributeTypeAndValue', {2,5,4,3}, {utf8String, <<"ARK-Genoa">>}}
         ]]},
     ?assertEqual(canonical_name(Decoded), canonical_name(Raw)).
+
+snp_publisher_signal_exposes_author_and_id_key_digests_test() ->
+    Report = #{
+        <<"author-key-enabled">> => true,
+        <<"author-key-digest">> => binary:copy(<<1>>, 48),
+        <<"id-key-digest">> => binary:copy(<<2>>, 48),
+        <<"measurement">> => binary:copy(<<3>>, 48),
+        <<"family-id">> => binary:copy(<<4>>, 16),
+        <<"image-id">> => binary:copy(<<5>>, 16)
+    },
+    Signal = publisher_signal(#{}, #{}, Report, #{}),
+    ?assertEqual(<<"reported">>, hb_maps:get(<<"source-status">>, Signal)),
+    ?assertEqual(2, hb_maps:get(<<"signer-count">>, Signal)),
+    Signers = hb_maps:get(<<"signers">>, Signal),
+    ?assertEqual(
+        <<"author-key">>,
+        hb_maps:get(<<"role">>, hb_maps:get(<<"signer-1">>, Signers))),
+    ?assertEqual(
+        <<"id-key">>,
+        hb_maps:get(<<"role">>, hb_maps:get(<<"signer-2">>, Signers))).
+
+snp_publisher_signal_tamper_rejected_test() ->
+    Report = #{
+        <<"author-key-enabled">> => false,
+        <<"id-key-digest">> => binary:copy(<<2>>, 48),
+        <<"measurement">> => binary:copy(<<3>>, 48)
+    },
+    Evidence0 = #{<<"report-json">> => Report},
+    Signal = publisher_signal(#{}, Evidence0, Report, #{}),
+    Evidence = Evidence0#{
+        <<"signals">> => #{<<"publisher">> =>
+            Signal#{<<"signers-digest">> =>
+                <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>}}
+    },
+    ?assertMatch(
+        #{<<"ok">> := false},
+        check_publisher_signal(#{}, Evidence, #{})).
 
 -endif.

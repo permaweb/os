@@ -7,7 +7,10 @@
 %%% belongs in external
 %%% analysis tools, not in the boot appliance.
 -module(lib_lapee_tpm_tcg).
--export([boot_signals/2, replay_pcrs/2, parse_acpi_table/1,
+-export([boot_signals/1, boot_signals/2,
+         boot_signals_from_events/1, boot_signals_from_events/2,
+         decoded_events/1, decoded_events_with_errors/1,
+         replay_pcrs/2, replay_pcrs_from_events/2, parse_acpi_table/1,
          parse_acpi_rsdp/1]).
 
 %%%============================================================================
@@ -196,10 +199,20 @@ decode_event_data(16#80000007, #{<<"event-data">> := Data}) ->
 decode_event_data(_, _) ->
     #{}.
 
+boot_signals(<<>>) ->
+    #{};
+boot_signals(LogBin) when is_binary(LogBin) ->
+    boot_signals(LogBin, #{}).
+
 boot_signals(<<>>, _Opts) ->
     #{};
 boot_signals(LogBin, Opts) when is_binary(LogBin) ->
-    Events = decoded_events(LogBin),
+    boot_signals_from_events(decoded_events(LogBin), Opts).
+
+boot_signals_from_events(Events) when is_list(Events) ->
+    boot_signals_from_events(Events, #{}).
+
+boot_signals_from_events(Events, Opts) when is_list(Events) ->
     SecureBoot = secure_boot_signal(Events),
     SecureBootPolicy = secure_boot_policy_signal(Events, Opts),
     LoadedImage = loaded_image_signal(Events, Opts),
@@ -365,9 +378,20 @@ indexed_signers(Entries) ->
          || {I, Entry} <- lists:zip(lists:seq(1, length(Entries)), Entries)]).
 
 decoded_events(LogBin) ->
-    [Ev || {_K, Ev} <- lists:sort(maps:to_list(decode_events(parse(LogBin)))),
-           is_map(Ev),
-           not maps:is_key(<<"error">>, Ev)].
+    {Events, _Errors} = decoded_events_with_errors(LogBin),
+    Events.
+
+decoded_events_with_errors(LogBin) ->
+    Decoded =
+        [
+            Ev
+         || {_K, Ev} <- lists:sort(maps:to_list(decode_events(parse(LogBin)))),
+            is_map(Ev)
+        ],
+    {
+        [Ev || Ev <- Decoded, not maps:is_key(<<"error">>, Ev)],
+        [Ev || Ev <- Decoded, maps:is_key(<<"error">>, Ev)]
+    }.
 
 loaded_image_signal(Events, Opts) ->
     Apps = [Ev || Ev <- Events,
@@ -448,14 +472,19 @@ stable_digest(Msg, Opts) ->
         Opts).
 
 replay_pcrs(LogBin, Pcrs) when is_binary(LogBin), is_list(Pcrs) ->
+    replay_pcrs_from_events(decoded_events(LogBin), Pcrs);
+replay_pcrs(_, Pcrs) when is_list(Pcrs) ->
+    maps:from_list([{Pcr, hb_util:encode(<<0:256>>)} || Pcr <- Pcrs]).
+
+replay_pcrs_from_events(Events, Pcrs) when is_list(Events), is_list(Pcrs) ->
     Wanted = maps:from_list([{Pcr, <<0:256>>} || Pcr <- Pcrs]),
     Replayed =
         lists:foldl(
             fun replay_event/2,
             Wanted,
-            [Ev || Ev <- decoded_events(LogBin), has_sha256(Ev)]),
+            [Ev || Ev <- Events, has_sha256(Ev)]),
     maps:map(fun(_Pcr, Digest) -> hb_util:encode(Digest) end, Replayed);
-replay_pcrs(_, Pcrs) when is_list(Pcrs) ->
+replay_pcrs_from_events(_, Pcrs) when is_list(Pcrs) ->
     maps:from_list([{Pcr, hb_util:encode(<<0:256>>)} || Pcr <- Pcrs]).
 
 replay_event(Ev, Acc) ->
