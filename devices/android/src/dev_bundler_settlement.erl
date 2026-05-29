@@ -37,7 +37,7 @@ quote(Base, Size, Opts) ->
             Opts
         ),
     hb_ao:resolve(
-        Base#{ <<"device">> => PricingDevice },
+        base_with_device(Base, PricingDevice, Opts),
         #{
             <<"path">> => <<"quote">>,
             <<"resource">> => <<"arweave-bytes">>,
@@ -68,7 +68,7 @@ charge(Base, Req, Amount, Opts) ->
             },
             Opts
         ),
-    case hb_ao:resolve(Base#{ <<"device">> => LedgerDevice }, ChargeReq, Opts) of
+    case hb_ao:resolve(base_with_device(Base, LedgerDevice, Opts), ChargeReq, Opts) of
         {ok, _} -> withdraw_if_enabled(Base, Req, Amount, Recipient, Opts);
         Error -> Error
     end.
@@ -99,11 +99,18 @@ withdraw_if_enabled(Base, Req, Amount, Recipient, Opts) ->
                     undefined -> maps:remove(<<"token">>, WithdrawReq0);
                     _ -> WithdrawReq0
                 end,
-            case hb_ao:resolve(Base#{ <<"device">> => AoPaymentDevice }, WithdrawReq, Opts) of
+            case hb_ao:resolve(
+                base_with_device(Base, AoPaymentDevice, Opts),
+                WithdrawReq,
+                Opts
+            ) of
                 {ok, _} -> {ok, Req};
                 Error -> Error
             end
     end.
+
+base_with_device(Base, Device, Opts) ->
+    hb_maps:put(<<"device">>, Device, hb_message:uncommitted(Base, Opts), Opts).
 
 withdraw_secret(Base, Opts) ->
     hb_private:get(

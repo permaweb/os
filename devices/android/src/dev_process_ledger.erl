@@ -60,9 +60,20 @@ credit_once(_LedgerID, Recipient, Quantity0, ImportKey, ImportValue, NodeMsg) ->
                                 get_balance_from(RecipientID, LiveNodeMsg) + Quantity,
                                 LiveNodeMsg
                             ),
-                        NewImports = Imports#{ImportKey => ImportValue},
+                        NewImports =
+                            set_message_key(
+                                Imports,
+                                ImportKey,
+                                ImportValue,
+                                LiveNodeMsg
+                            ),
                         NewNodeMsg =
-                            NewNodeMsg0#{<<"ao-payment-imports">> => NewImports},
+                            set_message_key(
+                                NewNodeMsg0,
+                                <<"ao-payment-imports">>,
+                                NewImports,
+                                LiveNodeMsg
+                            ),
                         hb_http_server:set_opts(#{}, NewNodeMsg),
                         {ok, imported, NewNodeMsg}
                 end
@@ -229,12 +240,16 @@ charge_valid_accounts(AccountID, RecipientID, Quantity, Charge, LiveNodeMsg) ->
                 <<"quantity">> => Quantity,
                 <<"status">> => <<"charged">>
             },
+            NewCharges =
+                set_message_key(Charges, ChargeKey, ChargeValue, LiveNodeMsg),
             hb_http_server:set_opts(
                 #{},
-                NewNodeMsg#{
-                    <<"ao-payment-charges">> =>
-                        Charges#{ChargeKey => ChargeValue}
-                }
+                set_message_key(
+                    NewNodeMsg,
+                    <<"ao-payment-charges">>,
+                    NewCharges,
+                    LiveNodeMsg
+                )
             ),
             {ok, ChargeValue}
     end.
@@ -242,8 +257,11 @@ charge_valid_accounts(AccountID, RecipientID, Quantity, Charge, LiveNodeMsg) ->
 set_balance_in_msg(Account, Amount, NodeMsg) ->
     NormAccount = hb_util:human_id(Account),
     Ledger = hb_opts:get(ao_payment_ledger_balances, #{}, NodeMsg),
-    NewLedger = hb_ao:set(Ledger, NormAccount, Amount, NodeMsg),
-    NodeMsg#{ <<"ao-payment-ledger-balances">> => NewLedger }.
+    NewLedger = set_message_key(Ledger, NormAccount, Amount, NodeMsg),
+    set_message_key(NodeMsg, <<"ao-payment-ledger-balances">>, NewLedger, NodeMsg).
+
+set_message_key(Msg, Key, Value, Opts) ->
+    hb_maps:put(Key, Value, hb_message:uncommitted(Msg, Opts), Opts).
 
 get_balance(Account, NodeMsg) ->
     get_balance_from(Account, latest_node_msg(NodeMsg)).

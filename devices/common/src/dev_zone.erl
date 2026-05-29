@@ -666,7 +666,9 @@ wait_for_server_opts(ServerID, Attempts) ->
 update_zone_start_status(ServerID, Status) ->
     case wait_for_server_opts(ServerID, 1) of
         Opts when is_map(Opts) ->
-            hb_http_server:set_opts(Opts#{<<"zone-start">> => Status});
+            hb_http_server:set_opts(
+                set_message_key(Opts, <<"zone-start">>, Status, Opts)
+            );
         _ ->
             ok
     end.
@@ -679,17 +681,24 @@ install_ring(Name, Templates0, AES, Wallet, Members, Opts) ->
     PrivZones = hb_opts:get(<<"priv-zones">>, #{}, Opts),
     Definition = zone_definition(Name, Templates, Wallet, Members, Opts),
     Identity = zone_identity(Name),
-    Opts#{
-        <<"zones">> => Zones#{Name => Definition},
-        <<"priv-zones">> => PrivZones#{
-            Name => #{
+    (hb_message:uncommitted(Opts, Opts))#{
+        <<"zones">> => set_message_key(Zones, Name, Definition, Opts),
+        <<"priv-zones">> => set_message_key(
+            PrivZones,
+            Name,
+            #{
                 <<"aes">> => AES,
                 <<"wallet">> => Wallet
-            }
-        },
-        <<"identities">> => Identities#{
-            Identity => #{<<"priv-wallet">> => Wallet}
-        }
+            },
+            Opts
+        ),
+        <<"identities">> =>
+            set_message_key(
+                Identities,
+                Identity,
+                #{<<"priv-wallet">> => Wallet},
+                Opts
+            )
     }.
 
 install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts) ->
@@ -1282,7 +1291,8 @@ add_member_to_members(Members, URL, Attestation, Role, Opts) ->
     case attestation_node_address(Attestation, Opts) of
         undefined -> Members;
         Address ->
-            hb_maps:put(
+            set_message_key(
+                Members,
                 Address,
                 #{
                     <<"address">> => Address,
@@ -1290,10 +1300,12 @@ add_member_to_members(Members, URL, Attestation, Role, Opts) ->
                     <<"role">> => Role,
                     <<"last-seen-unix">> => erlang:system_time(second)
                 },
-                hb_message:uncommitted(Members, Opts),
                 Opts
             )
     end.
+
+set_message_key(Msg, Key, Value, Opts) ->
+    hb_maps:put(Key, Value, hb_message:uncommitted(Msg, Opts), Opts).
 
 attestation_node_address(Attestation, Opts) ->
     Body = measurement_body(response_body(Attestation, Opts), Opts),

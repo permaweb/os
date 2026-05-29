@@ -21,7 +21,11 @@ info(_) ->
 
 %% @doc Open metering and estimate the cost of a bundler upload if possible.
 estimate(Base, Req, Opts) ->
-    case hb_ao:resolve(metering_msg(Base, Opts), Req#{ <<"path">> => <<"estimate">> }, Opts) of
+    case hb_ao:resolve(
+        metering_msg(Base, Opts),
+        request_with_path(Req, <<"estimate">>, Opts),
+        Opts
+    ) of
         {ok, _} ->
             case bundler_upload_subject(Req, Opts) of
                 {ok, Item} ->
@@ -44,7 +48,7 @@ price(Base, Req, Opts) ->
         },
     case hb_ao:resolve(
         metering_msg(Base, Opts),
-        Req#{ <<"path">> => <<"price">> },
+        request_with_path(Req, <<"price">>, Opts),
         UnitOpts
     ) of
         {ok, Amount} ->
@@ -79,6 +83,9 @@ metering_msg(Base, Opts) ->
         ),
     Device = named_device_ref(Device0, Opts),
     #{ <<"device">> => Device }.
+
+request_with_path(Req, Path, Opts) ->
+    hb_maps:put(<<"path">>, Path, hb_message:uncommitted(Req, Opts), Opts).
 
 %% @doc Extract a bundler upload subject from a P4 pricing request.
 bundler_upload_subject(Req, Opts) ->

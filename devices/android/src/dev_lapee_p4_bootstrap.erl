@@ -36,7 +36,7 @@ request(State, Raw, Opts) ->
             HookReq = alias_hook_req(HookReq0, State, Opts),
             case non_chargable_request(HookReq, Opts) of
                 true -> {ok, #{<<"body">> => raw_hook_body(HookReq, Opts)}};
-                false -> resolve_device(p4_state(State), <<"request">>, HookReq, Opts)
+                false -> resolve_device(p4_state(State, Opts), <<"request">>, HookReq, Opts)
             end;
         Error ->
             Error
@@ -45,11 +45,11 @@ request(State, Raw, Opts) ->
 response(State, Raw, Opts) ->
     case non_chargable_request(Raw, Opts) of
         true -> {ok, #{<<"body">> => raw_hook_body(Raw, Opts)}};
-        false -> resolve_device(p4_state(State), <<"response">>, Raw, Opts)
+        false -> resolve_device(p4_state(State, Opts), <<"response">>, Raw, Opts)
     end.
 
 resolve_device(Base, Path, Req, Opts) ->
-    hb_ao:resolve(Base, Req#{<<"path">> => Path}, Opts).
+    hb_ao:resolve(Base, message_with_key(Req, <<"path">>, Path, Opts), Opts).
 
 configure(NodeMsg0, BootstrapDevice) ->
     Address = node_address(NodeMsg0),
@@ -180,7 +180,12 @@ register_ledger_name(LedgerID, NodeMsg) ->
         case hb_opts:get(priv_wallet, no_viable_wallet, NodeMsg) of
             no_viable_wallet -> NodeMsg;
             Wallet ->
-                NodeMsg#{ <<"operator">> => ar_wallet:to_address(Wallet) }
+                message_with_key(
+                    NodeMsg,
+                    <<"operator">>,
+                    ar_wallet:to_address(Wallet),
+                    NodeMsg
+                )
         end,
     hb_ao:resolve(
         #{ <<"device">> => <<"local-name@1.0">> },
@@ -230,7 +235,9 @@ read_first([Path | Rest], Errors) ->
 
 install_base_config(NodeMsg0, Address, Beneficiary, LedgerProc, WithdrawSecret) ->
     NodeProcesses0 = map_opt(<<"node-processes">>, NodeMsg0),
-    NodeMsg1 = NodeMsg0#{
+    NodeProcesses =
+        message_with_key(NodeProcesses0, ?LEDGER_NAME, LedgerProc, NodeMsg0),
+    NodeMsg1 = (hb_message:uncommitted(NodeMsg0, NodeMsg0))#{
         <<"operator">> => Address,
         <<"p4-recipient">> => Address,
         <<"bundler-beneficiary">> => Beneficiary,
@@ -242,7 +249,7 @@ install_base_config(NodeMsg0, Address, Beneficiary, LedgerProc, WithdrawSecret) 
         <<"ao-payment-node">> =>
             <<"http://localhost:", (hb_util:bin(hb_maps:get(<<"port">>, NodeMsg0, 8734, NodeMsg0)))/binary>>,
         <<"scheduling-mode">> => aggressive,
-        <<"node-processes">> => NodeProcesses0#{?LEDGER_NAME => LedgerProc}
+        <<"node-processes">> => NodeProcesses
     },
     hb_private:set(NodeMsg1, <<"ao-payment-withdraw-secret">>, WithdrawSecret, NodeMsg0).
 
@@ -267,15 +274,28 @@ install_hooks(NodeMsg0, Address, Beneficiary, LedgerID, BootstrapDevice, DeviceR
             maps:get(<<"response">>, On0, []),
             [Processor]
         ),
-    On1 = On0#{
-        <<"request">> => Request,
-        <<"response">> => Response,
-        <<"bundled-message-complete">> => BundledMessageComplete
-    },
+    On1 =
+        message_with_key(
+            message_with_key(
+                message_with_key(
+                    On0,
+                    <<"request">>,
+                    Request,
+                    NodeMsg0
+                ),
+                <<"response">>,
+                Response,
+                NodeMsg0
+            ),
+            <<"bundled-message-complete">>,
+            BundledMessageComplete,
+            NodeMsg0
+        ),
     LocalNames0 = map_opt(<<"local-names">>, NodeMsg0),
-    NodeMsg0#{
+    LocalNames = message_with_key(LocalNames0, ?LEDGER_NAME, LedgerID, NodeMsg0),
+    (hb_message:uncommitted(NodeMsg0, NodeMsg0))#{
         <<"ao-payment-ledger">> => LedgerID,
-        <<"local-names">> => LocalNames0#{?LEDGER_NAME => LedgerID},
+        <<"local-names">> => LocalNames,
         <<"p4-non-chargable-routes">> => p4_non_chargable_routes(LedgerID),
         <<"on">> => On1
     }.
@@ -335,7 +355,7 @@ maybe_manifest_request(State, Raw, Opts) ->
 alias_hook_req(HookReq, State, Opts) ->
     Aliases = maps:get(<<"lapee-device-aliases">>, State, #{}),
     Body = hb_maps:get(<<"body">>, HookReq, [], Opts),
-    HookReq#{<<"body">> => alias_body(Body, Aliases)}.
+    message_with_key(HookReq, <<"body">>, alias_body(Body, Aliases), Opts).
 
 alias_body(Body, Aliases) when is_list(Body) ->
     [alias_message(Msg, Aliases) || Msg <- Body];
@@ -385,11 +405,11 @@ trim_leading_slash(<<"/", Rest/binary>>) ->
 trim_leading_slash(Path) ->
     Path.
 
-p4_state(State) ->
+p4_state(State, Opts) ->
     P4Device = maps:get(<<"p4-device">>, State, <<"p4@1.0">>),
     maps:without(
         [<<"manifest-request">>, <<"p4-device">>, <<"lapee-device-aliases">>],
-        State#{<<"device">> => P4Device}
+        message_with_key(State, <<"device">>, P4Device, Opts)
     ).
 
 bootstrap_device_ref(Base) when is_map(Base) ->
@@ -408,7 +428,11 @@ route_match(Request, Routes, Opts) ->
             no_path -> no_path;
             {_TargetKey, Path} -> Path
         end,
-    match_routes(Request#{<<"path">> => TargetPath}, list_routes(Routes, Opts), Opts).
+    match_routes(
+        message_with_key(Request, <<"path">>, TargetPath, Opts),
+        list_routes(Routes, Opts),
+        Opts
+    ).
 
 list_routes(Routes, Opts) when is_map(Routes) ->
     case hb_util:is_ordered_list(Routes, Opts) of
@@ -428,6 +452,9 @@ match_routes(Request, [Route | Rest], Opts) ->
         true -> Route;
         false -> match_routes(Request, Rest, Opts)
     end.
+
+message_with_key(Msg, Key, Value, Opts) ->
+    hb_maps:put(Key, Value, hb_message:uncommitted(Msg, Opts), Opts).
 
 raw_hook_body(HookReq, Opts) ->
     hb_maps:get(<<"body">>, HookReq, [], Opts).

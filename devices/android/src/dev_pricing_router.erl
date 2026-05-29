@@ -7,6 +7,9 @@
 -export([info/1, estimate/3, price/3]).
 
 -include_lib("hb/include/hb.hrl").
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 info(_) ->
     #{ exports => [<<"estimate">>, <<"price">>] }.
@@ -18,8 +21,9 @@ price(Base, Req, Opts) ->
     forward(<<"price">>, Base, Req, Opts).
 
 forward(Path, Base, Req, Opts) ->
-    PricingMsg = pricing_msg(Base, Req#{ <<"path">> => Path }, Opts),
-    hb_ao:resolve(PricingMsg, Req#{ <<"path">> => Path }, Opts).
+    ForwardReq = message_with_key(Req, <<"path">>, Path, Opts),
+    PricingMsg = pricing_msg(Base, ForwardReq, Opts),
+    hb_ao:resolve(PricingMsg, ForwardReq, Opts).
 
 pricing_msg(Base, Req, Opts) ->
     Route = selected_route(Base, Req, Opts),
@@ -30,9 +34,12 @@ pricing_msg(Base, Req, Opts) ->
             hb_maps:get(<<"default-pricing-device">>, Base, <<"simple-pay@1.0">>, Opts),
             Opts
         ),
-    (maps:merge(Base, maps:remove(<<"template">>, Route)))#{
-        <<"device">> => Device
-    }.
+    message_with_key(
+        maps:merge(Base, maps:remove(<<"template">>, Route)),
+        <<"device">>,
+        Device,
+        Opts
+    ).
 
 selected_route(Base, Req, Opts) ->
     Request = hb_ao:get(<<"request">>, Req, #{}, Opts#{ <<"hashpath">> => ignore }),
@@ -54,7 +61,11 @@ route_match(Request, Routes, Opts) ->
             no_path -> no_path;
             {_TargetKey, Path} -> Path
         end,
-    match_routes(Request#{<<"path">> => TargetPath}, list_routes(Routes, Opts), Opts).
+    match_routes(
+        message_with_key(Request, <<"path">>, TargetPath, Opts),
+        list_routes(Routes, Opts),
+        Opts
+    ).
 
 list_routes(Routes, Opts) when is_map(Routes) ->
     case hb_util:is_ordered_list(Routes, Opts) of
@@ -74,3 +85,20 @@ match_routes(Request, [Route | Rest], Opts) ->
         true -> Route;
         false -> match_routes(Request, Rest, Opts)
     end.
+
+message_with_key(Msg, Key, Value, Opts) ->
+    hb_maps:put(Key, Value, hb_message:uncommitted(Msg, Opts), Opts).
+
+-ifdef(TEST).
+message_with_key_strips_stale_commitments_test() ->
+    Wallet = ar_wallet:new(),
+    Signed =
+        hb_message:commit(
+            #{<<"path">> => <<"old">>, <<"marker">> => <<"kept">>},
+            #{<<"priv-wallet">> => Wallet}
+        ),
+    Updated = message_with_key(Signed, <<"path">>, <<"new">>, #{}),
+    ?assertEqual(<<"new">>, hb_maps:get(<<"path">>, Updated, undefined, #{})),
+    ?assertEqual(<<"kept">>, hb_maps:get(<<"marker">>, Updated, undefined, #{})),
+    ?assertEqual([], hb_message:signers(Updated, #{})).
+-endif.
