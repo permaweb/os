@@ -44,6 +44,9 @@ class HyperbeamRuntime(
                 builder.environment()["ANDEE_CRYPTO_SOCKET"] = AndeePaths.cryptoSocketName(context)
                 builder.environment()["ANDEE_RUNTIME_ROOT"] = runtimeRoot.absolutePath
                 builder.environment()["ANDEE_PACKAGE_NAME"] = context.packageName
+                builder.environment()["ANDEE_VERSION_NAME"] = BuildConfig.VERSION_NAME
+                builder.environment()["ANDEE_VERSION_CODE"] = BuildConfig.VERSION_CODE.toString()
+                builder.environment()["ANDEE_RELEASE_DIGEST"] = releaseDigest(context)
                 builder.environment()["ANDEE_NATIVE_LIB_DIR"] = context.applicationInfo.nativeLibraryDir
                 builder.environment()["ANDEE_ANDROID_ABI"] = android.os.Build.SUPPORTED_ABIS.first()
                 builder.environment()["ANDEE_BOOT_CONFIG"] = config.absolutePath
@@ -159,6 +162,18 @@ class HyperbeamRuntime(
                 }
             }
             return md.digest()
+        }
+
+        private fun releaseDigest(context: Context): String {
+            val packageInfo = context.packageManager.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES,
+            )
+            val md = MessageDigest.getInstance("SHA-256")
+            packageInfo.signingInfo?.apkContentsSigners.orEmpty().forEach {
+                md.update(it.toByteArray())
+            }
+            return md.digest().joinToString("") { "%02x".format(it) }
         }
 
         private fun base64Url(bytes: ByteArray): String =

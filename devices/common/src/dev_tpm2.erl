@@ -913,17 +913,28 @@ chk_tcg_event_log_replay(Envelope, Opts) ->
     PcrMap = hb_maps:get(<<"pcr-values">>, Quote, #{}, Opts),
     TcgLog = hb_maps:get(<<"tcg-event-log">>, Envelope, <<>>, Opts),
     LogBin = decode_idish(TcgLog),
-    Replayed = lib_lapee_tpm_tcg:replay_pcrs(
-        LogBin,
+    {TcgEvents, TcgErrors} =
+        lib_lapee_tpm_tcg:decoded_events_with_errors(LogBin),
+    Replayed = lib_lapee_tpm_tcg:replay_pcrs_from_events(
+        TcgEvents,
         [4, 11]
     ),
-    Signals = lib_lapee_tpm_tcg:boot_signals(LogBin, Opts),
+    Signals = lib_lapee_tpm_tcg:boot_signals_from_events(TcgEvents, Opts),
     case {hb_maps:get(<<"4">>, PcrMap, undefined, Opts),
           hb_maps:get(<<"11">>, PcrMap, undefined, Opts)} of
         {undefined, _} ->
             {error, <<"quote omitted PCR 4 loaded EFI application measurement">>};
         {_, undefined} ->
             {error, <<"quote omitted PCR 11 loaded UKI section measurements">>};
+        _ when TcgErrors =/= [] ->
+            {error,
+                iolist_to_binary(
+                    io_lib:format(
+                        "TCG event log parse errors: ~0p",
+                        [TcgErrors]
+                    )
+                )
+            };
         _ ->
             case first_error([
                 compare_replayed_pcrs(Replayed, PcrMap, Opts),
@@ -1063,7 +1074,9 @@ compare_loaded_image_components(Expected, Actual, Opts) ->
 ensure_loaded_value(Value, Opts) when ?IS_LINK(Value) ->
     ensure_loaded_value(hb_cache:ensure_loaded(Value, Opts), Opts);
 ensure_loaded_value(Value, Opts) when is_map(Value) ->
-    hb_cache:ensure_all_loaded(hb_link:decode_all_links(Value), Opts);
+    maps:map(fun(_Key, Nested) -> ensure_loaded_value(Nested, Opts) end, Value);
+ensure_loaded_value(Value, Opts) when is_list(Value) ->
+    [ensure_loaded_value(Nested, Opts) || Nested <- Value];
 ensure_loaded_value(Value, _Opts) ->
     Value.
 

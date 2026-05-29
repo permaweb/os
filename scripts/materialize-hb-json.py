@@ -67,6 +67,7 @@ INLINE_LINKS = {
     "ring-reference",
     "runtime-event-log",
     "runtime",
+    "publisher",
     "secret-recipient",
     "security",
     "secure-boot",
@@ -170,7 +171,11 @@ def materialize(value, base: str, depth: int):
 
 
 def should_inline(target: str) -> bool:
-    return target in INLINE_LINKS or target.isdecimal()
+    return (
+        target in INLINE_LINKS
+        or target.isdecimal()
+        or target.startswith("signer-")
+    )
 
 
 def main() -> int:

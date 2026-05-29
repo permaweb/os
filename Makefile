@@ -475,6 +475,7 @@ _qemu-zone-nonvolatile: toolchain
 
 _qemu-provisioner-nonvolatile: toolchain
 	OUTDIR="$(BUILD_DIR)/qemu-provisioner-nonvolatile" \
+	    IMG="$(SB_PROVISION_OUT)" \
 	    ./scripts/qemu-provisioner-nonvolatile.sh
 
 _qemu-operator-config-zone: toolchain

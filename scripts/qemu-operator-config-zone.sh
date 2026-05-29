@@ -308,13 +308,32 @@ start_node 1 "$WITH_IMG" "LapEE-config-with-signer"
 start_node 2 "$PLAIN_IMG" "LapEE-config-empty-signers"
 wait_node 1
 wait_node 2
+get_json 1 "/~meta@1.0/info/on/request" \
+    "$OUTDIR/responses/node1-meta-on-request.json"
+get_json 1 "/~meta@1.0/info/on/start" \
+    "$OUTDIR/responses/node1-meta-on-start.json"
 
 jq -e --arg signer "$SIGNER" \
     '."trusted-device-signers" == [$signer] and
      (."load-remote-devices" == true or ."load-remote-devices" == "true") and
-     (."on"."request" == [] or ."on"."request" == {"device":"json@1.0"}) and
-     (."on"."start" | type == "array" and length >= 2)' \
+     (has("on") or has("on+link"))' \
     "$OUTDIR/responses/node1-meta-info.json" >/dev/null
+jq -e '
+    def payload:
+        if .status == 200 and has("body") then .body else . end;
+    def ao_list_items:
+        if type == "array" then .
+        else [to_entries[] | select(.key | test("^[0-9]+$")) | .value] end;
+    payload | ao_list_items == []' \
+    "$OUTDIR/responses/node1-meta-on-request.json" >/dev/null
+jq -e '
+    def payload:
+        if .status == 200 and has("body") then .body else . end;
+    def ao_list_items:
+        if type == "array" then .
+        else [to_entries[] | select(.key | test("^[0-9]+$")) | .value] end;
+    payload | ao_list_items | length >= 2' \
+    "$OUTDIR/responses/node1-meta-on-start.json" >/dev/null
 jq -e '
     def empty_ao_list: . == [] or . == {"device":"json@1.0"};
     ."trusted-device-signers" | empty_ao_list' \

@@ -167,6 +167,7 @@ verify(Base, Req, Opts) ->
         check_certificate_root_trusted(Evidence, Opts),
         check_android_attestation_extension(Facts),
         check_reported_attestation_facts(Evidence, Facts, Opts),
+        check_publisher_signal(Evidence, Facts, Opts),
         check_attestation_challenge(Evidence, Facts, Opts),
         check_reported_security_level(Evidence, Facts, Opts),
         check_keystore_signature(Evidence, Opts),
@@ -317,9 +318,11 @@ evidence(EvidenceSubject, EvidenceSubjectID, Agent, Opts) ->
         <<"verdict">> =>
             hb_maps:get(<<"verdict">>, Agent, <<"policy-failure">>, Opts)
     },
+    Facts = public_attestation_facts(attestation_facts(Evidence0, Opts)),
     Evidence0#{
-        <<"android-attestation-facts">> =>
-            public_attestation_facts(attestation_facts(Evidence0, Opts))
+        <<"android-attestation-facts">> => Facts,
+        <<"signals">> => #{<<"publisher">> =>
+            publisher_signal(Evidence0, Facts, Opts)}
     }.
 
 policy_failure_evidence(Reason, Req, Opts) ->
@@ -340,6 +343,10 @@ policy_failure_evidence(Reason, Req, Opts) ->
         <<"policy-snapshot">> => #{
             <<"accepted">> => false,
             <<"reason">> => reason_to_text(Reason)
+        },
+        <<"signals">> => #{
+            <<"publisher">> =>
+                publisher_signal(#{<<"policy-snapshot">> => #{}}, #{}, Opts)
         }
     }.
 
@@ -635,6 +642,187 @@ check_reported_attestation_facts(Evidence, Facts, Opts) ->
             end
         end).
 
+check_publisher_signal(Evidence, Facts, Opts) ->
+    safely_check(
+        <<"publisher signer signal matches Android attestation facts">>,
+        <<"core">>,
+        fun() ->
+            Expected = publisher_signal(Evidence, public_attestation_facts(Facts), Opts),
+            Signals = hb_maps:get(<<"signals">>, Evidence, #{}, Opts),
+            case hb_maps:get(<<"publisher">>, Signals, undefined, Opts) of
+                undefined -> throw(<<"missing publisher signal">>);
+                Reported ->
+                    case {publisher_signal_id(Expected, Opts),
+                          publisher_signal_id(Reported, Opts)} of
+                        {ID, ID} -> ok;
+                        {ExpectedID, ReportedID} ->
+                            throw(#{
+                                <<"expected-id">> => ExpectedID,
+                                <<"reported-id">> => ReportedID,
+                                <<"expected">> => Expected,
+                                <<"reported">> => Reported
+                            })
+                    end
+            end
+        end).
+
+publisher_signal(Evidence, Facts, Opts) ->
+    Policy = hb_maps:get(<<"policy-snapshot">>, Evidence, #{}, Opts),
+    {Source, SourceStatus, Digests0} = publisher_digest_source(Facts, Policy, Opts),
+    Digests = unique_binaries(Digests0),
+    Signers = indexed_publisher_signers(Digests, Source),
+    #{
+        <<"source">> => Source,
+        <<"source-status">> => SourceStatus,
+        <<"signers">> => Signers,
+        <<"signer-count">> => length(Digests),
+        <<"signers-digest">> => publisher_digest(Signers, Opts),
+        <<"signers-digest-algorithm">> =>
+            <<"ao-core-uncommitted-message-id-v1">>,
+        <<"artifact">> => android_publisher_artifact(Facts, Policy, Opts)
+    }.
+
+publisher_digest_source(Facts, Policy, Opts) ->
+    AppID = hb_maps:get(<<"attestation-application-id">>, Facts, #{}, Opts),
+    Attested =
+        digest_values(
+            hb_maps:get(<<"signature-digests">>, AppID, [], Opts)),
+    case Attested of
+        [_ | _] ->
+            {<<"android-attestation-application-id">>, <<"attested">>, Attested};
+        [] ->
+            Reported =
+                digest_values(
+                    hb_maps:get(
+                        <<"signing-certificate-digests">>,
+                        Policy,
+                        [],
+                        Opts)),
+            case Reported of
+                [_ | _] ->
+                    {<<"android-agent-policy-snapshot">>, <<"reported">>,
+                     Reported};
+                [] ->
+                    {<<"android-agent-policy-snapshot">>, <<"unavailable">>, []}
+            end
+    end.
+
+indexed_publisher_signers(Digests, Source) ->
+    maps:from_list(
+        [
+            {publisher_signer_key(I), #{
+                <<"type">> => <<"apk-signing-certificate-sha256">>,
+                <<"sha256">> => Digest,
+                <<"source">> => Source
+            }}
+         || {I, Digest} <- lists:zip(lists:seq(1, length(Digests)), Digests)
+        ]).
+
+publisher_signer_key(I) ->
+    iolist_to_binary([<<"signer-">>, integer_to_binary(I)]).
+
+android_publisher_artifact(Facts, Policy, Opts) ->
+    AppID = hb_maps:get(<<"attestation-application-id">>, Facts, #{}, Opts),
+    #{
+        <<"package-name">> =>
+            hb_maps:get(<<"package-name">>, Policy, null, Opts),
+        <<"version-name">> =>
+            hb_maps:get(<<"version-name">>, Policy, null, Opts),
+        <<"version-code">> =>
+            hb_maps:get(<<"version-code">>, Policy, null, Opts),
+        <<"release-digest">> =>
+            hb_maps:get(<<"release-digest">>, Policy, null, Opts),
+        <<"release-digest-kind">> =>
+            <<"apk-signing-certificates-sha256-hex">>,
+        <<"attestation-package-count">> =>
+            length(attestation_package_infos(AppID, Opts)),
+        <<"attestation-package-names">> =>
+            attestation_package_names(AppID, Opts),
+        <<"attestation-signature-digest-count">> =>
+            length(
+                digest_values(
+                    hb_maps:get(<<"signature-digests">>, AppID, [], Opts))),
+        <<"verified-boot-state">> =>
+            hb_maps:get(<<"verified-boot-state">>, Facts, null, Opts),
+        <<"verified-boot-key">> =>
+            hb_maps:get(<<"verified-boot-key">>, Facts, null, Opts),
+        <<"verified-boot-hash">> =>
+            hb_maps:get(<<"verified-boot-hash">>, Facts, null, Opts),
+        <<"keymint-security-level">> =>
+            hb_maps:get(<<"keymint-security-level">>, Facts, null, Opts),
+        <<"device-locked">> =>
+            hb_maps:get(<<"device-locked">>, Facts, null, Opts),
+        <<"os-patch-level">> =>
+            hb_maps:get(<<"os-patch-level">>, Facts, null, Opts),
+        <<"vendor-patch-level">> =>
+            hb_maps:get(<<"vendor-patch-level">>, Facts, null, Opts),
+        <<"boot-patch-level">> =>
+            hb_maps:get(<<"boot-patch-level">>, Facts, null, Opts)
+    }.
+
+attestation_package_infos(AppID, Opts) ->
+    case hb_maps:get(<<"package-infos">>, AppID, [], Opts) of
+        List when is_list(List) -> [Info || Info <- List, is_map(Info)];
+        Map when is_map(Map) ->
+            [Info || {_Key, Info} <- indexed_map_values(Map), is_map(Info)];
+        _ -> []
+    end.
+
+attestation_package_names(AppID, Opts) ->
+    [
+        Name
+     || Info <- attestation_package_infos(AppID, Opts),
+        (Name = hb_maps:get(<<"package-name">>, Info, undefined, Opts))
+            =/= undefined
+    ].
+
+digest_values(List) when is_list(List) ->
+    [Digest || Digest <- List, is_binary(Digest), byte_size(Digest) > 0];
+digest_values(Map) when is_map(Map) ->
+    [Digest || {_Key, Digest} <- indexed_map_values(Map),
+               is_binary(Digest),
+               byte_size(Digest) > 0];
+digest_values(_Other) ->
+    [].
+
+unique_binaries(Values) ->
+    lists:foldl(
+        fun(Value, Acc) ->
+            case lists:member(Value, Acc) of
+                true -> Acc;
+                false -> Acc ++ [Value]
+            end
+        end,
+        [],
+        Values).
+
+-ifdef(TEST).
+publisher_digest(Msg, Opts) when map_size(Opts) =:= 0 ->
+    hb_util:encode(crypto:hash(sha256, term_to_binary(Msg)));
+publisher_digest(Msg, Opts) ->
+    stable_id(Msg, Opts).
+-else.
+publisher_digest(Msg, Opts) ->
+    stable_id(Msg, Opts).
+-endif.
+
+-ifdef(TEST).
+publisher_signal_id(Msg, Opts) when map_size(Opts) =:= 0 ->
+    hb_util:encode(
+        crypto:hash(sha256, term_to_binary(canonical_payload(Msg, Opts))));
+publisher_signal_id(Msg, Opts) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
+        uncommitted,
+        Opts).
+-else.
+publisher_signal_id(Msg, Opts) ->
+    hb_message:id(
+        hb_message:uncommitted_deep(canonical_payload(Msg, Opts), Opts),
+        uncommitted,
+        Opts).
+-endif.
+
 check_attestation_challenge(Evidence, Facts, Opts) ->
     safely_check(
         <<"attestation challenge binds enrollment subject">>,
@@ -816,6 +1004,12 @@ resolve_envelope(Base, Req, Opts) when is_map(Base) ->
 resolve_envelope(_Base, Req, Opts) ->
     hb_maps:get(<<"envelope">>, Req, #{}, Opts).
 
+response_body(Link, Opts) when ?IS_LINK(Link) ->
+    response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
+response_body({ok, Msg}, Opts) ->
+    response_body(Msg, Opts);
+response_body({error, Reason}, _Opts) ->
+    throw(Reason);
 response_body(#{<<"type">> := _} = Body, _Opts) ->
     Body;
 response_body(#{<<"status">> := Status, <<"body">> := Body}, Opts)
@@ -826,11 +1020,14 @@ response_body(#{<<"body">> := Body}, Opts) when is_map(Body) ->
 response_body(Body, _Opts) ->
     Body.
 
+canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
+    canonical_payload(response_body(Link, Opts), Opts);
 canonical_payload(Msg, Opts) when is_map(Msg) ->
+    Decoded = hb_link:decode_all_links(Msg),
     maps:from_list(
         [
             {Key, canonical_payload(Value, Opts)}
-         || {Key, Value} <- hb_maps:to_list(Msg, Opts),
+         || {Key, Value} <- hb_maps:to_list(Decoded, Opts),
             not detached_transport_key(Key)
         ]);
 canonical_payload(List, Opts) when is_list(List) ->
@@ -1399,5 +1596,53 @@ reported_attestation_facts_must_match_verifier_parser_test() ->
     ?assertMatch(
         #{<<"ok">> := false},
         check_reported_attestation_facts(#{}, Facts, #{})).
+
+publisher_signal_prefers_attested_apk_signer_test() ->
+    Facts = #{
+        <<"parsed">> => true,
+        <<"attestation-application-id">> => #{
+            <<"package-infos">> => [
+                #{<<"package-name">> => <<"org.permaweb.andee">>,
+                  <<"version">> => 1}
+            ],
+            <<"signature-digests">> => [<<"attested-digest">>]
+        }
+    },
+    Evidence = #{
+        <<"policy-snapshot">> => #{
+            <<"package-name">> => <<"org.permaweb.andee">>,
+            <<"version-name">> => <<"1.0">>,
+            <<"version-code">> => 1,
+            <<"release-digest">> => <<"release">>,
+            <<"signing-certificate-digests">> => #{
+                <<"0">> => <<"reported-digest">>
+            }
+        }
+    },
+    Signal = publisher_signal(Evidence, Facts, #{}),
+    ?assertEqual(<<"attested">>, hb_maps:get(<<"source-status">>, Signal)),
+    ?assertEqual(1, hb_maps:get(<<"signer-count">>, Signal)),
+    Signers = hb_maps:get(<<"signers">>, Signal),
+    ?assertEqual(
+        <<"attested-digest">>,
+        hb_maps:get(<<"sha256">>, hb_maps:get(<<"signer-1">>, Signers))).
+
+publisher_signal_tamper_rejected_test() ->
+    Facts = #{
+        <<"parsed">> => true,
+        <<"attestation-application-id">> => #{
+            <<"signature-digests">> => [<<"apk-signer">>]
+        }
+    },
+    Evidence0 = #{<<"policy-snapshot">> => #{}},
+    Signal = publisher_signal(Evidence0, Facts, #{}),
+    Evidence = Evidence0#{
+        <<"signals">> => #{<<"publisher">> =>
+            Signal#{<<"signers-digest">> =>
+                <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>}}
+    },
+    ?assertMatch(
+        #{<<"ok">> := false},
+        check_publisher_signal(Evidence, Facts, #{})).
 
 -endif.

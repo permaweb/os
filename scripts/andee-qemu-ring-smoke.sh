@@ -291,15 +291,28 @@ if runtime.get("android-abi"):
     }
 andee_template = {
     "measurement-device": "andee@1.0",
-    "evidence": {"type": andee.get("evidence", {}).get("type", "andee-android-evidence")},
     "body": {"system": andee_system_template},
 }
+andee_publisher = andee.get("evidence", {}).get("signals", {}).get("publisher", {})
+if andee_publisher.get("signers-digest") and andee_publisher.get("signer-count", 0) > 0:
+    andee_template["evidence"] = {
+        "signals": {
+            "publisher": {
+                "signers-digest": andee_publisher["signers-digest"],
+            },
+        },
+    }
+else:
+    andee_template["evidence"] = {
+        "type": andee.get("evidence", {}).get("type", "andee-android-evidence")
+    }
 
-(requests / "init.json").write_text(json.dumps({
+init = {
     "name": zone,
     "self-url": qemu1_guest,
     "templates": [qemu_template, andee_template],
-}))
+}
+(requests / "init.json").write_text(json.dumps(init))
 (requests / "join-qemu2.json").write_text(json.dumps({
     "name": zone,
     "peer-url": qemu1_guest,

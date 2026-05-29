@@ -1276,15 +1276,13 @@ hd_or_undefined([]) -> undefined.
 %% commitment in place, and the next `hb_message:commit' on a parent that
 %% holds Members linkifies it through the cache: the cache write honours
 %% the existing signature's `committed' list and silently drops the new
-%% key. Strip the stale commitments first, then set via the AO-Core
-%% primitive so callers (`commit_unsigned_tree') can re-sign over the
-%% updated content.
+%% key. Strip the stale commitments first, then set the plain map key
+%% without asking the AO resolver to interpret nested payload fields.
 add_member_to_members(Members, URL, Attestation, Role, Opts) ->
     case attestation_node_address(Attestation, Opts) of
         undefined -> Members;
         Address ->
-            hb_ao:set(
-                hb_message:uncommitted(Members, Opts),
+            hb_maps:put(
                 Address,
                 #{
                     <<"address">> => Address,
@@ -1292,6 +1290,7 @@ add_member_to_members(Members, URL, Attestation, Role, Opts) ->
                     <<"role">> => Role,
                     <<"last-seen-unix">> => erlang:system_time(second)
                 },
+                hb_message:uncommitted(Members, Opts),
                 Opts
             )
     end.

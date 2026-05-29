@@ -184,6 +184,9 @@ runtime_environment_keys() ->
     [
         {"ANDEE_RUNTIME_ROOT", <<"andee-runtime-root">>},
         {"ANDEE_PACKAGE_NAME", <<"andee-package-name">>},
+        {"ANDEE_VERSION_NAME", <<"andee-version-name">>},
+        {"ANDEE_VERSION_CODE", <<"andee-version-code">>},
+        {"ANDEE_RELEASE_DIGEST", <<"andee-release-digest">>},
         {"ANDEE_NATIVE_LIB_DIR", <<"andee-native-lib-dir">>},
         {"ANDEE_ANDROID_ABI", <<"andee-android-abi">>},
         {"ANDEE_BOOT_CONFIG", <<"andee-boot-config">>},
