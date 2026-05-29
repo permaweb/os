@@ -13,6 +13,7 @@ import urllib.error
 
 INLINE_LINKS = {
     "admission",
+    "app",
     "authorization",
     "body",
     "boot",
@@ -59,11 +60,13 @@ INLINE_LINKS = {
     "peer-secret-subject",
     "pcr-selection",
     "pcr-values",
+    "policy",
     "quote",
     "reason",
     "report",
     "ring-reference",
     "runtime-event-log",
+    "runtime",
     "secret-recipient",
     "security",
     "secure-boot",

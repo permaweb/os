@@ -67,6 +67,8 @@ peer_opts(_BaseURL, Opts) ->
         http_only_result => false,
         <<"http-only-result">> => false,
         <<"linkify-mode">> => false,
+        prometheus => false,
+        <<"prometheus">> => false,
         http_client => PeerClient,
         <<"http-client">> => PeerClient
     },

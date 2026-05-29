@@ -1319,11 +1319,11 @@ strip_trailing_slash(B) when is_binary(B), byte_size(B) > 0 ->
 strip_trailing_slash(B) ->
     B.
 
-verify_joiner(JoinerURL, _Req, RingReference, Opts) ->
-    VerifyReq = #{
+verify_joiner(JoinerURL, Req, RingReference, Opts) ->
+    VerifyReq = forward_allow_rejected_peer_attestation(Req, #{
         <<"url">> => JoinerURL,
         <<"peer-attestation-scope">> => RingReference
-    },
+    }, Opts),
     case measurement_verify_peer(VerifyReq, Opts) of
         {ok, #{<<"status">> := 200, <<"body">> := Body}} -> Body;
         _ ->
@@ -1355,18 +1355,29 @@ parse_positive_integer(_, Default) ->
     Default.
 
 assert_peer_attestation_body(PeerAttestation, RingReference, Opts) ->
+    VerificationChecks =
+        case peer_attestation_allows_rejected(PeerAttestation, Opts) of
+            true ->
+                [
+                    {field_bool, <<"boot-verified">>},
+                    {field_bool, <<"fresh-verified">>}
+                ];
+            false ->
+                [
+                    {flat_true, <<"boot-verified">>, <<"boot-verification">>},
+                    {flat_true, <<"fresh-verified">>, <<"verification">>}
+                ]
+        end,
     Required = [
         {eq, <<"type">>, <<"zone-peer-attestation">>},
         {field_integer, <<"issued-at-unix">>},
-        {flat_true, <<"boot-verified">>, <<"boot-verification">>},
-        {flat_true, <<"fresh-verified">>, <<"verification">>},
         {flat_true, <<"freshness-verified">>, <<"freshness">>},
         {flat_true, <<"credential-activation-verified">>,
-            <<"credential-activation">>},
+         <<"credential-activation">>},
         {field_binary, <<"peer-boot-attestation-id">>},
         {field_binary, <<"peer-fresh-attestation-id">>},
         {field_binary, <<"peer-credential-subject-id">>}
-    ],
+    ] ++ VerificationChecks,
     assert_fields(PeerAttestation, Required, fun bad_peer_attestation/1, Opts),
     assert_peer_attestation_validity(PeerAttestation, Opts),
     assert_peer_attestation_scope(PeerAttestation, RingReference, Opts).
@@ -1645,11 +1656,11 @@ measurement_body(Other, _Opts) ->
     Other.
 
 request_admission(PeerURL, SelfURL, AdmissionNonce, Req, Opts) ->
-    AdmitReq = #{
+    AdmitReq = forward_allow_rejected_peer_attestation(Req, #{
         <<"name">> => required_name(Req, Opts),
         <<"joiner-url">> => SelfURL,
         <<"admission-nonce">> => AdmissionNonce
-    },
+    }, Opts),
     try
         admission_response_body(
             lib_permawebos_peer_http:post(
@@ -2019,6 +2030,34 @@ truthy(<<"1">>) -> true;
 truthy(1) -> true;
 truthy(_) -> false.
 
+peer_attestation_allows_rejected(PeerAttestation, Opts) ->
+    truthy(
+        hb_maps:get(
+            <<"allow-rejected-peer-attestation">>,
+            PeerAttestation,
+            false,
+            Opts
+        )
+    ) andalso
+        truthy(
+            hb_opts:get(<<"allow-rejected-peer-attestation">>, false, Opts)
+        ).
+
+forward_allow_rejected_peer_attestation(Req, TargetReq, Opts) ->
+    lists:foldl(
+        fun(Key, Acc) ->
+            case hb_maps:get(Key, Req, undefined, Opts) of
+                undefined -> Acc;
+                Value -> Acc#{Key => Value}
+            end
+        end,
+        TargetReq,
+        [
+            <<"allow-rejected-peer-attestation">>,
+            <<"allow-rejected">>
+        ]
+    ).
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
@@ -2120,7 +2159,7 @@ alternative_templates_match_first_viable_test() ->
     ?assertEqual(<<"andee@1.0">>,
                  hb_maps:get(<<"measurement-device">>, Candidate, undefined, #{})).
 
-rejected_peer_attestations_never_admit_test() ->
+rejected_peer_attestations_require_local_allow_test() ->
     Now = erlang:system_time(second),
     RingReference = #{
         <<"name">> => <<"book-shelf">>,
@@ -2145,7 +2184,15 @@ rejected_peer_attestations_never_admit_test() ->
         <<"peer-credential-subject-id">> => <<"subject">>
     },
     ?assertThrow(
-        {zone_error, #{<<"error">> := <<"peer-attestation-invalid">>}},
-        assert_peer_attestation_body(Rejected, RingReference, #{})).
+        {zone_error, #{<<"field">> := <<"boot-verification">>}},
+        assert_peer_attestation_body(Rejected, RingReference, #{})),
+    ?assertThrow(
+        {zone_error, #{<<"field">> := <<"peer-scope.peer-url">>}},
+        assert_peer_attestation_body(
+            Rejected,
+            RingReference,
+            #{<<"allow-rejected-peer-attestation">> => true}
+        )
+    ).
 
 -endif.
