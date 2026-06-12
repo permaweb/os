@@ -28,7 +28,7 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= 312988c2b36ddebc1585ad7fae9a1b63d1152bd3
+HYPERBEAM_VERSION ?= 660c1cd365d68cb05f46629407e3ef7321e9b16e
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
