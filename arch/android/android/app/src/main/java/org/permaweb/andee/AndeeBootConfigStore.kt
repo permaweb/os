@@ -62,6 +62,7 @@ object AndeeBootConfigStore {
         val merged = deepMerge(copyObject(base), operator)
         stripReservedTopLevelBootKeys(merged)
         stripPrivateBootKeys(merged)
+        copyBaseRuntimeDefaults(base, merged)
 
         merged.put("measurement-device", "andee@1.0")
         merged.put("andee-config-source", "app-private-next-boot-config")
@@ -145,6 +146,16 @@ object AndeeBootConfigStore {
                 is JSONObject -> stripPrivateBootKeys(child)
                 is JSONArray -> stripPrivateBootKeys(child)
             }
+        }
+    }
+
+    private fun copyBaseRuntimeDefaults(base: JSONObject, merged: JSONObject) {
+        copyBaseValue(base, merged, "store-defaults")
+    }
+
+    private fun copyBaseValue(base: JSONObject, target: JSONObject, key: String) {
+        if (base.has(key)) {
+            target.put(key, copyValue(base.get(key)))
         }
     }
 

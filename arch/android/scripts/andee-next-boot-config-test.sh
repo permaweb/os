@@ -172,6 +172,9 @@ def contains_value(value, needle):
         return any(contains_value(child, needle) for child in value)
     return False
 
+def is_android_lmdb_store_defaults(value):
+    return value == {"lmdb": {"capacity": 68719476736}}
+
 if not started:
     fail("HyperBEAM did not report startup")
 if (out / "meta.status").read_text().strip() != "200":
@@ -183,6 +186,8 @@ if effective.get("andee-test-marker") != marker:
 if effective.get("measurement-device") != "andee@1.0":
     fail("effective config did not enforce andee measurement device")
 for key in reserved_runtime_keys:
+    if key == "store-defaults" and is_android_lmdb_store_defaults(effective.get(key)):
+        continue
     if key in effective:
         fail(f"effective config preserved reserved runtime key: {key}")
 for needle in operator_only_needles:
@@ -210,7 +215,7 @@ if attested_node.get("load-remote-devices") not in (None, False, "false"):
     fail("attested node message preserved operator load-remote-devices override")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
-if "store-defaults" in attested_node:
+if "store-defaults" in attested_node and not is_android_lmdb_store_defaults(attested_node.get("store-defaults")):
     fail("attested node message preserved operator store-defaults override")
 for needle in operator_only_needles:
     if contains_value(attested_node, needle):

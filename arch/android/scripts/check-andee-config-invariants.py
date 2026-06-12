@@ -59,6 +59,10 @@ def is_measurement_boot_hook(hook: Any) -> bool:
     )
 
 
+def is_android_lmdb_store_defaults(value: Any) -> bool:
+    return value == {"lmdb": {"capacity": 68719476736}}
+
+
 def main() -> int:
     config = load(BASE_CONFIG)
     hooks = start_hooks(config)
@@ -86,12 +90,13 @@ def main() -> int:
         "protocol",
         "routes",
         "store",
-        "store-defaults",
         "trusted-device-signers",
         "trusted-devices",
     ):
         if key in config:
             fail(f"base config should inherit common HyperBEAM default for {key}")
+    if not is_android_lmdb_store_defaults(config.get("store-defaults")):
+        fail("base config must cap Android LMDB stores at 64 GiB")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
         fail("operator config sanitizer must reserve measurement-body-source")
@@ -103,6 +108,8 @@ def main() -> int:
         fail("operator on.start hooks must run before base hooks")
     if "copyOperatorValue(hook)" not in store_text:
         fail("operator on.start hooks must be sanitized before merge")
+    if 'copyBaseValue(base, merged, "store-defaults")' not in store_text:
+        fail("boot config store must preserve base store-defaults after operator sanitization")
     for key in (
         "access-remote-cache-for-client",
         "cache-control",

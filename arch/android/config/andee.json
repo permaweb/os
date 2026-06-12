@@ -2,6 +2,11 @@
   "render-index-page": false,
   "initialized": "permanent",
   "measurement-device": "andee@1.0",
+  "store-defaults": {
+    "lmdb": {
+      "capacity": 68719476736
+    }
+  },
   "on": {
     "start": [
       {
