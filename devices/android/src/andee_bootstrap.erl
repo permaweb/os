@@ -30,7 +30,9 @@ start(ConfigPath) ->
     io:format("andee-bootstrap=config-loaded~n"),
     Merged = hb_maps:merge(Env, Loaded),
     ensure_runtime_applications(),
+    configure_public_key_cacerts(),
     hb_http_client:setup_conn(Merged),
+    ok = hb_http_client:init_prometheus(),
     io:format("andee-bootstrap=start-store~n"),
     Store = start_store(Merged),
     io:format("andee-bootstrap=generate-wallet~n"),
@@ -220,8 +222,24 @@ ensure_runtime_applications() ->
                     erlang:error({failed_to_start_andee_runtime_app, App, Reason})
             end
         end,
-        [crypto, public_key, ssl, inets, ranch, cowboy, gun, hackney, elmdb]
+        [crypto, public_key, ssl, inets, ranch, cowboy, gun, certifi, hackney, elmdb]
     ).
+
+configure_public_key_cacerts() ->
+    Cacerts =
+        case code:priv_dir(certifi) of
+            {error, PrivReason} ->
+                erlang:error({missing_andee_certifi, PrivReason});
+            PrivDir -> filename:join(PrivDir, "cacerts.pem")
+        end,
+    application:set_env(public_key, cacerts_path, Cacerts),
+    public_key:cacerts_clear(),
+    case public_key:cacerts_load(Cacerts) of
+        ok ->
+            io:format("andee-bootstrap=cacerts-loaded path=~ts~n", [Cacerts]);
+        {error, LoadReason} ->
+            erlang:error({failed_to_load_andee_cacerts, Cacerts, LoadReason})
+    end.
 
 ephemeral_wallet() ->
     ar_wallet:new({rsa, 65537}).
