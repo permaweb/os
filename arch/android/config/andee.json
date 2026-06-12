@@ -1,7 +1,6 @@
 {
   "render-index-page": false,
   "initialized": "permanent",
-  "access-remote-cache-for-client": false,
   "measurement-device": "andee@1.0",
   "on": {
     "start": [

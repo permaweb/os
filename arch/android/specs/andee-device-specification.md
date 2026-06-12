@@ -141,13 +141,6 @@ A production AndEE node MUST enforce at least:
 ```json
 {
   "measurement-device": "andee@1.0",
-  "load-remote-devices": false,
-  "store": [
-    {
-      "store-module": "hb_store_volatile",
-      "name": "andee-volatile"
-    }
-  ],
   "on": {
     "start": {
       "device": "measurement@1.0",
@@ -163,9 +156,9 @@ A production AndEE node MUST enforce at least:
 ```
 
 Operator configuration MAY shape public node metadata. It MUST NOT disable the
-AndEE measurement device, enable remote devices, bypass the `on.start` boot
-measurement hook, persist the v1 node key, or replace the volatile default
-store as the measured default.
+AndEE measurement device, enable remote device signer loading, bypass the
+`on.start` boot measurement hook, persist the v1 node key, or override
+HyperBEAM's stock store/cache configuration.
 
 ## 4. Stock `~meta@1.0`
 
@@ -206,10 +199,6 @@ Returns status `200`:
   "platform": "android",
   "runtime": {
     "hyperbeam-release": "<release id or unknown>",
-    "store": {
-      "default-module": "hb_store_volatile",
-      "persistence": "volatile"
-    },
     "app-uid-isolation": true,
     "runtime-root": "app-private",
     "config-source": "app-private"
@@ -234,8 +223,6 @@ Required semantics:
 
 - `schema` MUST be `andee-system-report@1`.
 - `platform` MUST be `android`.
-- `runtime.store.default-module` MUST be `hb_store_volatile`.
-- `runtime.store.persistence` MUST be `volatile`.
 - `runtime.app-uid-isolation` MUST be true.
 - `app.package-name` MUST be `org.permaweb.andee` for the release app.
 

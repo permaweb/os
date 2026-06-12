@@ -24,13 +24,24 @@ cat > "$OUT/next-boot-config.json" <<JSON
   "public-url": "https://andee-next-boot.example/$MARKER",
   "andee-test-marker": "$MARKER",
   "measurement-device": "not-andee@1.0",
+  "access-remote-cache-for-client": true,
+  "cache-control": ["always"],
+  "http-extra-opts": {
+    "cache-control": ["always"]
+  },
   "load-remote-devices": true,
+  "match-index": [],
+  "name-resolvers": ["https://andee-next-boot.example/resolver"],
   "store": [
     {
       "store-module": "hb_store_fs",
       "name": "operator-requested-persistent-store"
     }
   ],
+  "store-defaults": {
+    "scope": "operator-requested"
+  },
+  "trusted-device-signers": ["operator-requested-signer"],
   "on": {
     "request": []
   }
@@ -130,10 +141,36 @@ boot = read_json("boot.materialized.json")
 meta_node = meta.get("body", meta)
 measurement = boot.get("body", boot)
 attested_node = measurement.get("node") or {}
-store = effective.get("store")
 hooks = effective.get("on", {}).get("start")
 if isinstance(hooks, dict):
     hooks = [hooks]
+
+reserved_runtime_keys = (
+    "access-remote-cache-for-client",
+    "cache-control",
+    "http-extra-opts",
+    "load-remote-devices",
+    "match-index",
+    "name-resolvers",
+    "store",
+    "store-defaults",
+    "trusted-device-signers",
+)
+operator_only_needles = (
+    "operator-requested-persistent-store",
+    "operator-requested",
+    "operator-requested-signer",
+    "https://andee-next-boot.example/resolver",
+)
+
+def contains_value(value, needle):
+    if value == needle:
+        return True
+    if isinstance(value, dict):
+        return any(contains_value(child, needle) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_value(child, needle) for child in value)
+    return False
 
 if not started:
     fail("HyperBEAM did not report startup")
@@ -145,12 +182,12 @@ if effective.get("andee-test-marker") != marker:
     fail("effective config did not include selected next-boot marker")
 if effective.get("measurement-device") != "andee@1.0":
     fail("effective config did not enforce andee measurement device")
-if effective.get("load-remote-devices") is not True:
-    fail("effective config did not preserve selected load-remote-devices=true")
-if not isinstance(store, list) or not store:
-    fail("effective config store is not a non-empty list")
-if store[0].get("store-module") != "hb_store_fs":
-    fail("effective config did not preserve selected operator store")
+for key in reserved_runtime_keys:
+    if key in effective:
+        fail(f"effective config preserved reserved runtime key: {key}")
+for needle in operator_only_needles:
+    if contains_value(effective, needle):
+        fail(f"effective config preserved operator-only runtime value: {needle}")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]
@@ -167,8 +204,17 @@ if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
     fail("attested node message did not enforce andee measurement device")
-if attested_node.get("load-remote-devices") not in (True, "true"):
-    fail("attested node message did not preserve load-remote-devices=true")
+if attested_node.get("access-remote-cache-for-client") not in (None, False, "false"):
+    fail("attested node message preserved operator access-remote-cache-for-client override")
+if attested_node.get("load-remote-devices") not in (None, False, "false"):
+    fail("attested node message preserved operator load-remote-devices override")
+if "cache-control" in attested_node:
+    fail("attested node message preserved operator top-level cache-control override")
+if "store-defaults" in attested_node:
+    fail("attested node message preserved operator store-defaults override")
+for needle in operator_only_needles:
+    if contains_value(attested_node, needle):
+        fail(f"attested node message preserved operator-only runtime value: {needle}")
 
 verdict = {
     "scenario": "andee-next-boot-config",

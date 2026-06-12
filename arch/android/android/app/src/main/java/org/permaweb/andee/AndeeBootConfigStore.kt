@@ -60,15 +60,13 @@ object AndeeBootConfigStore {
         operatorText: String,
     ): JSONObject {
         val merged = deepMerge(copyObject(base), operator)
+        stripReservedTopLevelBootKeys(merged)
         stripPrivateBootKeys(merged)
 
         merged.put("measurement-device", "andee@1.0")
         merged.put("andee-config-source", "app-private-next-boot-config")
         merged.put("andee-operator-config-sha256", base64UrlSha256(operatorText.toByteArray(Charsets.UTF_8)))
         merged.put("andee-operator-config-bytes", operatorText.toByteArray(Charsets.UTF_8).size)
-        if (operator.optBoolean("load-remote-devices", false) && !operator.has("routes")) {
-            merged.remove("routes")
-        }
 
         val on = merged.optJSONObject("on") ?: JSONObject()
         on.put("start", mergedStartHooks(base, operator))
@@ -116,6 +114,15 @@ object AndeeBootConfigStore {
         require(value is JSONObject) { "AndEE boot config must be a JSON object" }
         require(tokener.nextClean().code == 0) { "AndEE boot config must contain exactly one JSON value" }
         return value
+    }
+
+    private fun stripReservedTopLevelBootKeys(value: JSONObject) {
+        val keys = value.keys().asSequence().toList()
+        for (key in keys) {
+            if (isReservedTopLevelBootKey(key)) {
+                value.remove(key)
+            }
+        }
     }
 
     private fun stripPrivateBootKeys(value: JSONObject) {
@@ -170,10 +177,16 @@ object AndeeBootConfigStore {
         return copied
     }
 
+    private fun isReservedTopLevelBootKey(key: String): Boolean {
+        return canonicalConfigKey(key) in RESERVED_TOP_LEVEL_BOOT_KEYS
+    }
+
     private fun isPrivateBootKey(key: String): Boolean {
-        val canonical = key.lowercase(Locale.US).replace('_', '-')
+        val canonical = canonicalConfigKey(key)
         return canonical.startsWith("priv") || canonical in PRIVATE_BOOT_KEYS
     }
+
+    private fun canonicalConfigKey(key: String): String = key.lowercase(Locale.US).replace('_', '-')
 
     private fun writeAtomic(file: File, text: String) {
         file.parentFile?.mkdirs()
@@ -197,6 +210,21 @@ object AndeeBootConfigStore {
     private fun pendingConfigFile(context: Context): File = File(configDir(context), "next.json")
     private fun activeConfigFile(context: Context): File = File(configDir(context), "active.json")
     private fun effectiveConfigFilePath(context: Context): File = File(configDir(context), "effective.json")
+
+    private val RESERVED_TOP_LEVEL_BOOT_KEYS = setOf(
+        "access-remote-cache-for-client",
+        "cache-control",
+        "http-extra-opts",
+        "load-remote-devices",
+        "match-index",
+        "name-resolvers",
+        "preloaded-devices-index",
+        "preloaded-store",
+        "priv-store",
+        "store",
+        "store-defaults",
+        "trusted-device-signers",
+    )
 
     private val PRIVATE_BOOT_KEYS = setOf(
         "priv-wallet",

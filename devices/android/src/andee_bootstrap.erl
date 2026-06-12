@@ -110,19 +110,7 @@ load_config(Path) ->
     end.
 
 normalize_config(Config) when is_map(Config) ->
-    normalize_config_atoms(
-        maybe_update_config(
-            <<"preloaded-store">>,
-            fun normalize_store/1,
-            maybe_update_config(<<"store">>, fun normalize_stores/1, Config)
-        )
-    ).
-
-maybe_update_config(Key, Fun, Config) ->
-    case maps:find(Key, Config) of
-        {ok, Value} -> Config#{ Key => Fun(Value) };
-        error -> Config
-    end.
+    normalize_config_atoms(Config).
 
 normalize_config_atoms(Config) ->
     maps:map(
@@ -140,38 +128,6 @@ normalize_config_atoms(Config) ->
         end,
         Config
     ).
-
-normalize_stores(Stores) when is_list(Stores) ->
-    [normalize_store(Store) || Store <- Stores];
-normalize_stores(Other) ->
-    Other.
-
-normalize_store(Store) when is_map(Store) ->
-    maps:map(
-        fun
-            (<<"store-module">>, <<"hb_store_volatile">>) -> hb_store_volatile;
-            (<<"store-module">>, <<"hb_store_lmdb">>) -> hb_store_lmdb;
-            (<<"store-module">>, <<"hb_store_fs">>) -> hb_store_fs;
-            (<<"store-module">>, <<"hb_store_andee_encrypted">>) ->
-                hb_store_andee_encrypted;
-            (<<"store-module">>, <<"hb_store_gateway">>) -> hb_store_gateway;
-            (<<"store-module">>, <<"hb_store_remote_node">>) -> hb_store_remote_node;
-            (<<"store">>, SubStores) -> normalize_stores(SubStores);
-            (<<"local-store">>, SubStores) -> normalize_store_ref(SubStores);
-            (<<"index-store">>, SubStores) -> normalize_store_ref(SubStores);
-            (_Key, Value) -> Value
-        end,
-        Store
-    );
-normalize_store(Other) ->
-    Other.
-
-normalize_store_ref(Stores) when is_list(Stores) ->
-    normalize_stores(Stores);
-normalize_store_ref(Store) when is_map(Store) ->
-    normalize_store(Store);
-normalize_store_ref(Other) ->
-    Other.
 
 runtime_environment() ->
     maps:from_list(

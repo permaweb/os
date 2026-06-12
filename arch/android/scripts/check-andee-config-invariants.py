@@ -69,8 +69,11 @@ def main() -> int:
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
     for key in (
+        "access-remote-cache-for-client",
+        "cache-control",
         "default-codec",
         "default-index",
+        "http-extra-opts",
         "load-remote-devices",
         "loaded-device-store",
         "match-index",
@@ -83,6 +86,7 @@ def main() -> int:
         "protocol",
         "routes",
         "store",
+        "store-defaults",
         "trusted-device-signers",
         "trusted-devices",
     ):
@@ -100,10 +104,20 @@ def main() -> int:
     if "copyOperatorValue(hook)" not in store_text:
         fail("operator on.start hooks must be sanitized before merge")
     for key in (
+        "access-remote-cache-for-client",
+        "cache-control",
         "forge-bootstrap",
+        "http-extra-opts",
+        "load-remote-devices",
         "loaded-device-store",
+        "match-index",
+        "name-resolvers",
         "preloaded-devices-index",
         "preloaded-store",
+        "priv-store",
+        "store",
+        "store-defaults",
+        "trusted-device-signers",
     ):
         if f'"{key}"' not in store_text:
             fail(f"operator config sanitizer must reserve {key}")

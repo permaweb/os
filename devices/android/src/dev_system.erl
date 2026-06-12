@@ -49,10 +49,6 @@ runtime_report(Opts) ->
     #{
         <<"hyperbeam-release">> =>
             hb_opts:get(<<"andee-hyperbeam-release">>, <<"unknown">>, Opts),
-        <<"store">> => #{
-            <<"default-module">> => <<"hb_store_volatile">>,
-            <<"persistence">> => <<"volatile">>
-        },
         <<"app-uid-isolation">> => true,
         <<"runtime-root">> =>
             hb_opts:get(<<"andee-runtime-root">>, <<"app-private">>, Opts),
