@@ -38,6 +38,12 @@ cat > "$OUT/next-boot-config.json" <<JSON
       "name": "operator-requested-persistent-store"
     }
   ],
+  "priv-store": [
+    {
+      "store-module": "hb_store_fs",
+      "name": "operator-requested-private-store"
+    }
+  ],
   "store-defaults": {
     "scope": "operator-requested"
   },
@@ -150,14 +156,12 @@ reserved_runtime_keys = (
     "cache-control",
     "http-extra-opts",
     "load-remote-devices",
-    "match-index",
     "name-resolvers",
-    "store",
-    "store-defaults",
     "trusted-device-signers",
 )
 operator_only_needles = (
     "operator-requested-persistent-store",
+    "operator-requested-private-store",
     "operator-requested",
     "operator-requested-signer",
     "https://andee-next-boot.example/resolver",
@@ -172,8 +176,16 @@ def contains_value(value, needle):
         return any(contains_value(child, needle) for child in value)
     return False
 
-def is_android_lmdb_store_defaults(value):
-    return value == {"lmdb": {"capacity": 68719476736}}
+def is_volatile_store(value, name):
+    return value == [{"store-module": "hb_store_volatile", "name": name}]
+
+def assert_base_volatile_stores(node, label):
+    if not is_volatile_store(node.get("store"), "andee-volatile-store"):
+        fail(f"{label} did not enforce volatile runtime store")
+    if not is_volatile_store(node.get("match-index"), "andee-volatile-match-index"):
+        fail(f"{label} did not enforce volatile match index")
+    if not is_volatile_store(node.get("priv-store"), "andee-volatile-priv-store"):
+        fail(f"{label} did not enforce volatile private store")
 
 if not started:
     fail("HyperBEAM did not report startup")
@@ -186,10 +198,9 @@ if effective.get("andee-test-marker") != marker:
 if effective.get("measurement-device") != "andee@1.0":
     fail("effective config did not enforce andee measurement device")
 for key in reserved_runtime_keys:
-    if key == "store-defaults" and is_android_lmdb_store_defaults(effective.get(key)):
-        continue
     if key in effective:
         fail(f"effective config preserved reserved runtime key: {key}")
+assert_base_volatile_stores(effective, "effective config")
 for needle in operator_only_needles:
     if contains_value(effective, needle):
         fail(f"effective config preserved operator-only runtime value: {needle}")
@@ -215,8 +226,9 @@ if attested_node.get("load-remote-devices") not in (None, False, "false"):
     fail("attested node message preserved operator load-remote-devices override")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
-if "store-defaults" in attested_node and not is_android_lmdb_store_defaults(attested_node.get("store-defaults")):
+if "store-defaults" in attested_node:
     fail("attested node message preserved operator store-defaults override")
+assert_base_volatile_stores(attested_node, "attested node message")
 for needle in operator_only_needles:
     if contains_value(attested_node, needle):
         fail(f"attested node message preserved operator-only runtime value: {needle}")

@@ -110,11 +110,12 @@ load_config(Path) ->
     end.
 
 normalize_config(Config) when is_map(Config) ->
-    normalize_config_atoms(Config).
+    normalize_config_value(Config).
 
-normalize_config_atoms(Config) ->
+normalize_config_value(Config) when is_map(Config) ->
     maps:map(
         fun
+            (<<"store-module">>, Value) -> normalize_store_module(Value);
             (<<"protocol">>, <<"http1">>) -> http1;
             (<<"protocol">>, <<"http2">>) -> http2;
             (<<"protocol">>, <<"http3">>) -> http3;
@@ -124,10 +125,17 @@ normalize_config_atoms(Config) ->
             (<<"scheduling-mode">>, <<"disabled">>) -> disabled;
             (<<"compute-mode">>, <<"aggressive">>) -> aggressive;
             (<<"compute-mode">>, <<"lazy">>) -> lazy;
-            (_Key, Value) -> Value
+            (_Key, Value) -> normalize_config_value(Value)
         end,
         Config
-    ).
+    );
+normalize_config_value(Values) when is_list(Values) ->
+    [normalize_config_value(Value) || Value <- Values];
+normalize_config_value(Value) ->
+    Value.
+
+normalize_store_module(<<"hb_store_volatile">>) -> hb_store_volatile;
+normalize_store_module(Value) -> normalize_config_value(Value).
 
 runtime_environment() ->
     maps:from_list(
@@ -233,5 +241,58 @@ runtime_environment_keys_are_reserved_test() ->
             <<"andee-base-apk-sha256">> => <<"forged">>
         })
     ).
+
+normalize_config_coerces_nested_volatile_store_modules_test() ->
+    Config =
+        #{
+            <<"store">> =>
+                [
+                    #{
+                        <<"store-module">> => <<"hb_store_volatile">>,
+                        <<"name">> => <<"runtime">>
+                    }
+                ],
+            <<"match-index">> =>
+                [
+                    #{
+                        <<"store-module">> => <<"hb_store_volatile">>,
+                        <<"name">> => <<"match">>
+                    }
+                ],
+            <<"priv-store">> =>
+                [
+                    #{
+                        <<"store-module">> => <<"hb_store_volatile">>,
+                        <<"name">> => <<"priv">>
+                    }
+                ],
+            <<"scheduling-mode">> => <<"local_confirmation">>,
+            <<"on">> =>
+                #{
+                    <<"start">> =>
+                        [
+                            #{
+                                <<"device">> => <<"measurement@1.0">>,
+                                <<"store-module">> => <<"not-a-store-module">>
+                            }
+                        ]
+                }
+        },
+    Normalized = normalize_config(Config),
+    ?assertMatch(
+        [#{<<"store-module">> := hb_store_volatile}],
+        maps:get(<<"store">>, Normalized)
+    ),
+    ?assertMatch(
+        [#{<<"store-module">> := hb_store_volatile}],
+        maps:get(<<"match-index">>, Normalized)
+    ),
+    ?assertMatch(
+        [#{<<"store-module">> := hb_store_volatile}],
+        maps:get(<<"priv-store">>, Normalized)
+    ),
+    ?assertEqual(local_confirmation, maps:get(<<"scheduling-mode">>, Normalized)),
+    [Hook] = maps:get(<<"start">>, maps:get(<<"on">>, Normalized)),
+    ?assertEqual(<<"not-a-store-module">>, maps:get(<<"store-module">>, Hook)).
 
 -endif.

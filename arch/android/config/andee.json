@@ -2,11 +2,24 @@
   "render-index-page": false,
   "initialized": "permanent",
   "measurement-device": "andee@1.0",
-  "store-defaults": {
-    "lmdb": {
-      "capacity": 68719476736
+  "store": [
+    {
+      "store-module": "hb_store_volatile",
+      "name": "andee-volatile-store"
     }
-  },
+  ],
+  "match-index": [
+    {
+      "store-module": "hb_store_volatile",
+      "name": "andee-volatile-match-index"
+    }
+  ],
+  "priv-store": [
+    {
+      "store-module": "hb_store_volatile",
+      "name": "andee-volatile-priv-store"
+    }
+  ],
   "on": {
     "start": [
       {

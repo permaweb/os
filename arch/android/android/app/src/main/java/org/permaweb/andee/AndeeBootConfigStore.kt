@@ -150,7 +150,9 @@ object AndeeBootConfigStore {
     }
 
     private fun copyBaseRuntimeDefaults(base: JSONObject, merged: JSONObject) {
-        copyBaseValue(base, merged, "store-defaults")
+        copyBaseValue(base, merged, "store")
+        copyBaseValue(base, merged, "match-index")
+        copyBaseValue(base, merged, "priv-store")
     }
 
     private fun copyBaseValue(base: JSONObject, target: JSONObject, key: String) {

@@ -59,8 +59,8 @@ def is_measurement_boot_hook(hook: Any) -> bool:
     )
 
 
-def is_android_lmdb_store_defaults(value: Any) -> bool:
-    return value == {"lmdb": {"capacity": 68719476736}}
+def is_volatile_store(value: Any, name: str) -> bool:
+    return value == [{"store-module": "hb_store_volatile", "name": name}]
 
 
 def main() -> int:
@@ -80,7 +80,6 @@ def main() -> int:
         "http-extra-opts",
         "load-remote-devices",
         "loaded-device-store",
-        "match-index",
         "name-resolvers",
         "port",
         "preloaded-devices-index",
@@ -89,14 +88,18 @@ def main() -> int:
         "prometheus",
         "protocol",
         "routes",
-        "store",
+        "store-defaults",
         "trusted-device-signers",
         "trusted-devices",
     ):
         if key in config:
             fail(f"base config should inherit common HyperBEAM default for {key}")
-    if not is_android_lmdb_store_defaults(config.get("store-defaults")):
-        fail("base config must cap Android LMDB stores at 64 GiB")
+    if not is_volatile_store(config.get("store"), "andee-volatile-store"):
+        fail("base config must use volatile Android runtime store")
+    if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
+        fail("base config must use volatile Android match index")
+    if not is_volatile_store(config.get("priv-store"), "andee-volatile-priv-store"):
+        fail("base config must use volatile Android private store")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
         fail("operator config sanitizer must reserve measurement-body-source")
@@ -108,8 +111,9 @@ def main() -> int:
         fail("operator on.start hooks must run before base hooks")
     if "copyOperatorValue(hook)" not in store_text:
         fail("operator on.start hooks must be sanitized before merge")
-    if 'copyBaseValue(base, merged, "store-defaults")' not in store_text:
-        fail("boot config store must preserve base store-defaults after operator sanitization")
+    for key in ("store", "match-index", "priv-store"):
+        if f'copyBaseValue(base, merged, "{key}")' not in store_text:
+            fail(f"boot config store must preserve base {key} after operator sanitization")
     for key in (
         "access-remote-cache-for-client",
         "cache-control",
