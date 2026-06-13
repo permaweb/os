@@ -76,8 +76,10 @@ class AndeeCryptoAgent(private val context: Context) : AutoCloseable {
                 val client = try {
                     server.accept()
                 } catch (exc: Exception) {
-                    if (running.get()) Log.w(TAG, "accept failed", exc)
-                    continue
+                    if (running.getAndSet(false)) {
+                        Log.w(TAG, "accept failed; stopping crypto agent listener", exc)
+                    }
+                    break
                 }
                 Thread { handle(client) }.start()
             }
