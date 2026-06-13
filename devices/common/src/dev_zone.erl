@@ -752,10 +752,7 @@ install_encrypted_volume(Name, RingAddress, AES, OldOpts, RingOpts) ->
                         encrypted_volume_failed(Name, {flush, FlushError})
                 end
         end,
-        RingOpts#{
-            <<"store">> =>
-                prepend_store(Store, hb_opts:get(<<"store">>, [], RingOpts))
-        }
+        install_encrypted_volume_store_opts(Store, RingOpts)
     catch
         Class:Reason:Stack ->
             hb_store_andee_encrypted:forget_secret(SecretRef),
@@ -833,16 +830,22 @@ encrypted_volume_failed(Name, Reason) ->
     }}).
 
 copy_existing_store_to_encrypted(OldOpts, EncryptedStore) ->
-    SourceStores = remove_same_store(
-        store_list(hb_opts:get(<<"store">>, [], OldOpts)),
-        EncryptedStore
-    ),
+    SourceStores = encrypted_volume_copy_sources(OldOpts, EncryptedStore),
     case SourceStores of
         [] ->
             ok;
         _ ->
             copy_store_path(SourceStores, EncryptedStore, <<"/">>, OldOpts)
     end.
+
+encrypted_volume_copy_sources(OldOpts, EncryptedStore) ->
+    lists:usort(
+        remove_same_store(
+            store_list(hb_opts:get(<<"store">>, [], OldOpts)) ++
+                store_list(hb_opts:get(<<"match-index">>, [], OldOpts)),
+            EncryptedStore
+        )
+    ).
 
 copy_store_path(SourceStores, TargetStore, Path, Opts) ->
     case hb_store:type(SourceStores, Path, Opts) of
@@ -882,6 +885,13 @@ copy_child_path(Parent, Child) ->
 
 prepend_store(Store, Stores0) ->
     [Store | remove_same_store(store_list(Stores0), Store)].
+
+install_encrypted_volume_store_opts(Store, RingOpts) ->
+    RingOpts#{
+        <<"store">> => prepend_store(Store, hb_opts:get(<<"store">>, [], RingOpts)),
+        <<"match-index">> =>
+            prepend_store(Store, hb_opts:get(<<"match-index">>, [], RingOpts))
+    }.
 
 remove_same_store(Stores, Store) ->
     [Existing || Existing <- Stores, not same_store(Existing, Store)].
@@ -2119,6 +2129,44 @@ nonvolatile_store_blocks_different_zone_test() ->
                 <<"zone-allow">> => 2,
                 <<"lapee-nonvolatile-status">> => Mounted
             })).
+
+andee_encrypted_volume_updates_store_and_match_index_test() ->
+    Encrypted = #{
+        <<"store-module">> => hb_store_andee_encrypted,
+        <<"name">> => <<"encrypted">>
+    },
+    Runtime = #{<<"store-module">> => hb_store_volatile, <<"name">> => <<"runtime">>},
+    Match = #{<<"store-module">> => hb_store_volatile, <<"name">> => <<"match">>},
+    Existing = #{
+        <<"store">> => [Runtime],
+        <<"match-index">> => [Match]
+    },
+    Updated = install_encrypted_volume_store_opts(Encrypted, Existing),
+    ?assertEqual(
+        [Encrypted, Runtime],
+        hb_maps:get(<<"store">>, Updated, undefined, #{})
+    ),
+    ?assertEqual(
+        [Encrypted, Match],
+        hb_maps:get(<<"match-index">>, Updated, undefined, #{})
+    ).
+
+andee_encrypted_volume_copies_store_and_match_index_sources_test() ->
+    Encrypted = #{
+        <<"store-module">> => hb_store_andee_encrypted,
+        <<"name">> => <<"encrypted">>
+    },
+    Runtime = #{<<"store-module">> => hb_store_volatile, <<"name">> => <<"runtime">>},
+    Match = #{<<"store-module">> => hb_store_volatile, <<"name">> => <<"match">>},
+    Sources =
+        encrypted_volume_copy_sources(
+            #{
+                <<"store">> => [Runtime],
+                <<"match-index">> => [Match, Encrypted]
+            },
+            Encrypted
+        ),
+    ?assertEqual(lists:sort([Runtime, Match]), lists:sort(Sources)).
 
 zone_init_allow_policy_test() ->
     ?assertEqual(ok, assert_zone_initialization_allowed(<<"alpha">>, #{})),
