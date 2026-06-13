@@ -11,17 +11,33 @@ for lock in "$PERMAWEBOS_COMMON_DEVICE_ROOT/rebar.lock" \
     fi
 done
 
+STAGING_DENYLIST=(
+    '_build'
+    '.DS_Store'
+    'cache-mainnet'
+    'hyperbeam-key.json'
+    'logs'
+)
+
 rm -rf "$ANDEE_DEVICE_ROOT"
 mkdir -p "$ANDEE_DEVICE_ROOT"
 
 copy_device_tree() {
     local src="$1"
     if command -v rsync >/dev/null 2>&1; then
-        rsync -a --exclude '_build' \
+        local excludes=()
+        local pattern
+        for pattern in "${STAGING_DENYLIST[@]}"; do
+            excludes+=(--exclude "$pattern")
+        done
+        rsync -a "${excludes[@]}" \
             "$src"/ "$ANDEE_DEVICE_ROOT"/
     else
         cp -a "$src"/. "$ANDEE_DEVICE_ROOT"/
-        rm -rf "$ANDEE_DEVICE_ROOT/_build"
+        local pattern
+        for pattern in "${STAGING_DENYLIST[@]}"; do
+            find "$ANDEE_DEVICE_ROOT" -name "$pattern" -prune -exec rm -rf {} +
+        done
     fi
 }
 
@@ -30,6 +46,19 @@ copy_device_tree "$ANDEE_DEVICE_OVERLAY_ROOT"
 
 if [ ! -f "$ANDEE_DEVICE_ROOT/rebar.lock" ]; then
     echo "staged Android device package has no rebar.lock" >&2
+    exit 1
+fi
+
+if bad_path="$(
+    find "$ANDEE_DEVICE_ROOT" \
+        \( -name '_build' -o \
+           -name '.DS_Store' -o \
+           -name 'cache-mainnet' -o \
+           -name 'hyperbeam-key.json' -o \
+           -name 'logs' \) \
+        -print -quit
+)"; [ -n "$bad_path" ]; then
+    echo "staged Android device package contains local artifact: $bad_path" >&2
     exit 1
 fi
 
