@@ -6,6 +6,15 @@ OUT="$BUILD_DIR/andee-smoke"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
+PACKAGE="org.permaweb.andee"
+KEEP_ANDEE_RUNNING="${KEEP_ANDEE_RUNNING:-0}"
+
+cleanup_app() {
+    if [ "$KEEP_ANDEE_RUNNING" != "1" ]; then
+        adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_app EXIT
 
 if [ ! -f "$APK" ]; then
     echo "APK missing: $APK" >&2
@@ -13,26 +22,26 @@ if [ ! -f "$APK" ]; then
 fi
 
 adb logcat -c || true
-adb uninstall org.permaweb.andee >/dev/null 2>&1 || true
+adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
 adb install -r "$APK" | tee "$OUT/install.txt"
-adb shell am start -n org.permaweb.andee/.OrnamentActivity | tee "$OUT/activity.txt"
-adb shell am start-foreground-service -n org.permaweb.andee/.AndeeService \
+adb shell am start -n "$PACKAGE/.OrnamentActivity" | tee "$OUT/activity.txt"
+adb shell am start-foreground-service -n "$PACKAGE/.AndeeService" \
     > "$OUT/service-start.txt" 2>&1 || true
 for _ in $(seq 1 90); do
-    adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stdout \
+    adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stdout \
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
-    adb shell run-as org.permaweb.andee cat no_backup/run/hyperbeam.stderr \
+    adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \
         > "$OUT/hyperbeam.stderr" 2>/dev/null || true
     if grep -q "AndEE HyperBEAM node started" "$OUT/hyperbeam.stdout"; then
         break
     fi
     sleep 1
 done
-adb shell dumpsys activity services org.permaweb.andee > "$OUT/services.txt" || true
-adb shell cmd package list packages -U org.permaweb.andee \
+adb shell dumpsys activity services "$PACKAGE" > "$OUT/services.txt" || true
+adb shell cmd package list packages -U "$PACKAGE" \
     > "$OUT/package-uid.txt" 2>/dev/null || true
 adb shell ps -A -o USER,UID,PID,NAME > "$OUT/app-ps.txt" 2>/dev/null || true
-adb shell run-as org.permaweb.andee ls -R no_backup > "$OUT/no-backup.txt" 2>/dev/null || true
+adb shell run-as "$PACKAGE" ls -R no_backup > "$OUT/no-backup.txt" 2>/dev/null || true
 adb logcat -d -s AndeeService RuntimeExtractor AndeeCryptoAgent HyperbeamRuntime \
     > "$OUT/logcat.txt" || true
 python3 - <<'PY' "$OUT/policy-frame.bin"
@@ -42,7 +51,7 @@ pathlib.Path(sys.argv[1]).write_bytes(struct.pack(">I", len(payload)) + payload)
 PY
 adb push "$OUT/policy-frame.bin" /data/local/tmp/andee-policy-frame.bin >/dev/null 2>&1 || true
 adb shell chmod 644 /data/local/tmp/andee-policy-frame.bin >/dev/null 2>&1 || true
-if adb exec-out run-as org.permaweb.andee sh -c \
+if adb exec-out run-as "$PACKAGE" sh -c \
     'toybox nc -U no_backup/run/andee-crypto.sock < /data/local/tmp/andee-policy-frame.bin' \
     > "$OUT/policy-response.bin" 2>/dev/null; then
     python3 - <<'PY' "$OUT/policy-response.bin" "$OUT/policy-response.json"

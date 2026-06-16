@@ -3,6 +3,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
 AVD_NAME="${AVD_NAME:-andee-api-36-arm64}"
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
 if adb devices | awk 'NR>1 && $2=="device" {found=1} END {exit !found}'; then
     echo "device already connected"
     exit 0
@@ -20,8 +21,14 @@ else
     echo "$!" > "$BUILD_DIR/andee-emulator.pid"
 fi
 
-adb wait-for-device
-until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
+deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+until adb get-state >/dev/null 2>&1 \
+    && adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "emulator did not boot within ${BOOT_TIMEOUT}s: $AVD_NAME" >&2
+        tail -n 80 "$LOG" >&2 || true
+        exit 1
+    fi
     sleep 2
 done
 adb shell input keyevent 82 >/dev/null 2>&1 || true

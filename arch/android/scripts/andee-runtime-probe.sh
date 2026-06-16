@@ -8,9 +8,25 @@ HOST_PORT="${HOST_PORT:-28734}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-240}"
 PACKAGE="org.permaweb.andee"
 RESET_APP_DATA="${RESET_APP_DATA:-0}"
+KEEP_ANDEE_RUNNING="${KEEP_ANDEE_RUNNING:-0}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
+
+cleanup_forward() {
+    adb forward --remove "tcp:$HOST_PORT" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    cleanup_forward
+    if [ "$KEEP_ANDEE_RUNNING" != "1" ]; then
+        adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+        if [ "$RESET_APP_DATA" = "1" ]; then
+            adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+trap cleanup EXIT
 
 if [ ! -f "$APK" ]; then
     echo "APK missing: $APK" >&2
@@ -52,7 +68,7 @@ for _ in $(seq 1 90); do
 done
 
 adb shell run-as "$PACKAGE" ps -A > "$OUT/app-ps.txt" 2>/dev/null || true
-adb forward --remove-all >/dev/null 2>&1 || true
+cleanup_forward
 adb forward "tcp:$HOST_PORT" tcp:8734 > "$OUT/adb-forward.txt"
 
 probe() {
@@ -146,7 +162,4 @@ if not verdict["passed"]:
     raise SystemExit(1)
 PY
 
-if [ "$RESET_APP_DATA" = "1" ]; then
-    adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
-fi
 echo "runtime probe evidence: $OUT"

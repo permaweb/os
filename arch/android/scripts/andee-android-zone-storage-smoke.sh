@@ -16,6 +16,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 
 cleanup() {
+    adb forward --remove "tcp:$HOST_PORT" >/dev/null 2>&1 || true
     adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
     if [ "$RESET_APP_DATA" = "1" ]; then
         adb uninstall "$PACKAGE" >/dev/null 2>&1 || true

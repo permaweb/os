@@ -79,9 +79,13 @@ negative = {
 }
 (out / "negative" / "policy-failures.json").write_text(json.dumps(negative, indent=2) + "\n")
 (out / "summary.json").write_text(json.dumps({
-    "passed": True,
+    "passed": False,
+    "fixture_evidence": True,
     "hardware_attestation": "emulator-limited",
-    "note": "Scenario harness exists and records explicit non-accepted emulator evidence.",
+    "note": (
+        "Scenario harness records explicit non-accepted emulator evidence; "
+        "passed remains false until live Android probes complete."
+    ),
 }, indent=2) + "\n")
 PY
 
@@ -129,6 +133,11 @@ summary["boot_live"] = bool(runtime.get("boot_materialized"))
 summary["fresh_live"] = bool(runtime.get("fresh_materialized"))
 summary["next_boot_config_live"] = bool(next_boot.get("passed"))
 summary["android_zone_encrypted_storage_live"] = bool(android_zone.get("passed"))
+summary["passed"] = bool(
+    runtime.get("passed")
+    and next_boot.get("passed")
+    and android_zone.get("passed")
+)
 summary["note"] = (
     "Live emulator boot/fresh evidence was fetched and materialized, and the "
     "private next-boot config path was verified against the attested node "
@@ -150,7 +159,7 @@ else
     python3 - <<'PY' "$OUT/zone-storage/summary.json"
 import json, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
-    "passed": True,
+    "passed": False,
     "scenario": "host-andee-zone-encrypted-store-rejoin",
     "skipped": True,
     "reason": (
@@ -167,7 +176,13 @@ zone_path = pathlib.Path(sys.argv[2])
 summary = json.loads(summary_path.read_text())
 zone = json.loads(zone_path.read_text())
 summary["zone_encrypted_storage"] = zone
-summary["zone_encrypted_storage_live"] = bool(zone.get("passed"))
+summary["zone_encrypted_storage_live"] = bool(
+    zone.get("passed") and not zone.get("skipped")
+)
+if not zone.get("skipped"):
+    summary["passed"] = bool(
+        summary.get("passed") and summary["zone_encrypted_storage_live"]
+    )
 summary_path.write_text(json.dumps(summary, indent=2) + "\n")
 PY
 

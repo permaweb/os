@@ -14,6 +14,19 @@ MARKER="andee-next-boot-config-$(date +%Y%m%d%H%M%S)"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+cleanup_forward() {
+    adb forward --remove "tcp:$HOST_PORT" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    cleanup_forward
+    adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+    if [ "$RESET_APP_DATA" = "1" ]; then
+        adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+
 if [ ! -f "$APK" ]; then
     echo "APK missing: $APK" >&2
     exit 1
@@ -98,7 +111,7 @@ adb shell run-as "$PACKAGE" test ! -f no_backup/boot-config/next.json \
 adb shell run-as "$PACKAGE" test -f no_backup/boot-config/active.json \
     > "$OUT/active-present.txt"
 
-adb forward --remove "tcp:$HOST_PORT" >/dev/null 2>&1 || true
+cleanup_forward
 adb forward "tcp:$HOST_PORT" tcp:8734 > "$OUT/adb-forward.txt"
 
 probe() {
@@ -126,14 +139,17 @@ for name in meta boot; do
     fi
 done
 
-python3 - <<'PY' "$OUT" "$MARKER" "$STARTED"
+python3 - <<'PY' "$OUT" "$MARKER" "$STARTED" "$BASE_URL"
 import json
 import pathlib
 import sys
+import urllib.parse
+import urllib.request
 
 out = pathlib.Path(sys.argv[1])
 marker = sys.argv[2]
 started = sys.argv[3] == "1"
+base_url = sys.argv[4]
 
 def fail(message):
     raise SystemExit(message)
@@ -141,7 +157,14 @@ def fail(message):
 def read_json(name):
     return json.loads((out / name).read_text())
 
+def fetch_json(path):
+    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode())
+
 effective = read_json("effective.json")
+boot_raw = read_json("boot.body")
 meta = read_json("meta.materialized.json")
 boot = read_json("boot.materialized.json")
 meta_node = meta.get("body", meta)
@@ -187,6 +210,26 @@ def assert_base_volatile_stores(node, label):
     if not is_volatile_store(node.get("priv-store"), "andee-volatile-priv-store"):
         fail(f"{label} did not enforce volatile private store")
 
+def linked_value(message, key):
+    link = message.get(f"{key}+link")
+    if isinstance(link, str):
+        return fetch_json(link)
+    return message.get(key)
+
+def assert_attested_public_store(node_link, key, name):
+    value = fetch_json(f"{node_link}/{key}")
+    if value.get("status") != 200:
+        fail(f"attested node {key} did not resolve with HTTP 200")
+    item = linked_value(value, "1")
+    if not isinstance(item, dict):
+        fail(f"attested node {key} did not resolve to a singleton store list")
+    if value.get("2") is not None or value.get("2+link") is not None:
+        fail(f"attested node {key} included more than one store entry")
+    if item.get("store-module") != "hb_store_volatile":
+        fail(f"attested node {key} did not enforce volatile store module")
+    if item.get("name") != name:
+        fail(f"attested node {key} did not enforce volatile store name")
+
 if not started:
     fail("HyperBEAM did not report startup")
 if (out / "meta.status").read_text().strip() != "200":
@@ -228,7 +271,24 @@ if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
 if "store-defaults" in attested_node:
     fail("attested node message preserved operator store-defaults override")
-assert_base_volatile_stores(attested_node, "attested node message")
+attested_body = linked_value(boot_raw, "body")
+if not isinstance(attested_body, dict):
+    fail("boot measurement body did not resolve")
+attested_node_link = attested_body.get("node+link")
+if not isinstance(attested_node_link, str):
+    fail("boot measurement body did not include an attested node link")
+assert_attested_public_store(
+    attested_node_link,
+    "store",
+    "andee-volatile-store",
+)
+assert_attested_public_store(
+    attested_node_link,
+    "match-index",
+    "andee-volatile-match-index",
+)
+if "priv-store" in attested_node:
+    fail("attested public node unexpectedly exposed private store config")
 for needle in operator_only_needles:
     if contains_value(attested_node, needle):
         fail(f"attested node message preserved operator-only runtime value: {needle}")
@@ -280,9 +340,7 @@ adb shell run-as "$PACKAGE" test ! -f no_backup/boot-config/next.json \
     > "$OUT/post-terminate-pending-consumed.txt"
 adb shell run-as "$PACKAGE" test -f no_backup/boot-config/active.json \
     > "$OUT/post-terminate-active-present.txt"
-adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
-if [ "$RESET_APP_DATA" = "1" ]; then
-    adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
-fi
+cleanup
+trap - EXIT
 
 echo "next boot config evidence: $OUT"
