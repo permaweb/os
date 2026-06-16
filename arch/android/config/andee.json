@@ -5,19 +5,34 @@
   "store": [
     {
       "store-module": "hb_store_volatile",
-      "name": "andee-volatile-store"
+      "name": "andee-volatile-store",
+      "ao-types": "store-module=\"atom\""
+    },
+    {
+      "store-module": "hb_store_gateway",
+      "access": ["read"],
+      "ao-types": "store-module=\"atom\"",
+      "local-store": [
+        {
+          "store-module": "hb_store_volatile",
+          "name": "andee-volatile-store",
+          "ao-types": "store-module=\"atom\""
+        }
+      ]
     }
   ],
   "match-index": [
     {
       "store-module": "hb_store_volatile",
-      "name": "andee-volatile-match-index"
+      "name": "andee-volatile-match-index",
+      "ao-types": "store-module=\"atom\""
     }
   ],
   "priv-store": [
     {
       "store-module": "hb_store_volatile",
-      "name": "andee-volatile-priv-store"
+      "name": "andee-volatile-priv-store",
+      "ao-types": "store-module=\"atom\""
     }
   ],
   "on": {

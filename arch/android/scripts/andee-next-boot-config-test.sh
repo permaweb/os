@@ -163,6 +163,14 @@ def fetch_json(path):
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.loads(response.read().decode())
 
+def fetch_body(path):
+    value = fetch_json(path)
+    while isinstance(value, dict) and (
+        "body" in value or "body+link" in value
+    ):
+        value = linked_value(value, "body")
+    return value
+
 effective = read_json("effective.json")
 boot_raw = read_json("boot.body")
 meta = read_json("meta.materialized.json")
@@ -200,11 +208,33 @@ def contains_value(value, needle):
     return False
 
 def is_volatile_store(value, name):
-    return value == [{"store-module": "hb_store_volatile", "name": name}]
+    return value == [
+        {
+            "store-module": "hb_store_volatile",
+            "name": name,
+            "ao-types": 'store-module="atom"',
+        }
+    ]
+
+def is_runtime_store(value):
+    volatile = {
+        "store-module": "hb_store_volatile",
+        "name": "andee-volatile-store",
+        "ao-types": 'store-module="atom"',
+    }
+    return value == [
+        volatile,
+        {
+            "store-module": "hb_store_gateway",
+            "access": ["read"],
+            "ao-types": 'store-module="atom"',
+            "local-store": [volatile],
+        },
+    ]
 
 def assert_base_volatile_stores(node, label):
-    if not is_volatile_store(node.get("store"), "andee-volatile-store"):
-        fail(f"{label} did not enforce volatile runtime store")
+    if not is_runtime_store(node.get("store")):
+        fail(f"{label} did not enforce volatile runtime store plus gateway reads")
     if not is_volatile_store(node.get("match-index"), "andee-volatile-match-index"):
         fail(f"{label} did not enforce volatile match index")
     if not is_volatile_store(node.get("priv-store"), "andee-volatile-priv-store"):
@@ -216,7 +246,7 @@ def linked_value(message, key):
         return fetch_json(link)
     return message.get(key)
 
-def assert_attested_public_store(node_link, key, name):
+def assert_attested_public_volatile_store(node_link, key, name):
     value = fetch_json(f"{node_link}/{key}")
     if value.get("status") != 200:
         fail(f"attested node {key} did not resolve with HTTP 200")
@@ -229,6 +259,26 @@ def assert_attested_public_store(node_link, key, name):
         fail(f"attested node {key} did not enforce volatile store module")
     if item.get("name") != name:
         fail(f"attested node {key} did not enforce volatile store name")
+
+def assert_attested_public_runtime_store(node_link):
+    if fetch_body(f"{node_link}/store/1/store-module") != "hb_store_volatile":
+        fail("attested node store first entry was not volatile")
+    if fetch_body(f"{node_link}/store/1/name") != "andee-volatile-store":
+        fail("attested node store first entry did not enforce volatile store name")
+    if fetch_body(f"{node_link}/store/2/store-module") != "hb_store_gateway":
+        fail("attested node store second entry was not gateway")
+    if fetch_body(f"{node_link}/store/2/access/1") != "read":
+        fail("attested node gateway store was not read-only")
+    if (
+        fetch_body(f"{node_link}/store/2/local-store/1/store-module")
+        != "hb_store_volatile"
+    ):
+        fail("attested node gateway local store was not volatile")
+    if (
+        fetch_body(f"{node_link}/store/2/local-store/1/name")
+        != "andee-volatile-store"
+    ):
+        fail("attested node gateway store did not cache into volatile store")
 
 if not started:
     fail("HyperBEAM did not report startup")
@@ -277,12 +327,8 @@ if not isinstance(attested_body, dict):
 attested_node_link = attested_body.get("node+link")
 if not isinstance(attested_node_link, str):
     fail("boot measurement body did not include an attested node link")
-assert_attested_public_store(
-    attested_node_link,
-    "store",
-    "andee-volatile-store",
-)
-assert_attested_public_store(
+assert_attested_public_runtime_store(attested_node_link)
+assert_attested_public_volatile_store(
     attested_node_link,
     "match-index",
     "andee-volatile-match-index",

@@ -60,7 +60,30 @@ def is_measurement_boot_hook(hook: Any) -> bool:
 
 
 def is_volatile_store(value: Any, name: str) -> bool:
-    return value == [{"store-module": "hb_store_volatile", "name": name}]
+    return value == [
+        {
+            "store-module": "hb_store_volatile",
+            "name": name,
+            "ao-types": 'store-module="atom"',
+        }
+    ]
+
+
+def is_runtime_store(value: Any) -> bool:
+    volatile = {
+        "store-module": "hb_store_volatile",
+        "name": "andee-volatile-store",
+        "ao-types": 'store-module="atom"',
+    }
+    return value == [
+        volatile,
+        {
+            "store-module": "hb_store_gateway",
+            "access": ["read"],
+            "ao-types": 'store-module="atom"',
+            "local-store": [volatile],
+        },
+    ]
 
 
 def main() -> int:
@@ -94,8 +117,8 @@ def main() -> int:
     ):
         if key in config:
             fail(f"base config should inherit common HyperBEAM default for {key}")
-    if not is_volatile_store(config.get("store"), "andee-volatile-store"):
-        fail("base config must use volatile Android runtime store")
+    if not is_runtime_store(config.get("store")):
+        fail("base config must use volatile Android runtime store plus gateway reads")
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
     if not is_volatile_store(config.get("priv-store"), "andee-volatile-priv-store"):

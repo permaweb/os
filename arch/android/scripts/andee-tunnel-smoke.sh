@@ -283,7 +283,29 @@ def read_json(name):
     return json.loads((out / name).read_text())
 
 def is_volatile_store(value, name):
-    return value == [{"store-module": "hb_store_volatile", "name": name}]
+    return value == [
+        {
+            "store-module": "hb_store_volatile",
+            "name": name,
+            "ao-types": 'store-module="atom"',
+        }
+    ]
+
+def is_runtime_store(value):
+    volatile = {
+        "store-module": "hb_store_volatile",
+        "name": "andee-volatile-store",
+        "ao-types": 'store-module="atom"',
+    }
+    return value == [
+        volatile,
+        {
+            "store-module": "hb_store_gateway",
+            "access": ["read"],
+            "ao-types": 'store-module="atom"',
+            "local-store": [volatile],
+        },
+    ]
 
 effective = read_json("effective.json")
 local_info = read_json("local-info.materialized.json")
@@ -309,8 +331,8 @@ if not hooks or not any(
     for hook in hooks
 ):
     fail("effective config did not include tunnel connect hook")
-if not is_volatile_store(effective.get("store"), "andee-volatile-store"):
-    fail("effective config did not keep volatile store")
+if not is_runtime_store(effective.get("store")):
+    fail("effective config did not keep volatile store plus gateway reads")
 if not is_volatile_store(effective.get("match-index"), "andee-volatile-match-index"):
     fail("effective config did not keep volatile match index")
 if not is_volatile_store(effective.get("priv-store"), "andee-volatile-priv-store"):

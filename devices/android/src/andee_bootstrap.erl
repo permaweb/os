@@ -105,37 +105,45 @@ start_store(Opts) ->
 
 load_config(Path) ->
     case file:read_file(Path) of
-        {ok, Bin} -> normalize_config(hb_json:decode(Bin));
+        {ok, Bin} -> decode_json_config(hb_json:decode(Bin));
         {error, Reason} -> erlang:error({failed_to_load_andee_config, Path, Reason})
     end.
 
-normalize_config(Config) when is_map(Config) ->
-    normalize_config_value(Config).
-
-normalize_config_value(Config) when is_map(Config) ->
-    maps:map(
+decode_json_config(Values) when is_list(Values) ->
+    [decode_json_config(Value) || Value <- Values];
+decode_json_config(Config) when is_map(Config) ->
+    Types = decode_ao_types(Config),
+    maps:fold(
         fun
-            (<<"store-module">>, Value) -> normalize_store_module(Value);
-            (<<"protocol">>, <<"http1">>) -> http1;
-            (<<"protocol">>, <<"http2">>) -> http2;
-            (<<"protocol">>, <<"http3">>) -> http3;
-            (<<"scheduling-mode">>, <<"aggressive">>) -> aggressive;
-            (<<"scheduling-mode">>, <<"local_confirmation">>) -> local_confirmation;
-            (<<"scheduling-mode">>, <<"remote_confirmation">>) -> remote_confirmation;
-            (<<"scheduling-mode">>, <<"disabled">>) -> disabled;
-            (<<"compute-mode">>, <<"aggressive">>) -> aggressive;
-            (<<"compute-mode">>, <<"lazy">>) -> lazy;
-            (_Key, Value) -> normalize_config_value(Value)
+            (<<"ao-types">>, _Value, Acc) ->
+                Acc;
+            (RawKey, BinValue, Acc) when is_binary(BinValue) ->
+                case hb_maps:find(hb_ao:normalize_key(RawKey), Types, #{}) of
+                    error -> Acc#{RawKey => BinValue};
+                    {ok, Type} -> Acc#{RawKey => hb_util:decode(Type, BinValue)}
+                end;
+            (RawKey, Child, Acc) when is_map(Child) or is_list(Child) ->
+                Acc#{RawKey => decode_json_config(Child)};
+            (RawKey, Value, Acc) ->
+                Acc#{RawKey => Value}
         end,
+        #{},
         Config
     );
-normalize_config_value(Values) when is_list(Values) ->
-    [normalize_config_value(Value) || Value <- Values];
-normalize_config_value(Value) ->
+decode_json_config(Value) ->
     Value.
 
-normalize_store_module(<<"hb_store_volatile">>) -> hb_store_volatile;
-normalize_store_module(Value) -> normalize_config_value(Value).
+decode_ao_types(Config) when is_map(Config) ->
+    decode_ao_types(hb_maps:get(<<"ao-types">>, Config, <<>>, #{}));
+decode_ao_types(Bin) when is_binary(Bin) ->
+    hb_maps:from_list(
+        lists:map(
+            fun({Key, {item, {_, Value}, _}}) ->
+                {hb_escape:decode(Key), Value}
+            end,
+            hb_structured_fields:parse_dictionary(Bin)
+        )
+    ).
 
 runtime_environment() ->
     maps:from_list(
@@ -242,57 +250,68 @@ runtime_environment_keys_are_reserved_test() ->
         })
     ).
 
-normalize_config_coerces_nested_volatile_store_modules_test() ->
-    Config =
-        #{
-            <<"store">> =>
-                [
-                    #{
-                        <<"store-module">> => <<"hb_store_volatile">>,
-                        <<"name">> => <<"runtime">>
-                    }
-                ],
-            <<"match-index">> =>
-                [
-                    #{
-                        <<"store-module">> => <<"hb_store_volatile">>,
-                        <<"name">> => <<"match">>
-                    }
-                ],
-            <<"priv-store">> =>
-                [
-                    #{
-                        <<"store-module">> => <<"hb_store_volatile">>,
-                        <<"name">> => <<"priv">>
-                    }
-                ],
-            <<"scheduling-mode">> => <<"local_confirmation">>,
-            <<"on">> =>
-                #{
-                    <<"start">> =>
-                        [
-                            #{
-                                <<"device">> => <<"measurement@1.0">>,
-                                <<"store-module">> => <<"not-a-store-module">>
-                            }
-                        ]
+load_config_honors_json_ao_types_test() ->
+    Path =
+        filename:join(
+            <<"/tmp">>,
+            <<"andee_config_",
+                (integer_to_binary(erlang:unique_integer([positive])))/binary,
+                ".json">>
+        ),
+    JSON =
+        <<"""
+        {
+          "ao-types": "scheduling-mode=\"atom\"",
+          "store": [
+            {
+              "store-module": "hb_store_volatile",
+              "name": "runtime",
+              "ao-types": "store-module=\"atom\""
+            },
+            {
+              "store-module": "hb_store_gateway",
+              "ao-types": "store-module=\"atom\"",
+              "local-store": [
+                {
+                  "store-module": "hb_store_volatile",
+                  "name": "runtime",
+                  "ao-types": "store-module=\"atom\""
                 }
-        },
-    Normalized = normalize_config(Config),
+              ]
+            }
+          ],
+          "scheduling-mode": "local_confirmation"
+        }
+        """>>,
+    ok = file:write_file(Path, JSON),
+    Normalized =
+        try load_config(Path)
+        after file:delete(Path)
+        end,
     ?assertMatch(
-        [#{<<"store-module">> := hb_store_volatile}],
+        [
+            #{
+                <<"store-module">> := <<"hb_store_volatile">>,
+                <<"ao-types">> := _
+            },
+            _
+        ],
+        maps:get(<<"store">>, hb_json:decode(JSON))
+    ),
+    ?assertMatch(
+        [
+            #{
+                <<"store-module">> := hb_store_volatile
+            },
+            #{
+                <<"store-module">> := hb_store_gateway,
+                <<"local-store">> :=
+                    [#{<<"store-module">> := hb_store_volatile}]
+            }
+        ],
         maps:get(<<"store">>, Normalized)
     ),
-    ?assertMatch(
-        [#{<<"store-module">> := hb_store_volatile}],
-        maps:get(<<"match-index">>, Normalized)
-    ),
-    ?assertMatch(
-        [#{<<"store-module">> := hb_store_volatile}],
-        maps:get(<<"priv-store">>, Normalized)
-    ),
-    ?assertEqual(local_confirmation, maps:get(<<"scheduling-mode">>, Normalized)),
-    [Hook] = maps:get(<<"start">>, maps:get(<<"on">>, Normalized)),
-    ?assertEqual(<<"not-a-store-module">>, maps:get(<<"store-module">>, Hook)).
+    ?assertNot(maps:is_key(<<"ao-types">>, Normalized)),
+    ?assertEqual(local_confirmation, maps:get(<<"scheduling-mode">>, Normalized)).
 
 -endif.
