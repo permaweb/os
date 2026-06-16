@@ -75,6 +75,75 @@ OTP_RELEASE="$ABI_OUT/erlang"
 OTP_MANIFEST="$ABI_OUT/manifest.json"
 mkdir -p "$SRC_CACHE" "$ABI_OUT"
 
+android_erts_current() {
+    python3 - "$OTP_MANIFEST" "$OPENSSL_MANIFEST" "$ABI" "$OTP_VERSION" \
+        "$OTP_SHA256" "$OPENSSL_VERSION" "$OPENSSL_SHA256" "$API_LEVEL" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+otp_manifest = pathlib.Path(sys.argv[1])
+openssl_manifest = pathlib.Path(sys.argv[2])
+abi = sys.argv[3]
+otp_version = sys.argv[4]
+otp_sha256 = sys.argv[5]
+openssl_version = sys.argv[6]
+openssl_sha256 = sys.argv[7]
+api_level = sys.argv[8]
+
+def load(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        raise SystemExit(1)
+
+def require(value, expected):
+    if value != expected:
+        raise SystemExit(1)
+
+def sha256(path):
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        raise SystemExit(1)
+
+otp = load(otp_manifest)
+openssl = load(openssl_manifest)
+require(otp.get("abi"), abi)
+require(otp.get("otp-version"), otp_version)
+require(otp.get("otp-sha256"), otp_sha256)
+require(otp.get("openssl-version"), openssl_version)
+require(otp.get("openssl-sha256"), openssl_sha256)
+require(otp.get("api-level"), api_level)
+require(openssl.get("abi"), abi)
+require(openssl.get("openssl-version"), openssl_version)
+require(openssl.get("openssl-sha256"), openssl_sha256)
+require(openssl.get("api-level"), api_level)
+
+release = pathlib.Path(otp.get("release", ""))
+beam = pathlib.Path(otp.get("beam_smp", ""))
+libcrypto = pathlib.Path(openssl.get("libcrypto", ""))
+if not (release / "releases").is_dir():
+    raise SystemExit(1)
+if not (release / "lib").is_dir():
+    raise SystemExit(1)
+if not any(release.glob("erts-*/bin/beam.smp")):
+    raise SystemExit(1)
+if not any(release.glob("releases/*/start.boot")):
+    raise SystemExit(1)
+if not any(release.glob("releases/*/installed_application_versions")):
+    raise SystemExit(1)
+require(sha256(beam), otp.get("beam_smp_sha256"))
+require(sha256(libcrypto), openssl.get("libcrypto-sha256"))
+PY
+}
+
+if [ "${ANDEE_FORCE_REBUILD_ERTS:-0}" != "1" ] && android_erts_current; then
+    echo "Android ERTS release current: $OTP_RELEASE"
+    exit 0
+fi
+
 OTP_TARBALL="$SRC_CACHE/otp_src_$OTP_VERSION.tar.gz"
 OPENSSL_TARBALL="$SRC_CACHE/openssl-$OPENSSL_VERSION.tar.gz"
 

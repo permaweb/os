@@ -56,6 +56,7 @@ fetch-attestation-roots:
 	./scripts/fetch-android-attestation-roots.py
 
 apk:
+	rm -f "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 	cd "$(ANDROID_DIR)" && \
 	    ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" \
 	    JAVA_HOME="$(JAVA_HOME)" ./gradlew :app:assembleDebug

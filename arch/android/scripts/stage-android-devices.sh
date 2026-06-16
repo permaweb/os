@@ -19,8 +19,18 @@ STAGING_DENYLIST=(
     'logs'
 )
 
+SAVED_BUILD=""
+if [ -d "$ANDEE_DEVICE_ROOT/_build" ]; then
+    SAVED_BUILD="$(mktemp -d "$BUILD_DIR/android-devices-build.XXXXXX")"
+    mv "$ANDEE_DEVICE_ROOT/_build" "$SAVED_BUILD/_build"
+fi
+
 rm -rf "$ANDEE_DEVICE_ROOT"
 mkdir -p "$ANDEE_DEVICE_ROOT"
+if [ -n "$SAVED_BUILD" ]; then
+    mv "$SAVED_BUILD/_build" "$ANDEE_DEVICE_ROOT/_build"
+    rmdir "$SAVED_BUILD"
+fi
 
 copy_device_tree() {
     local src="$1"
@@ -51,6 +61,7 @@ fi
 
 if bad_path="$(
     find "$ANDEE_DEVICE_ROOT" \
+        -path "$ANDEE_DEVICE_ROOT/_build" -prune -o \
         \( -name '_build' -o \
            -name '.DS_Store' -o \
            -name 'cache-mainnet' -o \
@@ -63,7 +74,8 @@ if bad_path="$(
 fi
 
 rm -f "$ANDEE_DEVICE_ROOT/src/lapee_devices.app.src"
-rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/andee_devices"
+rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/andee_devices" \
+    "$ANDEE_DEVICE_ROOT/_build/default/lib/lapee_devices"
 if [ -d "$ANDEE_DEVICE_ROOT/src/priv" ]; then
     rm -rf "$ANDEE_DEVICE_ROOT/priv"
     cp -a "$ANDEE_DEVICE_ROOT/src/priv" "$ANDEE_DEVICE_ROOT/priv"

@@ -309,7 +309,9 @@ adb push "$OUT/next-boot-config.json" "$REMOTE_CONFIG" > "$OUT/push-terminate.tx
 adb shell "run-as $PACKAGE sh -c 'cp $REMOTE_CONFIG no_backup/boot-config/next.json'" \
     > "$OUT/restage-terminate.txt"
 adb shell rm -f "$REMOTE_CONFIG" >/dev/null 2>&1 || true
-sleep 3
+# The ornament view polls the app-private boot config every 5s once the node is
+# ready; wait long enough for a directly staged next.json to flip the button.
+sleep 7
 read -r SCREEN_WIDTH SCREEN_HEIGHT < <(
     adb shell wm size | tr -d '\r' | awk -F'[ x]' '/Physical size/ {print $(NF-1), $NF}'
 )
