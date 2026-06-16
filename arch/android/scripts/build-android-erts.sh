@@ -146,6 +146,7 @@ EOF
         --xcomp-conf="$XCOMP_CONF" \
         --with-ssl="$OPENSSL_PREFIX" \
         --disable-dynamic-ssl-lib \
+        --disable-otp-test-engine \
         --without-javac \
         --without-odbc
     make -j "$JOBS"

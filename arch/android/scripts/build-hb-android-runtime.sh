@@ -9,6 +9,7 @@ JNI_DIR="$ROOT/android/app/src/main/jniLibs"
 NDK_ROOT="${ANDROID_NDK_ROOT:-}"
 NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
 REBAR3="$ROOT/scripts/verified-rebar3.sh"
+PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
@@ -136,6 +137,7 @@ done
     "$ANDEE_RUNTIME_SRC/andee_hyperbeam_launcher.c" \
     -o "$JNI_DIR/x86_64/libandee_hyperbeam.so"
 
+ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 python3 - <<'PY' "$ROOT" "$BUILD_DIR" "$WORK" "$JNI_DIR" "$TOOLCHAIN/llvm-strip"
 import os
 import re
@@ -155,6 +157,12 @@ prune_names = {
     "src", "include", "doc", "docs", "man", "examples", "emacs",
     "c_src", "misc", "usr",
 }
+prune_file_suffixes = {".a"}
+prune_otp_apps = set(os.environ["ANDEE_PRUNE_OTP_APPS"].split())
+prune_erts_bins_by_app = {
+    "common_test": {"ct_run"},
+    "dialyzer": {"dialyzer", "typer"},
+}
 
 def sanitize(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", value)
@@ -169,9 +177,38 @@ def is_elf(path: Path) -> bool:
 def ignore_release_dir(directory, names):
     ignored = set()
     for name in names:
-        if name in prune_names:
+        if name in prune_names or any(
+            name == app or name.startswith(f"{app}-")
+            for app in prune_otp_apps
+        ):
             ignored.add(name)
     return ignored
+
+def is_pruned_otp_app(name: str) -> bool:
+    return any(name == app or name.startswith(f"{app}-") for app in prune_otp_apps)
+
+def prune_installed_application_versions(target: Path) -> None:
+    for versions in target.glob("releases/*/installed_application_versions"):
+        kept = [
+            line
+            for line in versions.read_text().splitlines()
+            if not is_pruned_otp_app(line)
+        ]
+        versions.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+def prune_non_runtime_files(target: Path) -> None:
+    for path in target.rglob("*"):
+        if path.is_file() and path.suffix in prune_file_suffixes:
+            path.unlink()
+
+def is_pruned_erts_bin(rel: str) -> bool:
+    if "/erts-" not in rel or "/bin/" not in rel:
+        return False
+    name = rel.rsplit("/", 1)[-1]
+    return any(
+        app in prune_otp_apps and name in bins
+        for app, bins in prune_erts_bins_by_app.items()
+    )
 
 for abi in abis:
     release = build_dir / "android-erts" / abi / "erlang"
@@ -179,6 +216,8 @@ for abi in abis:
         raise SystemExit(f"missing Android ERTS release for {abi}: {release}")
     target = work / "erlang" / abi
     shutil.copytree(release, target, ignore=ignore_release_dir)
+    prune_installed_application_versions(target)
+    prune_non_runtime_files(target)
     link_lines = []
     for path in sorted(target.rglob("*")):
         if not path.is_file():
@@ -186,6 +225,9 @@ for abi in abis:
         if not (is_elf(path) or path.suffix == ".so"):
             continue
         rel = path.relative_to(work).as_posix()
+        if is_pruned_erts_bin(rel):
+            path.unlink()
+            continue
         native_name = f"libandee_{sanitize(abi)}_{sanitize(rel)}.so"
         native_path = jni_dir / abi / native_name
         shutil.copy2(path, native_path)
@@ -212,6 +254,8 @@ for abi in arm64-v8a x86_64; do
         if [ -d "$app/priv" ]; then
             find "$app/priv" -type f \
                 ! -path '*/crates/*' \
+                ! -name '*.a' \
+                ! -name '*.d' \
                 ! -name '*.so' \
                 ! -name '*.dylib' \
                 ! -name '*.dll' \
@@ -238,12 +282,14 @@ for abi in arm64-v8a x86_64; do
 done
 
 (cd "$WORK" && zip -qr "$OUT" .)
+ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 python3 - <<'PY' "$OUT" "$BUILD_DIR/andee-runtime/manifest.json" "$JNI_DIR" "$WORK"
-import hashlib, json, pathlib, sys
+import hashlib, json, os, pathlib, sys
 zip_path = pathlib.Path(sys.argv[1])
 manifest = pathlib.Path(sys.argv[2])
 jni_dir = pathlib.Path(sys.argv[3])
 work = pathlib.Path(sys.argv[4])
+prune_otp_apps = set(os.environ["ANDEE_PRUNE_OTP_APPS"].split())
 native = sorted(str(p.relative_to(jni_dir)) for p in jni_dir.glob("*/*.so"))
 links = {
     p.stem: len([line for line in p.read_text().splitlines() if line.strip()])
@@ -254,6 +300,7 @@ manifest.write_text(json.dumps({
     "artifact": str(zip_path),
     "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
     "kind": "android-hyperbeam-erts-andee-runtime",
+    "pruned-otp-apps": sorted(prune_otp_apps),
     "native-payload-count": len(native),
     "native-link-counts": links,
     "native-libraries": native,
