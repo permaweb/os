@@ -2,9 +2,11 @@ package org.permaweb.andee
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
@@ -16,9 +18,6 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
@@ -61,7 +60,13 @@ class OrnamentActivity : Activity() {
     override fun onResume() {
         super.onResume()
         startForegroundService(Intent(this, AndeeService::class.java))
+        ornamentView.resumePresentation()
         hideSystemBars()
+    }
+
+    override fun onPause() {
+        ornamentView.pausePresentation()
+        super.onPause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -154,12 +159,34 @@ private class OrnamentView(
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
     private val nodeStatus = AtomicReference(NodeStatus.booting())
     private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
+    private val presentationActive = AtomicBoolean(false)
     private val pollerRunning = AtomicBoolean(false)
     private var pollerThread: Thread? = null
+    private var animationFramePending = false
     private var startedAt = System.nanoTime()
     private var cachedQrUrl = ""
     private var cachedQrRows = QrV2L.rowsFor("http://<node>:8734/")
+    private var phoneRows: List<String> = emptyList()
+    private var qrBitmap: Bitmap? = null
+    private var qrBitmapStatus: NodeStatus? = null
+    private var qrBitmapPending = false
     private val configButtonBounds = RectF()
+    private val clipBounds = Rect()
+    private val clipBoundsF = RectF()
+    private val phoneDirty = Rect()
+
+    private var layoutWidth = 0
+    private var layoutHeight = 0
+    private var greeterTextSize = 0f
+    private var greeterLineHeight = 0f
+    private var greeterMargin = 0f
+    private var greeterTopMargin = 0f
+    private var greeterBottom = 0f
+    private var phoneTextSize = 0f
+    private var phoneLineHeight = 0f
+    private var phoneX = 0f
+    private var phoneTop = 0f
+    private val qrDrawBounds = RectF()
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -178,113 +205,269 @@ private class OrnamentView(
     }
     private val rectPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    private val animationTick = object : Runnable {
+        override fun run() {
+            animationFramePending = false
+            if (!presentationActive.get()) return
+            if (updatePhoneFrame(force = false)) invalidatePhone()
+            scheduleAnimationFrame()
+        }
+    }
+
     fun setNextBootConfigPending(pending: Boolean) {
-        nextBootConfigPending.set(pending)
-        postInvalidate()
+        if (nextBootConfigPending.getAndSet(pending) != pending) {
+            qrBitmapStatus = null
+            invalidate()
+        }
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        startedAt = System.nanoTime()
-        if (pollerRunning.compareAndSet(false, true)) {
-            pollerThread = Thread(::pollNode, "AndEE-Ornament-Probe").also {
-                it.isDaemon = true
-                it.start()
-            }
-        }
+        resumePresentation()
     }
 
     override fun onDetachedFromWindow() {
-        pollerRunning.set(false)
-        pollerThread?.interrupt()
-        pollerThread = null
+        pausePresentation()
         super.onDetachedFromWindow()
     }
 
+    fun resumePresentation() {
+        startedAt = System.nanoTime()
+        updatePhoneFrame(force = true)
+        if (presentationActive.compareAndSet(false, true)) startPoller()
+        invalidate()
+        scheduleAnimationFrame()
+    }
+
+    fun pausePresentation() {
+        presentationActive.set(false)
+        removeCallbacks(animationTick)
+        animationFramePending = false
+        stopPoller()
+    }
+
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        layoutWidth = 0
+        layoutHeight = 0
+        qrBitmap?.recycle()
+        qrBitmap = null
+    }
+
+    private fun startPoller() {
+        if (!pollerRunning.compareAndSet(false, true)) return
+        pollerThread = Thread(::pollNode, "AndEE-Ornament-Probe").also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
+
+    private fun stopPoller() {
+        pollerRunning.set(false)
+        pollerThread?.interrupt()
+        pollerThread = null
+    }
+
     override fun onDraw(canvas: Canvas) {
+        if (width <= 0 || height <= 0) return
+        ensureLayout()
+        if (!canvas.getClipBounds(clipBounds)) {
+            clipBounds.set(0, 0, width, height)
+        }
+        clipBoundsF.set(clipBounds)
+
         val status = nodeStatus.get()
-        val elapsed = ((System.nanoTime() - startedAt) / 1_000_000_000.0).toFloat()
         drawBackground(canvas)
-        val greeterBottom = drawGreeter(canvas)
-        drawPhone(canvas, elapsed, greeterBottom)
-        drawQr(canvas, status)
-        postInvalidateDelayed(33L)
+        if (clipBounds.top < greeterBottom) drawGreeter(canvas)
+        if (Rect.intersects(clipBounds, phoneDirty)) drawPhone(canvas)
+        if (RectF.intersects(qrDrawBounds, clipBoundsF)) drawQr(canvas, status)
     }
 
     private fun pollNode() {
-        while (pollerRunning.get()) {
-            nodeStatus.set(NodeProbe.snapshot())
-            nextBootConfigPending.set(AndeeBootConfigStore.hasPending(context))
-            postInvalidate()
+        while (presentationActive.get() && pollerRunning.get()) {
+            val status = NodeProbe.snapshot()
+            val pending = AndeeBootConfigStore.hasPending(context)
+            post {
+                var changed = false
+                if (nodeStatus.get() != status) {
+                    nodeStatus.set(status)
+                    qrBitmapStatus = null
+                    changed = true
+                }
+                if (nextBootConfigPending.get() != pending) {
+                    nextBootConfigPending.set(pending)
+                    qrBitmapStatus = null
+                    changed = true
+                }
+                if (changed) invalidate()
+            }
             try {
-                Thread.sleep(2_000L)
+                Thread.sleep(if (status.ready && status.ip != null) STEADY_POLL_MS else BOOT_POLL_MS)
             } catch (_: InterruptedException) {
                 return
             }
         }
     }
 
+    private fun scheduleAnimationFrame() {
+        if (animationFramePending || !presentationActive.get() || !isAttachedToWindow) return
+        animationFramePending = true
+        postDelayed(animationTick, ANIMATION_FRAME_MS)
+    }
+
+    private fun invalidatePhone() {
+        if (width <= 0 || height <= 0) {
+            invalidate()
+            return
+        }
+        ensureLayout()
+        postInvalidateOnAnimation(
+            phoneDirty.left,
+            phoneDirty.top,
+            phoneDirty.right,
+            phoneDirty.bottom,
+        )
+    }
+
     private fun drawBackground(canvas: Canvas) {
         canvas.drawColor(BACKGROUND)
     }
 
-    private fun drawGreeter(canvas: Canvas): Float {
-        val margin = dp(22f)
-        val topMargin = dp(40f)
+    private fun ensureLayout() {
+        if (layoutWidth == width && layoutHeight == height) return
+        layoutWidth = width
+        layoutHeight = height
+        greeterMargin = dp(22f)
+        greeterTopMargin = dp(40f)
         var size = (width / 58f).coerceIn(dp(10f), dp(21f))
         textPaint.typeface = mono
         textPaint.textSize = size
         var maxLine = HYPERBEAM_GREETER.maxOf { textPaint.measureText(it) }
-        val available = width - margin * 2f
+        val available = width - greeterMargin * 2f
         if (maxLine > available) {
             size *= available / maxLine
             textPaint.textSize = size
-            maxLine = HYPERBEAM_GREETER.maxOf { textPaint.measureText(it) }
         }
-        val lineHeight = size * 1.08f
-        var y = topMargin + size
+        greeterTextSize = size
+        greeterLineHeight = size * 1.08f
+        greeterBottom = greeterTopMargin + size + HYPERBEAM_GREETER.size * greeterLineHeight + size * 0.55f
 
-        textPaint.color = Color.WHITE
-        textPaint.clearShadowLayer()
-        for (line in HYPERBEAM_GREETER) {
-            canvas.drawText(line, margin, y, textPaint)
-            y += lineHeight
-        }
-        return y + size * 0.55f
-    }
-
-    private fun drawPhone(canvas: Canvas, elapsed: Float, greeterBottom: Float) {
-        val grid = renderPhoneGrid(elapsed)
-        val rows = grid.size
-        val cols = grid.first().size
+        val rows = PHONE_ROWS
+        val cols = PHONE_COLS
         val availableHeight = height - greeterBottom
         val sizeByWidth = width / (cols * 0.42f)
         val sizeByHeight = availableHeight / (rows * 1.08f) * 1.18f
-        val textSize = (min(sizeByWidth, sizeByHeight) * 0.86f).coerceIn(dp(18f), dp(76f))
+        phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f).coerceIn(dp(18f), dp(76f))
         phonePaint.typeface = mono
-        phonePaint.textSize = textSize
+        phonePaint.textSize = phoneTextSize
+        val charWidth = phonePaint.measureText("M")
+        phoneLineHeight = phoneTextSize * 1.08f
+        val blockWidth = charWidth * cols
+        phoneX = width * 0.62f - blockWidth * 0.50f
+        phoneTop = greeterBottom + dp(18f)
+        val phonePad = dp(18f)
+        phoneDirty.set(
+            floor(phoneX - phonePad).toInt().coerceAtLeast(0),
+            floor(phoneTop - phonePad).toInt().coerceAtLeast(0),
+            kotlin.math.ceil(phoneX + blockWidth + phonePad).toInt().coerceAtMost(width),
+            kotlin.math.ceil(phoneTop + rows * phoneLineHeight + phonePad).toInt().coerceAtMost(height),
+        )
+
+        val moduleCount = cachedQrRows.size
+        val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
+        val modulePx = max(3, floor(target / moduleCount).toInt())
+        val qrSize = (modulePx * moduleCount).toFloat()
+        val qrX = greeterMargin
+        val qrY = height - qrSize - dp(126f)
+        qrDrawBounds.set(0f, qrY - dp(28f), width.toFloat(), qrY + qrSize + dp(74f))
+    }
+
+    private fun drawGreeter(canvas: Canvas) {
+        var y = greeterTopMargin + greeterTextSize
+
+        textPaint.color = Color.WHITE
+        textPaint.clearShadowLayer()
+        textPaint.typeface = mono
+        textPaint.textSize = greeterTextSize
+        for (line in HYPERBEAM_GREETER) {
+            canvas.drawText(line, greeterMargin, y, textPaint)
+            y += greeterLineHeight
+        }
+    }
+
+    private fun drawPhone(canvas: Canvas) {
+        if (phoneRows.isEmpty()) updatePhoneFrame(force = true)
+        phonePaint.typeface = mono
+        phonePaint.textSize = phoneTextSize
         phonePaint.color = Color.WHITE
         phonePaint.setShadowLayer(dp(11f), 0f, 0f, Color.rgb(85, 229, 255))
 
-        val charWidth = phonePaint.measureText("M")
-        val lineHeight = textSize * 1.08f
-        val blockWidth = charWidth * cols
-        val x = width * 0.62f - blockWidth * 0.50f
-        val top = greeterBottom + dp(18f)
-
-        for ((index, row) in grid.withIndex()) {
-            val text = String(row)
-            canvas.drawText(text, x, top + (index + 1) * lineHeight, phonePaint)
+        for ((index, text) in phoneRows.withIndex()) {
+            canvas.drawText(text, phoneX, phoneTop + (index + 1) * phoneLineHeight, phonePaint)
         }
         phonePaint.clearShadowLayer()
     }
 
+    private fun updatePhoneFrame(force: Boolean): Boolean {
+        val elapsed = ((System.nanoTime() - startedAt) / 1_000_000_000.0).toFloat()
+        val nextRows = renderPhoneRows(elapsed)
+        if (!force && nextRows == phoneRows) return false
+        phoneRows = nextRows
+        return true
+    }
+
+    private fun renderPhoneRows(elapsed: Float): List<String> =
+        renderPhoneGrid(elapsed).map { String(it) }
+
     private fun drawQr(canvas: Canvas, status: NodeStatus) {
-        val margin = dp(22f)
+        val bitmap = cachedQrBitmap(status)
+        canvas.drawBitmap(bitmap, qrDrawBounds.left, qrDrawBounds.top, null)
+    }
+
+    private fun cachedQrBitmap(status: NodeStatus): Bitmap {
         if (cachedQrUrl != status.url) {
             cachedQrUrl = status.url
             cachedQrRows = QrV2L.rowsFor(status.url)
+            layoutWidth = 0
+            layoutHeight = 0
+            ensureLayout()
+            qrBitmap?.recycle()
+            qrBitmap = null
+            qrBitmapStatus = null
         }
+
+        val left = floor(qrDrawBounds.left).toInt()
+        val top = floor(qrDrawBounds.top).toInt()
+        val bitmapWidth = kotlin.math.ceil(qrDrawBounds.width()).toInt().coerceAtLeast(1)
+        val bitmapHeight = kotlin.math.ceil(qrDrawBounds.height()).toInt().coerceAtLeast(1)
+        val pending = nextBootConfigPending.get()
+        val current = qrBitmap
+        if (
+            current != null &&
+            !current.isRecycled &&
+            current.width == bitmapWidth &&
+            current.height == bitmapHeight &&
+            qrBitmapStatus == status &&
+            qrBitmapPending == pending
+        ) {
+            return current
+        }
+
+        current?.recycle()
+        val next = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+        next.eraseColor(Color.TRANSPARENT)
+        Canvas(next).also { bitmapCanvas ->
+            bitmapCanvas.translate(-left.toFloat(), -top.toFloat())
+            drawQrDirect(bitmapCanvas, status)
+        }
+        qrBitmap = next
+        qrBitmapStatus = status
+        qrBitmapPending = pending
+        return next
+    }
+
+    private fun drawQrDirect(canvas: Canvas, status: NodeStatus) {
+        val margin = dp(22f)
 
         val moduleCount = cachedQrRows.size
         val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
@@ -387,8 +570,8 @@ private class OrnamentView(
     }
 
     private fun renderPhoneGrid(elapsed: Float): Array<CharArray> {
-        val cols = 36
-        val rows = 29
+        val cols = PHONE_COLS
+        val rows = PHONE_ROWS
         val grid = Array(rows) { CharArray(cols) { ' ' } }
         val yaw = elapsed * 0.82f
         val pitch = -0.10f + sin(elapsed * 0.37f) * 0.05f
@@ -528,6 +711,11 @@ private class OrnamentView(
     companion object {
         private val BACKGROUND = Color.rgb(3, 14, 46)
         private val TERMINATE_ORANGE = Color.rgb(164, 76, 0)
+        private const val ANIMATION_FRAME_MS = 100L
+        private const val BOOT_POLL_MS = 1_000L
+        private const val STEADY_POLL_MS = 5_000L
+        private const val PHONE_COLS = 36
+        private const val PHONE_ROWS = 29
         private val HYPERBEAM_GREETER = listOf(
             "\u2588\u2588\u2557  \u2588\u2588\u2557\u2588\u2588\u2557   \u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557",
             "\u2588\u2588\u2551  \u2588\u2588\u2551\u255a\u2588\u2588\u2557 \u2588\u2588\u2554\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557",
@@ -578,20 +766,8 @@ private object NodeProbe {
     private fun hyperbeamReady(): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress("127.0.0.1", 8734), 450)
-                socket.soTimeout = 450
-                OutputStreamWriter(socket.getOutputStream(), Charsets.US_ASCII).use { writer ->
-                    writer.write(
-                        "GET /~meta@1.0/info HTTP/1.0\r\n" +
-                            "Host: 127.0.0.1:8734\r\n" +
-                            "Connection: close\r\n\r\n",
-                    )
-                    writer.flush()
-                    val firstLine = BufferedReader(
-                        InputStreamReader(socket.getInputStream(), Charsets.US_ASCII),
-                    ).readLine()
-                    firstLine?.startsWith("HTTP/1.") == true && firstLine.contains(" 200")
-                }
+                socket.connect(InetSocketAddress("127.0.0.1", 8734), 250)
+                true
             }
         } catch (_: Exception) {
             false
