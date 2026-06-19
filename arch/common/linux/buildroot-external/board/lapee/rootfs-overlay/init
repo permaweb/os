@@ -1068,14 +1068,39 @@ check_tme_sme() {
         *" tme "*) _has_cap=tme ;;
         *" sme "*) _has_cap=sme ;;
     esac
+
+    # AMD TSME (Transparent SME) is firmware-configured and does not
+    # require the kernel SME feature, so the "sme" cpuinfo flag may be
+    # absent even when DRAM encryption is active.  Probe three
+    # additional evidence sources before giving up.
+    if [ "$_has_cap" = "no" ]; then
+        _amd_sme_log=$(dmesg 2>/dev/null \
+            | grep -Ei 'AMD.*(SME|SEV|Memory Encryption)' || true)
+        if [ -n "$_amd_sme_log" ]; then
+            trace "tme: AMD memory encryption detected in dmesg"
+            _has_cap=sme
+        fi
+        if [ "$_has_cap" = "no" ] && \
+           { [ -e /dev/sev ] || [ -e /dev/sev-guest ]; }; then
+            trace "tme: /dev/sev or /dev/sev-guest present, AMD memory encryption active"
+            _has_cap=sme
+        fi
+        if [ "$_has_cap" = "no" ] && \
+           [ -f /sys/kernel/mm/mem_encrypt/active ] && \
+           [ "$(cat /sys/kernel/mm/mem_encrypt/active 2>/dev/null)" = "1" ]; then
+            trace "tme: /sys/kernel/mm/mem_encrypt/active=1, memory encryption active"
+            _has_cap=sme
+        fi
+    fi
+
     case "$_has_cap" in
         tme)
             trace "tme: CPU advertises TME, but kernel did not confirm enablement"
             halt_boot "TME is advertised, but the kernel did not confirm that firmware enabled it."
             ;;
         sme)
-            trace "tme: AMD SME capability present -> proceed"
-            status "Memory-encryption capability is present."
+            trace "tme: AMD SME/TSME capability present -> proceed"
+            status "Memory encryption is enabled."
             return 0
             ;;
         *)
@@ -1670,6 +1695,18 @@ detach_boot_media() {
         fi
         trace "boot-media: sysfs delete failed for /dev/$_disk"
     fi
+
+    # NVMe boot media (e.g. OVH bare-metal BYOI installs) cannot be
+    # hot-removed; the controller is soldered to the board. Remove
+    # the dev nodes so no later code can reopen the device.
+    case "$_disk" in
+        nvme*)
+            rm -f /dev/"$_disk" /dev/"$_disk"* 2>/dev/null || true
+            trace "boot-media: NVMe boot disk cannot be hot-removed; removed dev nodes for /dev/$_disk"
+            status "Boot media isolated."
+            return 0
+            ;;
+    esac
 
     # QEMU's virtio-block smoke path has no removable USB parent and
     # no delete hook. Keep that test path alive while preserving the

@@ -150,9 +150,9 @@ empty :=
 space := $(empty) $(empty)
 comma := ,
 EXCLUDED_ARCHES := $(subst $(comma),$(space),$(EXCLUDE_ARCH))
-ALL_ARCH_TARGETS := $(filter-out $(EXCLUDED_ARCHES),tme no-tme snp android provisioner)
+ALL_ARCH_TARGETS := $(filter-out $(EXCLUDED_ARCHES),tme tsme no-tme snp android provisioner)
 
-.PHONY: help all tme no-tme snp android android-check provisioner \
+.PHONY: help all tme tsme no-tme snp android android-check provisioner \
         runtime-image runtime-write provisioner-image provisioner-write \
         signing-keys write-image wifi-creds operator-config-apply \
         qemu qemu-oracle qemu-gui qemu-zone qemu-zone-nonvolatile \
@@ -341,6 +341,12 @@ tme:
 	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme.img" \
 	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme-signed.img" \
 	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme.signed.efi"
+
+tsme:
+	$(MAKE) runtime-image TME=1 \
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme.img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tsme.signed.efi"
 
 no-tme:
 	$(MAKE) runtime-image TME=0 \
