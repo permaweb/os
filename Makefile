@@ -125,12 +125,13 @@ HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exi
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 HYPERBEAM_ALLOW_CLEAN ?= 0
 LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/common
+WIFI_CMDLINE_TOKEN = $(if $(filter 0,$(WIFI)),,lapee.wifi=enabled)
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
-                rdinit=/init lapee.mode=prod lapee.wifi=enabled \
+                rdinit=/init lapee.mode=prod $(WIFI_CMDLINE_TOKEN) \
                 lapee.splash=$(SPLASH)
 DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
                 fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
-                lapee.mode=debug lapee.debug=1 lapee.wifi=enabled \
+                lapee.mode=debug lapee.debug=1 $(WIFI_CMDLINE_TOKEN) \
                 lapee.splash=$(SPLASH)
 
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
@@ -343,7 +344,7 @@ tme:
 	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme.signed.efi"
 
 tsme:
-	$(MAKE) runtime-image TME=1 \
+	$(MAKE) runtime-image TME=1 WIFI=0 \
 	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme.img" \
 	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme-signed.img" \
 	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tsme.signed.efi"
