@@ -26,6 +26,7 @@
 # Operator-owned secrets and Secure Boot material.
 /wifi.conf
 /config.json
+/wallet.json
 /hyperbeam-key.json
 /cache-mainnet/
 /secureboot/

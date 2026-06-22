@@ -104,6 +104,8 @@ WIFI      ?= 1
 SPLASH    ?= blue
 DEBUG     ?= 0
 TME       ?= 1
+OPERATOR_CONFIG ?=
+OPERATOR_WALLET ?=
 BUILDROOT_VOLUME ?= lapee-buildroot
 KERNEL_EXTRA_FRAGMENT ?=
 DEFCONFIG_EXTRA_SNIPPET ?=
@@ -137,7 +139,8 @@ DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
 RUNTIME_TME_TAG = $(if $(filter 0,$(TME)),no-tme,tme)
 RUNTIME_DEBUG_TAG = $(if $(filter 1,$(DEBUG)),-debug,)
-RUNTIME_CMDLINE = $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))$(if $(filter 0,$(TME)), LAPEE_NO_TME=1)
+MEM_ENCRYPT ?= 0
+RUNTIME_CMDLINE = $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))$(if $(filter 0,$(TME)), LAPEE_NO_TME=1)$(if $(filter 1,$(MEM_ENCRYPT)), mem_encrypt=on)
 RUNTIME_UNSIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).img
 RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)-signed.img
 RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).signed.efi
@@ -187,6 +190,16 @@ verify-config-invariants:
 runtime-image:
 	$(MAKE) _check-runtime-flags
 	$(MAKE) _check-signing-keys
+	@if [ -n "$(OPERATOR_CONFIG)" ]; then \
+	    test -f "$(OPERATOR_CONFIG)" || { echo "OPERATOR_CONFIG=$(OPERATOR_CONFIG) not found"; exit 1; }; \
+	    cp "$(OPERATOR_CONFIG)" "$(LAPEE_ROOT)/config.json"; \
+	    echo ">> staged config from $(OPERATOR_CONFIG)"; \
+	fi
+	@if [ -n "$(OPERATOR_WALLET)" ]; then \
+	    test -f "$(OPERATOR_WALLET)" || { echo "OPERATOR_WALLET=$(OPERATOR_WALLET) not found"; exit 1; }; \
+	    cp "$(OPERATOR_WALLET)" "$(LAPEE_ROOT)/wallet.json"; \
+	    echo ">> staged wallet from $(OPERATOR_WALLET)"; \
+	fi
 	$(MAKE) toolchain
 	$(MAKE) kernel
 	$(MAKE) _runtime-signed-image
@@ -228,8 +241,8 @@ wifi-creds:
 	$(MAKE) _wifi-creds
 
 operator-config-apply:
-	@[ -f wifi.conf ] || [ -f config.json ] || { \
-	    echo "nothing to apply: create wifi.conf and/or config.json"; \
+	@[ -f wifi.conf ] || [ -f config.json ] || [ -f wallet.json ] || { \
+	    echo "nothing to apply: create wifi.conf, config.json, and/or wallet.json"; \
 	    exit 1; }
 	$(MAKE) _operator-config-apply OUT="$(WRITE_IMAGE)"
 
@@ -344,7 +357,7 @@ tme:
 	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme.signed.efi"
 
 tsme:
-	$(MAKE) runtime-image TME=1 WIFI=0 \
+	$(MAKE) runtime-image TME=1 WIFI=0 MEM_ENCRYPT=1 \
 	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme.img" \
 	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tsme-signed.img" \
 	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tsme.signed.efi"
@@ -533,8 +546,8 @@ _wifi-creds:
 	./scripts/gather-wifi-creds.sh --force
 
 _operator-config-apply: toolchain
-	@[ -f wifi.conf ] || [ -f config.json ] || { \
-	    echo "nothing to apply: create wifi.conf and/or config.json"; \
+	@[ -f wifi.conf ] || [ -f config.json ] || [ -f wallet.json ] || { \
+	    echo "nothing to apply: create wifi.conf, config.json, and/or wallet.json"; \
 	    exit 1; }
 	@test -f "$(OUT)" || { \
 	    echo "$(OUT) missing. Run: make runtime-image or set OUT=..."; \
@@ -554,6 +567,9 @@ _operator-config-apply: toolchain
 	        fi; \
 	        if [[ -f /w/config.json ]]; then \
 	            mcopy -i /tmp/esp.img -o /w/config.json ::/EFI/boot/config.json; \
+	        fi; \
+	        if [[ -f /w/wallet.json ]]; then \
+	            mcopy -i /tmp/esp.img -o /w/wallet.json ::/EFI/boot/wallet.json; \
 	        fi; \
 	        dd if=/tmp/esp.img of=/w/$(OUT) \
 	            bs=512 seek=$$START count=$$SECT \

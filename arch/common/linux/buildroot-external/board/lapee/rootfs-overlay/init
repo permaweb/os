@@ -1207,6 +1207,7 @@ WIFI_SSID=""
 WIFI_PSK=""
 BOOT_ESP_DEV=""
 OPERATOR_CONFIG_JSON=/tmp/config.json
+OPERATOR_WALLET_JSON=/tmp/wallet.json
 BOOT_UKI_SHA256=/run/lapee/boot-uki-sha256
 BOOT_UKI_SOURCE=/run/lapee/boot-uki-source
 SYSTEMD_EFI_GUID=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
@@ -1632,6 +1633,19 @@ read_boot_media_config() {
                         || true
                 else
                     trace "config: no /EFI/boot/config.json on ESP"
+                fi
+                if [ -f /mnt/esp/EFI/boot/wallet.json ]; then
+                    cp /mnt/esp/EFI/boot/wallet.json "$OPERATOR_WALLET_JSON" \
+                        2>/dev/null || true
+                    chmod 600 "$OPERATOR_WALLET_JSON" 2>/dev/null || true
+                    trace "config: copied wallet.json from ESP"
+                elif [ -f /mnt/esp/EFI/Boot/wallet.json ]; then
+                    cp /mnt/esp/EFI/Boot/wallet.json "$OPERATOR_WALLET_JSON" \
+                        2>/dev/null || true
+                    chmod 600 "$OPERATOR_WALLET_JSON" 2>/dev/null || true
+                    trace "config: copied wallet.json from ESP"
+                else
+                    trace "config: no /EFI/boot/wallet.json on ESP"
                 fi
                 umount /mnt/esp 2>/dev/null || true
                 ensure_unmounted /mnt/esp boot-media \
@@ -2102,6 +2116,16 @@ if [ -n "$HB_PRELOADED_DEVICES_INDEX" ]; then
     trace "hyperbeam: preloaded device index $HB_PRELOADED_DEVICES_INDEX"
 else
     halt_boot "HyperBEAM preloaded device index could not be parsed."
+fi
+
+# Operator wallet. If wallet.json was present on the ESP, point
+# HB_KEY at the tmpfs copy so HyperBEAM uses a persistent identity.
+# Without this, HyperBEAM generates an ephemeral wallet each boot.
+if [ -s "$OPERATOR_WALLET_JSON" ]; then
+    export HB_KEY="$OPERATOR_WALLET_JSON"
+    trace "hyperbeam: HB_KEY=$OPERATOR_WALLET_JSON (operator wallet from ESP)"
+else
+    trace "hyperbeam: no operator wallet; HyperBEAM will generate an ephemeral key"
 fi
 
 # Keep Erlang outbound HTTP on IPv4-only networks. Some public

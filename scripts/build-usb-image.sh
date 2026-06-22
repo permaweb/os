@@ -200,6 +200,16 @@ if [[ -f "${LAPEE_ROOT}/config.json" ]]; then
     echo ">> staging config.json (${config_bytes} bytes)"
 fi
 
+# Optional operator HyperBEAM wallet. Init copies this off the ESP
+# into tmpfs as /tmp/wallet.json, then exports HB_KEY pointing at it.
+# Without this file HyperBEAM generates an ephemeral wallet on each boot.
+if [[ -f "${LAPEE_ROOT}/wallet.json" ]]; then
+    cp "${LAPEE_ROOT}/wallet.json" "$BUILD_DIR/wallet.json"
+    wallet_bytes=$(wc -c <"${LAPEE_ROOT}/wallet.json" | tr -d ' ')
+    STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + wallet_bytes))
+    echo ">> staging wallet.json (${wallet_bytes} bytes)"
+fi
+
 # A disk image cannot be exactly the UKI byte length: firmware wants
 # a GPT disk with an EFI System Partition, and FAT32 needs metadata
 # and slack. Auto-size from staged payload bytes, then add enough room
@@ -281,6 +291,11 @@ docker run --rm $DOCKER_PLATFORM \
         if [[ -f /work/usb-build/config.json ]]; then
             mcopy -i /work/usb-build/esp.img \\
                 /work/usb-build/config.json ::/EFI/boot/config.json
+        fi
+
+        if [[ -f /work/usb-build/wallet.json ]]; then
+            mcopy -i /work/usb-build/esp.img \\
+                /work/usb-build/wallet.json ::/EFI/boot/wallet.json
         fi
 
         dd if=/work/usb-build/esp.img of=/work/${IMG_IN_WORK} \\
