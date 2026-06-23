@@ -133,7 +133,7 @@ PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 lapee.splash=$(SPLASH)
 DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
                 fbcon=nodefer loglevel=7 panic=10 rdinit=/init \
-                lapee.mode=debug lapee.debug=1 $(WIFI_CMDLINE_TOKEN) \
+                lapee.mode=debug lapee.debug=1 LAPEE_HB_CONSOLE=1 $(WIFI_CMDLINE_TOKEN) \
                 lapee.splash=$(SPLASH)
 
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))

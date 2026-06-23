@@ -22,7 +22,11 @@
 -define(PEER_ATTESTATION_PREFIX,
         <<"~measurement@1.0/peer-attestations">>).
 -define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"andee@1.0">>]).
--define(DEFAULT_TIMEOUT_MS, 30000).
+%% Default timeout for each measurement sub-step. Raised from 30s to
+%% 120s to accommodate AMD fTPM retry logic: the TPM init chain may
+%% need up to 5 retries with exponential backoff (~62s worst case)
+%% when the fTPM returns transient timeouts during early boot.
+-define(DEFAULT_TIMEOUT_MS, 120000).
 
 info(_) ->
     #{

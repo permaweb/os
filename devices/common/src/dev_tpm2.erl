@@ -19,6 +19,10 @@
 -define(AK_POLICY_PCRS, [0, 1, 4, 7, 10, 11, 14, 15]).
 %% Default PCR selection the quote covers.
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 4, 7, 10, 11, 14, 15]).
+%% Maximum retry attempts for TPM init_chain. AMD fTPM can return
+%% transient timeouts especially during early boot when the PSP is busy.
+-define(INIT_CHAIN_MAX_RETRIES, 5).
+-define(INIT_CHAIN_RETRY_BASE_MS, 2000).
 -define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
 -define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
 -define(TPM_CC_POLICY_OR, 16#00000171).
@@ -2008,8 +2012,9 @@ ensure_ak(Subject, SubjectID, SubjectDigest, Opts) ->
                     case persistent_term:get({dev_tpm2, ak_tr},
                                               undefined) of
                         undefined ->
-                            case init_chain(
-                                   Subject, SubjectID, SubjectDigest, Opts) of
+                            case init_chain_with_retry(
+                                   Subject, SubjectID, SubjectDigest,
+                                   Opts, ?INIT_CHAIN_MAX_RETRIES) of
                                 ok ->
                                     {ok, persistent_term:get(
                                            {dev_tpm2, ak_tr})};
@@ -2024,6 +2029,52 @@ ensure_ak(Subject, SubjectID, SubjectDigest, Opts) ->
                 ok -> {ok, Tr};
                 {error, _} = E -> E
             end
+    end.
+
+%% @doc Retry wrapper for init_chain. AMD fTPM (firmware TPM inside the
+%% Platform Security Processor) can return transient timeouts during
+%% early boot, especially when TSME is active and the PSP is busy with
+%% memory encryption setup. We retry with exponential backoff to ride
+%% out these transient failures rather than failing the entire boot
+%% measurement.
+init_chain_with_retry(Subject, SubjectID, SubjectDigest, Opts, MaxRetries) ->
+    init_chain_with_retry(Subject, SubjectID, SubjectDigest, Opts,
+                          MaxRetries, 0, undefined).
+
+init_chain_with_retry(_Subject, _SubjectID, _SubjectDigest, _Opts,
+                      MaxRetries, Attempt, LastError) when Attempt >= MaxRetries ->
+    ?event({tpm_init_chain_retries_exhausted,
+            #{attempts => Attempt, last_error => LastError}}),
+    case LastError of
+        undefined -> {error, <<"tpm init_chain failed">>};
+        {error, _} -> LastError;
+        Other -> {error, Other}
+    end;
+init_chain_with_retry(Subject, SubjectID, SubjectDigest, Opts,
+                      MaxRetries, Attempt, _LastError) ->
+    case init_chain(Subject, SubjectID, SubjectDigest, Opts) of
+        ok ->
+            case Attempt of
+                0 -> ok;
+                _ ->
+                    ?event({tpm_init_chain_recovered,
+                            #{attempt => Attempt + 1}}),
+                    ok
+            end;
+        {error, Reason} = E ->
+            Delay = ?INIT_CHAIN_RETRY_BASE_MS * (1 bsl min(Attempt, 4)),
+            ?event({tpm_init_chain_retry,
+                    #{attempt => Attempt + 1,
+                      max => MaxRetries,
+                      reason => Reason,
+                      retry_in_ms => Delay}}),
+            timer:sleep(Delay),
+            %% Reset any partial TPM state from the failed attempt
+            %% so the next attempt starts clean. persistent_term
+            %% entries set by the failed init_chain are harmless
+            %% to overwrite on success.
+            init_chain_with_retry(Subject, SubjectID, SubjectDigest,
+                                  Opts, MaxRetries, Attempt + 1, E)
     end.
 
 init_chain(undefined, undefined, undefined, Opts) ->

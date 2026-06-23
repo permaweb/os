@@ -5,6 +5,10 @@
  * Connects to swtpm via the mssim or swtpm TCTI (chosen via load info).
  */
 
+/* Must precede all system headers so POSIX APIs (nanosleep) are visible
+ * even when compiling with -std=c11. */
+#define _POSIX_C_SOURCE 199309L
+
 #include <erl_nif.h>
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_mu.h>
@@ -468,21 +472,93 @@ do_unload(ErlNifEnv *env, void *priv_data)
     }
 }
 
+/*------------ fTPM retry helpers -------------------------------------------*/
+/*
+ * AMD firmware TPM (fTPM) running inside the Platform Security Processor
+ * can return transient failures during early boot, especially when TSME
+ * memory encryption is active. The kernel tpm_crb driver reports
+ * "Operation timed out" and tss2 returns a non-TPM transport error.
+ *
+ * We detect retryable conditions and loop with a short sleep. This is
+ * the same strategy used by tpm2-tools and systemd-cryptenroll.
+ */
+#include <time.h>
+
+#define LAPEE_TPM_MAX_RETRIES     3
+#define LAPEE_TPM_RETRY_DELAY_MS  500
+
+static void lapee_sleep_ms(int ms) {
+    struct timespec ts = { .tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* Return true if the TSS2_RC is a transient/retryable error from the
+ * fTPM or CRB transport. TPM2_RC_RETRY is explicit; the 0x000Fxxxx
+ * range covers TCTI transport errors (broken pipe, timeout, etc.). */
+static bool
+lapee_is_retryable_rc(TSS2_RC rc)
+{
+    if (rc == TPM2_RC_RETRY || rc == TPM2_RC_YIELDED)
+        return true;
+    /* TCTI layer errors (transport-level failures like the
+     * "Failed to get response size" we see on AMD fTPM). */
+    TSS2_RC layer = (rc >> 16) & 0xFF;
+    if (layer == 0x0A /* TSS2_TCTI_RC_LAYER */ ||
+        layer == 0x09 /* TSS2_SYS_RC_LAYER  */)
+        return true;
+    return false;
+}
+
+/* Re-initialize the ESYS context after a transport-level failure.
+ * The TCTI may be in a broken state after a timeout, so we tear
+ * down and rebuild both the TCTI and ESYS contexts. */
+static TSS2_RC
+lapee_reinit_esys(void)
+{
+    /* Flush any stale auth session. */
+    if (g_auth_session != ESYS_TR_NONE && g_esys_ctx) {
+        Esys_FlushContext(g_esys_ctx, g_auth_session);
+        g_auth_session = ESYS_TR_NONE;
+    }
+    if (g_esys_ctx) { Esys_Finalize(&g_esys_ctx); g_esys_ctx = NULL; }
+    if (g_tcti_ctx) { Tss2_TctiLdr_Finalize(&g_tcti_ctx); g_tcti_ctx = NULL; }
+
+    TSS2_RC rc = Tss2_TctiLdr_Initialize(g_tcti_conf, &g_tcti_ctx);
+    if (rc != TSS2_RC_SUCCESS) return rc;
+    rc = Esys_Initialize(&g_esys_ctx, g_tcti_ctx, NULL);
+    return rc;
+}
+
 /*-------------------------------- startup/0 ---------------------------------*/
 
 static ERL_NIF_TERM
 nif_startup_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc; (void)argv;
-    TSS2_RC rc = Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
-    if (rc == TPM2_RC_INITIALIZE) {
-        /* Already started. Idempotent. */
-        return enif_make_atom(env, "ok");
+    TSS2_RC rc;
+    for (int attempt = 0; attempt <= LAPEE_TPM_MAX_RETRIES; attempt++) {
+        rc = Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
+        if (rc == TPM2_RC_INITIALIZE) {
+            /* Already started. Idempotent. */
+            return enif_make_atom(env, "ok");
+        }
+        if (rc == TSS2_RC_SUCCESS) {
+            return enif_make_atom(env, "ok");
+        }
+        if (!lapee_is_retryable_rc(rc) || attempt == LAPEE_TPM_MAX_RETRIES)
+            break;
+        fprintf(stderr,
+                "[lapee_tpm_nif] Esys_Startup transient error 0x%08x (%s), "
+                "retry %d/%d\n",
+                rc, Tss2_RC_Decode(rc), attempt + 1, LAPEE_TPM_MAX_RETRIES);
+        lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
+        /* Reinit ESYS context -- TCTI may be in a broken state. */
+        TSS2_RC reinit_rc = lapee_reinit_esys();
+        if (reinit_rc != TSS2_RC_SUCCESS) {
+            return lapee_make_tss_error(env, "reinit_esys(after Startup)", reinit_rc);
+        }
     }
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_Startup", rc);
-    }
-    return enif_make_atom(env, "ok");
+    return lapee_make_tss_error(env, "Esys_Startup", rc);
 }
 
 /*-------------------------------- pcr_extend/2 ------------------------------*/
@@ -582,24 +658,47 @@ nif_create_primary_ek_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    ESYS_TR enc_session = ESYS_TR_NONE;
-    TSS2_RC rc = lapee_enc_session(&enc_session);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
-    }
+    TSS2_RC rc;
+    for (int attempt = 0; attempt <= LAPEE_TPM_MAX_RETRIES; attempt++) {
+        ESYS_TR enc_session = ESYS_TR_NONE;
+        rc = lapee_enc_session(&enc_session);
+        if (rc != TSS2_RC_SUCCESS) {
+            if (lapee_is_retryable_rc(rc) && attempt < LAPEE_TPM_MAX_RETRIES) {
+                fprintf(stderr,
+                        "[lapee_tpm_nif] EK auth session transient error "
+                        "0x%08x, retry %d/%d\n",
+                        rc, attempt + 1, LAPEE_TPM_MAX_RETRIES);
+                lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
+                lapee_reinit_esys();
+                /* Re-run Startup after reinit. */
+                Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
+                continue;
+            }
+            return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+        }
 
-    rc = Esys_CreatePrimary(g_esys_ctx,
-                            ESYS_TR_RH_ENDORSEMENT,
-                            ESYS_TR_PASSWORD,
-                            enc_session,
-                            ESYS_TR_NONE,
-                            &in_sensitive, &ek_template,
-                            &outside_info, &creation_pcr,
-                            &ek_tr, &out_public,
-                            &creation_data, &creation_hash,
-                            &creation_ticket);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_CreatePrimary(EK)", rc);
+        rc = Esys_CreatePrimary(g_esys_ctx,
+                                ESYS_TR_RH_ENDORSEMENT,
+                                ESYS_TR_PASSWORD,
+                                enc_session,
+                                ESYS_TR_NONE,
+                                &in_sensitive, &ek_template,
+                                &outside_info, &creation_pcr,
+                                &ek_tr, &out_public,
+                                &creation_data, &creation_hash,
+                                &creation_ticket);
+        if (rc == TSS2_RC_SUCCESS)
+            break;
+        if (!lapee_is_retryable_rc(rc) || attempt == LAPEE_TPM_MAX_RETRIES) {
+            return lapee_make_tss_error(env, "Esys_CreatePrimary(EK)", rc);
+        }
+        fprintf(stderr,
+                "[lapee_tpm_nif] Esys_CreatePrimary(EK) transient error "
+                "0x%08x (%s), retry %d/%d\n",
+                rc, Tss2_RC_Decode(rc), attempt + 1, LAPEE_TPM_MAX_RETRIES);
+        lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
+        lapee_reinit_esys();
+        Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
     }
 
     ERL_NIF_TERM pem_term, tpm2b_term, name_term, qname_term, err_term;
@@ -696,24 +795,65 @@ nif_create_signing_key_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     TPM2B_DIGEST *creation_hash = NULL;
     TPMT_TK_CREATION *creation_ticket = NULL;
 
-    ESYS_TR enc_session = ESYS_TR_NONE;
-    rc = lapee_enc_session(&enc_session);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
-    }
+    for (int ak_attempt = 0; ak_attempt <= LAPEE_TPM_MAX_RETRIES; ak_attempt++) {
+        ESYS_TR enc_session = ESYS_TR_NONE;
+        rc = lapee_enc_session(&enc_session);
+        if (rc != TSS2_RC_SUCCESS) {
+            if (lapee_is_retryable_rc(rc) && ak_attempt < LAPEE_TPM_MAX_RETRIES) {
+                fprintf(stderr,
+                        "[lapee_tpm_nif] AK auth session transient error "
+                        "0x%08x, retry %d/%d\n",
+                        rc, ak_attempt + 1, LAPEE_TPM_MAX_RETRIES);
+                lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
+                lapee_reinit_esys();
+                Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
+                /* Re-run the trial session since context was reset. */
+                ak_policy.size = 0;
+                trial_session = ESYS_TR_NONE;
+                rc = lapee_ak_policy_session(
+                    TPM2_SE_TRIAL, false, &trial_session, &ak_policy);
+                if (rc != TSS2_RC_SUCCESS) {
+                    return lapee_make_tss_error(env, "Esys_PolicyPCR(AK trial, retry)", rc);
+                }
+                Esys_FlushContext(g_esys_ctx, trial_session);
+                in_public.publicArea.authPolicy = ak_policy;
+                continue;
+            }
+            return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
+        }
 
-    rc = Esys_CreatePrimary(g_esys_ctx,
-                            ESYS_TR_RH_ENDORSEMENT,
-                            ESYS_TR_PASSWORD,
-                            enc_session,
-                            ESYS_TR_NONE,
-                            &in_sensitive, &in_public,
-                            &outside_info, &creation_pcr,
-                            &ak_tr, &out_public,
-                            &creation_data, &creation_hash,
-                            &creation_ticket);
-    if (rc != TSS2_RC_SUCCESS) {
-        return lapee_make_tss_error(env, "Esys_CreatePrimary(AK)", rc);
+        rc = Esys_CreatePrimary(g_esys_ctx,
+                                ESYS_TR_RH_ENDORSEMENT,
+                                ESYS_TR_PASSWORD,
+                                enc_session,
+                                ESYS_TR_NONE,
+                                &in_sensitive, &in_public,
+                                &outside_info, &creation_pcr,
+                                &ak_tr, &out_public,
+                                &creation_data, &creation_hash,
+                                &creation_ticket);
+        if (rc == TSS2_RC_SUCCESS)
+            break;
+        if (!lapee_is_retryable_rc(rc) || ak_attempt == LAPEE_TPM_MAX_RETRIES) {
+            return lapee_make_tss_error(env, "Esys_CreatePrimary(AK)", rc);
+        }
+        fprintf(stderr,
+                "[lapee_tpm_nif] Esys_CreatePrimary(AK) transient error "
+                "0x%08x (%s), retry %d/%d\n",
+                rc, Tss2_RC_Decode(rc), ak_attempt + 1, LAPEE_TPM_MAX_RETRIES);
+        lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
+        lapee_reinit_esys();
+        Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
+        /* Re-derive the AK policy after context reset. */
+        ak_policy.size = 0;
+        trial_session = ESYS_TR_NONE;
+        rc = lapee_ak_policy_session(
+            TPM2_SE_TRIAL, false, &trial_session, &ak_policy);
+        if (rc != TSS2_RC_SUCCESS) {
+            return lapee_make_tss_error(env, "Esys_PolicyPCR(AK trial, retry)", rc);
+        }
+        Esys_FlushContext(g_esys_ctx, trial_session);
+        in_public.publicArea.authPolicy = ak_policy;
     }
 
     ERL_NIF_TERM pem_term, mb_term, name_term, qname_term, err_term;
