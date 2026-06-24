@@ -23,10 +23,11 @@
         <<"~measurement@1.0/peer-attestations">>).
 -define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"andee@1.0">>]).
 %% Default timeout for each measurement sub-step. Raised from 30s to
-%% 120s to accommodate AMD fTPM retry logic: the TPM init chain may
-%% need up to 5 retries with exponential backoff (~62s worst case)
-%% when the fTPM returns transient timeouts during early boot.
--define(DEFAULT_TIMEOUT_MS, 120000).
+%% 300s to accommodate AMD fTPM retry logic: the C-level NIF now does
+%% up to 8 retries with CRB driver resets (~40s per NIF call), and the
+%% Erlang init_chain may retry up to 5 times with exponential backoff.
+%% Worst case: ~3-4 minutes for a fully wedged fTPM to recover.
+-define(DEFAULT_TIMEOUT_MS, 300000).
 
 info(_) ->
     #{

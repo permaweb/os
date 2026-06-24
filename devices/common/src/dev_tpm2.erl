@@ -21,8 +21,11 @@
 -define(DEFAULT_QUOTE_PCRS, [0, 1, 4, 7, 10, 11, 14, 15]).
 %% Maximum retry attempts for TPM init_chain. AMD fTPM can return
 %% transient timeouts especially during early boot when the PSP is busy.
+%% The C-level NIF now does up to 8 retries with CRB driver resets
+%% (~40s worst case per NIF call), so Erlang retries are a coarser
+%% outer loop with longer delays between attempts.
 -define(INIT_CHAIN_MAX_RETRIES, 5).
--define(INIT_CHAIN_RETRY_BASE_MS, 2000).
+-define(INIT_CHAIN_RETRY_BASE_MS, 5000).
 -define(TPM_CC_ACTIVATE_CREDENTIAL, 16#00000147).
 -define(TPM_CC_POLICY_COMMAND_CODE, 16#0000016C).
 -define(TPM_CC_POLICY_OR, 16#00000171).

@@ -2166,6 +2166,20 @@ if [ -f /sys/class/tpm/tpm0/tpm_version_major ]; then
     echo "[init] TPM v$(cat /sys/class/tpm/tpm0/tpm_version_major)"
 fi
 
+# AMD fTPM settle delay.
+#
+# The firmware TPM shares the Platform Security Processor with TSME
+# memory encryption. During early boot the PSP may still be busy with
+# encryption setup, causing tpm_crb command timeouts. Wait a few
+# seconds here so the fTPM is ready before HyperBEAM's dev_tpm2
+# init_chain tries to talk to it.
+if [ -d /sys/class/tpm/tpm0 ]; then
+    _tpm_settle=30
+    echo "[init] waiting ${_tpm_settle}s for fTPM/PSP to settle..."
+    sleep "$_tpm_settle"
+    echo "[init] fTPM settle delay complete"
+fi
+
 # Diagnostic: when LAPEE_HB_DIAG=1 is in /proc/cmdline, listen on port
 # 8734 with busybox nc and dump the first request to console. The host
 # test harness fires `curl http://127.0.0.1:${HOST_HTTP_PORT}/diag-probe'

@@ -479,17 +479,47 @@ do_unload(ErlNifEnv *env, void *priv_data)
  * memory encryption is active. The kernel tpm_crb driver reports
  * "Operation timed out" and tss2 returns a non-TPM transport error.
  *
- * We detect retryable conditions and loop with a short sleep. This is
- * the same strategy used by tpm2-tools and systemd-cryptenroll.
+ * We detect retryable conditions and loop with a sleep between attempts.
+ * When a TCTI I/O failure occurs the kernel's tpm_crb driver state
+ * machine may be wedged, so we unbind/rebind the CRB platform driver
+ * to force a full hardware reset before re-opening /dev/tpm0.
  */
 #include <time.h>
 
-#define LAPEE_TPM_MAX_RETRIES     3
-#define LAPEE_TPM_RETRY_DELAY_MS  500
+#define LAPEE_TPM_MAX_RETRIES     8
+#define LAPEE_TPM_RETRY_DELAY_MS  2000
 
 static void lapee_sleep_ms(int ms) {
     struct timespec ts = { .tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
+}
+
+/*
+ * Wait for /dev/tpm0 to be accessible. After a transport timeout the
+ * kernel driver may need a moment to recover internally. We poll for
+ * the device node rather than doing a destructive unbind/rebind which
+ * removes /dev/tpm0 entirely and risks a race with the rebind.
+ */
+static void
+lapee_wait_for_tpm_device(void)
+{
+    const char *dev = "/dev/tpm0";
+    /* Extract device path from TCTI conf if present. */
+    if (strncmp(g_tcti_conf, "device:", 7) == 0 && g_tcti_conf[7] != '\0') {
+        dev = g_tcti_conf + 7;
+    }
+
+    for (int i = 0; i < 10; i++) {
+        FILE *fp = fopen(dev, "r");
+        if (fp) {
+            fclose(fp);
+            fprintf(stderr, "[lapee_tpm_nif] %s accessible after %d ms\n",
+                    dev, i * 500);
+            return;
+        }
+        lapee_sleep_ms(500);
+    }
+    fprintf(stderr, "[lapee_tpm_nif] %s still not accessible after 5s\n", dev);
 }
 
 /* Return true if the TSS2_RC is a transient/retryable error from the
@@ -509,24 +539,117 @@ lapee_is_retryable_rc(TSS2_RC rc)
     return false;
 }
 
+/* Flush all loaded sessions and transient objects from the TPM.
+ * After a transport timeout the TPM may hold orphaned session
+ * slots that we never received handles for. Walking the handle
+ * ranges and flushing everything ensures the TPM's limited
+ * session table is clean before the next attempt.
+ *
+ * All errors are silently ignored — the TCTI may still be flaky
+ * right after reconnect, and a failed flush is not fatal. The
+ * subsequent Startup(CLEAR) will also clear transient state. */
+static void
+lapee_flush_all_tpm_sessions(void)
+{
+    if (!g_esys_ctx) return;
+
+    /* TPM2_LOADED_SESSION_FIRST..LAST covers HMAC and policy sessions. */
+    TPMS_CAPABILITY_DATA *cap = NULL;
+    TPMI_YES_NO more = TPM2_NO;
+    TSS2_RC rc = Esys_GetCapability(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        TPM2_CAP_HANDLES, TPM2_LOADED_SESSION_FIRST, 64,
+        &more, &cap);
+    if (rc == TSS2_RC_SUCCESS && cap != NULL) {
+        for (UINT32 i = 0; i < cap->data.handles.count; i++) {
+            ESYS_TR tr = ESYS_TR_NONE;
+            TSS2_RC trc = Esys_TR_FromTPMPublic(
+                g_esys_ctx, cap->data.handles.handle[i],
+                ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                &tr);
+            if (trc == TSS2_RC_SUCCESS && tr != ESYS_TR_NONE) {
+                Esys_FlushContext(g_esys_ctx, tr);
+            }
+        }
+        fprintf(stderr, "[lapee_tpm_nif] flushed %u loaded session(s)\n",
+                cap->data.handles.count);
+        Esys_Free(cap);
+    } else if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "[lapee_tpm_nif] session flush: GetCapability "
+                "failed 0x%08x (non-fatal)\n", rc);
+    }
+
+    /* Also flush transient objects (TPM2_TRANSIENT_FIRST range). */
+    cap = NULL;
+    rc = Esys_GetCapability(
+        g_esys_ctx,
+        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+        TPM2_CAP_HANDLES, TPM2_TRANSIENT_FIRST, 64,
+        &more, &cap);
+    if (rc == TSS2_RC_SUCCESS && cap != NULL) {
+        for (UINT32 i = 0; i < cap->data.handles.count; i++) {
+            ESYS_TR tr = ESYS_TR_NONE;
+            TSS2_RC trc = Esys_TR_FromTPMPublic(
+                g_esys_ctx, cap->data.handles.handle[i],
+                ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                &tr);
+            if (trc == TSS2_RC_SUCCESS && tr != ESYS_TR_NONE) {
+                Esys_FlushContext(g_esys_ctx, tr);
+            }
+        }
+        if (cap->data.handles.count > 0) {
+            fprintf(stderr, "[lapee_tpm_nif] flushed %u transient object(s)\n",
+                    cap->data.handles.count);
+        }
+        Esys_Free(cap);
+    }
+}
+
 /* Re-initialize the ESYS context after a transport-level failure.
  * The TCTI may be in a broken state after a timeout, so we tear
- * down and rebuild both the TCTI and ESYS contexts. */
+ * down and rebuild both. We wait for the device node to be
+ * accessible (the kernel driver may need a moment to recover from
+ * the timeout internally), then reconnect, flush orphaned sessions,
+ * and issue Startup(CLEAR) to put the TPM in a known state. */
 static TSS2_RC
 lapee_reinit_esys(void)
 {
-    /* Flush any stale auth session. */
-    if (g_auth_session != ESYS_TR_NONE && g_esys_ctx) {
-        Esys_FlushContext(g_esys_ctx, g_auth_session);
-        g_auth_session = ESYS_TR_NONE;
-    }
+    /* Don't try to flush on a broken context — just tear it down. */
+    g_auth_session = ESYS_TR_NONE;
     if (g_esys_ctx) { Esys_Finalize(&g_esys_ctx); g_esys_ctx = NULL; }
     if (g_tcti_ctx) { Tss2_TctiLdr_Finalize(&g_tcti_ctx); g_tcti_ctx = NULL; }
 
+    /* Wait for the device node to be accessible again. The kernel
+     * driver should recover internally without an unbind/rebind. */
+    if (strncmp(g_tcti_conf, "device:", 7) == 0) {
+        lapee_wait_for_tpm_device();
+    }
+
     TSS2_RC rc = Tss2_TctiLdr_Initialize(g_tcti_conf, &g_tcti_ctx);
-    if (rc != TSS2_RC_SUCCESS) return rc;
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "[lapee_tpm_nif] reinit: TCTI reopen failed "
+                "0x%08x (%s)\n", rc, Tss2_RC_Decode(rc));
+        return rc;
+    }
     rc = Esys_Initialize(&g_esys_ctx, g_tcti_ctx, NULL);
-    return rc;
+    if (rc != TSS2_RC_SUCCESS) {
+        fprintf(stderr, "[lapee_tpm_nif] reinit: ESYS init failed "
+                "0x%08x (%s)\n", rc, Tss2_RC_Decode(rc));
+        return rc;
+    }
+
+    /* Try to flush orphaned sessions, then Startup(CLEAR) to reset
+     * the TPM. Both are best-effort — if they fail the next retry
+     * iteration will try again. */
+    lapee_flush_all_tpm_sessions();
+    rc = Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
+    if (rc != TSS2_RC_SUCCESS && rc != TPM2_RC_INITIALIZE) {
+        fprintf(stderr, "[lapee_tpm_nif] reinit: Startup(CLEAR) returned "
+                "0x%08x (%s) (non-fatal)\n", rc, Tss2_RC_Decode(rc));
+    }
+
+    return TSS2_RC_SUCCESS;
 }
 
 /*-------------------------------- startup/0 ---------------------------------*/
@@ -670,8 +793,6 @@ nif_create_primary_ek_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                         rc, attempt + 1, LAPEE_TPM_MAX_RETRIES);
                 lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
                 lapee_reinit_esys();
-                /* Re-run Startup after reinit. */
-                Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
                 continue;
             }
             return lapee_make_tss_error(env, "StartAuthSession(HMAC)", rc);
@@ -698,7 +819,6 @@ nif_create_primary_ek_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                 rc, Tss2_RC_Decode(rc), attempt + 1, LAPEE_TPM_MAX_RETRIES);
         lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
         lapee_reinit_esys();
-        Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
     }
 
     ERL_NIF_TERM pem_term, tpm2b_term, name_term, qname_term, err_term;
@@ -806,7 +926,6 @@ nif_create_signing_key_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                         rc, ak_attempt + 1, LAPEE_TPM_MAX_RETRIES);
                 lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
                 lapee_reinit_esys();
-                Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
                 /* Re-run the trial session since context was reset. */
                 ak_policy.size = 0;
                 trial_session = ESYS_TR_NONE;
@@ -843,7 +962,6 @@ nif_create_signing_key_impl(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                 rc, Tss2_RC_Decode(rc), ak_attempt + 1, LAPEE_TPM_MAX_RETRIES);
         lapee_sleep_ms(LAPEE_TPM_RETRY_DELAY_MS);
         lapee_reinit_esys();
-        Esys_Startup(g_esys_ctx, TPM2_SU_CLEAR);
         /* Re-derive the AK policy after context reset. */
         ak_policy.size = 0;
         trial_session = ESYS_TR_NONE;
