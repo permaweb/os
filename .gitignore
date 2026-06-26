@@ -27,6 +27,7 @@
 /wifi.conf
 /config.json
 /hyperbeam-key.json
+/wallet.json
 /cache-mainnet/
 /secureboot/
 

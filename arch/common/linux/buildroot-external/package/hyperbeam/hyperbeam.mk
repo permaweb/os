@@ -28,7 +28,7 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= c6a16a26dc4ddca55c57db2fd7be6b898d105bb3
+HYPERBEAM_VERSION ?= a9812e021c05092fbd7332612b33b5ed9392a770
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -291,8 +291,6 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
 	cp -a $(@D)/_build/preloaded-store \
 		$(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
-	cp -a $(@D)/_build/hb_preloaded_index.hrl \
-		$(TARGET_DIR)/usr/lib/hyperbeam/_build/hb_preloaded_index.hrl
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/scripts
 	cp -a $(@D)/scripts/schema.gql \
 		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/schema.gql
