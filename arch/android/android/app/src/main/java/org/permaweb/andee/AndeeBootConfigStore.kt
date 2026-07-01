@@ -152,6 +152,7 @@ object AndeeBootConfigStore {
     private fun copyBaseRuntimeDefaults(base: JSONObject, merged: JSONObject) {
         copyBaseValue(base, merged, "store")
         copyBaseValue(base, merged, "match-index")
+        copyBaseValue(base, merged, "arweave-index-store")
         copyBaseValue(base, merged, "priv-store")
     }
 
@@ -226,6 +227,7 @@ object AndeeBootConfigStore {
 
     private val RESERVED_TOP_LEVEL_BOOT_KEYS = setOf(
         "access-remote-cache-for-client",
+        "arweave-index-store",
         "cache-control",
         "http-extra-opts",
         "load-remote-devices",

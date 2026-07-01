@@ -10,8 +10,10 @@ PACKAGE="org.permaweb.andee"
 REMOTE_CONFIG="/data/local/tmp/andee-tunnel-smoke.json"
 RESET_APP_DATA="${RESET_APP_DATA:-1}"
 TUNNEL_DEVICE="${TUNNEL_DEVICE:-tunnel@1.0}"
-TUNNEL_IMPL="${TUNNEL_IMPL:-tF8WoGCazRaFsysvkvnYsa09nzxA42pQDCsoBFQTJII}"
+TUNNEL_IMPL="${TUNNEL_IMPL:-mfpw6oZe4NDaMMbkhulgQ63GcNHlwhOCRDTAQU5wjww}"
 TUNNEL_PEER="${TUNNEL_PEER:-https://smoke.solutions}"
+REMOTE_TRUSTED_TUNNEL_IMPL="${REMOTE_TRUSTED_TUNNEL_IMPL:-tF8WoGCazRaFsysvkvnYsa09nzxA42pQDCsoBFQTJII}"
+TUNNEL_WORKERS="${TUNNEL_WORKERS:-3}"
 PUBLIC_RETRIES="${PUBLIC_RETRIES:-20}"
 PUBLIC_RETRY_SLEEP="${PUBLIC_RETRY_SLEEP:-1}"
 MARKER="andee-tunnel-smoke-$(date +%Y%m%d%H%M%S)"
@@ -36,7 +38,7 @@ fi
 curl -fsS --max-time "$PROBE_TIMEOUT" \
     "$TUNNEL_PEER/~meta@1.0/info/trusted-devices/$TUNNEL_DEVICE" \
     > "$OUT/peer-trusted-device.txt"
-if [ "$(cat "$OUT/peer-trusted-device.txt")" != "$TUNNEL_IMPL" ]; then
+if [ "$(cat "$OUT/peer-trusted-device.txt")" != "$REMOTE_TRUSTED_TUNNEL_IMPL" ]; then
     echo "peer does not trust expected tunnel implementation" >&2
     exit 1
 fi
@@ -54,6 +56,7 @@ cat > "$OUT/next-boot-config.json" <<JSON
         "path": "connect",
         "method": "POST",
         "peer": "$TUNNEL_PEER",
+        "workers": $TUNNEL_WORKERS,
         "hook": {
           "result": "ignore"
         }
@@ -259,7 +262,7 @@ payload = json.loads((out / "public-info.body").read_text())
 )
 PY
 
-python3 - <<'PY' "$OUT" "$MARKER" "$ADDRESS" "$PUBLIC_HOST" "$TUNNEL_DEVICE" "$TUNNEL_IMPL" "$TUNNEL_PEER"
+python3 - <<'PY' "$OUT" "$MARKER" "$ADDRESS" "$PUBLIC_HOST" "$TUNNEL_DEVICE" "$TUNNEL_IMPL" "$TUNNEL_PEER" "$TUNNEL_WORKERS" "$REMOTE_TRUSTED_TUNNEL_IMPL"
 import json
 import pathlib
 import sys
@@ -271,6 +274,8 @@ public_host = sys.argv[4]
 tunnel_device = sys.argv[5]
 tunnel_impl = sys.argv[6]
 tunnel_peer = sys.argv[7]
+tunnel_workers = int(sys.argv[8])
+remote_trusted_tunnel_impl = sys.argv[9]
 
 def fail(message):
     raise SystemExit(message)
@@ -318,7 +323,7 @@ if isinstance(hooks, dict):
 
 if read("started.txt") != "1":
     fail("HyperBEAM did not report startup")
-if read("peer-trusted-device.txt") != tunnel_impl:
+if read("peer-trusted-device.txt") != remote_trusted_tunnel_impl:
     fail("smoke peer did not report expected trusted tunnel device")
 if effective.get("andee-test-marker") != marker:
     fail("effective config did not include selected tunnel marker")
@@ -328,6 +333,7 @@ if not hooks or not any(
     hook.get("device") == tunnel_device
     and hook.get("path") == "connect"
     and hook.get("peer") == tunnel_peer
+    and hook.get("workers") == tunnel_workers
     for hook in hooks
 ):
     fail("effective config did not include tunnel connect hook")
@@ -335,6 +341,19 @@ if not is_runtime_store(effective.get("store")):
     fail("effective config did not keep volatile store plus gateway reads")
 if not is_volatile_store(effective.get("match-index"), "andee-volatile-match-index"):
     fail("effective config did not keep volatile match index")
+arweave_index_store = effective.get("arweave-index-store")
+if arweave_index_store != {
+    "store-module": "hb_store_arweave",
+    "ao-types": 'store-module="atom"',
+    "index-store": [
+        {
+            "store-module": "hb_store_volatile",
+            "name": "andee-volatile-arweave-index-store",
+            "ao-types": 'store-module="atom"',
+        }
+    ],
+}:
+    fail("effective config did not keep volatile Arweave index store")
 if not is_volatile_store(effective.get("priv-store"), "andee-volatile-priv-store"):
     fail("effective config did not keep volatile private store")
 for name in (
@@ -365,6 +384,8 @@ summary = {
     "tunnel_device": tunnel_device,
     "tunnel_impl": tunnel_impl,
     "peer": tunnel_peer,
+    "remote_trusted_tunnel_impl": remote_trusted_tunnel_impl,
+    "workers": tunnel_workers,
     "local_address_status": "200",
     "local_info_status": "200",
     "local_tunnel_status": "200",

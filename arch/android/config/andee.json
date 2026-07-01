@@ -28,6 +28,17 @@
       "ao-types": "store-module=\"atom\""
     }
   ],
+  "arweave-index-store": {
+    "store-module": "hb_store_arweave",
+    "ao-types": "store-module=\"atom\"",
+    "index-store": [
+      {
+        "store-module": "hb_store_volatile",
+        "name": "andee-volatile-arweave-index-store",
+        "ao-types": "store-module=\"atom\""
+      }
+    ]
+  },
   "priv-store": [
     {
       "store-module": "hb_store_volatile",

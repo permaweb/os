@@ -88,6 +88,28 @@ build_android_elmdb_nif() {
     )
 }
 
+build_android_hb_keccak_nif() {
+    local abi="$1"
+    local clang hb_app erts_include out
+    clang="$(clang_for_abi "$abi")"
+    hb_app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+    erts_include="$BUILD_DIR/android-erts/$abi/erlang/usr/include"
+    out="$WORK/erlang/$abi/lib/hb/priv/hb_keccak.so"
+
+    if [ ! -d "$erts_include" ]; then
+        echo "missing Android ERTS include dir for $abi: $erts_include" >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$out")"
+    "$TOOLCHAIN/$clang" \
+        -shared -fPIC -O2 -Wall -Wextra \
+        -I "$erts_include" \
+        -I "$hb_app/native/hb_keccak" \
+        -o "$out" \
+        "$hb_app/native/hb_keccak/hb_keccak.c" \
+        "$hb_app/native/hb_keccak/hb_keccak_nif.c"
+}
+
 stage_native_payload() {
     local abi="$1"
     local rel="$2"
@@ -121,6 +143,13 @@ if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
 (cd "$ANDEE_DEVICE_ROOT" && "$REBAR3" compile)
+HB_SCHEMA="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/scripts/schema.gql"
+if [ ! -f "$HB_SCHEMA" ]; then
+    echo "missing HyperBEAM GraphQL schema: $HB_SCHEMA" >&2
+    exit 1
+fi
+mkdir -p "$WORK/scripts"
+cp "$HB_SCHEMA" "$WORK/scripts/schema.gql"
 rm -rf "$WORK/_build"
 build_andee_preloaded_store "$WORK/_build/preloaded-store"
 cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
@@ -267,6 +296,11 @@ for abi in arm64-v8a x86_64; do
         fi
     done
     erlc -o "$APP_LIB/b64rs/ebin" "$ANDEE_RUNTIME_SRC/erlang-overrides/b64rs.erl"
+    build_android_hb_keccak_nif "$abi"
+    stage_native_payload \
+        "$abi" \
+        "erlang/$abi/lib/hb/priv/hb_keccak.so" \
+        "$APP_LIB/hb/priv/hb_keccak.so"
     ELMDB_TARGET="$(rust_target_for_abi "$abi")"
     ELMDB_NIF="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb/native/elmdb_nif/target/$ELMDB_TARGET/release/libelmdb_nif.so"
     if [ ! -f "$ELMDB_NIF" ]; then

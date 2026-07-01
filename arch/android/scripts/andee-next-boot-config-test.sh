@@ -232,11 +232,26 @@ def is_runtime_store(value):
         },
     ]
 
+def is_volatile_arweave_index_store(value):
+    return value == {
+        "store-module": "hb_store_arweave",
+        "ao-types": 'store-module="atom"',
+        "index-store": [
+            {
+                "store-module": "hb_store_volatile",
+                "name": "andee-volatile-arweave-index-store",
+                "ao-types": 'store-module="atom"',
+            }
+        ],
+    }
+
 def assert_base_volatile_stores(node, label):
     if not is_runtime_store(node.get("store")):
         fail(f"{label} did not enforce volatile runtime store plus gateway reads")
     if not is_volatile_store(node.get("match-index"), "andee-volatile-match-index"):
         fail(f"{label} did not enforce volatile match index")
+    if not is_volatile_arweave_index_store(node.get("arweave-index-store")):
+        fail(f"{label} did not enforce volatile Arweave index store")
     if not is_volatile_store(node.get("priv-store"), "andee-volatile-priv-store"):
         fail(f"{label} did not enforce volatile private store")
 
@@ -333,6 +348,19 @@ assert_attested_public_volatile_store(
     "match-index",
     "andee-volatile-match-index",
 )
+arweave_index_store = fetch_json(f"{attested_node_link}/arweave-index-store")
+if arweave_index_store.get("store-module") != "hb_store_arweave":
+    fail("attested node Arweave index store did not use hb_store_arweave")
+if (
+    fetch_body(f"{attested_node_link}/arweave-index-store/index-store/1/store-module")
+    != "hb_store_volatile"
+):
+    fail("attested node Arweave index store was not volatile")
+if (
+    fetch_body(f"{attested_node_link}/arweave-index-store/index-store/1/name")
+    != "andee-volatile-arweave-index-store"
+):
+    fail("attested node Arweave index store did not enforce volatile store name")
 if "priv-store" in attested_node:
     fail("attested public node unexpectedly exposed private store config")
 for needle in operator_only_needles:

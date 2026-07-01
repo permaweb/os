@@ -86,6 +86,20 @@ def is_runtime_store(value: Any) -> bool:
     ]
 
 
+def is_volatile_arweave_index_store(value: Any) -> bool:
+    return value == {
+        "store-module": "hb_store_arweave",
+        "ao-types": 'store-module="atom"',
+        "index-store": [
+            {
+                "store-module": "hb_store_volatile",
+                "name": "andee-volatile-arweave-index-store",
+                "ao-types": 'store-module="atom"',
+            }
+        ],
+    }
+
+
 def main() -> int:
     config = load(BASE_CONFIG)
     hooks = start_hooks(config)
@@ -121,6 +135,8 @@ def main() -> int:
         fail("base config must use volatile Android runtime store plus gateway reads")
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
+    if not is_volatile_arweave_index_store(config.get("arweave-index-store")):
+        fail("base config must use volatile Android Arweave index store")
     if not is_volatile_store(config.get("priv-store"), "andee-volatile-priv-store"):
         fail("base config must use volatile Android private store")
     store_text = BOOT_CONFIG_STORE.read_text()
@@ -134,11 +150,12 @@ def main() -> int:
         fail("operator on.start hooks must run before base hooks")
     if "copyOperatorValue(hook)" not in store_text:
         fail("operator on.start hooks must be sanitized before merge")
-    for key in ("store", "match-index", "priv-store"):
+    for key in ("store", "match-index", "arweave-index-store", "priv-store"):
         if f'copyBaseValue(base, merged, "{key}")' not in store_text:
             fail(f"boot config store must preserve base {key} after operator sanitization")
     for key in (
         "access-remote-cache-for-client",
+        "arweave-index-store",
         "cache-control",
         "forge-bootstrap",
         "http-extra-opts",
