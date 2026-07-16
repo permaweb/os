@@ -36,8 +36,8 @@ INIT_SCRIPT = (
 )
 DEVICE_LOADING_INTERNALS = (
     "forge-bootstrap",
+    "load-remote-devices",
     "loaded-device-store",
-    "preloaded-devices-index",
     "preloaded-store",
 )
 
@@ -100,8 +100,6 @@ def main() -> int:
             BASE_CONFIG,
             "base config must include zone@1.0 start POST after measurement",
         )
-    if "load-remote-devices" in config:
-        fail(BASE_CONFIG, "base config must leave load-remote-devices to operator config")
     if config.get("trusted-device-signers"):
         fail(BASE_CONFIG, "base config must not pin trusted remote device signers")
     for key in DEVICE_LOADING_INTERNALS:

@@ -27,8 +27,10 @@ HOST_BUILD_DIR="${LAPEE_BUILD_DIR:-$LAPEE_ROOT/build}"
 LAPEE_LINUX_DIR="${LAPEE_LINUX_DIR:-$LAPEE_ROOT/arch/common/linux}"
 LAPEE_BUILDROOT_EXTERNAL="${LAPEE_BUILDROOT_EXTERNAL:-$LAPEE_LINUX_DIR/buildroot-external}"
 LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/common}"
+LAPEE_HB_DEVICE_INPUTS=(cargo-locks native src rebar.config rebar.lock)
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
+CONTAINER="${BUILDROOT_CONTAINER:-${VOLUME}-build}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 DEFCONFIG=${DEFCONFIG:-lapee_defconfig}
 KERNEL_EXTRA_FRAGMENT="${KERNEL_EXTRA_FRAGMENT:-}"
@@ -72,6 +74,12 @@ fi
     echo "missing LAPEE_HB_DEVICE_DIR: $LAPEE_HB_DEVICE_DIR" >&2
     exit 1
 }
+for path in "${LAPEE_HB_DEVICE_INPUTS[@]}"; do
+    [[ -e "$LAPEE_HB_DEVICE_DIR/$path" ]] || {
+        echo "missing HyperBEAM device input: $LAPEE_HB_DEVICE_DIR/$path" >&2
+        exit 1
+    }
+done
 
 # Ensure the docker volume exists. Wipe its config marker if the
 # defconfig file's mtime is newer than what the volume saw last
@@ -103,7 +111,14 @@ docker run --rm $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -v "$LAPEE_HB_DEVICE_DIR":/src-hyperbeam-devices:ro \
     $IMAGE bash -c "rm -rf /build/common-devices && \
-                    cp -r /src-hyperbeam-devices /build/common-devices"
+                    mkdir -p /build/common-devices && \
+                    cp -r \
+                        /src-hyperbeam-devices/cargo-locks \
+                        /src-hyperbeam-devices/native \
+                        /src-hyperbeam-devices/src \
+                        /src-hyperbeam-devices/rebar.config \
+                        /src-hyperbeam-devices/rebar.lock \
+                        /build/common-devices/"
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
     EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"
@@ -210,7 +225,13 @@ KERNEL_FRAGMENT_SHA=$(
 HYPERBEAM_RECIPE_SHA=$(
     {
         find "$LAPEE_BUILDROOT_EXTERNAL/package/hyperbeam" -type f
-        find "$LAPEE_HB_DEVICE_DIR" -type f
+        for path in "${LAPEE_HB_DEVICE_INPUTS[@]}"; do
+            if [[ -d "$LAPEE_HB_DEVICE_DIR/$path" ]]; then
+                find "$LAPEE_HB_DEVICE_DIR/$path" -type f
+            else
+                printf '%s\n' "$LAPEE_HB_DEVICE_DIR/$path"
+            fi
+        done
     } \
         | LC_ALL=C sort \
         | xargs shasum -a 256 \
@@ -333,9 +354,9 @@ fi
 # is the -j level. Default to the host CPU count; override with
 # JOBS=N if needed (e.g. on a memory-constrained host).
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
-docker rm -f lapee-br-build 2>/dev/null || true
+docker rm -f "$CONTAINER" 2>/dev/null || true
 echo "=== Buildroot build (foreground; logs streamed; -j$JOBS) ==="
-docker run --rm --name lapee-br-build $DOCKER_PLATFORM \
+docker run --rm --name "$CONTAINER" $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -e BR2_JLEVEL="$JOBS" \
     $IMAGE bash -euo pipefail -c "cd /build/out && date && make ERLANG_VERSION='$ERLANG_VERSION' LINUX_FIRMWARE_VERSION='$LINUX_FIRMWARE_VERSION' -j$JOBS 2>&1 | tee /build/out/build.log"

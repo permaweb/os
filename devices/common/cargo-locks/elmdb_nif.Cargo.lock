@@ -54,6 +54,7 @@ dependencies = [
  "arc-swap",
  "lazy_static",
  "lmdb",
+ "lmdb-sys",
  "rustler",
  "scc",
 ]

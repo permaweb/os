@@ -10,7 +10,7 @@
 #   2. LapEE C NIFs (lapee_tpm_nif): compiled by Buildroot's cross-gcc
 #      (TARGET_CC) against staged libtss2 / OpenSSL headers from
 #      $(STAGING_DIR)/usr/include.
-#   3. Rust NIFs (hb_keccak via rustler): compiled by `cargo'
+#   3. Rust NIFs (LMDB and PermawebOS SNP): compiled by `cargo'
 #      with a x86_64-unknown-linux-gnu cross target. The Rust
 #      toolchain + target sysroot are installed in the build
 #      container's Dockerfile; cargo links via TARGET_CC.
@@ -28,7 +28,10 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= d31a5764a77c9e43bf21bcadfe7e3376e4fb58ca
+HYPERBEAM_VERSION ?= e445aad9da2a3017023ce99bd934540729e3b872
+# Reproducible timestamp for the pinned source commit. Update it together with
+# HYPERBEAM_VERSION (`git show -s --format=%ct <version>`).
+HYPERBEAM_SOURCE_DATE_EPOCH ?= 1784173208
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -86,6 +89,28 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 	chmod +x $(@D)/.lapee-build/git
 	printf '%s\n' \
 		'#!/usr/bin/env bash' \
+		'if [ -n "$${LAPEE_WAMR_BUILD_TARGET:-}" ]; then' \
+		'    exec /usr/bin/make WAMR_BUILD_TARGET="$$LAPEE_WAMR_BUILD_TARGET" "$$@"' \
+		'fi' \
+		'exec /usr/bin/make "$$@"' \
+		> $(@D)/.lapee-build/make
+	chmod +x $(@D)/.lapee-build/make
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'host_arch=$$(uname -m)' \
+		'args=()' \
+		'for arg in "$$@"; do' \
+		'    if [[ "$$host_arch" =~ ^(aarch64|arm64)$$ && "$$arg" = -msse4.2 ]]; then' \
+		'        continue' \
+		'    fi' \
+		'    args+=("$$arg")' \
+		'done' \
+		'exec /usr/bin/cc "$${args[@]}"' \
+		> $(@D)/.lapee-build/host-cc
+	chmod +x $(@D)/.lapee-build/host-cc
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
 		'set -e' \
 		'crate=$$(basename "$$(pwd)")' \
 		'args=("$$@")' \
@@ -109,7 +134,7 @@ define HYPERBEAM_CREATE_BUILD_HELPERS
 		'        fi' \
 		'        ;;' \
 		'esac' \
-		'if { [ "$$crate" = b64rs ] || [ "$$crate" = elmdb_nif ]; } && [ "$$cmd" = build ]; then' \
+		'if [ "$$crate" = elmdb_nif ] && [ "$$cmd" = build ]; then' \
 		'    mkdir -p target' \
 		'    /home/builder/.cargo/bin/cargo "$${args[@]}" >target/lapee-target-cargo.json' \
 		'    target_so=$$(find target ../../target -path "*/$${CARGO_BUILD_TARGET:-__none__}/release/lib$$crate.so" -type f -print -quit 2>/dev/null || true)' \
@@ -217,6 +242,17 @@ HYPERBEAM_PRE_BUILD_HOOKS += HYPERBEAM_CREATE_BUILD_HELPERS
 HYPERBEAM_C_NATIVE_COMPAT_FLAGS = \
 	-Wno-error=incompatible-pointer-types
 
+# Forge runs under host Erlang before the target runtime is assembled. On an
+# ARM Linux builder, override WAMR's Linux=x86 default and filter the x86-only
+# SSE flag which upstream's secp NIF Makefile applies to every Linux host.
+HYPERBEAM_HOST_WAMR_TARGET = $(if $(filter aarch64 arm64,$(shell uname -m)),AARCH64,X86_64)
+HYPERBEAM_HOST_BUILD_ENV = \
+	PATH=$(@D)/.lapee-build:$(HOST_DIR)/bin:/home/builder/.cargo/bin:$(BR_PATH) \
+	LAPEE_WAMR_BUILD_TARGET="$(HYPERBEAM_HOST_WAMR_TARGET)" \
+	CC="$(@D)/.lapee-build/host-cc" \
+	LAPEE_CARGO_LOCK_DIR="$(HYPERBEAM_DEVICE_DIR)/cargo-locks" \
+	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib"
+
 HYPERBEAM_BUILD_ENV = \
 	PATH=$(@D)/.lapee-build:$(HOST_DIR)/bin:/home/builder/.cargo/bin:$(BR_PATH) \
 	__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS="nightly" \
@@ -240,6 +276,7 @@ HYPERBEAM_BUILD_ENV = \
 	OPENSSL_NO_VENDOR=1 \
 	LAPEE_CARGO_LOCK_DIR="$(HYPERBEAM_DEVICE_DIR)/cargo-locks" \
 	CMAKE_TOOLCHAIN_FILE="$(@D)/.lapee-build/toolchain.cmake" \
+	TARGET_ARCH="$(call qstrip,$(BR2_ARCH))" \
 	CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu \
 	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(@D)/.lapee-build/cc-filter" \
 	CC_x86_64_unknown_linux_gnu="$(@D)/.lapee-build/cc-filter" \
@@ -247,8 +284,24 @@ HYPERBEAM_BUILD_ENV = \
 	CFLAGS_x86_64_unknown_linux_gnu="$(TARGET_CFLAGS) $(HYPERBEAM_C_NATIVE_COMPAT_FLAGS)" \
 	ERL_LIBS="$(HOST_DIR)/lib/erlang/lib"
 
+define HYPERBEAM_CLEAN_CORE_NATIVE
+	rm -rf $(@D)/_build/wamr $(@D)/native/lib/secp256k1/build
+	rm -f $(@D)/priv/*.so
+	find $(@D)/native/hb_beamr $(@D)/native/hb_keccak \
+	    $(@D)/native/hb_util_string $(@D)/native/hb_nif \
+	    $(@D)/native/secp256k1 \
+	    -type f \( -name '*.o' -o -name '*.d' \) -delete
+	if [ -f $(@D)/_build/default/lib/b64veryfast/Makefile ]; then \
+	    $(MAKE) -C $(@D)/_build/default/lib/b64veryfast clean; \
+	fi
+endef
+
 define HYPERBEAM_BUILD_CMDS
-	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 compile
+	# Forge is a host build tool. Build its mandatory NIFs for the build host
+	# before generating the immutable store; target NIFs are built afterwards.
+	rm -rf $(@D)/_build/preloaded-store
+	$(HYPERBEAM_CLEAN_CORE_NATIVE)
+	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 compile
 	rm -rf $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.beam \
 	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.so \
 	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/lapee_snp_nif.beam \
@@ -273,15 +326,38 @@ define HYPERBEAM_BUILD_CMDS
 	    $(HYPERBEAM_BUILD_ENV) cargo build --release --locked
 	cp -af $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
 	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
-	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 release \
-		--include-erts $(TARGET_DIR)/usr/lib/erlang
 	rm -rf $(@D)/_build/lapee-preload-src $(@D)/_build/preloaded-store
 	mkdir -p $(@D)/_build/lapee-preload-src
 	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/preloaded
 	rm -f $(@D)/_build/lapee-preload-src/preloaded/auth/dev_snp.erl
-	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 device preload \
+	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 device preload \
 	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
 	    --output-dir _build/preloaded-store
+	# Replace every host native artifact with a target build while preserving
+	# the already-generated, architecture-independent Forge store.
+	$(HYPERBEAM_CLEAN_CORE_NATIVE)
+	cd $(@D)/_build/default/lib/b64veryfast && \
+	    $(HYPERBEAM_BUILD_ENV) $(MAKE) all
+	cd $(@D)/_build/default/lib/elmdb/native/elmdb_nif && \
+	    $(HYPERBEAM_BUILD_ENV) cargo build --release --locked
+	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 compile
+	cd $(@D) && $(HYPERBEAM_BUILD_ENV) ./rebar3 release \
+		--include-erts $(TARGET_DIR)/usr/lib/erlang
+	# Rebar's build hook records wall-clock time. Normalize after the final
+	# invocation so identical pinned inputs produce identical runtime metadata.
+	printf '%s\n' \
+	    '#{' \
+	    '    <<"source">> => <<"$(HYPERBEAM_VERSION)">>,' \
+	    '    <<"source-short">> => <<"$(shell printf %.12s $(HYPERBEAM_VERSION))">>,' \
+	    '    <<"build-time">> => $(HYPERBEAM_SOURCE_DATE_EPOCH)' \
+	    '}.' \
+	    > $(@D)/priv/hb_buildinfo
+	for info in \
+	    $(@D)/_build/default/rel/hb/bin/priv/hb_buildinfo \
+	    $(@D)/_build/default/rel/hb/lib/hb-*/priv/hb_buildinfo; do \
+	    test -f "$$info"; \
+	    cp -a $(@D)/priv/hb_buildinfo "$$info"; \
+	done
 endef
 
 define HYPERBEAM_INSTALL_TARGET_CMDS
@@ -291,8 +367,6 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
 	cp -a $(@D)/_build/preloaded-store \
 		$(TARGET_DIR)/usr/lib/hyperbeam/_build/preloaded-store
-	cp -a $(@D)/_build/hb_preloaded_index.hrl \
-		$(TARGET_DIR)/usr/lib/hyperbeam/_build/hb_preloaded_index.hrl
 	mkdir -p $(TARGET_DIR)/usr/lib/hyperbeam/scripts
 	cp -a $(@D)/scripts/schema.gql \
 		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/schema.gql
@@ -317,14 +391,6 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	            "$(TARGET_DIR)/usr/lib/hyperbeam/lib/"; \
 	    fi; \
 	done
-	if [ -f $(@D)/_build/default/lib/b64rs/native/b64rs/target/lapee-target/release/libb64rs.so ]; then \
-	    for d in $(TARGET_DIR)/usr/lib/hyperbeam/lib/b64rs-*; do \
-	        [ -d "$$d" ] || continue; \
-	        mkdir -p "$$d/priv"; \
-	        cp -af $(@D)/_build/default/lib/b64rs/native/b64rs/target/lapee-target/release/libb64rs.so \
-	            "$$d/priv/b64rs.so"; \
-	    done; \
-	fi
 	elmdb_target=$(@D)/_build/default/lib/elmdb/native/elmdb_nif/target/lapee-target/release/libelmdb_nif.so; \
 	if [ ! -f "$$elmdb_target" ]; then \
 	    elmdb_target=$(@D)/_build/default/lib/elmdb/priv/crates/elmdb_nif/elmdb_nif.so; \
@@ -356,6 +422,12 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	    rm -rf "$$d/doc" "$$d/examples" "$$d/man" "$$d/c_src"; \
 	done
 	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/asn1-*/priv/lib/asn1rt_nif.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/b64veryfast-*/priv/b64veryfast.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/elmdb-*/priv/libelmdb_nif.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/hb_beamr.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/hb_keccak.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/hb_util_string.so
+	test -f $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*/priv/secp256k1_arweave.so
 	find $(TARGET_DIR)/usr/lib/hyperbeam $(TARGET_DIR)/usr/lib/erlang \
 	    -type f \( -perm /111 -o -name '*.so*' \) -print0 \
 	    | xargs -0 -r file \

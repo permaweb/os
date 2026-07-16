@@ -93,7 +93,7 @@ def main() -> int:
                     "initialized": node["initialized"],
                     "access-remote-cache-for-client":
                         node["access-remote-cache-for-client"],
-                    "load-remote-devices": node["load-remote-devices"],
+                    "trusted-device-signers": node["trusted-device-signers"],
                 },
             },
         }

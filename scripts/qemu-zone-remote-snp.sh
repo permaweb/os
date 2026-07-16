@@ -526,7 +526,8 @@ assert_security_properties() {
             node_initialized: measurement($att).body.node.initialized,
             access_remote_cache_for_client:
                 measurement($att).body.node."access-remote-cache-for-client",
-            load_remote_devices: measurement($att).body.node."load-remote-devices",
+            trusted_device_signers:
+                measurement($att).body.node."trusted-device-signers",
             memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
             dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
             measurement_device: measurement($att)."measurement-device",
@@ -549,6 +550,7 @@ assert_security_properties() {
           }' > "$OUTDIR/responses/security-properties.json"
     jq -e --argjson publisher_required "$publisher_required" '
         def falsy: . == false or . == "false";
+        def empty_ao_list: . == [] or . == {"device":"json@1.0"};
         .distinct_cmdlines == 1 and
         .distinct_boot_evidence == 1 and
         all(.nodes[]; . as $node |
@@ -563,7 +565,7 @@ assert_security_properties() {
              else true end) and
             $node.node_initialized == "permanent" and
             ($node.access_remote_cache_for_client | falsy) and
-            ($node.load_remote_devices | falsy) and
+            ($node.trusted_device_signers | empty_ao_list) and
             (($node.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
         all(.nodes[]; ((.memtotal_kb | type) == "number" and .memtotal_kb > 0)) and
         .distinct_dmi_products == 2 and

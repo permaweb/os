@@ -42,7 +42,6 @@ cat > "$OUT/next-boot-config.json" <<JSON
   "http-extra-opts": {
     "cache-control": ["always"]
   },
-  "load-remote-devices": true,
   "match-index": [],
   "name-resolvers": ["https://andee-next-boot.example/resolver"],
   "store": [
@@ -188,13 +187,11 @@ reserved_runtime_keys = (
     "http-extra-opts",
     "load-remote-devices",
     "name-resolvers",
-    "trusted-device-signers",
 )
 operator_only_needles = (
     "operator-requested-persistent-store",
     "operator-requested-private-store",
     "operator-requested",
-    "operator-requested-signer",
     "https://andee-next-boot.example/resolver",
 )
 
@@ -312,6 +309,8 @@ assert_base_volatile_stores(effective, "effective config")
 for needle in operator_only_needles:
     if contains_value(effective, needle):
         fail(f"effective config preserved operator-only runtime value: {needle}")
+if effective.get("trusted-device-signers") != ["operator-requested-signer"]:
+    fail("effective config did not preserve trusted remote device signers")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]
@@ -332,6 +331,8 @@ if attested_node.get("access-remote-cache-for-client") not in (None, False, "fal
     fail("attested node message preserved operator access-remote-cache-for-client override")
 if attested_node.get("load-remote-devices") not in (None, False, "false"):
     fail("attested node message preserved operator load-remote-devices override")
+if attested_node.get("trusted-device-signers") != ["operator-requested-signer"]:
+    fail("attested node message did not commit to trusted remote device signers")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
 if "store-defaults" in attested_node:

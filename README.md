@@ -257,16 +257,16 @@ HB_CONFIG=/tmp/config.json,/etc/lapee/lapee.json
 
 The measured PermawebOS config is last, so enforced measurement devices and
 the boot measurement hook remain part of the node. Operator-controlled keys
-such as `load-remote-devices` and `trusted-device-signers` are intentionally
-not forced by the base config; deployments choose them and that choice appears
-in measurement evidence.
+such as `trusted-device-signers` are intentionally not forced by the base
+config; deployments choose them and that choice appears in measurement
+evidence. A nonempty signer list enables remote device lookup; an empty list
+keeps lookup local to the node's configured stores.
 
 Use HyperBEAM/AO-Core key spelling directly:
 
 ```json
 {
   "zone-allow": 1,
-  "load-remote-devices": true,
   "trusted-device-signers": [
     "WjnS-s03HWsDSdMnyTdzB1eHZB2QheUWP_FVRVYxkXk"
   ]

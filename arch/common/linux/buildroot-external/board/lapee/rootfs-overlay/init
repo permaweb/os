@@ -1391,8 +1391,8 @@ copy_operator_config_json() {
     erl -noshell -eval '
         [Path] = init:get_plain_arguments(),
         Reserved = [
+            <<"load-remote-devices">>,
             <<"preloaded-store">>,
-            <<"preloaded-devices-index">>,
             <<"forge-bootstrap">>,
             <<"loaded-device-store">>
         ],
@@ -2049,22 +2049,8 @@ echo "[init] HB_CONFIG = $HB_CONFIG"
 export HB_CONFIG
 
 PRELOADED_STORE_DIR=/usr/lib/hyperbeam/_build/preloaded-store
-PRELOADED_INDEX_HRL=/usr/lib/hyperbeam/_build/hb_preloaded_index.hrl
 if [ ! -s "$PRELOADED_STORE_DIR/data.mdb" ]; then
     halt_boot "HyperBEAM preloaded device store is missing."
-fi
-if [ ! -f "$PRELOADED_INDEX_HRL" ]; then
-    halt_boot "HyperBEAM preloaded device index is missing."
-fi
-HB_PRELOADED_DEVICES_INDEX=$(
-    sed -n 's/.*PRELOADED_DEVICES_INDEX_MESSAGE_ID, <<"\([^"]*\)">>.*/\1/p' \
-        "$PRELOADED_INDEX_HRL" | head -1
-)
-if [ -n "$HB_PRELOADED_DEVICES_INDEX" ]; then
-    export HB_PRELOADED_DEVICES_INDEX
-    trace "hyperbeam: preloaded device index $HB_PRELOADED_DEVICES_INDEX"
-else
-    halt_boot "HyperBEAM preloaded device index could not be parsed."
 fi
 
 # Keep Erlang outbound HTTP on IPv4-only networks. Some public

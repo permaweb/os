@@ -119,7 +119,6 @@ def main() -> int:
         "loaded-device-store",
         "name-resolvers",
         "port",
-        "preloaded-devices-index",
         "preloaded-store",
         "process-sampler",
         "prometheus",
@@ -163,12 +162,10 @@ def main() -> int:
         "loaded-device-store",
         "match-index",
         "name-resolvers",
-        "preloaded-devices-index",
         "preloaded-store",
         "priv-store",
         "store",
         "store-defaults",
-        "trusted-device-signers",
     ):
         if f'"{key}"' not in store_text:
             fail(f"operator config sanitizer must reserve {key}")

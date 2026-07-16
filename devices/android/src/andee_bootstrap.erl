@@ -13,13 +13,13 @@
 -define(DEFAULT_PORT, 8734).
 
 start() ->
-    ensure_preloaded_store_environment(),
+    ensure_preloaded_store(),
     Env = hb_opts:default_message_with_env(),
     ConfigPath = hb_opts:get(<<"hb-config-location">>, ?DEFAULT_CONFIG, Env),
     start(ConfigPath).
 
 start(ConfigPath) ->
-    ensure_preloaded_store_environment(),
+    ensure_preloaded_store(),
     io:format("andee-bootstrap=load-config path=~ts~n", [hb_util:bin(ConfigPath)]),
     Env = hb_opts:default_message_with_env(),
     Loaded =
@@ -58,37 +58,10 @@ start(ConfigPath) ->
         stop -> ok
     end.
 
-ensure_preloaded_store_environment() ->
-    ok = ensure_preloaded_store(),
-    case os:getenv("HB_PRELOADED_DEVICES_INDEX") of
-        false ->
-            os:putenv(
-                "HB_PRELOADED_DEVICES_INDEX",
-                binary_to_list(read_preloaded_devices_index())
-            );
-        _ ->
-            ok
-    end.
-
 ensure_preloaded_store() ->
     case file:read_file_info("_build/preloaded-store/data.mdb") of
         {ok, _} -> ok;
         {error, Reason} -> erlang:error({missing_andee_preloaded_store, Reason})
-    end.
-
-read_preloaded_devices_index() ->
-    case file:read_file("_build/hb_preloaded_index.hrl") of
-        {ok, Bin} ->
-            case re:run(
-                Bin,
-                <<"PRELOADED_DEVICES_INDEX_MESSAGE_ID, <<\"([^\"]+)\">>">>,
-                [{capture, [1], binary}]
-            ) of
-                {match, [Index]} -> Index;
-                nomatch -> erlang:error(missing_andee_preloaded_devices_index)
-            end;
-        {error, Reason} ->
-            erlang:error({missing_andee_preloaded_devices_index, Reason})
     end.
 
 start_store(Opts) ->

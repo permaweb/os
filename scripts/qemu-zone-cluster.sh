@@ -757,7 +757,7 @@ jq -n \
         node_initialized: measurement($att).body.node.initialized,
         access_remote_cache_for_client:
             measurement($att).body.node."access-remote-cache-for-client",
-        load_remote_devices: measurement($att).body.node."load-remote-devices",
+        trusted_device_signers: measurement($att).body.node."trusted-device-signers",
         memtotal_kb: measurement($att).body.system.memory.meminfo.memtotal.value,
         dmi_product: measurement($att).body.system.firmware.dmi.fields."product-name",
         measurement_device: measurement($att)."measurement-device",
@@ -786,13 +786,14 @@ expected_devices=$(jq -n \
 if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; then
     jq -e --argjson expected "$expected_devices" \
         'def falsy: . == false or . == "false";
+         def empty_ao_list: . == [] or . == {"device":"json@1.0"};
          .distinct_cmdlines == 1 and .distinct_boot_evidence == 1 and
            all(.nodes[]; (.secure_boot_enabled == true or .secure_boot_enabled == "true") and
              (.image_signers_digest | type == "string") and
              (.image_signer_count | type == "number" and . > 0) and
              .node_initialized == "permanent" and
              (.access_remote_cache_for_client | falsy) and
-             (.load_remote_devices | falsy) and
+             (.trusted_device_signers | empty_ao_list) and
              ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
            .distinct_memtotal_kb == 4 and
            .distinct_dmi_products == 2 and .distinct_ek_public == 4 and
@@ -807,11 +808,12 @@ if [[ "$expected_devices" = '["tpm@2.0a","tpm@2.0a","tpm@2.0a","tpm@2.0a"]' ]]; 
 else
     jq -e --argjson expected "$expected_devices" \
         'def falsy: . == false or . == "false";
+         def empty_ao_list: . == [] or . == {"device":"json@1.0"};
          .distinct_cmdlines == 1 and .distinct_boot_evidence == 1 and
            all(.nodes[]; (.boot_evidence != null) and
              .node_initialized == "permanent" and
              (.access_remote_cache_for_client | falsy) and
-             (.load_remote_devices | falsy) and
+             (.trusted_device_signers | empty_ao_list) and
              ((.cmdline | test("lapee.mode=debug|lapee.debug|LAPEE_HB_DIAG")) | not)) and
            .distinct_memtotal_kb == 4 and
            .distinct_dmi_products == 2 and

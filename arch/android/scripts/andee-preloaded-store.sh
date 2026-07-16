@@ -2,9 +2,7 @@
 
 build_andee_preloaded_store() {
     local out="$1"
-    local hrl
     local rebar3="${REBAR3:-$ROOT/scripts/verified-rebar3.sh}"
-    hrl="$(dirname "$out")/hb_preloaded_index.hrl"
 
     rm -rf "$out"
     mkdir -p "$(dirname "$out")"
@@ -18,13 +16,27 @@ build_andee_preloaded_store() {
         echo "AndEE preloaded LMDB store was not generated: $out" >&2
         exit 1
     fi
-    PRELOADED_DEVICES_INDEX="$(
-        sed -n 's/.*PRELOADED_DEVICES_INDEX_MESSAGE_ID, <<"\([^"]*\)">>.*/\1/p' \
-            "$hrl" | head -1
-    )"
-    if [ -z "$PRELOADED_DEVICES_INDEX" ]; then
-        echo "AndEE preloaded device index could not be parsed from $hrl" >&2
-        exit 1
-    fi
-    export PRELOADED_DEVICES_INDEX
+    (
+        cd "$ANDEE_DEVICE_ROOT"
+        erl -noshell -pa _build/default/lib/*/ebin -eval '
+            [Output] = init:get_plain_arguments(),
+            Store = #{
+                <<"store-module">> => hb_store_lmdb,
+                <<"name">> => unicode:characters_to_binary(Output),
+                <<"read-only">> => true
+            },
+            ok = hb_store:start(Store),
+            case hb_store:resolve(
+                Store,
+                <<"~meta@1.0/preloaded-devices-index">>,
+                #{}
+            ) of
+                {ok, ID} when is_binary(ID), byte_size(ID) > 0 -> halt(0);
+                Other ->
+                    io:format(standard_error,
+                        "missing in-store preloaded index: ~p~n", [Other]),
+                    halt(1)
+            end.
+        ' -extra "$out"
+    )
 }

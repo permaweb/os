@@ -233,12 +233,10 @@ object AndeeBootConfigStore {
         "load-remote-devices",
         "match-index",
         "name-resolvers",
-        "preloaded-devices-index",
         "preloaded-store",
         "priv-store",
         "store",
         "store-defaults",
-        "trusted-device-signers",
     )
 
     private val PRIVATE_BOOT_KEYS = setOf(
@@ -249,7 +247,6 @@ object AndeeBootConfigStore {
         "loaded-device-store",
         "secret",
         "measurement-body-source",
-        "preloaded-devices-index",
         "preloaded-store",
     )
 }
