@@ -28,7 +28,8 @@ start(ConfigPath) ->
             runtime_environment()
         ),
     io:format("andee-bootstrap=config-loaded~n"),
-    Merged = hb_maps:merge(Env, Loaded),
+    Configured = merge_hooks(Env, Loaded),
+    Merged = hb_maps:merge(Env, Configured),
     ensure_runtime_applications(),
     configure_public_key_cacerts(),
     hb_http_client:setup_conn(Merged),
@@ -40,11 +41,11 @@ start(ConfigPath) ->
     io:format("andee-bootstrap=derive-address~n"),
     Address = hb_util:human_id(ar_wallet:to_address(Wallet)),
     NodeMsg =
-        Loaded#{
+        Configured#{
             <<"priv-wallet">> => Wallet,
             <<"address">> => Address,
             <<"store">> => Store,
-            <<"port">> => hb_opts:get(<<"port">>, ?DEFAULT_PORT, Loaded),
+            <<"port">> => hb_opts:get(<<"port">>, ?DEFAULT_PORT, Configured),
             <<"cache-writers">> => [Address]
         },
     io:format("andee-bootstrap=start-http port=~p~n",
@@ -57,6 +58,18 @@ start(ConfigPath) ->
     receive
         stop -> ok
     end.
+
+%% Configured event hooks extend the stock HyperBEAM chain by event name.
+%% Without this merge, AndEE's measurement `on/start' hook replaces the
+%% default `on/request' chain, disabling normal name and manifest resolution.
+merge_hooks(Env, Configured) ->
+    Configured#{
+        <<"on">> =>
+            hb_maps:merge(
+                hb_maps:get(<<"on">>, Env, #{}, Env),
+                hb_maps:get(<<"on">>, Configured, #{}, Env)
+            )
+    }.
 
 ensure_preloaded_store() ->
     case file:read_file_info("_build/preloaded-store/data.mdb") of
@@ -221,6 +234,26 @@ runtime_environment_keys_are_reserved_test() ->
             <<"andee-runtime-zip-sha256">> => <<"forged">>,
             <<"andee-base-apk-sha256">> => <<"forged">>
         })
+    ).
+
+configured_hooks_preserve_default_request_chain_test() ->
+    DefaultRequest = [#{ <<"device">> => <<"manifest@1.0">> }],
+    MeasurementStart = #{
+        <<"device">> => <<"measurement@1.0">>,
+        <<"path">> => <<"boot">>
+    },
+    Merged =
+        merge_hooks(
+            #{ <<"on">> => #{ <<"request">> => DefaultRequest } },
+            #{ <<"on">> => #{ <<"start">> => MeasurementStart } }
+        ),
+    ?assertEqual(
+        DefaultRequest,
+        hb_maps:get(<<"request">>, hb_maps:get(<<"on">>, Merged), undefined)
+    ),
+    ?assertEqual(
+        MeasurementStart,
+        hb_maps:get(<<"start">>, hb_maps:get(<<"on">>, Merged), undefined)
     ).
 
 load_config_honors_json_ao_types_test() ->
