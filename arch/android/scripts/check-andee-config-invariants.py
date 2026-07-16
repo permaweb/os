@@ -161,7 +161,6 @@ def main() -> int:
         "load-remote-devices",
         "loaded-device-store",
         "match-index",
-        "name-resolvers",
         "preloaded-store",
         "priv-store",
         "store",

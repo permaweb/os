@@ -232,7 +232,6 @@ object AndeeBootConfigStore {
         "http-extra-opts",
         "load-remote-devices",
         "match-index",
-        "name-resolvers",
         "preloaded-store",
         "priv-store",
         "store",

@@ -186,13 +186,11 @@ reserved_runtime_keys = (
     "cache-control",
     "http-extra-opts",
     "load-remote-devices",
-    "name-resolvers",
 )
 operator_only_needles = (
     "operator-requested-persistent-store",
     "operator-requested-private-store",
     "operator-requested",
-    "https://andee-next-boot.example/resolver",
 )
 
 def contains_value(value, needle):
@@ -311,6 +309,8 @@ for needle in operator_only_needles:
         fail(f"effective config preserved operator-only runtime value: {needle}")
 if effective.get("trusted-device-signers") != ["operator-requested-signer"]:
     fail("effective config did not preserve trusted remote device signers")
+if effective.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
+    fail("effective config did not preserve measured remote name resolvers")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]
@@ -323,6 +323,8 @@ if not (
     fail("effective config did not preserve measurement boot hook over hook-body first")
 if meta_node.get("andee-test-marker") != marker:
     fail("stock meta info did not include selected marker")
+if meta_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
+    fail("stock meta info did not include measured remote name resolvers")
 if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
@@ -333,6 +335,8 @@ if attested_node.get("load-remote-devices") not in (None, False, "false"):
     fail("attested node message preserved operator load-remote-devices override")
 if attested_node.get("trusted-device-signers") != ["operator-requested-signer"]:
     fail("attested node message did not commit to trusted remote device signers")
+if attested_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
+    fail("attested node message did not commit to measured remote name resolvers")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
 if "store-defaults" in attested_node:

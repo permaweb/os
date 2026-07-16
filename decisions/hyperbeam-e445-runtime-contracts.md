@@ -22,8 +22,10 @@ contract and create two index authorities.
 e445 removed `load-remote-devices`. A nonempty `trusted-device-signers` list is
 now both the enablement and authorization boundary. PermawebOS continues to
 measure the effective node message, allows an operator to supply trusted
-signers, and strips the obsolete switch. Empty signers keep remote loading
-disabled.
+signers and public `name-resolvers`, and strips the obsolete switch. Empty
+signers keep remote loading disabled. Resolver bindings remain unprivileged:
+the implementation archive must still verify against a trusted signer, and the
+effective bindings are committed by measurement.
 
 ### Package mandatory native components
 

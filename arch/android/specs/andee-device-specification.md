@@ -156,12 +156,13 @@ A production AndEE node MUST enforce at least:
 ```
 
 Operator configuration MAY shape public node metadata and MAY enable normal
-remote device resolution with a nonempty `trusted-device-signers` allowlist.
-The exact allowlist is part of the effective node message and therefore the
-boot measurement. Operator configuration MUST NOT disable the AndEE
-measurement device, bypass the `on.start` boot measurement hook, persist the
-v1 node key, inject an unmeasured `trusted-devices` map, or override
-HyperBEAM's stock store/cache configuration.
+remote device resolution with a nonempty `trusted-device-signers` allowlist
+and measured `name-resolvers`. The exact allowlist and resolver bindings are
+part of the effective node message and therefore the boot measurement.
+Operator configuration MUST NOT disable the AndEE measurement device, bypass
+the `on.start` boot measurement hook, persist the v1 node key, inject an
+unmeasured `trusted-devices` map, or override HyperBEAM's stock store/cache
+configuration.
 
 ## 4. Stock `~meta@1.0`
 
