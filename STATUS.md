@@ -123,6 +123,24 @@ copy data extents explicitly, with a zero-scanning fallback where
 `SEEK_DATA`/`SEEK_HOLE` is unavailable, then `fsync` and atomically rename the
 completed image.
 
+## Regular-file image capability result
+
+The pinned lwext4 spike is green on `emulator-5562` at
+`agent/andock-image-engine-spike` commit `716af74`. A main-app regular-file FD
+was transferred to three distinct isolated UIDs; each run formatted and
+mutated a journaled ext4 image, deliberately killed the parser, rebound a new
+isolated process, recovered and verified the filesystem, sparse-copied the
+complete image, reopened the copy, and rejected four malformed-image classes.
+All runs ended with `regular-file-image-capability=ok`, with no matching SELinux
+denial.
+
+The 64 MiB fixture occupied 1,409,024 bytes after copy. Three Android
+`SEEK_DATA`/`SEEK_HOLE` copies took 1.859, 2.095, and 1.741 ms (1.859 ms
+median). This accepts the one-time regular-file capability route but does not
+yet accept lwext4 for production: the actual 823 MiB, 26,931-entry Ubuntu
+template, PRoot syscall adapter, writable `mmap`, torn-write recovery, and
+checker strategy remain explicit gates.
+
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
