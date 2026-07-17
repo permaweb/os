@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Base64
 import android.util.Log
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -317,8 +318,16 @@ internal class AndeeExecutionManager(
         JSONObject().put("ok", true).put("status", 200).put("body", body)
 
     private fun failureResponse(failure: Throwable): JSONObject {
-        val status = (failure as? ExecutionFailure)?.status ?: 500
-        Log.w(TAG, "execution request rejected", failure)
+        val status = when (failure) {
+            is ExecutionFailure -> failure.status
+            is IllegalArgumentException, is JSONException -> 400
+            else -> 500
+        }
+        if (status >= 500) {
+            Log.w(TAG, "execution request failed", failure)
+        } else {
+            Log.i(TAG, "execution request rejected ($status): ${failure.message}")
+        }
         return JSONObject()
             .put("ok", false)
             .put("status", status)

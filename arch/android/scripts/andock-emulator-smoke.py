@@ -124,6 +124,20 @@ def main():
     unusual_name = "odd\tline\nfile.bin"
     content = bytes(range(256)) * (3 * 1024 * 1024 // 256)
     try:
+        invalid_protocol = client.request(
+            "read",
+            member,
+            protocol="not-andock",
+            path="/root/missing",
+        )
+        require(invalid_protocol.get("status") == 400, invalid_protocol)
+        invalid_member = client.request("list", "../member", path="/root")
+        require(invalid_member.get("status") == 400, invalid_member)
+        traversal = client.request("read", member, path="/root/../etc/passwd")
+        require(traversal.get("status") == 400, traversal)
+        unknown = client.request("unknown", member)
+        require(unknown.get("status") == 404, unknown)
+
         environment = exec_command(
             client,
             member,
@@ -139,6 +153,10 @@ def main():
         require(b"/root\nuid=0(root)" in environment_output, environment_output)
         require(b"Python 3.12" in environment_output, environment_output)
         require(b"v22." in environment_output, environment_output)
+        missing_path = client.request("read", member, path="/root/missing")
+        require(missing_path.get("status") == 404, missing_path)
+        directory_read = client.request("read", member, path="/root")
+        require(directory_read.get("status") == 400, directory_read)
 
         encoded = base64.urlsafe_b64encode(content).decode().rstrip("=")
         success(client.request(
