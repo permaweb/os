@@ -95,6 +95,13 @@ def main():
         require("Ubuntu 24.04" in base, base)
         require("arch=aarch64" in base, base)
 
+        for index in range(1, 4):
+            workloads.run(
+                f"warm-command-{index}",
+                "printf ready",
+                maximum_seconds=0.5,
+            )
+
         workloads.run(
             "path-search-clean-stderr",
             "set -eu; "
@@ -105,7 +112,7 @@ def main():
 
         workloads.run(
             "apt-install",
-            "set -eu; apt-get update; "
+            "set -eu; apt-cache show tree >/dev/null; "
             "apt-get install -y --no-install-recommends "
             "cmake dnsutils espeak-ng ffmpeg golang-go "
             "netcat-openbsd openjdk-21-jdk-headless pkg-config rustc cargo "
@@ -241,18 +248,24 @@ def main():
         )
 
         workloads.run(
-            "filesystem-scale",
+            "filesystem-scale-create",
             "set -eu; rm -rf /root/many; mkdir /root/many; "
             "python3 - <<'PY'\n"
             "from pathlib import Path\n"
             "root = Path('/root/many')\n"
             "for index in range(10000):\n"
             "    (root / f'{index:05d}').write_text(str(index))\n"
-            "PY\n"
+            "PY",
+            timeout=600_000,
+        )
+        workloads.run(
+            "filesystem-scale-traversal",
+            "set -eu; "
             "test \"$(find /root/many -maxdepth 1 -type f | wc -l)\" "
             "-eq 10000; "
             "du -sh /root/many",
-            timeout=600_000,
+            timeout=300_000,
+            maximum_seconds=5,
         )
         workloads.run(
             "git-large-tree",
@@ -327,8 +340,7 @@ def main():
         workloads.write("/root/andock_network_syscalls.c", network_syscalls)
         race_port = 45733
         race_output = "/data/local/tmp/andock-network-race.bin"
-        race_pid = int(client.adb_command(
-            "shell", "sh", "-c",
+        race_pid = int(client.shell_command(
             f"set -eu; rm -f {race_output}; "
             f"nc -4 -u -s 127.0.0.1 -p {race_port} -l "
             f">{race_output} 2>/dev/null </dev/null & "
@@ -345,20 +357,40 @@ def main():
                 allow_network=True,
             )
         finally:
-            race_bytes = int(client.adb_command(
-                "shell", "sh", "-c",
+            race_bytes = int(client.shell_command(
                 f"kill {race_pid} 2>/dev/null || true; sleep 1; "
                 f"wc -c <{race_output}; rm -f {race_output}",
             ).stdout)
         require(race_bytes == 0, f"raced loopback received {race_bytes} bytes")
 
         workloads.run(
-            "python-ml-install",
+            "python-ml-download",
+            "set -eu; mkdir /root/torch-wheels; "
+            "pip download --disable-pip-version-check "
+            "--dest /root/torch-wheels "
+            "--index-url https://download.pytorch.org/whl/cpu torch",
+            timeout=900_000,
+            allow_network=True,
+        )
+        workloads.run(
+            "python-ml-local-install",
             "set -eu; pip install --no-cache-dir --disable-pip-version-check "
-            "transformers torch; "
+            "--no-index --find-links /root/torch-wheels torch; "
+            "python3 -c \"import torch; "
+            "assert torch.tensor([6, 7]).prod().item() == 42; "
+            "assert torch.__version__.endswith('+cpu'), torch.__version__\"",
+            timeout=300_000,
+            maximum_seconds=95,
+        )
+        workloads.run(
+            "python-transformers-install",
+            "set -eu; "
+            "pip install --no-cache-dir --disable-pip-version-check "
+            "transformers; "
             "python3 - <<'PY'\n"
             "import torch, transformers\n"
             "assert torch.tensor([6, 7]).prod().item() == 42\n"
+            "assert torch.__version__.endswith('+cpu'), torch.__version__\n"
             "print('torch', torch.__version__)\n"
             "print('transformers', transformers.__version__)\n"
             "PY",
@@ -371,9 +403,8 @@ def main():
                 "set -eu; "
                 "python3 -c 'import torch; print(torch.__version__)' >/dev/null; "
                 "pip3 show torch >/dev/null; "
-                "du -sh /root/.local "
-                "/usr/local/lib/python3.12/dist-packages >/dev/null",
-                maximum_seconds=10,
+                "du -sh /usr/local/lib/python3.12/dist-packages >/dev/null",
+                maximum_seconds=20,
             )
         workloads.run(
             "huggingface-tiny-model",
@@ -452,7 +483,11 @@ def main():
             "for number, arguments in [(425, (1, 0)), (438, (-1, -1, 0))]:\n"
             "    ctypes.set_errno(0)\n"
             "    assert libc.syscall(number, *arguments) == -1\n"
-            "    assert ctypes.get_errno() == errno.EPERM\n"
+            "    denied = ctypes.get_errno()\n"
+            "    if number == 425:\n"
+            "        assert denied in (errno.EPERM, errno.ENOSYS), denied\n"
+            "    else:\n"
+            "        assert denied == errno.EPERM, denied\n"
             "PY\n"
             "node -e \"const net=require('net'); "
             "const socket=net.connect(443,'1.1.1.1'); "

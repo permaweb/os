@@ -134,6 +134,14 @@ expect_denied cat /proc/self/mountinfo
 expect_denied cat /proc/mounts
 expect_denied ls /proc/1
 expect_denied ls /sys
+for cpu_identity in \
+	/sys/devices/system/cpu/possible \
+	/sys/devices/system/cpu/present \
+	/sys/devices/system/cpu/cpu0/regs/identification/midr_el1; do
+	[ -n "$(cat "$cpu_identity")" ] ||
+		fail "empty CPU identity file: $cpu_identity"
+	expect_denied sh -c "printf forged >'$cpu_identity'"
+done
 expect_denied cat /dev/kmsg
 expect_denied ls /dev/block
 expect_denied readlink /proc/self/fd/987

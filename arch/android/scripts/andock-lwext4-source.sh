@@ -36,6 +36,8 @@ prepare_andock_lwext4() {
     apply_andock_lwext4_patch \
         "$ROOT/execution/lwext4-open-inode.patch"
     apply_andock_lwext4_patch \
+        "$ROOT/execution/lwext4-inode-times.patch"
+    apply_andock_lwext4_patch \
         "$ROOT/execution/lwext4-atomic-replace.patch"
     apply_andock_lwext4_patch \
         "$ROOT/execution/lwext4-nondirectory-replace.patch"

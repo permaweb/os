@@ -11,10 +11,10 @@ EXPECTED = {
     "architecture": "arm64",
     "image-logical-bytes": 8 * 1024 * 1024 * 1024,
     "image-sha256":
-        "a2da758ebe2b780a2a4b271d35747a3d7116ffb91677395484c1f8f0fccb32a5",
+        "e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c",
     "image-uuid": "4b7e4af2-25cd-4ae5-a14d-8f8628b88f5d",
     "metadata-inventory-sha256":
-        "f789df32c906a86ccebb7ac03340c757a766edb71fc99da4a4c73cbc1132cac6",
+        "4bb273ba4f81618fd8bcf99819770d633e11bddd43df704bea6a015b43cb5049",
     "node-sha256":
         "0294e8b915ab75f92c7513d2fcb830ae06e10684e6c603e99a87dbf8835389c1",
     "node-version": "22.23.1",
@@ -25,7 +25,7 @@ EXPECTED = {
     "source-date-epoch": 1735689600,
     "sparse-image-format": "android-sparse-v1",
     "sparse-image-sha256":
-        "febb51845e8becf078195c0c805c34df91dd7bc8e9f709ec595488691892dc63",
+        "6f45382bd8c1c383860c75e92c801864832c1be680fc6ab04c969f21c4dbddb6",
     "ubuntu-builder-image":
         "ubuntu@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b",
     "ubuntu-snapshot": "20260714T000000Z",

@@ -354,17 +354,19 @@ for all descriptors to close, and then removes only that member image.
 - Run consistency checking and deterministic recovery without parsing the
   mutable filesystem in the HyperBEAM process.
 
-### Phase 6: measurement after the design stabilizes
+### Phase 6: measurement audit after the design stabilizes
 
 Do not merge the current `agent/andock-measurement` projection: it names the
 old `android-app-broker@1` design.
 
-After the storage format and runtime are frozen, expose only verifier-relevant
-immutable facts: device version, architecture, syscall layer digest, filesystem
-engine/version, immutable template digest, provisioner revision, network policy,
-and resource policy. Existing APK/runtime/config commitments remain primary.
-Mutable member images, allocation state, and workspace contents remain outside
-the boot measurement.
+After the storage format and runtime are frozen, audit the existing aggregate
+commitments before adding another projection. For v1, the runtime-ZIP,
+native-library-set, APK-set, and effective-node-message facts already commit to
+the immutable execution implementation and selected policy, so no measurement
+or system-device change is required. Individual artifact and source revisions
+remain available in the packaged manifests for verifier policy. Mutable member
+images, allocation state, and workspace contents remain outside the boot
+measurement. See `decisions/andock-measurement.md`.
 
 ## Validation matrix
 

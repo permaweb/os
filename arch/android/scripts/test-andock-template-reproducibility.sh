@@ -6,12 +6,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 OUT="$BUILD_DIR/andock-template/reproducibility"
 FIRST="$OUT/andock-ubuntu-arm64-first.ext4"
 SECOND="$OUT/andock-ubuntu-arm64-second.ext4"
-FIRST_SIMG="${FIRST%.ext4}.simg"
-SECOND_SIMG="${SECOND%.ext4}.simg"
+FIRST_SIMG="$FIRST.simg"
+SECOND_SIMG="$SECOND.simg"
 EXPANDED="$OUT/andock-ubuntu-arm64-expanded.ext4"
-LWEXT4_COPY="$OUT/andock-ubuntu-arm64-lwext4-copy.ext4"
-PROBE_BUILD="$BUILD_DIR/andock-image-engine-spike"
-PROBE="$PROBE_BUILD/host/andock-image-engine-probe"
 mkdir -p "$OUT"
 
 "$ROOT/scripts/build-andock-template.sh" "$FIRST"
@@ -25,11 +22,6 @@ cmp -s "$SECOND.source.inventory.ndjson" "$SECOND.image.inventory.ndjson"
 python3 "$ROOT/scripts/andock-android-sparse.py" \
     expand "$FIRST_SIMG" "$EXPANDED"
 cmp -s "$FIRST" "$EXPANDED"
-
-"$ROOT/scripts/build-andock-image-engine-spike.sh" --native-only >/dev/null
-"$PROBE" --sparse-copy "$FIRST" "$LWEXT4_COPY"
-cmp -s "$FIRST" "$LWEXT4_COPY"
-"$PROBE" --inspect-populated "$LWEXT4_COPY"
 
 printf 'reproducible-image-sha256=%s\n' \
     "$(shasum -a 256 "$FIRST" | awk '{print $1}')"

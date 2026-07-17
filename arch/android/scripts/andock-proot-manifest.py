@@ -20,6 +20,7 @@ def inputs(root):
         root / "execution/termux-tar-wrapper",
         root / "execution/andock-proot-image.patch",
         root / "execution/lwext4-open-inode.patch",
+        root / "execution/lwext4-inode-times.patch",
         root / "execution/lwext4-atomic-replace.patch",
         root / "execution/lwext4-nondirectory-replace.patch",
         root / "execution/lwext4-sparse-read.patch",

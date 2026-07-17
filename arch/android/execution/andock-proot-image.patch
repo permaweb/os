@@ -276,14 +276,21 @@ index da9b888..24cfbe6 100644
  SYSNUM(connect)
  SYSNUM(copy_file_range)
  SYSNUM(creat)
-@@ -144,5 +145,6 @@ SYSNUM(io_getevents)
+@@ -73,5 +74,6 @@ SYSNUM(fchdir)
+ SYSNUM(fchmod)
+ SYSNUM(fchmodat)
++SYSNUM(fchmodat2)
+ SYSNUM(fchown)
+ SYSNUM(fchown32)
+ SYSNUM(fchownat)
+@@ -144,5 +146,6 @@ SYSNUM(io_getevents)
  SYSNUM(io_setup)
  SYSNUM(io_submit)
 +SYSNUM(io_uring_setup)
  SYSNUM(ioctl)
  SYSNUM(ioperm)
  SYSNUM(iopl)
-@@ -233,6 +235,7 @@ SYSNUM(perf_event_open)
+@@ -233,6 +236,7 @@ SYSNUM(perf_event_open)
  SYSNUM(personality)
  SYSNUM(pipe)
  SYSNUM(pipe2)
@@ -295,15 +302,11 @@ diff --git a/src/syscall/sysnums-arm64.h b/src/syscall/sysnums-arm64.h
 index 43e1f73..a4100aa 100644
 --- a/src/syscall/sysnums-arm64.h
 +++ b/src/syscall/sysnums-arm64.h
-@@ -278,7 +278,10 @@ const Sysnum sysnums_arm64[] = {
--	[ 289 ] = PR_pkey_alloc,
--	[ 290 ] = PR_pkey_free,
+@@ -280,5 +280,9 @@ const Sysnum sysnums_arm64[] = {
 -	[ 291 ] = PR_statx,
 -	[ 435 ] = PR_clone3,
 -	[ 437 ] = PR_openat2,
 -	[ 439 ] = PR_faccessat2,
-+	[ 289 ] = PR_pkey_alloc,
-+	[ 290 ] = PR_pkey_free,
 +	[ 291 ] = PR_statx,
 +	[ 425 ] = PR_io_uring_setup,
 +	[ 435 ] = PR_clone3,
@@ -311,4 +314,5 @@ index 43e1f73..a4100aa 100644
 +	[ 437 ] = PR_openat2,
 +	[ 438 ] = PR_pidfd_getfd,
 +	[ 439 ] = PR_faccessat2,
++	[ 452 ] = PR_fchmodat2,
  };

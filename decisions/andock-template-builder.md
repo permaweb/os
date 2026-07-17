@@ -68,17 +68,18 @@ again and byte-compares it with the raw ext4 image. Ubuntu's pinned
 Two clean pinned containers produced byte-identical artifacts:
 
 - raw ext4 SHA-256:
-  `a2da758ebe2b780a2a4b271d35747a3d7116ffb91677395484c1f8f0fccb32a5`
+  `e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c`
 - raw logical size: 8,589,934,592 bytes
-- raw allocated size: 840,925,184 bytes in the builder
+- raw allocated size: 893,861,888 bytes in the builder
 - Android sparse-image SHA-256:
-  `febb51845e8becf078195c0c805c34df91dd7bc8e9f709ec595488691892dc63`
-- Android sparse-image size: 840,455,684 bytes
+  `6f45382bd8c1c383860c75e92c801864832c1be680fc6ab04c969f21c4dbddb6`
+- Android sparse-image size: 893,384,196 bytes
 
-The source and mounted-image inventories were byte-identical. The pinned
-lwext4 probe then sparse-copied and reopened a disposable copy, enumerated
-26,938 entries, and read representative glibc, Python, Node.js, symlink,
-setuid, ownership, and xattr surfaces successfully.
+Both 26,960-entry source inventories were byte-identical to their mounted-image
+inventories. Expanding either Android sparse artifact reproduced the raw image
+byte for byte. Runtime compatibility is exercised separately by the native
+engine test and Android emulator workload gates, rather than by the retired
+development probe.
 
 The ignored evidence log is
 `arch/android/build/andock-template/reproducibility-gate-simg.txt`.

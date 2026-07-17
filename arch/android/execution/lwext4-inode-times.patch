@@ -1,0 +1,56 @@
+diff --git a/include/ext4.h b/include/ext4.h
+--- a/include/ext4.h
++++ b/include/ext4.h
+@@ -336,5 +336,17 @@ int ext4_fopen_inode(ext4_file *file, const char *mount_point,
+ 		uint32_t inode, int flags);
+ 
++/**@brief   Set timestamps on an existing inode.
++ *
++ * @param   mount_point Mounted filesystem path.
++ * @param   inode       Existing inode.
++ * @param   atime       Access timestamp.
++ * @param   mtime       Modification timestamp.
++ * @param   ctime       Inode-change timestamp.
++ *
++ * @return  Standard error code.*/
++int ext4_inode_times_set(const char *mount_point, uint32_t inode,
++		uint32_t atime, uint32_t mtime, uint32_t ctime);
++
+ /**@brief   File close function.
+  *
+  * @param   file File handle.
+diff --git a/src/ext4.c b/src/ext4.c
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -1628,6 +1628,31 @@ finish:
+ 	return r;
+ }
+ 
++int ext4_inode_times_set(const char *mount_point, uint32_t inode,
++		uint32_t atime, uint32_t mtime, uint32_t ctime)
++{
++	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
++	struct ext4_inode_ref ref;
++	int r;
++
++	if (!mp)
++		return ENOENT;
++
++	EXT4_MP_LOCK(mp);
++	r = ext4_fs_get_inode_ref(&mp->fs, inode, &ref);
++	if (r != EOK)
++		goto finish;
++	ext4_inode_set_access_time(ref.inode, atime);
++	ext4_inode_set_modif_time(ref.inode, mtime);
++	ext4_inode_set_change_inode_time(ref.inode, ctime);
++	ref.dirty = true;
++	r = ext4_fs_put_inode_ref(&ref);
++
++finish:
++	EXT4_MP_UNLOCK(mp);
++	return r;
++}
++
+ int ext4_fclose(ext4_file *file)
+ {
+ 	ext4_assert(file && file->mp);

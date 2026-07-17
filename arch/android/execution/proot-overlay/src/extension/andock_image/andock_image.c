@@ -40,6 +40,8 @@
 #define ANDOCK_MAX_PENDING_FDS 32
 #define ANDOCK_MAX_NETWORK_IO (64U * 1024U * 1024U)
 #define ANDOCK_MAX_NETWORK_IOVECS 1024U
+#define ANDOCK_MAX_FILE_IO 0x7ffff000U
+#define ANDOCK_FILE_IO_CHUNK (1024U * 1024U)
 
 #ifndef CLOSE_RANGE_UNSHARE
 #define CLOSE_RANGE_UNSHARE (1U << 1)
@@ -103,6 +105,9 @@ struct AndockResponse {
 	uint64_t inode;
 	uint64_t cache_id;
 	uint64_t token;
+	int64_t atime;
+	int64_t mtime;
+	int64_t ctime;
 	char *path;
 	uint8_t *data;
 	size_t data_size;
@@ -141,6 +146,7 @@ struct AndockOpenFile {
 	int fd;
 	int host_fd;
 	bool close_on_exec;
+	mode_t mode;
 	nlink_t nlink;
 	uint64_t inode;
 	uint64_t cache_id;
@@ -194,6 +200,8 @@ struct AndockNetworkTable {
 static bool image_active;
 static struct AndockFileLock *file_locks;
 static struct AndockRecordLock *record_locks;
+
+static void remove_open_file(Tracee *tracee, int fd);
 
 static void release_file_locks(struct AndockFileDescription *owner)
 {
@@ -282,8 +290,8 @@ enum AndockSocketState {
 };
 
 static void add_open_file(Tracee *tracee, int fd, int host_fd,
-	const char *path, uint64_t inode, uint64_t cache_id, nlink_t nlink,
-	bool is_directory, int flags);
+	const char *path, uint64_t inode, uint64_t cache_id, mode_t mode,
+	nlink_t nlink, bool is_directory, int flags);
 static void release_network_description(
 		struct AndockNetworkDescription *description);
 static int add_network_file(Tracee *tracee, int fd, bool close_on_exec,
@@ -314,13 +322,12 @@ struct AndockBrokerState {
 	nlink_t pending_nlink;
 	uint64_t pending_inode;
 	uint64_t pending_cache_id;
+	mode_t pending_mode;
 	bool pending_is_directory;
 	int pending_host_fd;
 	int pending_flags;
 	bool pending_dirty;
 	bool pending_cache_retained;
-	bool pending_offset_update;
-	off_t pending_offset;
 	bool transfer_pending;
 	bool transfer_update_input;
 	bool transfer_update_output;
@@ -374,6 +381,7 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_fcntl64, FILTER_SYSEXIT },
 	{ PR_fdatasync, FILTER_SYSEXIT },
 	{ PR_fallocate, FILTER_SYSEXIT },
+	{ PR_fchmodat2, 0 },
 	{ PR_flock, FILTER_SYSEXIT },
 	{ PR_fsync, FILTER_SYSEXIT },
 	{ PR_ftruncate, FILTER_SYSEXIT },
@@ -395,6 +403,8 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_pwritev2, FILTER_SYSEXIT },
 	{ PR_read, FILTER_SYSEXIT },
 	{ PR_readv, FILTER_SYSEXIT },
+	{ PR_recvfrom, FILTER_SYSEXIT },
+	{ PR_recvmsg, FILTER_SYSEXIT },
 	{ PR_sendfile, FILTER_SYSEXIT },
 	{ PR_sendfile64, FILTER_SYSEXIT },
 	{ PR_sendmmsg, FILTER_SYSEXIT },
@@ -501,6 +511,9 @@ static int broker_call(int operation, int flags, int mode,
 	response->inode = result.inode;
 	response->cache_id = result.cache_id;
 	response->token = result.token;
+	response->atime = result.atime;
+	response->mtime = result.mtime;
+	response->ctime = result.ctime;
 	response->path = result.path;
 	response->data = result.data;
 	response->data_size = result.data_size;
@@ -915,6 +928,19 @@ static void update_open_file_links(Tracee *tracee, const char *path,
 	}
 }
 
+static void update_open_file_modes(Tracee *tracee, uint64_t inode,
+		mode_t mode)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockOpenFile *file = state == NULL || state->files == NULL ?
+		NULL : state->files->open_files;
+	while (file != NULL) {
+		if (file->inode == inode)
+			file->mode = mode;
+		file = file->next;
+	}
+}
+
 static void update_open_file_paths(Tracee *tracee, const char *source,
 		const char *target)
 {
@@ -1034,6 +1060,9 @@ static bool safe_guest_fd(Tracee *tracee, int fd)
 
 static const char *synthetic_directory_path(const char *path)
 {
+	if (strcmp(path, "/proc") == 0
+	    || strcmp(path, "/proc/.") == 0)
+		return "/proc";
 	if (strcmp(path, "/dev/fd") == 0
 	    || strcmp(path, "/dev/fd/.") == 0)
 		return "/proc/self/fd";
@@ -1053,6 +1082,12 @@ static const char *synthetic_directory_path(const char *path)
 	    || strcmp(path, "/proc/thread-self/fd") == 0)
 		return path;
 	return NULL;
+}
+
+static bool synthetic_proc_path(const char *path)
+{
+	return path != NULL && (strcmp(path, "/proc") == 0
+		|| strncmp(path, "/proc/", strlen("/proc/")) == 0);
 }
 
 static int synthetic_relative_path(Tracee *tracee, int dir_fd,
@@ -1082,6 +1117,13 @@ static int synthetic_relative_path(Tracee *tracee, int dir_fd,
 	if (strcmp(path, ".") == 0) {
 		strcpy(result, base);
 		return 1;
+	}
+	if (strcmp(base, "/proc") == 0) {
+		if (strcmp(path, "self") != 0
+		    && strcmp(path, "thread-self") != 0)
+			return -EACCES;
+		status = join_paths(2, result, base, path);
+		return status < 0 ? status : 1;
 	}
 	if (strcmp(base, "/proc/self/fd") == 0
 	    || strcmp(base, "/proc/thread-self/fd") == 0) {
@@ -1143,6 +1185,12 @@ static int safe_host_kernel_path(Tracee *tracee, const char *path,
 		"/dev/null", "/dev/zero", "/dev/full", "/dev/random",
 		"/dev/urandom", "/dev/tty", "/dev/ptmx", NULL,
 	};
+	static const char *cpu_identity[] = {
+		"/sys/devices/system/cpu/possible",
+		"/sys/devices/system/cpu/present",
+		"/sys/devices/system/cpu/cpu0/regs/identification/midr_el1",
+		NULL,
+	};
 	int fd;
 	int index;
 	int length;
@@ -1155,6 +1203,12 @@ static int safe_host_kernel_path(Tracee *tracee, const char *path,
 	}
 	for (index = 0; devices[index] != NULL; index++) {
 		if (strcmp(path, devices[index]) == 0) {
+			strcpy(result, path);
+			return 1;
+		}
+	}
+	for (index = 0; cpu_identity[index] != NULL; index++) {
+		if (strcmp(path, cpu_identity[index]) == 0) {
 			strcpy(result, path);
 			return 1;
 		}
@@ -1843,10 +1897,11 @@ int andock_image_take_executable_path(Tracee *tracee, char result[PATH_MAX])
 }
 
 static int set_pending_open_file(Tracee *tracee, const char *path,
-		uint64_t inode, uint64_t cache_id, nlink_t nlink,
-		bool directory, int flags)
+		uint64_t inode, uint64_t cache_id, mode_t mode,
+		nlink_t nlink, bool directory, int flags)
 {
 	struct AndockBrokerState *state = broker_state(tracee);
+	int status;
 	if (state == NULL)
 		return -ENOTCONN;
 	release_pending_cache(state);
@@ -1854,9 +1909,18 @@ static int set_pending_open_file(Tracee *tracee, const char *path,
 	state->pending_path = talloc_strdup(state, path);
 	if (state->pending_path == NULL)
 		return -ENOMEM;
+	if (cache_id != 0) {
+		status = andock_image_engine_retain(cache_id);
+		if (status < 0) {
+			TALLOC_FREE(state->pending_path);
+			return status;
+		}
+		state->pending_cache_retained = true;
+	}
 	state->pending_nlink = nlink;
 	state->pending_inode = inode;
 	state->pending_cache_id = cache_id;
+	state->pending_mode = mode;
 	state->pending_is_directory = directory;
 	state->pending_flags = flags;
 	state->pending_dirty = false;
@@ -1884,7 +1948,8 @@ static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		return status;
 	if (resolved.type == ANDOCK_DIRECTORY) {
 		status = set_pending_open_file(
-			tracee, resolved.path, resolved.inode, 0, 2, true, flags);
+			tracee, resolved.path, resolved.inode, 0, resolved.mode,
+			2, true, flags);
 		free_response(&resolved, true);
 		if (status < 0)
 			return status;
@@ -1902,7 +1967,7 @@ static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		return -EIO;
 	}
 	status = set_pending_open_file(tracee, opened.path, opened.inode,
-		opened.cache_id, response_nlink(&opened), false, flags);
+		opened.cache_id, opened.mode, response_nlink(&opened), false, flags);
 	if (status < 0) {
 		free_response(&opened, true);
 		return status;
@@ -1990,7 +2055,7 @@ static int prepare_tracked_fd_reopen(Tracee *tracee, Reg path_reg,
 		if ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC) != 0)
 			return -EISDIR;
 		status = set_pending_open_file(tracee, source->path, source->inode,
-			source->cache_id, source->nlink, true, flags);
+			source->cache_id, source->mode, source->nlink, true, flags);
 		if (status < 0)
 			return status;
 		status = set_sysarg_path(tracee, target, path_reg);
@@ -2016,7 +2081,8 @@ static int prepare_tracked_fd_reopen(Tracee *tracee, Reg path_reg,
 		return status;
 	}
 	status = set_pending_open_file(tracee, source->path, source->inode,
-		source->cache_id, source->nlink, source->directory, flags);
+		source->cache_id, source->mode, source->nlink,
+		source->directory, flags);
 	if (status < 0) {
 		if (guest_backing_fd >= 0)
 			close(guest_backing_fd);
@@ -2024,14 +2090,6 @@ static int prepare_tracked_fd_reopen(Tracee *tracee, Reg path_reg,
 			close(host_backing_fd);
 		return status;
 	}
-	status = andock_image_engine_retain(source->cache_id);
-	if (status < 0) {
-		close(guest_backing_fd);
-		close(host_backing_fd);
-		TALLOC_FREE(state->pending_path);
-		return status;
-	}
-	state->pending_cache_retained = true;
 	if (state->pending_host_fd >= 0)
 		close(state->pending_host_fd);
 	state->pending_host_fd = host_backing_fd;
@@ -2139,7 +2197,8 @@ static int handle_open_enter(Extension *extension, Tracee *tracee, Sysnum sysnum
 		const char *synthetic = synthetic_directory_path(path);
 		if (synthetic != NULL) {
 			status = set_pending_open_file(
-				tracee, synthetic, 0, 0, 2, true, flags);
+				tracee, synthetic, 0, 0, S_IFDIR | 0555,
+				2, true, flags);
 			if (status < 0)
 				return status;
 			strcpy(target, "/system");
@@ -2172,8 +2231,13 @@ open_image:
 	if (brokered_fd >= 0) {
 		status = begin_fd_transfer(
 			tracee, state, brokered_fd, (flags & O_CLOEXEC) != 0);
-		if (status < 0)
+		if (status < 0) {
+			if (state->pending_host_fd >= 0)
+				close(state->pending_host_fd);
+			state->pending_host_fd = -1;
+			release_pending_cache(state);
 			TALLOC_FREE(state->pending_path);
+		}
 		return status;
 	}
 
@@ -3050,51 +3114,146 @@ static int handle_file_access(Tracee *tracee, Sysnum sysnum)
 		? -EBADF : 0;
 }
 
-static int handle_positioned_io(Tracee *tracee, Sysnum sysnum)
+static ssize_t transfer_sequential_buffer(Tracee *tracee,
+		struct AndockOpenFile *file, word_t address, size_t size,
+		off_t position, bool write)
 {
-	struct AndockBrokerState *state = broker_state(tracee);
+	uint8_t *buffer;
+	size_t transferred = 0;
+	size_t capacity;
+	int failure = 0;
+
+	if (size == 0)
+		return 0;
+	if (file->host_fd < 0)
+		return -EBADF;
+	capacity = size < ANDOCK_FILE_IO_CHUNK
+		? size : ANDOCK_FILE_IO_CHUNK;
+	buffer = malloc(capacity);
+	if (buffer == NULL)
+		return -ENOMEM;
+	while (transferred < size) {
+		size_t amount = size - transferred;
+		ssize_t result;
+		int status;
+		if (amount > capacity)
+			amount = capacity;
+		if (write) {
+			status = read_data(tracee, buffer, address + transferred, amount);
+			if (status < 0) {
+				if (transferred == 0)
+					failure = status;
+				break;
+			}
+			result = pwrite(file->host_fd, buffer, amount,
+				position + (off_t)transferred);
+		}
+		else {
+			result = pread(file->host_fd, buffer, amount,
+				position + (off_t)transferred);
+			if (result > 0) {
+				status = write_data(tracee, address + transferred,
+					buffer, (size_t)result);
+				if (status < 0) {
+					if (transferred == 0)
+						failure = status;
+					break;
+				}
+			}
+		}
+		if (result < 0) {
+			if (transferred == 0)
+				failure = -errno;
+			break;
+		}
+		if (result == 0)
+			break;
+		transferred += (size_t)result;
+		if ((size_t)result < amount)
+			break;
+	}
+	free(buffer);
+	return failure != 0 ? failure : (ssize_t)transferred;
+}
+
+static int handle_sequential_io(Tracee *tracee, Sysnum sysnum)
+{
 	struct AndockOpenFile *file;
-	Sysnum positioned;
-	uint64_t offset;
-	int fd;
+	struct iovec *vectors = NULL;
+	ssize_t result;
+	size_t transferred = 0;
+	bool write;
+	int count;
 
 	if (sysnum != PR_read && sysnum != PR_write &&
 		sysnum != PR_readv && sysnum != PR_writev)
 		return 0;
-	fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
-	file = find_open_file(tracee, fd);
-	if (state == NULL || file == NULL || file->directory ||
-		file->description == NULL)
+	file = find_open_file(
+		tracee, (int)peek_reg(tracee, CURRENT, SYSARG_1));
+	if (file == NULL || file->directory || file->description == NULL)
 		return 0;
-	if ((sysnum == PR_read || sysnum == PR_readv) && !file_readable(file))
+	write = sysnum == PR_write || sysnum == PR_writev;
+	if ((write && !file_writable(file)) || (!write && !file_readable(file)))
 		return -EBADF;
-	if ((sysnum == PR_write || sysnum == PR_writev) && !file_writable(file))
-		return -EBADF;
-	offset = (uint64_t)file->description->offset;
-	if ((sysnum == PR_write || sysnum == PR_writev) &&
-		(file->description->flags & O_APPEND) != 0) {
-		struct stat metadata;
-		if (file->host_fd < 0 || fstat(file->host_fd, &metadata) < 0)
-			return -errno;
-		offset = (uint64_t)metadata.st_size;
-	}
-	positioned = sysnum == PR_read ? PR_pread64
-		: sysnum == PR_write ? PR_pwrite64
-		: sysnum == PR_readv ? PR_preadv : PR_pwritev;
-	set_sysnum(tracee, positioned);
-	if (sysnum == PR_readv || sysnum == PR_writev) {
-		poke_reg(tracee, SYSARG_4, (word_t)(uint32_t)offset);
-		poke_reg(tracee, SYSARG_5, (word_t)(uint32_t)(offset >> 32));
-		poke_reg(tracee, SYSARG_6, 0);
+
+	if (sysnum == PR_read || sysnum == PR_write) {
+		size_t size = (size_t)peek_reg(tracee, CURRENT, SYSARG_3);
+		if (size > ANDOCK_MAX_FILE_IO)
+			size = ANDOCK_MAX_FILE_IO;
+		result = transfer_sequential_buffer(tracee, file,
+			peek_reg(tracee, CURRENT, SYSARG_2), size,
+			file->description->offset, write);
+		if (result < 0)
+			return (int)result;
+		transferred = (size_t)result;
 	}
 	else {
-		poke_reg(tracee, SYSARG_4, (word_t)offset);
-		poke_reg(tracee, SYSARG_5, 0);
-		poke_reg(tracee, SYSARG_6, 0);
+		long maximum = sysconf(_SC_IOV_MAX);
+		count = (int)peek_reg(tracee, CURRENT, SYSARG_3);
+		if (count < 0 || (maximum > 0 && count > maximum))
+			return -EINVAL;
+		if (count != 0) {
+			if ((size_t)count > SIZE_MAX / sizeof(*vectors))
+				return -EINVAL;
+			vectors = malloc((size_t)count * sizeof(*vectors));
+			if (vectors == NULL)
+				return -ENOMEM;
+			int status = read_data(tracee, vectors,
+				peek_reg(tracee, CURRENT, SYSARG_2),
+				(size_t)count * sizeof(*vectors));
+			if (status < 0) {
+				free(vectors);
+				return status;
+			}
+		}
+		for (int index = 0;
+			index < count && transferred < ANDOCK_MAX_FILE_IO; index++) {
+			size_t size = vectors[index].iov_len;
+			size_t remaining = ANDOCK_MAX_FILE_IO - transferred;
+			if (size > remaining)
+				size = remaining;
+			result = transfer_sequential_buffer(tracee, file,
+				(word_t)vectors[index].iov_base, size,
+				file->description->offset + (off_t)transferred, write);
+			if (result < 0) {
+				if (transferred == 0) {
+					free(vectors);
+					return (int)result;
+				}
+				break;
+			}
+			transferred += (size_t)result;
+			if ((size_t)result < size)
+				break;
+		}
+		free(vectors);
 	}
-	state->pending_offset_update = true;
-	state->pending_offset = (off_t)offset;
-	return 1;
+	if (transferred > 0) {
+		file->description->offset += (off_t)transferred;
+		if (write)
+			andock_image_engine_mark_dirty(file->cache_id);
+	}
+	return void_result(tracee, (int64_t)transferred);
 }
 
 static int append_loaded_buffer(Tracee *tracee,
@@ -3309,25 +3468,28 @@ static int handle_file_transfer(Tracee *tracee, Sysnum sysnum)
 	return 1;
 }
 
-static int flush_open_file(struct AndockOpenFile *file)
+static int sync_open_file(struct AndockOpenFile *file, bool durable)
 {
 	if (file == NULL || file->cache_id == 0)
 		return 0;
-	return andock_image_engine_sync(file->cache_id);
+	return durable ? andock_image_engine_sync(file->cache_id)
+		: andock_image_engine_writeback(file->cache_id);
 }
 
 static int handle_file_sync(Tracee *tracee, Sysnum sysnum)
 {
 	if (sysnum != PR_fsync && sysnum != PR_fdatasync && sysnum != PR_close)
 		return 0;
-	struct AndockOpenFile *file = find_open_file(
-		tracee, (int)peek_reg(tracee, CURRENT, SYSARG_1));
-	if (file == NULL)
-		return 0;
-	int status = flush_open_file(file);
+	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	struct AndockOpenFile *file = find_open_file(tracee, fd);
+	int status = sync_open_file(file, sysnum != PR_close);
 	if (status < 0)
 		return status;
-	return sysnum == PR_close ? 0 : void_result(tracee, 0);
+	if (sysnum != PR_close)
+		return file == NULL ? 0 : void_result(tracee, 0);
+	remove_open_file(tracee, fd);
+	remove_network_file(tracee, fd);
+	return 0;
 }
 
 static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
@@ -3362,10 +3524,17 @@ static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 		int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
 		if (file != NULL && file->host_fd >= 0 &&
 			(protection & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0)
-			andock_image_engine_mark_dirty(file->cache_id);
+			andock_image_engine_mark_mapped(file->cache_id);
 		return 0;
 	}
 	case PR_msync:
+	{
+		int status = andock_image_engine_sync_all();
+		if (status == 0
+		    && ((int)peek_reg(tracee, CURRENT, SYSARG_3) & MS_SYNC) != 0)
+			status = andock_image_engine_flush();
+		return status;
+	}
 	case PR_munmap:
 		return andock_image_engine_sync_all();
 	default:
@@ -3400,12 +3569,29 @@ static int handle_statfs(Tracee *tracee, Sysnum sysnum)
 		strcpy(guest, file->path);
 	}
 	else {
+		const char *synthetic;
 		status = get_sysarg_path(tracee, path, SYSARG_1);
 		if (status < 0)
 			return status;
-		status = guest_path(tracee, guest, AT_FDCWD, path);
-		if (status < 0)
-			return status;
+		synthetic = synthetic_directory_path(path);
+		if (synthetic != NULL)
+			strcpy(guest, synthetic);
+		else {
+			status = guest_path(tracee, guest, AT_FDCWD, path);
+			if (status < 0)
+				return status;
+		}
+	}
+	if (strcmp(guest, "/proc") == 0
+	    || strncmp(guest, "/proc/", strlen("/proc/")) == 0) {
+		output.f_type = 0x9fa0; /* Linux procfs magic. */
+		output.f_bsize = 4096;
+		output.f_frsize = 4096;
+		output.f_namelen = 255;
+		status = write_data(tracee,
+			peek_reg(tracee, CURRENT, SYSARG_2), &output,
+			sizeof(output));
+		return status < 0 ? status : void_result(tracee, 0);
 	}
 	status = broker_call(ANDOCK_STATFS, 0, 0, guest, NULL,
 		NULL, 0, &response);
@@ -3876,6 +4062,8 @@ static int handle_fchmod(Tracee *tracee, Sysnum sysnum)
 	status = broker_call(ANDOCK_CHMOD, 0,
 		(int) peek_reg(tracee, CURRENT, SYSARG_2),
 		file->path, NULL, NULL, 0, &response);
+	if (status >= 0)
+		update_open_file_modes(tracee, response.inode, response.mode);
 	free_response(&response, true);
 	return status < 0 ? status : void_result(tracee, 0);
 }
@@ -3909,6 +4097,10 @@ static int resolve_stat_path(Tracee *tracee, struct AndockResponse *response,
 		return status;
 	if (status > 0) {
 		strcpy(path, target);
+		dir_fd = AT_FDCWD;
+	}
+	if (strcmp(path, "/proc/..") == 0) {
+		strcpy(path, "/");
 		dir_fd = AT_FDCWD;
 	}
 	if (path[0] == '/' && andock_image_is_kernel_path(path)) {
@@ -4024,9 +4216,25 @@ static int handle_path_stat(Tracee *tracee, Sysnum sysnum)
 		if (file->host_fd >= 0) {
 			if (fstat(file->host_fd, &output) < 0)
 				return -errno;
+			if (file->cache_id != 0) {
+				int64_t atime;
+				int64_t mtime;
+				int64_t ctime;
+				status = andock_image_engine_timestamps(
+					file->cache_id, &atime, &mtime, &ctime);
+				if (status < 0)
+					return status;
+				output.st_atim.tv_sec = atime;
+				output.st_atim.tv_nsec = 0;
+				output.st_mtim.tv_sec = mtime;
+				output.st_mtim.tv_nsec = 0;
+				output.st_ctim.tv_sec = ctime;
+				output.st_ctim.tv_nsec = 0;
+			}
 			output.st_dev = 1;
 			output.st_ino = file->inode;
 			output.st_nlink = file->nlink;
+			output.st_mode = file->mode;
 			output.st_uid = 0;
 			output.st_gid = 0;
 			status = write_data(tracee,
@@ -4066,7 +4274,7 @@ static int handle_path_stat(Tracee *tracee, Sysnum sysnum)
 		free_response(&response, true);
 		return status;
 	}
-	output.st_dev = 1;
+	output.st_dev = synthetic_proc_path(response.path) ? 2 : 1;
 	if (response.inode != 0)
 		output.st_ino = response.inode;
 	else if (response.fd < 0)
@@ -4078,6 +4286,9 @@ static int handle_path_stat(Tracee *tracee, Sysnum sysnum)
 	output.st_size = response.size;
 	output.st_blksize = 4096;
 	output.st_blocks = (response.size + 511) / 512;
+	output.st_atim.tv_sec = response.atime;
+	output.st_mtim.tv_sec = response.mtime;
+	output.st_ctim.tv_sec = response.ctime;
 	status = write_data(tracee,
 		peek_reg(tracee, CURRENT, output_reg), &output, sizeof(output));
 	free_response(&response, true);
@@ -4111,14 +4322,14 @@ static int handle_path_statx(Tracee *tracee, Sysnum sysnum)
 	output.stx_mode = response.mode;
 	output.stx_size = response.size;
 	output.stx_blocks = (response.size + 511) / 512;
-	output.stx_dev_minor = 1;
-	output.stx_atime.tv_sec = metadata.st_atim.tv_sec;
+	output.stx_dev_minor = synthetic_proc_path(response.path) ? 2 : 1;
+	output.stx_atime.tv_sec = response.atime;
 	output.stx_atime.tv_nsec = metadata.st_atim.tv_nsec;
-	output.stx_btime.tv_sec = metadata.st_ctim.tv_sec;
+	output.stx_btime.tv_sec = response.ctime;
 	output.stx_btime.tv_nsec = metadata.st_ctim.tv_nsec;
-	output.stx_ctime.tv_sec = metadata.st_ctim.tv_sec;
+	output.stx_ctime.tv_sec = response.ctime;
 	output.stx_ctime.tv_nsec = metadata.st_ctim.tv_nsec;
-	output.stx_mtime.tv_sec = metadata.st_mtim.tv_sec;
+	output.stx_mtime.tv_sec = response.mtime;
 	output.stx_mtime.tv_nsec = metadata.st_mtim.tv_nsec;
 	status = write_data(tracee,
 		peek_reg(tracee, CURRENT, SYSARG_5), &output, sizeof(output));
@@ -4263,6 +4474,8 @@ static int mutation_path(Tracee *tracee, int operation, int dir_fd, Reg path_reg
 	if (status < 0)
 		return status;
 	status = broker_call(operation, flags, mode, guest, second, NULL, 0, &response);
+	if (status >= 0 && operation == ANDOCK_CHMOD)
+		update_open_file_modes(tracee, response.inode, response.mode);
 	free_response(&response, true);
 	return status < 0 ? status : void_result(tracee, 0);
 }
@@ -4422,7 +4635,19 @@ static int emit_proc_directory(Tracee *tracee,
 		directory->description->offset, "..", ANDOCK_DIRECTORY);
 	if (status < 0)
 		goto done;
-	if (strcmp(directory->path, "/proc/self") == 0
+	if (strcmp(directory->path, "/proc") == 0) {
+		static const char *root_entries[] = {
+			"self", "thread-self", NULL,
+		};
+		for (index = 0; root_entries[index] != NULL; index++) {
+			status = emit_synthetic_entry(output, output_size, used,
+				&logical, directory->description->offset,
+				root_entries[index], ANDOCK_DIRECTORY);
+			if (status < 0)
+				goto done;
+		}
+	}
+	else if (strcmp(directory->path, "/proc/self") == 0
 	    || strcmp(directory->path, "/proc/thread-self") == 0) {
 		for (index = 0; self_entries[index] != NULL; index++) {
 			status = emit_synthetic_entry(output, output_size, used,
@@ -4639,7 +4864,8 @@ static int handle_socket_chain(Tracee *tracee, struct AndockBrokerState *state)
 			state->pending_host_fd = -1;
 			add_open_file(tracee, (int) received_fd, host_fd,
 				state->pending_path, state->pending_inode,
-				state->pending_cache_id, state->pending_nlink,
+				state->pending_cache_id, state->pending_mode,
+				state->pending_nlink,
 				state->pending_is_directory, state->pending_flags);
 			release_pending_cache(state);
 			TALLOC_FREE(state->pending_path);
@@ -4775,10 +5001,10 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 	status = handle_append_io(tracee, sysnum);
 	if (status != 0)
 		return status;
-	status = track_file_mutation(tracee, sysnum);
+	status = handle_sequential_io(tracee, sysnum);
 	if (status != 0)
 		return status;
-	status = handle_positioned_io(tracee, sysnum);
+	status = track_file_mutation(tracee, sysnum);
 	if (status != 0)
 		return status;
 	status = handle_unix_socket_enter(tracee, state, sysnum);
@@ -4860,6 +5086,41 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 		return mutation_path(tracee, ANDOCK_CHMOD,
 			(int) peek_reg(tracee, CURRENT, SYSARG_1), SYSARG_2,
 			0, (int) peek_reg(tracee, CURRENT, SYSARG_3), NULL);
+	case PR_fchmodat2:
+	{
+		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_4);
+		if ((flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) != 0)
+			return -EINVAL;
+		if ((flags & AT_EMPTY_PATH) != 0) {
+			char path[PATH_MAX];
+			int status = get_sysarg_path(tracee, path, SYSARG_2);
+			if (status < 0)
+				return status;
+			if (path[0] == '\0') {
+				struct AndockOpenFile *file = find_open_file(tracee,
+					(int) peek_reg(tracee, CURRENT, SYSARG_1));
+				struct AndockResponse response = {
+					.fd = -1,
+					.backing_fd = -1,
+				};
+				if (file == NULL)
+					return 0;
+				status = broker_call(ANDOCK_CHMOD,
+					flags & AT_SYMLINK_NOFOLLOW,
+					(int) peek_reg(tracee, CURRENT, SYSARG_3),
+					file->path, NULL, NULL, 0, &response);
+				if (status >= 0)
+					update_open_file_modes(
+						tracee, response.inode, response.mode);
+				free_response(&response, true);
+				return status < 0 ? status : void_result(tracee, 0);
+			}
+		}
+		return mutation_path(tracee, ANDOCK_CHMOD,
+			(int) peek_reg(tracee, CURRENT, SYSARG_1), SYSARG_2,
+			flags & AT_SYMLINK_NOFOLLOW,
+			(int) peek_reg(tracee, CURRENT, SYSARG_3), NULL);
+	}
 	case PR_truncate:
 	case PR_truncate64:
 		return handle_truncate(tracee, SYSARG_1, SYSARG_2);
@@ -4970,7 +5231,7 @@ static struct AndockFileDescription *acquire_file_description(
 }
 
 static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
-		const char *path, uint64_t inode, uint64_t cache_id,
+		const char *path, uint64_t inode, uint64_t cache_id, mode_t mode,
 		off_t offset, int flags, nlink_t nlink, bool is_directory,
 		struct AndockFileDescription *shared_description)
 {
@@ -5009,6 +5270,7 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 		existing->description = description;
 		existing->inode = inode;
 		existing->cache_id = cache_id;
+		existing->mode = mode;
 		existing->nlink = nlink;
 		existing->directory = is_directory;
 		if (old_cache_id != cache_id) {
@@ -5032,6 +5294,7 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 	file->description = description;
 	file->inode = inode;
 	file->cache_id = cache_id;
+	file->mode = mode;
 	file->nlink = nlink;
 	file->directory = is_directory;
 	talloc_set_destructor(file, close_open_file);
@@ -5047,11 +5310,11 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 }
 
 static void add_open_file(Tracee *tracee, int fd, int host_fd,
-		const char *path, uint64_t inode, uint64_t cache_id, nlink_t nlink,
-		bool is_directory, int flags)
+		const char *path, uint64_t inode, uint64_t cache_id, mode_t mode,
+		nlink_t nlink, bool is_directory, int flags)
 {
 	add_open_file_at_offset(
-		tracee, fd, host_fd, path, inode, cache_id, 0, flags,
+		tracee, fd, host_fd, path, inode, cache_id, mode, 0, flags,
 		nlink, is_directory, NULL);
 }
 
@@ -5147,16 +5410,6 @@ static int handle_exit(Tracee *tracee)
 		else
 			cancel_pending_unix_bind(state);
 	}
-	if (state != NULL && state->pending_offset_update) {
-		if (syscall_result > 0) {
-			struct AndockOpenFile *file = find_open_file(
-				tracee, (int)peek_reg(tracee, ORIGINAL, SYSARG_1));
-			if (file != NULL && file->description != NULL)
-				file->description->offset =
-					state->pending_offset + (off_t)syscall_result;
-		}
-		state->pending_offset_update = false;
-	}
 	if (state != NULL && state->transfer_pending) {
 		if (syscall_result > 0) {
 			struct AndockOpenFile *input = find_open_file(
@@ -5213,7 +5466,7 @@ static int handle_exit(Tracee *tracee)
 			add_open_file(tracee, result, state->pending_host_fd,
 				state->pending_path,
 				state->pending_inode, state->pending_cache_id,
-				state->pending_nlink,
+				state->pending_mode, state->pending_nlink,
 				state->pending_is_directory, state->pending_flags);
 		}
 		else if (state->pending_host_fd >= 0)
@@ -5283,16 +5536,12 @@ static int handle_exit(Tracee *tracee)
 				source->host_fd >= 0
 					? fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
 				source->path, source->inode, source->cache_id,
-				0, file_close_on_exec ? O_CLOEXEC : 0, source->nlink,
+				source->mode, 0, file_close_on_exec ? O_CLOEXEC : 0,
+				source->nlink,
 				source->directory, source->description);
 		if (network_source != NULL)
 			add_network_file(tracee, result, network_close_on_exec,
 				network_source->description, false);
-	}
-	if (sysnum == PR_close && result == 0) {
-		remove_open_file(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
-		remove_network_file(tracee,
-			(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
 	}
 	if (sysnum == PR_close_range && result == 0) {
 		unsigned int first =
@@ -5323,7 +5572,7 @@ static void inherit_open_files(Tracee *child, const Tracee *parent)
 		add_open_file_at_offset(child, file->fd,
 			file->host_fd >= 0
 				? fcntl(file->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
-			file->path, file->inode, file->cache_id, 0,
+			file->path, file->inode, file->cache_id, file->mode, 0,
 			file->close_on_exec ? O_CLOEXEC : 0,
 			file->nlink, file->directory, file->description);
 		file = file->next;
@@ -5348,7 +5597,7 @@ static int unshare_open_files_for_exec(Tracee *tracee)
 		add_open_file_at_offset(tracee, file->fd,
 			file->host_fd >= 0
 				? fcntl(file->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
-			file->path, file->inode, file->cache_id, 0,
+			file->path, file->inode, file->cache_id, file->mode, 0,
 			file->close_on_exec ? O_CLOEXEC : 0,
 			file->nlink, file->directory, file->description);
 		if (find_open_file(tracee, file->fd) == NULL) {

@@ -1,89 +1,66 @@
 # Andock measurement boundary
 
-Status: accepted design; exact artifact values follow the frozen production
-build.
+Status: accepted; no measurement-device change is required for Andock v1.
 
 ## Decision
 
-Do not change `~measurement@1.0` or the Android `~andee@1.0` evidence protocol
-for Andock. The existing measurement body already commits to both:
+Do not change `~measurement@1.0`, `~andee@1.0`, or `~system@1.0` for Andock.
+The existing measurement body already commits to both relevant inputs:
 
-1. `~system@1.0/all`, including Android/APK/runtime artifact identity; and
-2. `~meta@1.0/info`, including the effective node message.
+1. `~system@1.0/all` commits to the installed APK set, signing certificate,
+   runtime ZIP, native launcher, and native-library set; and
+2. `~meta@1.0/info` commits to the effective node message, including the
+   operator-selected execution device and its policy.
 
-Andock adds verifier-readable facts beneath the Android system report. It does
-not add another measurement engine, another subject calculation, or a special
-Ouroboros attestation path.
+The deterministic ext4 template and its manifest are entries in the measured
+runtime ZIP. PRoot, its loader, and the Andock launcher are entries in the
+measured native-library set. Their pinned source revisions and individual
+digests remain in the packaged build manifests. Adding a second projection of
+the same facts to the measurement device would duplicate the trust decision
+without strengthening the cryptographic commitment.
 
-## Immutable facts
+The parked `agent/andock-measurement` branch must not be merged. It describes
+the obsolete app-broker prototype and adds an Andock-specific measurement
+surface where none is needed.
 
-The final `~system@1.0/all` runtime report must expose one `execution` map with
-at least:
+## Mutable state
 
-- device and protocol version (`andock@1.0`);
-- Android ABI (`arm64-v8a`);
-- PRoot source revision, patch-set revision, and packaged binary digest;
-- filesystem engine name, source revision, patch-set revision, and packaged
-  binary digest;
-- immutable filesystem-template digest and logical size;
-- Ubuntu snapshot, provisioner revision/digest, package-lock digest, and
-  installed-package manifest digest;
-- isolated-UID/SELinux policy version;
-- network capability policy version; and
-- default capacity/concurrency policy where it changes the trusted runtime.
+Per-member images are created outside the immutable runtime tree. Package
+installs, workspace files, sparse allocation state, active worker IDs,
+temporary memfds, and command output therefore do not enter the boot
+measurement. This is intentional: ordinary member work must survive restart
+without changing the immutable runtime identity.
 
-These values originate in the Android packaging/runtime manifest, enter
-HyperBEAM through reserved `ANDEE_*` environment facts, and cannot be
-overridden by imported node configuration. Wire-visible digests are
-base64url-encoded bytes rather than new hexadecimal identifiers.
+## Verification consequences
 
-The selected execution device and operator-selected resource/network policy
-remain ordinary effective node-message fields. `~meta@1.0/info` already places
-them in the measured body; AndEE must not special-case or duplicate them.
+An external policy can enforce Andock by checking the cryptographically
+verified aggregate artifact facts and the measured effective node message. It
+may additionally parse the packaged manifests when it needs the individual
+PRoot, loader, launcher, template, Ubuntu snapshot, or provisioning revision.
+That parser is verifier policy, not another AO device or subject algorithm.
 
-## Existing aggregate commitments
+The complete measurement-body ID is not expected to be stable across app
+restarts: AndEE currently reports a generation timestamp and creates an
+ephemeral node identity. Tests compare the immutable system-artifact projection
+and the intended effective-config projection instead.
 
-The filesystem template and native execution libraries are packaged as
-immutable APK/runtime assets. The existing runtime ZIP, native-library set,
-base APK, APK set, and Android signing-certificate facts therefore remain the
-primary byte-level commitments. Explicit execution facts make verifier policy
-readable; they do not replace or weaken those aggregate hashes.
-
-Startup verifies every explicit digest against the packaged asset before the
-execution service becomes available. A changed engine, PRoot build, template,
-or immutable manifest must either produce a different measurement body or fail
-startup.
-
-## Explicit exclusions
-
-Do not measure:
-
-- per-member filesystem images;
-- sparse allocation state or physical block count;
-- installed packages or files added by a member;
-- active worker PIDs/isolated UIDs;
-- command output, temporary memfds, or lifecycle generation; or
-- mutable workspace indexes.
-
-Those are runtime state. Measuring them would make ordinary member work alter
-the boot subject and destroy restart comparability.
-
-## Branch consequence
-
-`agent/andock-measurement` at `9ff70109` must not be merged. It describes the
-parked `android-app-broker@1` prototype and changes the wrong layer. The final
-measurement component is limited to reserved Android bootstrap facts,
-`dev_system` reporting/tests, verifier expectations, and specification text
-after the production artifact manifest is frozen.
+`RuntimeExtractor` verifies the template while expanding a newly installed
+runtime and records the runtime marker. A subsequent launch trusts that cached
+private extraction when the marker still matches. A debugger or rooted actor
+with the application UID can therefore mutate the cached expanded image after
+installation without changing the packaged runtime-ZIP digest. That actor is
+outside the ordinary unrooted-phone threat boundary; the isolated Andock guest
+cannot reach the cached template or application-private tree. Rehashing the
+logical 8 GiB template at every launch would add material startup cost and is
+not part of v1.
 
 ## Acceptance
 
-- Unchanged APK/runtime/config produces the same boot subject.
-- Changing the selected execution device or measured policy changes the node
-  portion of the subject.
 - Changing any packaged execution binary, template, or immutable manifest
-  changes the system portion or fails startup.
-- An external verifier rejects an unexpected device, engine, template digest,
-  or network policy.
-- Writes and package installs inside a member image do not change the boot
-  subject.
+  changes an existing APK/runtime aggregate or fails fresh extraction.
+- Changing the selected execution device or its measured node policy changes
+  the effective-config projection.
+- Member writes and package installs leave the immutable artifact projection
+  unchanged.
+- The Andock worker cannot read or modify the runtime ZIP, cached template,
+  effective config, wallet, crypto socket, or another member image.

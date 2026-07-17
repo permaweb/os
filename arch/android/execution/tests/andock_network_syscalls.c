@@ -1080,8 +1080,13 @@ int main(int argc, char **argv)
 	require(syscall(SYS_pidfd_getfd, -1, replacement, 0) < 0
 		&& errno == EPERM, "pidfd_getfd not denied");
 	errno = 0;
-	require(syscall(SYS_io_uring_setup, 1, NULL) < 0 && errno == EPERM,
-		"io_uring_setup not denied");
+	require(syscall(SYS_io_uring_setup, 1, NULL) < 0,
+		"io_uring_setup unexpectedly succeeded");
+	/* Android's inherited app seccomp filter can reject io_uring before
+	 * PRoot's later filter observes it.  Both outcomes make the escape
+	 * surface unavailable; Andock itself returns EPERM when it is reached. */
+	require(errno == EPERM || errno == ENOSYS,
+		"io_uring_setup wrong errno");
 
 	struct sockaddr_in connected = ipv4("1.1.1.1", 443);
 	require(connect(replacement, (struct sockaddr *) &connected,

@@ -11,7 +11,8 @@ export DEBIAN_FRONTEND=noninteractive
 export PIP_BREAK_SYSTEM_PACKAGES=1
 
 snapshot="https://snapshot.ubuntu.com/ubuntu/$ANDEE_UBUNTU_SNAPSHOT"
-cat >/etc/apt/sources.list.d/ubuntu.sources <<EOF
+rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources
+cat >/etc/apt/sources.list.d/ubuntu-snapshot.sources <<EOF
 Types: deb
 URIs: $snapshot
 Suites: noble noble-updates noble-backports noble-security
@@ -73,8 +74,9 @@ cat >/etc/apt/apt.conf.d/99andock <<'EOF'
 APT::Sandbox::User "root";
 EOF
 
-# Runtime package installs use normal Ubuntu repositories. Only the immutable
-# image build is pinned to the snapshot above.
+# Keep the signed snapshot source and its index so a fresh member can install
+# packages immediately. Normal Ubuntu repositories are also configured for an
+# agent that explicitly refreshes APT state after the measured image was built.
 cat >/etc/apt/sources.list.d/ubuntu.sources <<'EOF'
 Types: deb
 URIs: https://ports.ubuntu.com/ubuntu-ports/
@@ -100,7 +102,6 @@ chmod 1777 /tmp /var/tmp
 dpkg-query -W > /tmp/andock-packages.txt
 LC_ALL=C sort -o /tmp/andock-packages.txt /tmp/andock-packages.txt
 apt-get clean
-rm -rf /var/lib/apt/lists/*
 rm -rf /tmp/node-compile-cache /var/log/apt/*
 rm -f \
     /run/systemd/container \

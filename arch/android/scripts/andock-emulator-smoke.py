@@ -66,6 +66,76 @@ def main():
         require(b"/root\nuid=0(root)" in environment_output, environment_output)
         require(b"Python 3.12" in environment_output, environment_output)
         require(b"v22." in environment_output, environment_output)
+
+        independent_offsets = exec_command(
+            client,
+            member,
+            "python3 - <<'PY'\n"
+            "path = '/root/independent-offsets'\n"
+            "open(path, 'wb').write(b'abcdef')\n"
+            "with open(path, 'rb') as first, open(path, 'rb') as second:\n"
+            "    first.seek(3)\n"
+            "    assert second.tell() == 0\n"
+            "    assert first.read(1) == b'd'\n"
+            "    assert second.read(1) == b'a'\n"
+            "PY",
+        )
+        require(
+            independent_offsets["body"]["exit-code"] == 0,
+            decode_output(independent_offsets),
+        )
+        shared_offset = exec_command(
+            client,
+            member,
+            "python3 - <<'PY'\n"
+            "import concurrent.futures\n"
+            "import os\n"
+            "path = '/root/shared-offset'\n"
+            "expected = [f'{index:063x}\\n'.encode() for index in range(4096)]\n"
+            "open(path, 'wb').write(b''.join(expected))\n"
+            "descriptor = os.open(path, os.O_RDONLY)\n"
+            "def drain():\n"
+            "    records = []\n"
+            "    while True:\n"
+            "        record = os.read(descriptor, 64)\n"
+            "        if not record:\n"
+            "            return records\n"
+            "        assert len(record) == 64\n"
+            "        records.append(record)\n"
+            "with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:\n"
+            "    records = sum((task.result() for task in "
+            "[pool.submit(drain) for _ in range(8)]), [])\n"
+            "os.close(descriptor)\n"
+            "assert sorted(records) == expected\n"
+            "PY",
+        )
+        require(
+            shared_offset["body"]["exit-code"] == 0,
+            decode_output(shared_offset),
+        )
+        concurrent_directories = exec_command(
+            client,
+            member,
+            "python3 - <<'PY'\n"
+            "import concurrent.futures\n"
+            "import os\n"
+            "path = '/root/concurrent-directories'\n"
+            "os.makedirs(path, exist_ok=True)\n"
+            "expected = {f'entry-{index:03d}' for index in range(64)}\n"
+            "for name in expected:\n"
+            "    open(os.path.join(path, name), 'wb').close()\n"
+            "def scan(_):\n"
+            "    for _ in range(200):\n"
+            "        assert set(os.listdir(path)) == expected\n"
+            "with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:\n"
+            "    list(pool.map(scan, range(8)))\n"
+            "PY",
+            timeout=120_000,
+        )
+        require(
+            concurrent_directories["body"]["exit-code"] == 0,
+            decode_output(concurrent_directories),
+        )
         missing_path = client.request("read", member, path="/root/missing")
         require(missing_path.get("status") == 404, missing_path)
         directory_read = client.request("read", member, path="/root")
@@ -115,6 +185,50 @@ def main():
         require(timed["body"]["timed-out"] is True, timed)
         require(timed["body"]["exit-code"] == 124, timed)
 
+        archive = exec_command(
+            client,
+            member,
+            "set -eu; rm -rf /root/tar-source /root/tar-target "
+            "/root/tar-test.tar; mkdir /root/tar-source; "
+            "printf archive >/root/tar-source/file; "
+            "chmod 0640 /root/tar-source/file; "
+            "chmod 0751 /root/tar-source; "
+            "touch -d @1700000000 /root/tar-source/file /root/tar-source; "
+            "tar -C /root -cf /root/tar-test.tar tar-source; "
+            "mkdir /root/tar-target; "
+            "tar -C /root/tar-target -xf /root/tar-test.tar; "
+            "test \"$(stat -c %a /root/tar-target/tar-source)\" = 751; "
+            "test \"$(stat -c %a /root/tar-target/tar-source/file)\" = 640; "
+            "test \"$(stat -c %Y /root/tar-target/tar-source/file)\" "
+            "= 1700000000; "
+            "test \"$(cat /root/tar-target/tar-source/file)\" = archive",
+        )
+        require(archive["body"]["exit-code"] == 0, archive)
+
+        fchmodat2 = exec_command(
+            client,
+            member,
+            "python3 - <<'PY'\n"
+            "import ctypes\n"
+            "import os\n"
+            "path = b'/root/fchmodat2-file'\n"
+            "open(path, 'wb').close()\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "AT_FDCWD = -100\n"
+            "AT_EMPTY_PATH = 0x1000\n"
+            "assert libc.syscall(452, AT_FDCWD, path, 0o640, "
+            "AT_EMPTY_PATH) == 0, ctypes.get_errno()\n"
+            "descriptor = os.open(path, os.O_RDONLY)\n"
+            "try:\n"
+            "    assert libc.syscall(452, descriptor, b'', 0o600, "
+            "AT_EMPTY_PATH) == 0, ctypes.get_errno()\n"
+            "finally:\n"
+            "    os.close(descriptor)\n"
+            "assert os.stat(path).st_mode & 0o7777 == 0o600\n"
+            "PY",
+        )
+        require(fchmodat2["body"]["exit-code"] == 0, fchmodat2)
+
         result = {}
 
         def run_cancellable():
@@ -150,6 +264,9 @@ def main():
         isolation = exec_command(
             client,
             member,
+            "test -d /proc; "
+            "mountpoint -q /proc; "
+            "test \"$(stat -f -c %t /proc)\" = 9fa0; "
             "test \"$(readlink /proc/self/root)\" = /; "
             "test \"$(readlink /proc/self/cwd)\" = /root; "
             "test \"$(readlink /proc/self/exe)\" = /usr/bin/bash; "
@@ -186,7 +303,7 @@ def main():
         )
         require(destroyed.get("status") == 404, destroyed)
     finally:
-        for cleanup in (member, sibling, cancellable, "smoke-ready"):
+        for cleanup in (member, sibling, cancellable):
             try:
                 client.request("destroy", cleanup)
             except Exception:

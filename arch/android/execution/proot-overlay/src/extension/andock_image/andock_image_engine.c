@@ -24,6 +24,7 @@
 #include <ext4.h>
 #include <ext4_blockdev.h>
 #include <ext4_errno.h>
+#include <ext4_fs.h>
 #include <ext4_inode.h>
 #include <ext4_types.h>
 
@@ -35,6 +36,7 @@
 #define ANDOCK_IMAGE_MAX_SYMLINKS 40
 #define ANDOCK_IMAGE_IO_BYTES (1024U * 1024U)
 #define ANDOCK_IMAGE_MAX_XATTR_BYTES (1024U * 1024U)
+#define ANDOCK_IMAGE_DIRECTORY_CACHE_SIZE 256U
 
 #ifndef MFD_EXEC
 #define MFD_EXEC 0x0010U
@@ -63,7 +65,12 @@ struct cached_inode {
 	uint64_t cache_id;
 	int memory_fd;
 	unsigned int references;
+	int64_t atime;
+	int64_t mtime;
+	int64_t ctime;
 	bool dirty;
+	bool shared_mapped;
+	bool timestamps_explicit;
 	bool unlinked;
 	struct cached_inode *next;
 };
@@ -80,6 +87,57 @@ static struct socket_reservation *socket_reservations;
 static uint64_t materialization_count;
 static uint64_t next_cache_id;
 static uint64_t next_socket_token;
+
+struct raw_lookup {
+	char path[PATH_MAX];
+	struct ext4_inode inode;
+	uint32_t inode_number;
+	uint32_t mode;
+	bool valid;
+};
+
+static struct raw_lookup latest_lookup;
+static bool reuse_latest_lookup;
+
+struct cached_directory {
+	char path[PATH_MAX];
+	uint64_t generation;
+};
+
+static struct cached_directory directory_cache[ANDOCK_IMAGE_DIRECTORY_CACHE_SIZE];
+static unsigned int next_directory_cache;
+static uint64_t directory_cache_generation = 1;
+
+static void clear_directory_cache(void)
+{
+	if (directory_cache_generation == UINT64_MAX) {
+		memset(directory_cache, 0, sizeof(directory_cache));
+		directory_cache_generation = 1;
+	} else
+		directory_cache_generation++;
+	next_directory_cache = 0;
+}
+
+static bool cached_directory(const char *path)
+{
+	unsigned int index;
+	for (index = 0; index < ANDOCK_IMAGE_DIRECTORY_CACHE_SIZE; index++) {
+		if (directory_cache[index].generation == directory_cache_generation
+		    && strcmp(directory_cache[index].path, path) == 0)
+			return true;
+	}
+	return false;
+}
+
+static void cache_directory(const char *path)
+{
+	struct cached_directory *entry =
+		&directory_cache[next_directory_cache];
+	strcpy(entry->path, path);
+	entry->generation = directory_cache_generation;
+	next_directory_cache = (next_directory_cache + 1)
+		% ANDOCK_IMAGE_DIRECTORY_CACHE_SIZE;
+}
 
 static bool path_at_or_below(const char *path, const char *parent)
 {
@@ -387,6 +445,8 @@ int andock_image_engine_start(int image_fd)
 	materialization_count = 0;
 	next_cache_id = 0;
 	next_socket_token = 0;
+	latest_lookup.valid = false;
+	clear_directory_cache();
 	member_image_fd = fcntl(image_fd, F_DUPFD_CLOEXEC, 0);
 	if (member_image_fd < 0)
 		return -errno;
@@ -475,27 +535,58 @@ static int path_push(char path[PATH_MAX], const char *component, size_t length)
 	return 0;
 }
 
-static int raw_type(const char *guest, int *type)
+static int raw_inode(const char *guest, struct raw_lookup **lookup)
 {
+	if (reuse_latest_lookup && latest_lookup.valid
+	    && strcmp(latest_lookup.path, guest) == 0) {
+		*lookup = &latest_lookup;
+		return 0;
+	}
 	char path[PATH_MAX];
 	int status = mount_path(guest, path);
 	if (status < 0)
 		return status;
-	if (ext4_inode_exist(path, EXT4_DE_SYMLINK) == EOK)
-		*type = ANDOCK_IMAGE_SYMLINK;
-	else if (ext4_inode_exist(path, EXT4_DE_DIR) == EOK)
+	int ext4_result = ext4_raw_inode_fill(path, &latest_lookup.inode_number,
+		&latest_lookup.inode);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	if (member_image.fs == NULL)
+		return -EIO;
+	latest_lookup.mode = ext4_inode_get_mode(
+		&member_image.fs->sb, &latest_lookup.inode);
+	strcpy(latest_lookup.path, guest);
+	latest_lookup.valid = true;
+	*lookup = &latest_lookup;
+	return 0;
+}
+
+static int raw_type(const char *guest, int *type)
+{
+	if (cached_directory(guest)) {
 		*type = ANDOCK_IMAGE_DIRECTORY;
-	else if (ext4_inode_exist(path, EXT4_DE_REG_FILE) == EOK)
+		return 0;
+	}
+	struct raw_lookup *lookup;
+	int status = raw_inode(guest, &lookup);
+	if (status < 0)
+		return status;
+	switch (lookup->mode & EXT4_INODE_MODE_TYPE_MASK) {
+	case EXT4_INODE_MODE_SOFTLINK:
+		*type = ANDOCK_IMAGE_SYMLINK;
+		break;
+	case EXT4_INODE_MODE_DIRECTORY:
+		*type = ANDOCK_IMAGE_DIRECTORY;
+		cache_directory(guest);
+		break;
+	case EXT4_INODE_MODE_FILE:
 		*type = ANDOCK_IMAGE_FILE;
-	else {
-		struct ext4_inode inode;
-		if (ext4_raw_inode_fill(path, NULL, &inode) != EOK)
-			return -ENOENT;
-		uint32_t mode = 0;
-		if (ext4_mode_get(path, &mode) != EOK)
-			return -EIO;
-		*type = (mode & S_IFMT) == S_IFSOCK
-			? ANDOCK_IMAGE_SOCKET : ANDOCK_IMAGE_OTHER;
+		break;
+	case EXT4_INODE_MODE_SOCKET:
+		*type = ANDOCK_IMAGE_SOCKET;
+		break;
+	default:
+		*type = ANDOCK_IMAGE_OTHER;
+		break;
 	}
 	return 0;
 }
@@ -638,15 +729,11 @@ static int result_data(struct andock_image_result *result,
 static int metadata(const char *guest, int type,
 		struct andock_image_result *result)
 {
-	char path[PATH_MAX];
-	int status = mount_path(guest, path);
+	struct raw_lookup *lookup;
+	int status = raw_inode(guest, &lookup);
 	if (status < 0)
 		return status;
-
-	uint32_t mode = 0;
-	int ext4_result = ext4_mode_get(path, &mode);
-	if (ext4_result != EOK)
-		return -ext4_result;
+	uint32_t mode = lookup->mode;
 	result->type = type;
 	result->mode = mode;
 	switch (type) {
@@ -667,27 +754,27 @@ static int metadata(const char *guest, int type,
 		break;
 	}
 
-	struct ext4_inode inode;
-	uint32_t inode_number = 0;
-	ext4_result = ext4_raw_inode_fill(path, &inode_number, &inode);
-	if (ext4_result != EOK)
-		return -ext4_result;
-	result->inode = inode_number;
-	result->links = ext4_inode_get_links_cnt(&inode);
+	result->inode = lookup->inode_number;
+	result->links = ext4_inode_get_links_cnt(&lookup->inode);
+	result->atime = ext4_inode_get_access_time(&lookup->inode);
+	result->mtime = ext4_inode_get_modif_time(&lookup->inode);
+	result->ctime = ext4_inode_get_change_inode_time(&lookup->inode);
 	if (type == ANDOCK_IMAGE_FILE) {
-		ext4_file file;
-		ext4_result = ext4_fopen(&file, path, "r");
-		if (ext4_result != EOK)
-			return -ext4_result;
-		result->size = ext4_fsize(&file);
-		ext4_fclose(&file);
+		struct cached_inode *cached = find_cached_inode(lookup->inode_number);
+		if (cached != NULL) {
+			struct stat status;
+			if (fstat(cached->memory_fd, &status) != 0)
+				return -errno;
+			result->size = status.st_size;
+			result->atime = cached->atime;
+			result->mtime = cached->mtime;
+			result->ctime = cached->ctime;
+		} else
+			result->size = ext4_inode_get_size(
+				&member_image.fs->sb, &lookup->inode);
 	} else if (type == ANDOCK_IMAGE_SYMLINK) {
-		char link[PATH_MAX];
-		size_t length = 0;
-		ext4_result = ext4_readlink(path, link, sizeof(link), &length);
-		if (ext4_result != EOK)
-			return -ext4_result;
-		result->size = length;
+		result->size = ext4_inode_get_size(
+			&member_image.fs->sb, &lookup->inode);
 	}
 	return result_path(result, guest);
 }
@@ -774,6 +861,12 @@ static int load_cached_inode(const char *guest,
 	}
 	free(buffer);
 	ext4_fclose(&file);
+	/*
+	 * Android's isolated_app domain deliberately denies setattr on executable
+	 * MFD_EXEC files.  The memfd is only an execution and I/O carrier; guest
+	 * metadata remains authoritative in ext4 and is reported by the PRoot
+	 * extension rather than being copied onto this host object.
+	 */
 	if (status < 0) {
 		close(memory_fd);
 		return status;
@@ -791,6 +884,9 @@ static int load_cached_inode(const char *guest,
 	}
 	cached->cache_id = ++next_cache_id;
 	cached->memory_fd = memory_fd;
+	cached->atime = result->atime;
+	cached->mtime = result->mtime;
+	cached->ctime = result->ctime;
 	cached->next = inode_cache;
 	inode_cache = cached;
 	materialization_count++;
@@ -851,8 +947,18 @@ static int resolve_operation(int flags, const char *path,
 	if ((flags & ANDOCK_IMAGE_EXECUTABLE) != 0 &&
 		(type != ANDOCK_IMAGE_FILE || (result->mode & 0111) == 0))
 		return -EACCES;
-	if (type == ANDOCK_IMAGE_FILE)
+	if (type == ANDOCK_IMAGE_FILE
+	    && (flags & ANDOCK_IMAGE_EXECUTABLE) != 0) {
 		status = materialize(resolved, O_RDONLY | O_CLOEXEC, false, result);
+		if (status == 0) {
+			struct cached_inode *cached = find_cached_id(result->cache_id);
+			if (cached != NULL && cached->references == 0
+			    && !cached->dirty && !cached->shared_mapped) {
+				remove_cached_inode(cached);
+				result->cache_id = 0;
+			}
+		}
+	}
 	else if (type == ANDOCK_IMAGE_SYMLINK) {
 		char link[PATH_MAX];
 		status = raw_readlink(resolved, link);
@@ -916,6 +1022,18 @@ static int open_operation(int flags, mode_t mode, const char *path,
 	return materialize(resolved, flags, true, result);
 }
 
+static int refresh_cached_timestamps(struct cached_inode *cached)
+{
+	struct stat status;
+	if (fstat(cached->memory_fd, &status) != 0)
+		return -errno;
+	cached->atime = status.st_atim.tv_sec;
+	cached->mtime = status.st_mtim.tv_sec;
+	cached->ctime = status.st_ctim.tv_sec;
+	cached->timestamps_explicit = false;
+	return 0;
+}
+
 static int writeback_cached_inode(struct cached_inode *cached)
 {
 	if (member_image_fd < 0 || cached == NULL)
@@ -958,8 +1076,15 @@ static int writeback_cached_inode(struct cached_inode *cached)
 	}
 	free(buffer);
 	ext4_fclose(&file);
-	if (result == 0)
-		result = andock_image_engine_flush();
+	if (result == 0) {
+		ext4_result = ext4_inode_times_set(
+			ANDOCK_IMAGE_MOUNT, (uint32_t)cached->inode,
+			(uint32_t)cached->atime,
+			(uint32_t)cached->mtime,
+			(uint32_t)cached->ctime);
+		if (ext4_result != EOK)
+			result = -ext4_result;
+	}
 	return result;
 }
 
@@ -981,7 +1106,35 @@ int andock_image_engine_mark_dirty(uint64_t cache_id)
 	struct cached_inode *cached = find_cached_id(cache_id);
 	if (cached == NULL)
 		return -ENOENT;
+	int status = refresh_cached_timestamps(cached);
+	if (status < 0)
+		return status;
 	cached->dirty = true;
+	return 0;
+}
+
+int andock_image_engine_mark_mapped(uint64_t cache_id)
+{
+	struct cached_inode *cached = find_cached_id(cache_id);
+	if (cached == NULL)
+		return -ENOENT;
+	int status = refresh_cached_timestamps(cached);
+	if (status < 0)
+		return status;
+	cached->dirty = true;
+	cached->shared_mapped = true;
+	return 0;
+}
+
+int andock_image_engine_timestamps(uint64_t cache_id,
+		int64_t *atime, int64_t *mtime, int64_t *ctime)
+{
+	struct cached_inode *cached = find_cached_id(cache_id);
+	if (cached == NULL || atime == NULL || mtime == NULL || ctime == NULL)
+		return -EINVAL;
+	*atime = cached->atime;
+	*mtime = cached->mtime;
+	*ctime = cached->ctime;
 	return 0;
 }
 
@@ -999,9 +1152,15 @@ static int sync_cached_inode(struct cached_inode *cached)
 	return status;
 }
 
-int andock_image_engine_sync(uint64_t cache_id)
+int andock_image_engine_writeback(uint64_t cache_id)
 {
 	return sync_cached_inode(find_cached_id(cache_id));
+}
+
+int andock_image_engine_sync(uint64_t cache_id)
+{
+	int status = andock_image_engine_writeback(cache_id);
+	return status < 0 ? status : andock_image_engine_flush();
 }
 
 int andock_image_engine_release(uint64_t cache_id)
@@ -1017,7 +1176,14 @@ int andock_image_engine_release(uint64_t cache_id)
 	if (cached->references != 0)
 		return 0;
 	int status = sync_cached_inode(cached);
-	if (status == 0 && cached->unlinked)
+	/*
+	 * The cache owns one memfd per materialized inode.  Keeping every clean,
+	 * closed file resident eventually exhausts the isolated process fd limit
+	 * during normal package and archive workloads.  A writable shared mapping
+	 * is the only object that can still change the memfd after the last open
+	 * description has gone away, so only those entries must remain resident.
+	 */
+	if (status == 0 && (cached->unlinked || !cached->shared_mapped))
 		remove_cached_inode(cached);
 	return status;
 }
@@ -1027,6 +1193,14 @@ int andock_image_engine_sync_all(void)
 	int first_error = 0;
 	struct cached_inode *cached = inode_cache;
 	while (cached != NULL) {
+		if (cached->shared_mapped) {
+			if (!cached->timestamps_explicit) {
+				int status = refresh_cached_timestamps(cached);
+				if (status < 0 && first_error == 0)
+					first_error = status;
+			}
+			cached->dirty = true;
+		}
 		int status = sync_cached_inode(cached);
 		if (status < 0 && first_error == 0)
 			first_error = status;
@@ -1449,14 +1623,19 @@ static int symlink_operation(const char *target, const char *link_path,
 	return metadata(resolved, ANDOCK_IMAGE_SYMLINK, result);
 }
 
-static int chmod_operation(mode_t mode, const char *path,
+static int chmod_operation(int flags, mode_t mode, const char *path,
 		struct andock_image_result *result)
 {
+	if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0)
+		return -EINVAL;
 	char resolved[PATH_MAX];
 	int type;
-	int status = resolve_guest(path, true, false, resolved, &type);
+	int status = resolve_guest(path,
+		(flags & AT_SYMLINK_NOFOLLOW) == 0, false, resolved, &type);
 	if (status < 0)
 		return status;
+	if (type == ANDOCK_IMAGE_SYMLINK)
+		return -EOPNOTSUPP;
 	char image_path_buffer[PATH_MAX];
 	status = mount_path(resolved, image_path_buffer);
 	if (status < 0)
@@ -1464,7 +1643,10 @@ static int chmod_operation(mode_t mode, const char *path,
 	int ext4_result = ext4_mode_set(image_path_buffer, mode & 07777);
 	if (ext4_result != EOK)
 		return -ext4_result;
-	return metadata(resolved, type, result);
+	status = metadata(resolved, type, result);
+	if (status < 0)
+		return status;
+	return 0;
 }
 
 static int truncate_operation(const char *path, const void *data,
@@ -1572,7 +1754,24 @@ static int utimens_operation(int flags, const char *path, const void *data,
 	}
 	if (ext4_result != EOK)
 		return -ext4_result;
-	return metadata(resolved, type, result);
+	status = metadata(resolved, type, result);
+	if (status < 0)
+		return status;
+	struct cached_inode *cached = find_cached_inode(result->inode);
+	if (cached != NULL) {
+		if (values[1] != utime_omit)
+			cached->atime = values[1] == utime_now ? (int64_t)now
+				: (int64_t)values[0];
+		if (values[3] != utime_omit)
+			cached->mtime = values[3] == utime_now ? (int64_t)now
+				: (int64_t)values[2];
+		cached->ctime = now;
+		cached->timestamps_explicit = true;
+		result->atime = cached->atime;
+		result->mtime = cached->mtime;
+		result->ctime = cached->ctime;
+	}
+	return 0;
 }
 
 static int link_operation(int flags, const char *source, const char *target,
@@ -1762,6 +1961,10 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 	if (member_image_fd < 0 || result == NULL)
 		return -ENODEV;
 	result_init(result);
+	latest_lookup.valid = false;
+	reuse_latest_lookup = operation == ANDOCK_IMAGE_RESOLVE;
+	if (operation != ANDOCK_IMAGE_RESOLVE)
+		clear_directory_cache();
 	int status;
 	switch (operation) {
 	case ANDOCK_IMAGE_RESOLVE:
@@ -1789,7 +1992,7 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 		status = symlink_operation(second_path, path, result);
 		break;
 	case ANDOCK_IMAGE_CHMOD:
-		status = chmod_operation(mode, path, result);
+		status = chmod_operation(flags, mode, path, result);
 		break;
 	case ANDOCK_IMAGE_TRUNCATE:
 		status = truncate_operation(path, data, data_size, result);
@@ -1829,6 +2032,8 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 		status = -ENOSYS;
 		break;
 	}
+	if (operation != ANDOCK_IMAGE_RESOLVE)
+		clear_directory_cache();
 	if (status < 0)
 		andock_image_result_release(result);
 	return status;

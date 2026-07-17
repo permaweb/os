@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define _FILE_OFFSET_BITS 64
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -100,6 +101,32 @@ static void expect_size(int fd, off_t expected)
 	}
 }
 
+static void expect_metadata_times(const char *path)
+{
+	struct andock_image_result metadata = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		path, NULL);
+	if (metadata.mtime == 0 || metadata.atime == 0) {
+		fprintf(stderr, "missing virtual timestamps: %lld/%lld\n",
+			(long long)metadata.atime, (long long)metadata.mtime);
+		exit(1);
+	}
+	andock_image_result_release(&metadata);
+}
+
+static void expect_metadata_mtime(const char *path, time_t expected)
+{
+	struct andock_image_result metadata = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		path, NULL);
+	if (metadata.mtime != expected) {
+		fprintf(stderr, "persisted mtime mismatch: expected %lld, got %lld\n",
+			(long long)expected, (long long)metadata.mtime);
+		exit(1);
+	}
+	andock_image_result_release(&metadata);
+}
+
 static void expect_fill(int fd, off_t offset, size_t size, unsigned char byte)
 {
 	unsigned char buffer[4096];
@@ -119,6 +146,18 @@ static void expect_fill(int fd, off_t offset, size_t size, unsigned char byte)
 		offset += (off_t)wanted;
 		size -= wanted;
 	}
+}
+
+static int open_fd_count(void)
+{
+	DIR *directory = opendir("/proc/self/fd");
+	if (directory == NULL)
+		fail("opendir-fds", -errno);
+	int count = 0;
+	while (readdir(directory) != NULL)
+		count++;
+	closedir(directory);
+	return count;
 }
 
 static void verify_sparse_fixtures(void)
@@ -178,6 +217,81 @@ int main(int argc, char **argv)
 	struct andock_image_result directory = call(
 		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work", NULL);
 	andock_image_result_release(&directory);
+	struct andock_image_result metadata = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/sparse-full", NULL);
+	if (metadata.guest_fd >= 0 || metadata.cache_id != 0
+	    || andock_image_engine_materializations() != materializations) {
+		fprintf(stderr, "metadata resolution materialized file contents\n");
+		return 1;
+	}
+	andock_image_result_release(&metadata);
+	expect_metadata_times("/sparse-full");
+	directory = call(
+		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work/cache-eviction", NULL);
+	andock_image_result_release(&directory);
+	struct andock_image_result mode_file = open_file(
+		"/work/cache-eviction/mode", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
+		0600);
+	track(&mode_file);
+	if ((mode_file.mode & 07777) != 0600) {
+		fprintf(stderr, "created file mode mismatch\n");
+		return 1;
+	}
+	int64_t cached_atime;
+	int64_t cached_mtime;
+	int64_t cached_ctime;
+	if (andock_image_engine_timestamps(mode_file.cache_id,
+			&cached_atime, &cached_mtime, &cached_ctime) < 0
+	    || cached_atime != mode_file.atime
+	    || cached_mtime != mode_file.mtime
+	    || cached_ctime != mode_file.ctime) {
+		fprintf(stderr, "cached file timestamps mismatch\n");
+		return 1;
+	}
+	struct andock_image_result changed_mode = call(
+		ANDOCK_IMAGE_CHMOD, 0, 0644, "/work/cache-eviction/mode", NULL);
+	if ((changed_mode.mode & 07777) != 0644) {
+		fprintf(stderr, "changed file mode mismatch\n");
+		return 1;
+	}
+	andock_image_result_release(&changed_mode);
+	expect_status("non-executable-resolution",
+		raw_call(ANDOCK_IMAGE_RESOLVE,
+			ANDOCK_IMAGE_DEREFERENCE_FINAL | ANDOCK_IMAGE_EXECUTABLE,
+			"/work/cache-eviction/mode", NULL), -EACCES);
+	close_tracked(&mode_file);
+	struct andock_image_result executable = open_file(
+		"/work/cache-eviction/executable",
+		O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0755);
+	track(&executable);
+	close_tracked(&executable);
+	struct andock_image_result executable_resolution = call(
+		ANDOCK_IMAGE_RESOLVE,
+		ANDOCK_IMAGE_DEREFERENCE_FINAL | ANDOCK_IMAGE_EXECUTABLE,
+		0, "/work/cache-eviction/executable", NULL);
+	if ((executable_resolution.mode & 07777) != 0755
+	    || executable_resolution.guest_fd < 0) {
+		fprintf(stderr, "executable resolution metadata mismatch\n");
+		return 1;
+	}
+	andock_image_result_release(&executable_resolution);
+	int baseline_fds = open_fd_count();
+	for (int index = 0; index < 512; index++) {
+		char path[64];
+		snprintf(path, sizeof(path), "/work/cache-eviction/%03d", index);
+		struct andock_image_result transient = open_file(
+			path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+		track(&transient);
+		write_at(transient.guest_fd, 0, "transient");
+		if (andock_image_engine_mark_dirty(transient.cache_id) < 0)
+			fail("cache-eviction-dirty", -EIO);
+		close_tracked(&transient);
+	}
+	if (open_fd_count() != baseline_fds) {
+		fprintf(stderr, "closed inode cache retained file descriptors\n");
+		return 1;
+	}
 	directory = call(
 		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work/non-empty", NULL);
 	andock_image_result_release(&directory);
@@ -419,8 +533,46 @@ int main(int argc, char **argv)
 	if (andock_image_engine_mark_dirty(second.cache_id) < 0 ||
 		andock_image_engine_sync(second.cache_id) < 0)
 		fail("rename-sync", -EIO);
+	struct stat moved_status;
+	if (fstat(second.guest_fd, &moved_status) != 0)
+		fail("moved-fstat", -errno);
+	time_t moved_mtime = moved_status.st_mtime;
 	close_tracked(&second);
 	close_tracked(&first);
+
+	struct andock_image_result mapped = open_file(
+		"/work/mapped-after-close",
+		O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0755);
+	track(&mapped);
+	if (ftruncate(mapped.guest_fd, 4096) != 0)
+		fail("mapped-truncate", -errno);
+	write_at(mapped.guest_fd, 0, "before42");
+	if (andock_image_engine_mark_dirty(mapped.cache_id) < 0
+	    || andock_image_engine_sync(mapped.cache_id) < 0)
+		fail("mapped-initial-sync", -EIO);
+	mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+		MAP_SHARED, mapped.guest_fd, 0);
+	if (mapping == MAP_FAILED)
+		fail("mapped-after-close-mmap", -errno);
+	uint64_t mapped_cache_id = mapped.cache_id;
+	if (andock_image_engine_mark_mapped(mapped_cache_id) < 0)
+		fail("mapped-after-close-track", -EIO);
+	close_tracked(&mapped);
+	memcpy(mapping, "MAPPED42", 8);
+	if (msync(mapping, 4096, MS_SYNC) != 0)
+		fail("mapped-after-close-msync", -errno);
+	if (andock_image_engine_sync_all() < 0)
+		fail("mapped-after-close-sync", -EIO);
+	struct andock_image_result mapped_executable = call(
+		ANDOCK_IMAGE_RESOLVE,
+		ANDOCK_IMAGE_DEREFERENCE_FINAL | ANDOCK_IMAGE_EXECUTABLE,
+		0, "/work/mapped-after-close", NULL);
+	andock_image_result_release(&mapped_executable);
+	memcpy(mapping, "RETAIN42", 8);
+	if (msync(mapping, 4096, MS_SYNC) != 0
+	    || andock_image_engine_sync_all() < 0)
+		fail("mapped-after-executable-sync", -EIO);
+	munmap(mapping, 4096);
 	if (andock_image_engine_stop() < 0)
 		fail("stop", -EIO);
 
@@ -429,6 +581,12 @@ int main(int argc, char **argv)
 		fail("restart", -errno);
 	close(image_fd);
 	verify_sparse_fixtures();
+	expect_metadata_times("/sparse-full");
+	expect_metadata_mtime("/work/moved", moved_mtime);
+	struct andock_image_result mapped_persisted = open_file(
+		"/work/mapped-after-close", O_RDONLY | O_CLOEXEC, 0);
+	expect_bytes(mapped_persisted.guest_fd, 0, "RETAIN42");
+	andock_image_result_release(&mapped_persisted);
 	expect_status("old-link-missing",
 		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
 			"/work/alpha.link", NULL), -ENOENT);

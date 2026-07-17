@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import shlex
 import struct
 import subprocess
 import time
@@ -22,6 +23,11 @@ class Client:
             check=True,
             capture_output=True,
             timeout=timeout,
+        )
+
+    def shell_command(self, command, timeout=60):
+        return self.adb_command(
+            "shell", "sh", "-c", shlex.quote(command), timeout=timeout,
         )
 
     def request(self, action, member, **fields):
@@ -65,13 +71,10 @@ class Client:
         while time.monotonic() < deadline:
             try:
                 response = self.request(
-                    "exec",
-                    "smoke-ready",
-                    cwd="/root",
-                    command="printf ready",
-                    **{"timeout-ms": 10_000, "allow-network": False},
+                    "probe",
+                    "probe",
                 )
-                if response.get("status") == 200:
+                if response.get("status") == 404:
                     return
             except Exception as failure:
                 last_error = failure

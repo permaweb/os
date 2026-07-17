@@ -2,6 +2,96 @@
 
 Updated: 2026-07-17 America/New_York
 
+## Latest release checkpoint
+
+Active work is isolated in
+`/Users/sam/.codex/worktrees/lapee-andock-arm64-release` on
+`agent/andock-arm64-release`; the shared `/Users/sam/src/lapee` checkout is not
+used. The committed tip is `c88ac011a8233e9aa13bef11b4a384a6f310412d`.
+No branch has been pushed or merged to `main`.
+
+The ARM64 image-backed runtime is now the only active Andock design. Each
+Android isolated worker receives one complete writable sparse ext4 member
+image. PRoot supplies Linux path and syscall compatibility over the in-process
+lwext4 engine; no host directory, application-private root, configuration,
+wallet, crypto socket, or other member image is exposed. The current emulator
+APK runs on the owned API 36 ARM64 `emulator-5562` and includes pinned
+HyperBEAM `fcdf5867686c64a8abe79e04e10f3590fbd62b7f`.
+
+## 2026-07-17 halt checkpoint
+
+Work stopped at the user's request after the laptop connection failed. The
+retained `andock-final-workloads` member was destroyed; no further integration
+or network-dependent validation was attempted.
+
+The following release failures are fixed and revalidated: seccomp activation,
+cached-inode lifetime during concurrent FD transfer, descriptor exhaustion
+across large file sets, executable mappings, virtual mode/time metadata,
+`fchmodat2`, durable close/fsync/munmap semantics, Unix datagram address
+detranslation under seccomp, and host ADB shell quoting. The guest-close path
+now writes dirty memfd data back to ext4 without forcing a whole-image host
+`fsync`; explicit guest sync operations and orderly engine shutdown retain the
+durability boundary. An abrupt Android force-stop persistence regression is
+green.
+
+The deterministic template gate is green. The final image identities are:
+
+- raw image: `e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c`;
+- sparse image: `6f45382bd8c1c383860c75e92c801864832c1be680fc6ab04c969f21c4dbddb6`;
+- metadata inventory:
+  `4bb273ba4f81618fd8bcf99819770d633e11bddd43df704bea6a015b43cb5049`;
+- inventory entries: 26,960; and
+- allocated raw/sparse bytes: 893,861,888 / 893,384,196.
+
+Independent rebuilds produced byte-identical raw images, sparse images,
+manifests, and inventories. The final clean-installed emulator artifacts are:
+
+- debug APK: `6239db5448fcb6484c8cc1989472d5f4668da98e07446726c36d5d96bd4476b8`;
+- runtime ZIP: `b279b1b3c9621df09441f75dbd1b25be3897df28f1f3aebbf789f3dd94ec9aa3`;
+- native Andock/PRoot:
+  `d99d1b17e331a9f7e16896700c83aa74bc968d02c771d46775f9969acc03c66a`.
+
+Final-source gates completed before the halt:
+
+- host image-engine suite: passed;
+- `make -C arch/android android-build`: passed;
+- clean-install `ANDOCK_EMULATOR_SMOKE_OK`: passed on owned ARM64 API 36
+  `emulator-5562`;
+- alternating GCC/G++ loader regression: 20 consecutive cycles passed;
+- compiled Unix/network boundary and Linux file-syscall probes: passed; and
+- deterministic template reproducibility and manifest validation: passed.
+
+The first final-candidate workload reached and passed APT/toolchains, system
+and venv pip, native Python wheels, Node/node-gyp, 10,000-file creation and
+traversal, Git, SQLite/archives, IPC/mmap, Unix sockets, file syscalls, the
+network boundary, CPU-only PyTorch, and Transformers. CPU-only PyTorch install
+took 86.497 seconds after the durable-close fix, versus 101.511 seconds before
+it. Transformers took 69.629 seconds. The exact warm ML composite stabilized
+at 16.6--16.9 seconds; its components were PyTorch import 4.861 seconds, pip
+metadata 2.253 seconds, complete site-packages size traversal 10.079 seconds,
+and file count 7.367 seconds. The workload ceilings are calibrated at 95
+seconds for the install and 20 seconds for the composite.
+
+A coherent clean-member rerun then passed base, warm, path, APT (360.481
+seconds), and toolchain (23.918 seconds) stages. It stopped at `pip-system`
+because the laptop lost DNS: pip repeatedly reported `Temporary failure in
+name resolution` and could not resolve `requests`. This was an external
+connection failure, not an Andock assertion or runtime failure.
+
+Outstanding validation after this checkpoint:
+
+1. Resume the complete workload matrix after laptop networking is restored.
+2. Run the final release ladder: config invariants, Android smoke/scenarios,
+   zone-storage smoke, and root `scripts/smoke.sh` Android/mixed gates.
+3. Run the frozen build on a real unrooted ARM64 phone.
+4. Complete portable Ouroboros device/UI end-to-end validation on the frozen
+   Andock runtime.
+
+Authentication remains out of scope. The existing measurement device remains
+unchanged: the APK, runtime ZIP, native-library aggregates, and ordinary
+measured node configuration already commit the immutable Andock capability;
+mutable member images remain outside the measurement.
+
 ## Active execution
 
 The implementation is now authorized to proceed autonomously. The validated

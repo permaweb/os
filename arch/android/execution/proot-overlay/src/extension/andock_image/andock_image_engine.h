@@ -50,6 +50,9 @@ struct andock_image_result {
 	uint64_t inode;
 	uint64_t cache_id;
 	uint64_t token;
+	int64_t atime;
+	int64_t mtime;
+	int64_t ctime;
 	nlink_t links;
 	char *path;
 	uint8_t *data;
@@ -68,6 +71,10 @@ int andock_image_engine_flush(void);
 int andock_image_engine_retain(uint64_t cache_id);
 int andock_image_engine_release(uint64_t cache_id);
 int andock_image_engine_mark_dirty(uint64_t cache_id);
+int andock_image_engine_mark_mapped(uint64_t cache_id);
+int andock_image_engine_timestamps(uint64_t cache_id,
+	int64_t *atime, int64_t *mtime, int64_t *ctime);
+int andock_image_engine_writeback(uint64_t cache_id);
 int andock_image_engine_sync(uint64_t cache_id);
 int andock_image_engine_sync_all(void);
 uint64_t andock_image_engine_materializations(void);
