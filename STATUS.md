@@ -30,6 +30,11 @@ filesystem/runtime port. Andock preserves the existing interchangeable
 Docker/QEMU request and `member-context` contract; any broader auth redesign is
 tracked separately and is not a merge dependency here.
 
+The final review boundary is now enforced mechanically as well as by scope:
+the composed Android branch has no changed auth, session, bearer, wallet,
+credential, or member-identity filename. Reviews proposing unrelated auth work
+are stopped rather than converted into Andock requirements.
+
 The scoped portable Ouroboros branch is clean at `20b293013f2ba307e44e1bb416146127420b679b`
 from pre-auth base `3d708da8dd32ddd2810893841d722bf0cd0602e7`.
 HyperBEAM/Forge are pinned to fcdf, seven real device specifications and package
@@ -101,6 +106,23 @@ validation matrix are in `decisions/andock-filesystem-capability.md`.
 5. Validate the ordinary trusted Ouroboros packages and Arweave UI manifest on
    stock HyperBEAM and AndEE without auth, session, wallet, identity, or
    application-server changes.
+
+## Current integrity gate
+
+The per-command Android network broker is composed at `39ec02a`. Its focused
+policy/protocol suite passed 9 tests, and the Android debug APK, unit, and lint
+tasks are green. Native socket injection remains deliberately unclaimed until
+the syscall adapter is integrated and the real IPv4, IPv6, UDP, DNS, redirect,
+subprocess, copied-binary, local-address, and listener-denial probes pass.
+
+The strengthened filesystem adapter gate rejected the latest native candidate
+before integration: independent fresh template copies returned inconsistent
+guest bytes for `/usr/bin/python3.12`, and `dpkg -V python3.12-minimal` reported
+the executable as changed. The raw template itself is being checked separately
+from the cached memfd/open-file-description layer. No APK or member image will
+be accepted until fresh copies read identically, Python runs without a signal,
+the synthetic kernel-path suite passes with seccomp enabled, and the exact
+command is green three times.
 
 ## Dedicated emulator baseline
 
