@@ -2670,6 +2670,8 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 	}
 	tracee = TRACEE(extension);
 	state = extension->config;
+	if (state == NULL)
+		return event == REMOVED ? 0 : -ENOTCONN;
 	switch (event) {
 	case SYSCALL_ENTER_START:
 		return handle_enter(extension, tracee);
