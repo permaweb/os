@@ -14,9 +14,12 @@ Parallel work is isolated as follows:
 - `agent/hb-edge-fcdf`: completed upstream runtime/NIF/build integration;
 - `agent/andock-fs-spike`: completed and rejected the one-time directory
   capability route on stock Android;
-- `agent/ouroboros-portable-scoped`: portable device/UI/package-boundary
-  reconciliation from the pre-auth ancestor, without publication; and
-- `agent/andock-image-fd`: architecture record and eventual clean integration.
+- `agent/ouroboros-portable-scoped`: completed portable device/UI/package-
+  boundary reconciliation from the pre-auth ancestor, without publication;
+- `agent/ouroboros-andock-backend`: ordinary trusted `~andock@1.0` package,
+  branched from that clean pre-auth baseline; and
+- `agent/andock-image-fd-stable`: architecture record and eventual clean
+  integration.
 
 No component is merged to `main` until the final dependency graph, emulator
 runtime, package workloads, security assertions, and locally available target
@@ -37,6 +40,17 @@ passed the seven tools, representative errors, file-list parity, and a 2.24 MB
 round trip, then was bounded and reaped after the later attachment phase ran
 for more than seven minutes and exceeded 6 GiB RSS; this is recorded as an
 existing harness pathology rather than widened into the Andock scope.
+
+The first standalone `~andock@1.0` package checkpoint is committed at
+`59474d2` on `agent/ouroboros-andock-backend`. It delegates all seven tools,
+file browsing, authorization, validation, serialization, clipping, and errors
+to the existing shared `lib_ouroboros_execution` contract. Its only private
+mechanic is the fail-closed local Android execution transport. Package and
+import-boundary verification passed for all eight device archives, its real
+Unix-domain framing tests passed 3/3, and `make test` passed 14 source plus
+253 packaged tests. The branch contains no auth, bearer, session, node-wallet,
+identity, or member-context change; the out-of-scope review task that proposed
+such expansion was stopped.
 
 The measurement-layer decision is now fixed: `~measurement@1.0` and
 `~andee@1.0` do not change for Andock. The stable implementation will add only
