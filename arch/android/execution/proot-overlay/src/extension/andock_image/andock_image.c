@@ -2608,9 +2608,18 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		errno = 0;
 		image_fd = value == NULL ? -1 : strtol(value, &end, 10);
 		if (value == NULL || errno != 0 || *value == '\0' || *end != '\0' ||
-			image_fd < 0 || image_fd > INT_MAX ||
-			fcntl((int)image_fd, F_GETFD) < 0)
+			image_fd < 0 || image_fd > INT_MAX) {
+			dprintf(STDERR_FILENO,
+				"andock: invalid ANDOCK_IMAGE_FD environment value\n");
 			return -EBADF;
+		}
+		if (fcntl((int)image_fd, F_GETFD) < 0) {
+			int error = errno;
+			dprintf(STDERR_FILENO,
+				"andock: member image descriptor %ld is unavailable: %s (%d)\n",
+				image_fd, strerror(error), error);
+			return -EBADF;
+		}
 		status = andock_image_engine_start((int)image_fd);
 		close((int)image_fd);
 		unsetenv("ANDOCK_IMAGE_FD");
