@@ -17,10 +17,29 @@ CONTAINER=andock-proot-image-builder-$$
 VOLUME=andock-proot-image-build-$$
 CACHE_VOLUME=andock-proot-image-cache-$TERMUX_PACKAGES_REF
 
+force_rebuild=0
+if [[ $# -gt 1 || (${1:-} != "" && ${1:-} != "--force") ]]; then
+    echo "Usage: $0 [--force]" >&2
+    exit 2
+fi
+if [[ ${1:-} == "--force" ]]; then
+    force_rebuild=1
+fi
+
+require_tool python3
+
+if [[ $force_rebuild == 0 ]] && python3 \
+    "$ROOT/scripts/andock-proot-manifest.py" validate \
+    "$OUT" "$ROOT" "$TERMUX_PACKAGES_REF" "$BUILDER_IMAGE" "$LWEXT4_REF"
+then
+    echo "Andock image-backed PRoot already matches pinned inputs: $OUT"
+    cat "$OUT/manifest.json"
+    exit 0
+fi
+
 require_tool curl
 require_tool docker
 require_tool git
-require_tool python3
 
 mkdir -p "$(dirname "$DOWNLOAD")" "$(dirname "$LWEXT4_SOURCE")"
 if [[ ! -f "$DOWNLOAD" ]]; then
@@ -110,48 +129,8 @@ docker cp \
     "$CONTAINER:/tmp/andock-proot/data/data/org.permaweb.andee/files/usr/." \
     "$OUT/usr"
 
-python3 - "$OUT" "$ROOT" "$TERMUX_PACKAGES_REF" "$BUILDER_IMAGE" \
-    "$LWEXT4_REF" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-out = pathlib.Path(sys.argv[1])
-root = pathlib.Path(sys.argv[2])
-inputs = [
-    root / "execution/termux-proot-prefix.patch",
-    root / "execution/termux-tar-wrapper",
-    root / "execution/andock-proot-image.patch",
-    root / "execution/lwext4-open-inode.patch",
-    root / "execution/lwext4-atomic-replace.patch",
-    root / "native/andock-image-engine-probe/include/generated/ext4_config.h",
-    root / "native/andock-image-engine-probe/patches/0001-fix-xattr-list-size-ub.patch",
-    *sorted((root / "execution/proot-overlay/src/extension/andock_image").glob("*")),
-]
-selected = [out / "usr/bin/proot", out / "usr/libexec/proot/loader"]
-manifest = {
-    "architecture": "arm64",
-    "proot-version": "5.1.107.84",
-    "proot-source-sha256": "a44ddbf18bc72c9780d56948b03aeda6d285392503ece0cae17cfc02e7bc7928",
-    "termux-packages-revision": sys.argv[3],
-    "termux-builder-image": sys.argv[4],
-    "lwext4-revision": sys.argv[5],
-    "toolchain-revision": f"termux-{sys.argv[3]}+andock-image-1",
-    "android-package-prefix": "/data/data/org.permaweb.andee/files/usr",
-    "files": {
-        str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in selected
-    },
-    "inputs": {
-        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in inputs
-    },
-}
-(out / "manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-)
-PY
+python3 "$ROOT/scripts/andock-proot-manifest.py" write \
+    "$OUT" "$ROOT" "$TERMUX_PACKAGES_REF" "$BUILDER_IMAGE" "$LWEXT4_REF"
 
 echo "Andock image-backed PRoot native root: $OUT"
 cat "$OUT/manifest.json"
