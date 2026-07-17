@@ -14,8 +14,8 @@ Parallel work is isolated as follows:
 - `agent/hb-edge-fcdf`: completed upstream runtime/NIF/build integration;
 - `agent/andock-fs-spike`: completed and rejected the one-time directory
   capability route on stock Android;
-- `agent/ouroboros-portable-integrated`: portable device/UI/audit
-  reconciliation without publication; and
+- `agent/ouroboros-portable-scoped`: portable device/UI/package-boundary
+  reconciliation from the pre-auth ancestor, without publication; and
 - `agent/andock-image-fd`: architecture record and eventual clean integration.
 
 No component is merged to `main` until the final dependency graph, emulator
@@ -26,6 +26,17 @@ Authentication and workspace authorization are explicitly outside this
 filesystem/runtime port. Andock preserves the existing interchangeable
 Docker/QEMU request and `member-context` contract; any broader auth redesign is
 tracked separately and is not a merge dependency here.
+
+The scoped portable Ouroboros branch is clean at `20b293013f2ba307e44e1bb416146127420b679b`
+from pre-auth base `3d708da8dd32ddd2810893841d722bf0cd0602e7`.
+HyperBEAM/Forge are pinned to fcdf, seven real device specifications and package
+boundaries are verified, and `make test` passed 11 source and 246 packaged
+tests. Its diff contains no auth, session, bearer, node-wallet, identity,
+`member-context`, or related test changes. The unchanged desktop QEMU harness
+passed the seven tools, representative errors, file-list parity, and a 2.24 MB
+round trip, then was bounded and reaped after the later attachment phase ran
+for more than seven minutes and exceeded 6 GiB RSS; this is recorded as an
+existing harness pathology rather than widened into the Andock scope.
 
 The measurement-layer decision is now fixed: `~measurement@1.0` and
 `~andee@1.0` do not change for Andock. The stable implementation will add only
