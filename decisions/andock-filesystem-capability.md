@@ -180,6 +180,37 @@ The spike ends with a short decision record containing cold creation time,
 10,000-file traversal time, random and sequential I/O, image growth, restart
 behavior, corruption handling, and exact device/kernel/filesystem facts.
 
+## Packaging and member creation
+
+The build produces one deterministic raw ext4 template with a fixed logical
+capacity and an explicitly lwext4-compatible feature set. It is generated from
+the pinned Ubuntu provisioner, package manifest, Node.js archive, and permagit
+archive; its raw bytes and input manifest are hashed before APK assembly.
+
+The raw template is a compressed entry in `andee-runtime.zip`. Extraction must
+not materialize its zero ranges: `RuntimeExtractor` hashes the full logical
+byte stream while seeking over all-zero blocks in the destination and sets the
+final logical length explicitly. Startup verifies the extracted raw digest
+before enabling Andock. The existing runtime-ZIP and APK-set digests therefore
+continue to commit to the same bytes.
+
+Member creation occurs only in the main app UID:
+
+1. open the verified template read-only;
+2. create a same-directory, owner-only temporary image;
+3. copy data extents with `SEEK_DATA`/`SEEK_HOLE`, falling back to bounded
+   zero scanning;
+4. set the exact logical length, `fsync` the destination, and close it;
+5. atomically rename it to the opaque member filename and `fsync` the
+   containing directory; and
+6. open only that completed member image and transfer its descriptor to the
+   selected isolated worker.
+
+An interrupted temporary image is never addressable as a member and is
+removed during startup recovery. The immutable template descriptor is not
+passed to a worker. Member deletion first stops and unbinds the worker, waits
+for all descriptors to close, and then removes only that member image.
+
 ## Implementation phases
 
 ### Phase 0: freeze and profile the prototype
