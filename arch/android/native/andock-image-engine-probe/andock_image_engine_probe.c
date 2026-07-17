@@ -540,8 +540,8 @@ static void inspect_populated_root(struct report *report)
 	report_bool(
 		report,
 		"population-counts",
-		result == EOK && counts.entries == 26931 &&
-		counts.regular_files == 22483 && counts.directories == 3485 &&
+		result == EOK && counts.entries == 26938 &&
+		counts.regular_files == 22490 && counts.directories == 3485 &&
 		counts.symlinks == 963 && counts.other == 0
 	);
 
