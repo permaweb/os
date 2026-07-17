@@ -1,0 +1,70 @@
+diff --git a/src/ext4.c b/src/ext4.c
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -1180,9 +1180,52 @@ static int ext4_create_hardlink(const char *path,
+ 			r = ext4_link(mp, &ref, child_ref, path, len, rename);
+ 			break;
+ 		} else if (r == EOK && is_goal) {
+-			/*Destroy last result*/
+-			ext4_dir_destroy_result(&ref, &result);
+-			r = EEXIST;
++			next_inode = result.dentry->inode;
++			r = ext4_dir_destroy_result(&ref, &result);
++			if (r != EOK)
++				break;
++			if (!rename) {
++				r = EEXIST;
++				break;
++			}
++			if (next_inode == child_ref->index) {
++				r = EALREADY;
++				break;
++			}
++
++			struct ext4_inode_ref replaced;
++			r = ext4_fs_get_inode_ref(fs, next_inode, &replaced);
++			if (r != EOK)
++				break;
++			bool regular_source = ext4_inode_is_type(
++				sb, child_ref->inode, EXT4_INODE_MODE_FILE);
++			bool regular_target = ext4_inode_is_type(
++				sb, replaced.inode, EXT4_INODE_MODE_FILE);
++			if (!regular_source || !regular_target) {
++				ext4_fs_put_inode_ref(&replaced);
++				r = EEXIST;
++				break;
++			}
++
++			if (ext4_inode_get_links_cnt(replaced.inode) == 1) {
++				ext4_block_cache_write_back(mp->fs.bdev, 1);
++				r = ext4_trunc_inode(mp, replaced.index, 0);
++				ext4_block_cache_write_back(mp->fs.bdev, 0);
++			}
++			if (r == EOK)
++				r = ext4_unlink(mp, &ref, &replaced, path, len);
++			if (r == EOK && !ext4_inode_get_links_cnt(replaced.inode)) {
++				ext4_inode_set_del_time(replaced.inode, -1L);
++				r = ext4_fs_free_inode(&replaced);
++			}
++			{
++				int put_result = ext4_fs_put_inode_ref(&replaced);
++				if (r == EOK)
++					r = put_result;
++			}
++			if (r == EOK)
++				r = ext4_link(
++					mp, &ref, child_ref, path, len, true);
+ 			break;
+ 		}
+ 
+@@ -1371,6 +1414,10 @@ int ext4_frename(const char *path, const char *new_path)
+ 	child_loaded = true;
+ 
+ 	r = ext4_create_hardlink(new_path, &child_ref, true);
++	if (r == EALREADY) {
++		r = EOK;
++		goto Finish;
++	}
+ 	if (r != EOK)
+ 		goto Finish;
+ 

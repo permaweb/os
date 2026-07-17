@@ -1,0 +1,22 @@
+diff --git a/src/ext4_xattr.c b/src/ext4_xattr.c
+index bb2ac32..6b48716 100644
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -902,7 +902 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
+-			/*
+-			 * Size calculation by pointer arithmetics.
+-			 */
+-			buf_len +=
+-			    (char *)((struct ext4_xattr_list_entry *)0 + 1) +
+-			    name_len + 1 -
+-			    (char *)(struct ext4_xattr_list_entry *)0;
++			buf_len += sizeof(struct ext4_xattr_list_entry) + name_len + 1;
+@@ -962,7 +956 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
+-			/*
+-			 * Size calculation by pointer arithmetics.
+-			 */
+-			buf_len +=
+-			    (char *)((struct ext4_xattr_list_entry *)0 + 1) +
+-			    name_len + 1 -
+-			    (char *)(struct ext4_xattr_list_entry *)0;
++			buf_len += sizeof(struct ext4_xattr_list_entry) + name_len + 1;

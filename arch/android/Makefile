@@ -20,7 +20,8 @@ export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
 .PHONY: help android-env android-check android-sdk android-gradle-wrapper fetch-attestation-roots \
         apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
         next-boot-config-test android-zone-storage-smoke zone-storage-scenario \
-        verify-config-invariants erl-compile clean
+        verify-config-invariants erl-compile andock-template \
+        andock-template-reproducibility clean
 
 help:
 	@printf '%s\n' \
@@ -40,6 +41,8 @@ help:
 	    '  make next-boot-config-test      Verify private next-boot config import path.' \
 	    '  make android-zone-storage-smoke Verify Android app-private encrypted zone storage.' \
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
+	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \
+	    '  make andock-template-reproducibility  Rebuild and compare the template twice.' \
 	    '  make verify-config-invariants   Check enforced HB config invariants.' \
 	    '  make erl-compile                Compile AndEE device package.'
 
@@ -102,6 +105,12 @@ verify-config-invariants:
 erl-compile:
 	./scripts/stage-android-devices.sh
 	cd "$(ANDEE_DEVICE_ROOT)" && "$(ROOT)/scripts/verified-rebar3.sh" compile
+
+andock-template:
+	./scripts/build-andock-template.sh
+
+andock-template-reproducibility:
+	./scripts/test-andock-template-reproducibility.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)" "$(ANDROID_DIR)/app/build" "$(ANDROID_DIR)/build" \

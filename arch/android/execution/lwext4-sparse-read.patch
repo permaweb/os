@@ -1,0 +1,76 @@
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -1772,6 +1772,13 @@
+-	fblock_start = 0;
+-	fblock_count = 0;
+-	while (size >= block_size) {
+-		while (iblock_idx < iblock_last) {
+-			r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
+-						       &fblock, true);
++	while (size >= block_size && iblock_idx < iblock_last) {
++		r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
++					       &fblock, true);
++		if (r != EOK)
++			goto Finish;
++
++		bool hole = fblock == 0;
++		fblock_start = fblock;
++		fblock_count = 1;
++		while (fblock_count < iblock_last - iblock_idx) {
++			r = ext4_fs_get_inode_dblk_idx(
++				&ref, iblock_idx + fblock_count,
++				&fblock, true);
+@@ -1780,7 +1787,2 @@
+-
+-			iblock_idx++;
+-
+-			if (!fblock_start)
+-				fblock_start = fblock;
+-
+-			if ((fblock_start + fblock_count) != fblock)
++			if ((hole && fblock != 0) ||
++			    (!hole && fblock != fblock_start + fblock_count))
+@@ -1788 +1789,0 @@
+-
+@@ -1792,4 +1793,9 @@
+-		r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf, fblock_start,
+-					   fblock_count);
+-		if (r != EOK)
+-			goto Finish;
++		size_t run_bytes = (size_t)block_size * fblock_count;
++		if (hole) {
++			memset(u8_buf, 0, run_bytes);
++		} else {
++			r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf,
++						  fblock_start, fblock_count);
++			if (r != EOK)
++				goto Finish;
++		}
+@@ -1797,3 +1803,4 @@
+-		size -= block_size * fblock_count;
+-		u8_buf += block_size * fblock_count;
+-		file->fpos += block_size * fblock_count;
++		size -= run_bytes;
++		u8_buf += run_bytes;
++		file->fpos += run_bytes;
++		iblock_idx += fblock_count;
+@@ -1802,4 +1809 @@
+-			*rcnt += block_size * fblock_count;
+-
+-		fblock_start = fblock;
+-		fblock_count = 1;
++			*rcnt += run_bytes;
+@@ -1814,4 +1818,9 @@
+-		off = fblock * block_size;
+-		r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf, size);
+-		if (r != EOK)
+-			goto Finish;
++		if (fblock == 0) {
++			memset(u8_buf, 0, size);
++		} else {
++			off = fblock * block_size;
++			r = ext4_block_readbytes(
++				file->mp->fs.bdev, off, u8_buf, size);
++			if (r != EOK)
++				goto Finish;
++		}

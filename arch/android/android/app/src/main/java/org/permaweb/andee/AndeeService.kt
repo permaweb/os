@@ -12,6 +12,7 @@ import android.util.Log
 
 class AndeeService : Service() {
     private var cryptoAgent: AndeeCryptoAgent? = null
+    private var executionManager: AndeeExecutionManager? = null
     private var hyperbeamRuntime: HyperbeamRuntime? = null
     private var starterThread: Thread? = null
     @Volatile private var stopping = false
@@ -51,16 +52,20 @@ class AndeeService : Service() {
         if (hyperbeamRuntime?.isAlive() == true || starterThread?.isAlive == true) return
         Thread {
             var agent: AndeeCryptoAgent? = null
+            var execution: AndeeExecutionManager? = null
             var runtime: HyperbeamRuntime? = null
             try {
                 val runtimeRoot = RuntimeExtractor(this).extractIfNeeded()
+                execution = AndeeExecutionManager(this, runtimeRoot).also { it.start() }
                 val currentAgent = AndeeCryptoAgent(this).also { it.start() }
                 agent = currentAgent
                 if (stopping) {
                     currentAgent.close()
+                    execution.close()
                     return@Thread
                 }
                 cryptoAgent = currentAgent
+                executionManager = execution
                 val policy = currentAgent.policyStatus()
                 if (!policy.optBoolean("accepted", false)) {
                     Log.w(TAG, "policy rejected; starting HyperBEAM for rejected measurement")
@@ -69,6 +74,7 @@ class AndeeService : Service() {
                 if (stopping) {
                     runtime?.close()
                     agent?.close()
+                    execution?.close()
                     return@Thread
                 }
                 hyperbeamRuntime = runtime
@@ -77,6 +83,7 @@ class AndeeService : Service() {
                 Log.e(TAG, "failed to start AndEE runtime", exc)
                 runtime?.close()
                 agent?.close()
+                execution?.close()
                 stopSelf()
             } finally {
                 starterThread = null
@@ -112,6 +119,8 @@ class AndeeService : Service() {
     private fun stopRuntime() {
         hyperbeamRuntime?.close()
         hyperbeamRuntime = null
+        executionManager?.close()
+        executionManager = null
         cryptoAgent?.close()
         cryptoAgent = null
         starterThread = null
