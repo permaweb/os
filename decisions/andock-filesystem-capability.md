@@ -62,19 +62,27 @@ environment, not the Docker-compatible Linux contract.
 ## Target capability model
 
 The main app owns immutable assets and opaque mutable member files. At worker
-creation it opens only the selected member's filesystem capabilities and
-passes those descriptors once to the isolated service:
+creation it opens only the selected member's complete writable filesystem
+image and passes that descriptor once to the isolated service:
 
-1. a read-only immutable base capability;
-2. a read-write mutable member capability;
-3. the bounded command transport; and
-4. network capability state, with Internet sockets brokered separately only
+1. one read-write member filesystem-image capability;
+2. the bounded command transport; and
+3. network capability state, with Internet sockets brokered separately only
    when policy permits them.
 
-Filesystem parsing, pathname resolution, copy-up, and mutation then occur
-inside the isolated worker. No guest filesystem operation sends a host path to
-HyperBEAM or the main Android app. The main app does not parse mutable guest
-filesystem structures.
+The immutable measured template is used only when the main app creates a new
+member image; it is never on the worker's hot path. Filesystem parsing,
+pathname resolution, and mutation then occur inside the isolated worker. No
+guest filesystem operation sends a host path to HyperBEAM or the main Android
+app. The main app does not parse mutable guest filesystem structures.
+
+Each member therefore sees one ordinary writable Linux filesystem. `/usr`,
+`/etc`, `/var`, `/tmp`, and `/root` require no overlay semantics and may be
+modified freely. The storage cost of duplicating the provisioned template is
+accepted for v1 because execution latency and conventional Linux behavior are
+more important than deduplication. Sparse copying is required to avoid
+materializing unused filesystem capacity; reflink may be an optional creation
+fast path, but no runtime behavior may depend on it.
 
 The guest tracee must not inherit the raw filesystem descriptors. They remain
 owned by the isolated supervisor, marked close-on-exec, and explicitly closed
@@ -120,11 +128,9 @@ concatenating guest strings with an Android host path.
   bounded before allocation or traversal.
 - Embedded NUL, malformed encoding at protocol boundaries, invalid member
   identifiers, and unsupported inode types fail closed.
-- Rename, link, unlink, and copy-up operate on parent inode handles. A path is
+- Rename, link, and unlink operate on parent inode handles. A path is
   revalidated at the mutation point rather than trusted from an earlier
   string-based check.
-- Immutable-base inodes cannot be mutated. A write first produces a member
-  copy-up or whiteout inside the mutable capability.
 - Device nodes, host sockets, raw block access, and arbitrary descriptor import
   are not representable in the guest filesystem.
 - `/proc` is synthetic and exposes no supervisor, image, command-transport,
@@ -174,21 +180,24 @@ coverage, crash behavior, licensing, source maintenance, code size, and
 measured performance. Do not select a library merely because it can read a
 happy-path image.
 
-### 3. Base-plus-member storage probe
+### 3. Per-member image creation probe
 
-Evaluate these representations in order:
+Create each member as a complete writable filesystem image copied from the
+measured immutable template. Evaluate creation methods in this order:
 
-1. filesystem-level clone/reflink of a raw immutable base, if `FICLONE` is
-   available and reliable on both the emulator and representative retail
+1. filesystem-level clone/reflink of the raw immutable template, if `FICLONE`
+   is available and reliable on both the emulator and representative retail
    storage;
-2. a read-only base filesystem plus a writable userspace overlay; and
-3. a bounded block-level copy-on-write layer below one filesystem engine.
+2. a sparse extent-preserving copy with bounded temporary storage; and
+3. a fully allocated copy only on storage where neither optimization exists.
 
-A reflink-only implementation cannot be the general retail baseline unless a
-clean unsupported-device failure or a tested portable fallback exists. A
-custom copy-on-write format must include versioning, checksums, deterministic
-recovery, bounded allocation, and fault-injection tests; a naive sparse-file
-bitmap is not sufficient.
+A reflink-only implementation cannot be the general retail baseline. The
+sparse-copy fallback must preserve holes, fail atomically when space is
+insufficient, and never expose a partially initialized image as a member.
+Userspace overlay, whiteout, copy-up, and custom block-COW formats are excluded
+from v1. They may return only as optional optimizations after they outperform
+the full-image baseline without changing guest semantics or the trusted
+runtime.
 
 The spike ends with a short decision record containing cold creation time,
 10,000-file traversal time, random and sequential I/O, image growth, restart
@@ -204,7 +213,7 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
   `find`, `du`, Python import, Node resolution, Git status, local wheel unpack,
   and sequential I/O.
 - Add counters and latency histograms for PRoot stops, resolve/open/list,
-  Binder transactions, FD transfers, copy-up, xattrs, and audited denials.
+  Binder transactions, FD transfers, xattrs, and audited denials.
 - Remove the repeated regular-file `TCGETS` attempt and remeasure so the design
   is not based on an avoidable logging pathology.
 
@@ -225,13 +234,9 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
 
 ### Phase 2: local filesystem engine
 
-- Implement inode-based lookup beneath the selected base and member
-  capabilities.
+- Implement inode-based lookup inside the selected member image.
 - Implement complete regular file, directory, symlink, hard-link, rename,
   truncate, mode, timestamp, `statfs`, and `user.*` xattr semantics.
-- Implement immutable-base fallback, copy-up, opaque directory/whiteout
-  behavior, and atomic replacement without exposing internal overlay metadata
-  in the guest.
 - Preserve sparse files and bounded filesystem capacity.
 - Serialize operations for one member while allowing independent member
   workers to overlap.
@@ -254,9 +259,9 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
 
 - Build the immutable filesystem from the same pinned declarative provisioner
   as the Ouroboros Docker base.
-- Ensure `/usr`, `/etc`, `/var`, `/tmp`, and `/root` are writable through the
-  member layer so `apt`, `pip`, npm, compilers, and source builds behave as
-  root-oriented agents expect.
+- Ensure `/usr`, `/etc`, `/var`, `/tmp`, and `/root` are ordinarily writable in
+  the member filesystem so `apt`, `pip`, npm, compilers, and source builds
+  behave as root-oriented agents expect.
 - Preserve standard Python behavior: system install policy, venvs, `--user`,
   local wheels, atomic rename, bytecode caches, native extensions, and normal
   `sys.path` discovery.
@@ -272,7 +277,7 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
 - Make stop preserve state, restart reopen the same member capability, and
   destroy remove only that member after all worker references are gone.
 - Exercise app kill, service kill, low-memory kill, power-loss fault points,
-  partial copy-up, incomplete rename, and full-storage behavior.
+  incomplete rename, and full-storage behavior.
 - Run consistency checking and deterministic recovery without parsing the
   mutable filesystem in the HyperBEAM process.
 
@@ -283,7 +288,7 @@ old `android-app-broker@1` design.
 
 After the storage format and runtime are frozen, expose only verifier-relevant
 immutable facts: device version, architecture, syscall layer digest, filesystem
-engine/version, immutable base digest, provisioner revision, network policy,
+engine/version, immutable template digest, provisioner revision, network policy,
 and resource policy. Existing APK/runtime/config commitments remain primary.
 Mutable member images, allocation state, and workspace contents remain outside
 the boot measurement.
@@ -307,7 +312,7 @@ the boot measurement.
 
 From a real guest process, attempt to read or modify:
 
-- the raw base/member descriptors through `/proc/self/fd` and inherited FDs;
+- the raw member-image descriptor through `/proc/self/fd` and inherited FDs;
 - the parent or sibling Android app-data paths;
 - another member's filesystem;
 - the effective node configuration and imported private options;

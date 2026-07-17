@@ -101,11 +101,13 @@ This closes the direct-directory route without relaxing owner-only modes,
 SELinux, or the isolated UID. The complete probe, exact APK hashes, runtime
 report, and decision rule are on `agent/andock-fs-spike` at `07eafbd`.
 
-The base-plus-member representation also cannot assume reflinks on the
-emulator: GNU `cp --reflink=always` over two brokered app-private regular files
-returned `EOPNOTSUPP` for a 16 MiB control. Reflink remains a valid optional
-fast path on supporting retail storage, but the baseline needs a sparse-copy or
-separate base/member fallback with independently tested persistence semantics.
+The emulator cannot provide the optional creation fast path: GNU
+`cp --reflink=always` over two app-private regular files returned
+`EOPNOTSUPP` for a 16 MiB control. The v1 storage model is therefore one
+complete writable filesystem image per member, created atomically with a
+sparse extent-preserving copy from the measured immutable template. Reflink
+may accelerate creation on supporting retail storage, but overlay, whiteout,
+copy-up, and runtime base lookup are explicitly out of scope for v1.
 
 ## Non-negotiable acceptance
 
