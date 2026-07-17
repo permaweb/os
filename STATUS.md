@@ -22,6 +22,11 @@ No component is merged to `main` until the final dependency graph, emulator
 runtime, package workloads, security assertions, and locally available target
 builds are green together.
 
+Authentication and workspace authorization are explicitly outside this
+filesystem/runtime port. Andock preserves the existing interchangeable
+Docker/QEMU request and `member-context` contract; any broader auth redesign is
+tracked separately and is not a merge dependency here.
+
 The measurement-layer decision is now fixed: `~measurement@1.0` and
 `~andee@1.0` do not change for Andock. The stable implementation will add only
 reserved Android execution facts to `~system@1.0/all` plus matching verifier
@@ -144,9 +149,6 @@ checker strategy remain explicit gates.
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
-- Direct `~andock@1.0` requests cannot self-authorize by supplying a member ID
-  and `member-context`; verified workspace authorization is required before a
-  member image is opened or a worker is allocated.
 - No guest host-path concatenation or descriptor exposure.
 - PyTorch install and post-install traversal meet the explicit performance
   gates in the decision record.
