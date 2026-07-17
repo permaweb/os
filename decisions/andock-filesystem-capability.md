@@ -109,7 +109,9 @@ concatenating guest strings with an Android host path.
   revalidated at the mutation point rather than trusted from an earlier
   string-based check.
 - Device nodes, host sockets, raw block access, and arbitrary descriptor import
-  are not representable in the guest filesystem.
+  are not representable in the guest filesystem. The syscall layer supplies
+  only the conventional safe synthetic devices required by userland, including
+  `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/fd`.
 - `/proc` is synthetic and exposes no supervisor, image, command-transport,
   crypto-agent, or main-app descriptor.
 - The worker receives no descriptor for the app data directory, another
@@ -258,6 +260,8 @@ for all descriptors to close, and then removes only that member image.
 - Dispatch filesystem operations directly to the local engine.
 - Preserve executable loading, dynamic loader behavior, shebangs, `/proc`,
   pathname UNIX sockets, signals, process trees, and real timeouts.
+- Retain PRoot's own-tracee `/proc` virtualization without making the image FD,
+  PRoot supervisor, HyperBEAM process, or unrelated Android processes visible.
 - Materialize a regular inode into a kernel-backed descriptor at most once per
   worker cache generation. Repeated opens duplicate the coherent descriptor;
   they must not recopy the complete file from ext4. Writable descriptors and
