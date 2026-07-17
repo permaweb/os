@@ -185,7 +185,11 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
 The build produces one deterministic raw ext4 template with a fixed logical
 capacity and an explicitly lwext4-compatible feature set. It is generated from
 the pinned Ubuntu provisioner, package manifest, Node.js archive, and permagit
-archive; its raw bytes and input manifest are hashed before APK assembly.
+archive; its raw bytes and input manifest are hashed before APK assembly. Image
+population runs as root inside the pinned Linux builder and consumes the
+numeric-owner OCI export directly. A host-extracted tree on macOS is not an
+acceptable input because it collapses service-account ownership and Linux
+xattrs/capabilities to host-user metadata.
 
 The raw template is a compressed entry in `andee-runtime.zip`. Extraction must
 not materialize its zero ranges: `RuntimeExtractor` hashes the full logical
@@ -254,6 +258,12 @@ for all descriptors to close, and then removes only that member image.
 - Dispatch filesystem operations directly to the local engine.
 - Preserve executable loading, dynamic loader behavior, shebangs, `/proc`,
   pathname UNIX sockets, signals, process trees, and real timeouts.
+- Materialize a regular inode into a kernel-backed descriptor at most once per
+  worker cache generation. Repeated opens duplicate the coherent descriptor;
+  they must not recopy the complete file from ext4. Writable descriptors and
+  shared mappings become dirty at mutation time and write back on `fsync`,
+  `msync`, last close, and worker teardown. Open descriptors and mappings must
+  observe ordinary shared-file semantics.
 - Delete the per-operation AIDL transaction, Kotlin path resolver, isolated
   socket-to-Binder bridge, host overlay-path translation, and corresponding
   frame protocol once parity is proven.
@@ -308,6 +318,9 @@ the boot measurement.
   and rename races.
 - Hard links, rename-over-existing, cross-directory rename, unlink-open files,
   sparse files, xattrs, timestamps, modes, and atomic replace.
+- Repeated opens of large ELF and data files, visibility between simultaneous
+  descriptors, writable `MAP_SHARED`, `msync`, close-before-`munmap`, and dirty
+  teardown recovery.
 - Mutation fault injection at every persistent write and recovery after
   process death.
 - Fuzz filesystem images and syscall frames under ASan/UBSan on the host and
