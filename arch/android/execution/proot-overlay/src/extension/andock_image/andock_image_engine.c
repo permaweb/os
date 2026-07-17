@@ -547,19 +547,9 @@ static int metadata(const char *guest, int type,
 
 static int reopen_memfd(int fd, int flags)
 {
-	char path[64];
-	int length = snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
-	if (length < 0 || length >= (int)sizeof(path))
-		return -ENAMETOOLONG;
-	int open_flags = flags & (O_ACCMODE | O_APPEND | O_CLOEXEC | O_NONBLOCK);
-#ifdef O_SYNC
-	open_flags |= flags & O_SYNC;
-#endif
-#ifdef O_DSYNC
-	open_flags |= flags & O_DSYNC;
-#endif
-	int reopened = open(path, open_flags);
-	return reopened < 0 ? -errno : reopened;
+	(void)flags;
+	int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	return duplicate < 0 ? -errno : duplicate;
 }
 
 static int load_cached_inode(const char *guest,
@@ -576,8 +566,12 @@ static int load_cached_inode(const char *guest,
 		return status;
 	ext4_file file;
 	int ext4_result = ext4_fopen(&file, path, "r");
-	if (ext4_result != EOK)
+	if (ext4_result != EOK) {
+		dprintf(STDERR_FILENO,
+			"andock: materialize %s: ext4 open failed: %s (%d)\n",
+			guest, strerror(ext4_result), -ext4_result);
 		return -ext4_result;
+	}
 	uint64_t size = ext4_fsize(&file);
 	if (size > (uint64_t)INT64_MAX) {
 		ext4_fclose(&file);
@@ -587,11 +581,17 @@ static int load_cached_inode(const char *guest,
 		MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_EXEC);
 	if (memory_fd < 0) {
 		status = -errno;
+		dprintf(STDERR_FILENO,
+			"andock: materialize %s: memfd_create failed: %s (%d)\n",
+			guest, strerror(-status), status);
 		ext4_fclose(&file);
 		return status;
 	}
 	if (ftruncate(memory_fd, (off_t)size) != 0) {
 		status = -errno;
+		dprintf(STDERR_FILENO,
+			"andock: materialize %s: ftruncate failed: %s (%d)\n",
+			guest, strerror(-status), status);
 		close(memory_fd);
 		ext4_fclose(&file);
 		return status;
@@ -610,10 +610,16 @@ static int load_cached_inode(const char *guest,
 		ext4_result = ext4_fread(&file, buffer, wanted, &read);
 		if (ext4_result != EOK || read != wanted) {
 			status = ext4_result == EOK ? -EIO : -ext4_result;
+			dprintf(STDERR_FILENO,
+				"andock: materialize %s: ext4 read failed: %s (%d)\n",
+				guest, strerror(-status), status);
 			break;
 		}
 		if (exact_pwrite(memory_fd, buffer, read, offset) != EOK) {
 			status = -EIO;
+			dprintf(STDERR_FILENO,
+				"andock: materialize %s: memfd write failed: %s (%d)\n",
+				guest, strerror(-status), status);
 			break;
 		}
 		offset += (off_t)read;
@@ -657,10 +663,12 @@ static int materialize(const char *guest, int flags, bool tracked,
 	if (status < 0)
 		return status;
 	int guest_fd = reopen_memfd(cached->memory_fd, flags);
-	if (guest_fd < 0)
+	if (guest_fd < 0) {
+		dprintf(STDERR_FILENO,
+			"andock: materialize %s: memfd duplicate failed: %s (%d)\n",
+			guest, strerror(-guest_fd), guest_fd);
 		return guest_fd;
-	if ((flags & O_APPEND) != 0)
-		lseek(guest_fd, 0, SEEK_END);
+	}
 	result->guest_fd = guest_fd;
 	if (tracked) {
 		result->backing_fd = fcntl(
@@ -687,8 +695,13 @@ static int resolve_operation(int flags, const char *path,
 		resolved,
 		&type
 	);
-	if (status < 0)
+	if (status < 0) {
+		if ((flags & ANDOCK_IMAGE_EXECUTABLE) != 0)
+			dprintf(STDERR_FILENO,
+				"andock: resolve executable %s failed: %s (%d)\n",
+				path, strerror(-status), status);
 		return status;
+	}
 	if (type == ANDOCK_IMAGE_MISSING) {
 		result->type = type;
 		return result_path(result, resolved);
@@ -707,6 +720,10 @@ static int resolve_operation(int flags, const char *path,
 		if (status == 0)
 			status = result_data(result, link, strlen(link));
 	}
+	if (status < 0 && (flags & ANDOCK_IMAGE_EXECUTABLE) != 0)
+		dprintf(STDERR_FILENO,
+			"andock: resolve executable %s (%s) failed: %s (%d)\n",
+			path, resolved, strerror(-status), status);
 	return status;
 }
 

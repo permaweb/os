@@ -15,10 +15,12 @@ def inputs(root):
         root / "scripts/build-andock-proot-image.sh",
         root / "scripts/andock-proot-manifest.py",
         root / "execution/termux-proot-prefix.patch",
+        root / "execution/termux-proot-launcher.patch",
         root / "execution/termux-tar-wrapper",
         root / "execution/andock-proot-image.patch",
         root / "execution/lwext4-open-inode.patch",
         root / "execution/lwext4-atomic-replace.patch",
+        root / "runtime-src/andock_proot_launcher.c",
         root / "native/andock-image-engine-probe/include/generated/ext4_config.h",
         root / "native/andock-image-engine-probe/patches/0001-fix-xattr-list-size-ub.patch",
     ]
@@ -34,7 +36,11 @@ def inputs(root):
 
 
 def manifest(out, root, termux_revision, builder_image, lwext4_revision):
-    selected = [out / "usr/bin/proot", out / "usr/libexec/proot/loader"]
+    selected = [
+        out / "usr/bin/proot",
+        out / "usr/libexec/andock/proot-launcher",
+        out / "usr/libexec/proot/loader",
+    ]
     return {
         "architecture": "arm64",
         "proot-version": "5.1.107.84",
@@ -43,7 +49,7 @@ def manifest(out, root, termux_revision, builder_image, lwext4_revision):
         "termux-packages-revision": termux_revision,
         "termux-builder-image": builder_image,
         "lwext4-revision": lwext4_revision,
-        "toolchain-revision": f"termux-{termux_revision}+andock-image-1",
+        "toolchain-revision": f"termux-{termux_revision}+andock-image-2",
         "android-package-prefix": "/data/data/org.permaweb.andee/files/usr",
         "files": {
             str(path.relative_to(out)): digest(path)
@@ -61,14 +67,17 @@ def main():
         )
     action = sys.argv[1]
     out = pathlib.Path(sys.argv[2])
-    expected = manifest(out, pathlib.Path(sys.argv[3]), *sys.argv[4:])
     manifest_path = out / "manifest.json"
     if action == "validate":
         try:
             current = json.loads(manifest_path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            expected = manifest(
+                out, pathlib.Path(sys.argv[3]), *sys.argv[4:]
+            )
+        except (json.JSONDecodeError, OSError):
             raise SystemExit(1)
         raise SystemExit(0 if current == expected else 1)
+    expected = manifest(out, pathlib.Path(sys.argv[3]), *sys.argv[4:])
     manifest_path.write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n")
 
 

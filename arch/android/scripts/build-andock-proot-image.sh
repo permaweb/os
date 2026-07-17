@@ -75,9 +75,12 @@ fi
 git -C "$SOURCE" checkout --detach --force "$TERMUX_PACKAGES_REF"
 git -C "$SOURCE" clean -dffx
 git -C "$SOURCE" apply "$ROOT/execution/termux-proot-prefix.patch"
+git -C "$SOURCE" apply "$ROOT/execution/termux-proot-launcher.patch"
 cp "$ROOT/execution/andock-proot-image.patch" \
     "$SOURCE/packages/proot/andock-proot-image.patch"
 mkdir -p "$SOURCE/packages/proot/andock-overlay/andock_image/lwext4/include/generated"
+cp "$ROOT/runtime-src/andock_proot_launcher.c" \
+    "$SOURCE/packages/proot/andock-overlay/andock_proot_launcher.c"
 cp "$ROOT/execution/proot-overlay/src/extension/andock_image/"*.c \
     "$ROOT/execution/proot-overlay/src/extension/andock_image/"*.h \
     "$SOURCE/packages/proot/andock-overlay/andock_image/"
@@ -120,6 +123,7 @@ docker exec --user root "$CONTAINER" sh -euxc '
     done
     root=/tmp/andock-proot/data/data/org.permaweb.andee/files/usr
     test -x "$root/bin/proot"
+    test -x "$root/libexec/andock/proot-launcher"
     test -x "$root/libexec/proot/loader"
 '
 

@@ -1,0 +1,12 @@
+diff --git a/packages/proot/build.sh b/packages/proot/build.sh
+index 30f98bea5e..261b33a889 100644
+--- a/packages/proot/build.sh
++++ b/packages/proot/build.sh
+@@ -30,1 +30,7 @@
+ termux_step_post_make_install() {
++	mkdir -p "$TERMUX_PREFIX/libexec/andock"
++	"$CC" $CPPFLAGS $CFLAGS \
++		"$TERMUX_PKG_SRCDIR/src/andock_proot_launcher.c" \
++		$LDFLAGS -o "$TERMUX_PREFIX/libexec/andock/proot-launcher"
++	chmod 700 "$TERMUX_PREFIX/libexec/andock/proot-launcher"
++

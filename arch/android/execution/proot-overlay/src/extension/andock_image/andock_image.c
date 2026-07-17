@@ -91,13 +91,19 @@ struct AndockResponse {
 	int backing_fd;
 };
 
+struct AndockFileDescription {
+	off_t offset;
+	int flags;
+	unsigned int references;
+};
+
 struct AndockOpenFile {
 	int fd;
 	int host_fd;
-	size_t offset;
 	nlink_t nlink;
 	uint64_t inode;
 	char *path;
+	struct AndockFileDescription *description;
 	bool directory;
 	bool dirty;
 	struct AndockOpenFile *next;
@@ -120,12 +126,19 @@ struct AndockUnixSocketTable {
 
 static bool image_active;
 
+static void release_file_description(struct AndockFileDescription *description)
+{
+	if (description != NULL && --description->references == 0)
+		free(description);
+}
+
 static int close_open_file(struct AndockOpenFile *file)
 {
 	if (file->inode != 0 && image_active)
 		andock_image_engine_release(file->inode);
 	if (file->host_fd >= 0)
 		close(file->host_fd);
+	release_file_description(file->description);
 	return 0;
 }
 
@@ -137,7 +150,8 @@ enum AndockSocketState {
 };
 
 static void add_open_file(Tracee *tracee, int fd, int host_fd,
-	const char *path, uint64_t inode, nlink_t nlink, bool is_directory);
+	const char *path, uint64_t inode, nlink_t nlink, bool is_directory,
+	int flags);
 
 struct AndockBrokerState {
 	enum AndockSocketState socket_state;
@@ -158,7 +172,10 @@ struct AndockBrokerState {
 	uint64_t pending_inode;
 	bool pending_is_directory;
 	int pending_host_fd;
+	int pending_flags;
 	bool pending_dirty;
+	bool pending_offset_update;
+	off_t pending_offset;
 	int pending_fds[ANDOCK_MAX_PENDING_FDS];
 	int pending_fds_count;
 	word_t recvfrom_address;
@@ -236,10 +253,17 @@ int andock_image_open_host_path(const char *path, int flags)
 	duplicate = fcntl((int) fd, F_DUPFD_CLOEXEC, 0);
 	if (duplicate >= 0 && lseek(duplicate, 0, SEEK_SET) < 0) {
 		int error = errno;
+		dprintf(STDERR_FILENO,
+			"andock: executable fd %ld seek failed: %s (%d)\n",
+			fd, strerror(error), -error);
 		close(duplicate);
 		errno = error;
 		return -1;
 	}
+	if (duplicate < 0)
+		dprintf(STDERR_FILENO,
+			"andock: executable fd %ld duplicate failed: %s (%d)\n",
+			fd, strerror(errno), -errno);
 	return duplicate;
 }
 
@@ -848,8 +872,13 @@ int andock_image_translate_executable_path(Tracee *tracee,
 		char result[PATH_MAX], int dir_fd, const char *user_path,
 		bool deref_final)
 {
-	return translate_path_with_policy(tracee, result, dir_fd, user_path,
+	int status = translate_path_with_policy(tracee, result, dir_fd, user_path,
 		deref_final, true);
+	if (status < 0)
+		dprintf(STDERR_FILENO,
+			"andock: executable translation %s failed: %s (%d)\n",
+			user_path, strerror(-status), status);
+	return status;
 }
 
 static int resolve_executable(Tracee *tracee, char result[PATH_MAX],
@@ -877,10 +906,17 @@ int andock_image_find_executable(Tracee *tracee, char result[PATH_MAX],
 		const char *paths, const char *command)
 {
 	const char *cursor;
+	int status;
 	if (command == NULL)
 		command = "/bin/sh";
-	if (strchr(command, '/') != NULL)
-		return resolve_executable(tracee, result, command);
+	if (strchr(command, '/') != NULL) {
+		status = resolve_executable(tracee, result, command);
+		if (status < 0)
+			dprintf(STDERR_FILENO,
+				"andock: cannot resolve initial executable %s: %s (%d)\n",
+				command, strerror(-status), status);
+		return status;
+	}
 
 	paths = paths != NULL ? paths : getenv("PATH");
 	if (paths == NULL || paths[0] == '\0')
@@ -921,7 +957,7 @@ int andock_image_take_executable_path(Tracee *tracee, char result[PATH_MAX])
 }
 
 static int set_pending_open_file(Tracee *tracee, const char *path,
-		uint64_t inode, nlink_t nlink, bool directory)
+		uint64_t inode, nlink_t nlink, bool directory, int flags)
 {
 	struct AndockBrokerState *state = broker_state(tracee);
 	if (state == NULL)
@@ -933,6 +969,7 @@ static int set_pending_open_file(Tracee *tracee, const char *path,
 	state->pending_nlink = nlink;
 	state->pending_inode = inode;
 	state->pending_is_directory = directory;
+	state->pending_flags = flags;
 	state->pending_dirty = false;
 	return 0;
 }
@@ -952,7 +989,7 @@ static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		return status;
 	if (resolved.type == ANDOCK_DIRECTORY) {
 		status = set_pending_open_file(
-			tracee, resolved.path, resolved.inode, 2, true);
+			tracee, resolved.path, resolved.inode, 2, true, flags);
 		free_response(&resolved, true);
 		if (status < 0)
 			return status;
@@ -969,7 +1006,7 @@ static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		return -EIO;
 	}
 	status = set_pending_open_file(tracee, opened.path, opened.inode,
-		response_nlink(&opened), false);
+		response_nlink(&opened), false, flags);
 	if (status < 0) {
 		free_response(&opened, true);
 		return status;
@@ -1103,7 +1140,7 @@ static int handle_open_enter(Extension *extension, Tracee *tracee, Sysnum sysnum
 	return 1;
 }
 
-static int void_result(Tracee *tracee, int result)
+static int void_result(Tracee *tracee, int64_t result)
 {
 	Extension *extension = get_extension(tracee, andock_image_callback);
 	struct AndockBrokerState *state;
@@ -1114,6 +1151,160 @@ static int void_result(Tracee *tracee, int result)
 	state->synthetic_result_valid = true;
 	poke_reg(tracee, SYSARG_RESULT, (word_t) result);
 	set_sysnum(tracee, PR_void);
+	return 1;
+}
+
+static bool file_readable(const struct AndockOpenFile *file)
+{
+#ifdef O_PATH
+	if ((file->description->flags & O_PATH) != 0)
+		return false;
+#endif
+	return (file->description->flags & O_ACCMODE) != O_WRONLY;
+}
+
+static bool file_writable(const struct AndockOpenFile *file)
+{
+#ifdef O_PATH
+	if ((file->description->flags & O_PATH) != 0)
+		return false;
+#endif
+	return (file->description->flags & O_ACCMODE) != O_RDONLY;
+}
+
+static int settable_status_flags(void)
+{
+	int flags = O_APPEND | O_NONBLOCK;
+#ifdef O_ASYNC
+	flags |= O_ASYNC;
+#endif
+#ifdef O_DIRECT
+	flags |= O_DIRECT;
+#endif
+#ifdef O_NOATIME
+	flags |= O_NOATIME;
+#endif
+	return flags;
+}
+
+static int handle_file_control(Tracee *tracee, Sysnum sysnum)
+{
+	struct AndockOpenFile *file;
+	int operation;
+
+	if (sysnum != PR_fcntl && sysnum != PR_fcntl64)
+		return 0;
+	file = find_open_file(
+		tracee, (int)peek_reg(tracee, CURRENT, SYSARG_1));
+	if (file == NULL || file->description == NULL)
+		return 0;
+	operation = (int)peek_reg(tracee, CURRENT, SYSARG_2);
+	if (operation == F_GETFL)
+		return void_result(tracee, file->description->flags);
+	if (operation == F_SETFL) {
+		int mutable = settable_status_flags();
+		int requested = (int)peek_reg(tracee, CURRENT, SYSARG_3);
+		file->description->flags =
+			(file->description->flags & ~mutable) | (requested & mutable);
+		return void_result(tracee, 0);
+	}
+	return 0;
+}
+
+static int handle_file_access(Tracee *tracee, Sysnum sysnum)
+{
+	struct AndockOpenFile *file;
+	int fd;
+	bool read = false;
+	bool write = false;
+
+	switch (sysnum) {
+	case PR_read:
+	case PR_readv:
+	case PR_pread64:
+	case PR_preadv:
+	case PR_preadv2:
+		read = true;
+		fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+		break;
+	case PR_write:
+	case PR_writev:
+	case PR_pwrite64:
+	case PR_pwritev:
+	case PR_pwritev2:
+	case PR_ftruncate:
+	case PR_ftruncate64:
+		write = true;
+		fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+		break;
+	case PR_mmap:
+	case PR_mmap2: {
+		fd = (int)peek_reg(tracee, CURRENT, SYSARG_5);
+		file = find_open_file(tracee, fd);
+		if (file == NULL || file->directory)
+			return 0;
+		int protection = (int)peek_reg(tracee, CURRENT, SYSARG_3);
+		int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
+		if (!file_readable(file) ||
+			((protection & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 &&
+			 !file_writable(file)))
+			return -EACCES;
+		return 0;
+	}
+	default:
+		return 0;
+	}
+	file = find_open_file(tracee, fd);
+	if (file == NULL || file->directory)
+		return 0;
+	return (read && !file_readable(file)) || (write && !file_writable(file))
+		? -EBADF : 0;
+}
+
+static int handle_positioned_io(Tracee *tracee, Sysnum sysnum)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockOpenFile *file;
+	Sysnum positioned;
+	uint64_t offset;
+	int fd;
+
+	if (sysnum != PR_read && sysnum != PR_write &&
+		sysnum != PR_readv && sysnum != PR_writev)
+		return 0;
+	fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	file = find_open_file(tracee, fd);
+	if (state == NULL || file == NULL || file->directory ||
+		file->description == NULL)
+		return 0;
+	if ((sysnum == PR_read || sysnum == PR_readv) && !file_readable(file))
+		return -EBADF;
+	if ((sysnum == PR_write || sysnum == PR_writev) && !file_writable(file))
+		return -EBADF;
+	offset = (uint64_t)file->description->offset;
+	if ((sysnum == PR_write || sysnum == PR_writev) &&
+		(file->description->flags & O_APPEND) != 0) {
+		struct stat metadata;
+		if (file->host_fd < 0 || fstat(file->host_fd, &metadata) < 0)
+			return -errno;
+		offset = (uint64_t)metadata.st_size;
+	}
+	positioned = sysnum == PR_read ? PR_pread64
+		: sysnum == PR_write ? PR_pwrite64
+		: sysnum == PR_readv ? PR_preadv : PR_pwritev;
+	set_sysnum(tracee, positioned);
+	if (sysnum == PR_readv || sysnum == PR_writev) {
+		poke_reg(tracee, SYSARG_4, (word_t)(uint32_t)offset);
+		poke_reg(tracee, SYSARG_5, (word_t)(uint32_t)(offset >> 32));
+		poke_reg(tracee, SYSARG_6, 0);
+	}
+	else {
+		poke_reg(tracee, SYSARG_4, (word_t)offset);
+		poke_reg(tracee, SYSARG_5, 0);
+		poke_reg(tracee, SYSARG_6, 0);
+	}
+	state->pending_offset_update = true;
+	state->pending_offset = (off_t)offset;
 	return 1;
 }
 
@@ -1186,6 +1377,7 @@ static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 
 static int handle_statfs(Tracee *tracee, Sysnum sysnum)
 {
+	struct AndockOpenFile *file;
 	char path[PATH_MAX];
 	char guest[PATH_MAX];
 	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
@@ -1194,14 +1386,25 @@ static int handle_statfs(Tracee *tracee, Sysnum sysnum)
 	int status;
 	int index;
 
-	if (sysnum != PR_statfs)
+	if (sysnum != PR_statfs && sysnum != PR_fstatfs)
 		return 0;
-	status = get_sysarg_path(tracee, path, SYSARG_1);
-	if (status < 0)
-		return status;
-	status = guest_path(tracee, guest, AT_FDCWD, path);
-	if (status < 0)
-		return status;
+	if (sysnum == PR_fstatfs) {
+		file = find_open_file(tracee,
+			(int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (file == NULL)
+			return 0;
+		if (strlen(file->path) >= sizeof(guest))
+			return -ENAMETOOLONG;
+		strcpy(guest, file->path);
+	}
+	else {
+		status = get_sysarg_path(tracee, path, SYSARG_1);
+		if (status < 0)
+			return status;
+		status = guest_path(tracee, guest, AT_FDCWD, path);
+		if (status < 0)
+			return status;
+	}
 	status = broker_call(ANDOCK_STATFS, 0, 0, guest, NULL,
 		NULL, 0, &response);
 	if (status < 0)
@@ -1213,7 +1416,7 @@ static int handle_statfs(Tracee *tracee, Sysnum sysnum)
 	memcpy(fields, response.data, sizeof(fields));
 	for (index = 0; index < (int) (sizeof(fields) / sizeof(fields[0])); index++)
 		fields[index] = be64_to_host(fields[index]);
-	output.f_type = 0x794c7630; /* Linux overlayfs magic. */
+	output.f_type = 0xEF53; /* Linux ext2/3/4 magic. */
 	output.f_bsize = fields[0];
 	output.f_frsize = fields[0];
 	output.f_blocks = fields[1];
@@ -1876,27 +2079,34 @@ static int handle_chdir(Tracee *tracee, Sysnum sysnum)
 	return tracee->fs->cwd != NULL ? void_result(tracee, 0) : -ENOMEM;
 }
 
-static int handle_directory_lseek(Tracee *tracee, Sysnum sysnum)
+static int handle_file_lseek(Tracee *tracee, Sysnum sysnum)
 {
-	struct AndockOpenFile *directory;
+	struct AndockOpenFile *file;
+	struct stat metadata;
 	int64_t offset;
 	int whence;
 
 	if (sysnum != PR_lseek)
 		return 0;
-	directory = find_directory(tracee,
+	file = find_open_file(tracee,
 		(int) peek_reg(tracee, CURRENT, SYSARG_1));
-	if (directory == NULL)
+	if (file == NULL || file->description == NULL)
 		return 0;
 	offset = (int64_t) peek_reg(tracee, CURRENT, SYSARG_2);
 	whence = (int) peek_reg(tracee, CURRENT, SYSARG_3);
 	if (whence == SEEK_CUR)
-		offset += directory->offset;
+		offset += file->description->offset;
+	else if (whence == SEEK_END) {
+		if (file->directory || file->host_fd < 0 ||
+			fstat(file->host_fd, &metadata) < 0)
+			return file->directory ? -EINVAL : -errno;
+		offset += metadata.st_size;
+	}
 	else if (whence != SEEK_SET)
 		return -EINVAL;
 	if (offset < 0)
 		return -EINVAL;
-	directory->offset = offset;
+	file->description->offset = (off_t)offset;
 	return void_result(tracee, offset);
 }
 
@@ -2041,14 +2251,14 @@ static int handle_getdents(Tracee *tracee, Sysnum sysnum)
 		free(output);
 		return status;
 	}
-	if (directory->offset <= logical) {
+	if (directory->description->offset <= (off_t)logical) {
 		status = emit_dirent(output, output_size, &used, ".", 1,
 			ANDOCK_DIRECTORY, logical++);
 		if (status < 0)
 			goto done;
 	}
 	else logical++;
-	if (directory->offset <= logical) {
+	if (directory->description->offset <= (off_t)logical) {
 		status = emit_dirent(output, output_size, &used, "..", 2,
 			ANDOCK_DIRECTORY, logical++);
 		if (status < 0)
@@ -2066,7 +2276,7 @@ static int handle_getdents(Tracee *tracee, Sysnum sysnum)
 			status = -EPROTO;
 			goto fail;
 		}
-		if (directory->offset <= logical) {
+		if (directory->description->offset <= (off_t)logical) {
 			status = emit_dirent(output, output_size, &used,
 				(char *) response.data + index, name_size, type, logical);
 			if (status < 0)
@@ -2077,7 +2287,8 @@ static int handle_getdents(Tracee *tracee, Sysnum sysnum)
 	}
 	status = 0;
 done:
-	directory->offset += used == 0 ? 0 : logical - directory->offset;
+	if (used > 0)
+		directory->description->offset = (off_t)logical;
 	if (status == -ENOSPC && used > 0)
 		status = 0;
 	if (status == 0) {
@@ -2161,7 +2372,7 @@ static int handle_socket_chain(Tracee *tracee, struct AndockBrokerState *state)
 			add_open_file(tracee, (int) received_fd, host_fd,
 				state->pending_path, state->pending_inode,
 				state->pending_nlink,
-				state->pending_is_directory);
+				state->pending_is_directory, state->pending_flags);
 			struct AndockOpenFile *file = find_open_file(
 				tracee, (int)received_fd);
 			if (file != NULL)
@@ -2269,7 +2480,16 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 	status = handle_file_sync(tracee, sysnum);
 	if (status != 0)
 		return status;
+	status = handle_file_control(tracee, sysnum);
+	if (status != 0)
+		return status;
+	status = handle_file_access(tracee, sysnum);
+	if (status != 0)
+		return status;
 	status = track_file_mutation(tracee, sysnum);
+	if (status != 0)
+		return status;
+	status = handle_positioned_io(tracee, sysnum);
 	if (status != 0)
 		return status;
 	status = handle_unix_socket_enter(tracee, state, sysnum);
@@ -2320,7 +2540,7 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 		return status;
 	if (sysnum == PR_chdir || sysnum == PR_fchdir)
 		return handle_chdir(tracee, sysnum);
-	status = handle_directory_lseek(tracee, sysnum);
+	status = handle_file_lseek(tracee, sysnum);
 	if (status != 0)
 		return status;
 	if (sysnum == PR_getdents64)
@@ -2406,14 +2626,62 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 	}
 }
 
+static int logical_open_flags(int flags)
+{
+	int logical = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK);
+#ifdef O_DIRECT
+	logical |= flags & O_DIRECT;
+#endif
+#ifdef O_DSYNC
+	logical |= flags & O_DSYNC;
+#endif
+#ifdef O_LARGEFILE
+	logical |= flags & O_LARGEFILE;
+#endif
+#ifdef O_NOATIME
+	logical |= flags & O_NOATIME;
+#endif
+#ifdef O_PATH
+	logical |= flags & O_PATH;
+#endif
+#ifdef O_SYNC
+	logical |= flags & O_SYNC;
+#endif
+	return logical;
+}
+
+static struct AndockFileDescription *acquire_file_description(
+		struct AndockFileDescription *shared, off_t offset, int flags)
+{
+	if (shared != NULL) {
+		shared->references++;
+		return shared;
+	}
+	struct AndockFileDescription *description = calloc(1, sizeof(*description));
+	if (description == NULL)
+		return NULL;
+	description->offset = offset;
+	description->flags = logical_open_flags(flags);
+	description->references = 1;
+	return description;
+}
+
 static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
-		const char *path, uint64_t inode, size_t offset,
-		nlink_t nlink, bool is_directory)
+		const char *path, uint64_t inode, off_t offset, int flags,
+		nlink_t nlink, bool is_directory,
+		struct AndockFileDescription *shared_description)
 {
 	struct AndockBrokerState *state = broker_state(tracee);
 	struct AndockOpenFile *existing = find_open_file(tracee, fd);
 	struct AndockOpenFile *file;
+	struct AndockFileDescription *description;
 	if (state == NULL || state->files == NULL) {
+		if (host_fd >= 0)
+			close(host_fd);
+		return;
+	}
+	description = acquire_file_description(shared_description, offset, flags);
+	if (description == NULL) {
 		if (host_fd >= 0)
 			close(host_fd);
 		return;
@@ -2422,6 +2690,7 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 		uint64_t old_inode = existing->inode;
 		char *copy = talloc_strdup(existing, path);
 		if (copy == NULL) {
+			release_file_description(description);
 			if (host_fd >= 0)
 				close(host_fd);
 			return;
@@ -2431,7 +2700,8 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 		TALLOC_FREE(existing->path);
 		existing->host_fd = host_fd;
 		existing->path = copy;
-		existing->offset = offset;
+		release_file_description(existing->description);
+		existing->description = description;
 		existing->inode = inode;
 		existing->nlink = nlink;
 		existing->directory = is_directory;
@@ -2446,13 +2716,14 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 	}
 	file = talloc_zero(state->files, struct AndockOpenFile);
 	if (file == NULL) {
+		release_file_description(description);
 		if (host_fd >= 0)
 			close(host_fd);
 		return;
 	}
 	file->fd = fd;
 	file->host_fd = host_fd;
-	file->offset = offset;
+	file->description = description;
 	file->inode = inode;
 	file->nlink = nlink;
 	file->directory = is_directory;
@@ -2470,10 +2741,11 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 }
 
 static void add_open_file(Tracee *tracee, int fd, int host_fd,
-		const char *path, uint64_t inode, nlink_t nlink, bool is_directory)
+		const char *path, uint64_t inode, nlink_t nlink, bool is_directory,
+		int flags)
 {
 	add_open_file_at_offset(
-		tracee, fd, host_fd, path, inode, 0, nlink, is_directory);
+		tracee, fd, host_fd, path, inode, 0, flags, nlink, is_directory, NULL);
 }
 
 static void remove_open_file(Tracee *tracee, int fd)
@@ -2498,9 +2770,21 @@ static int handle_exit(Tracee *tracee)
 {
 	struct AndockBrokerState *state = broker_state(tracee);
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
-	int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	int64_t syscall_result = (int64_t)peek_reg(
+		tracee, CURRENT, SYSARG_RESULT);
+	int result = (int)syscall_result;
 	int status;
 	struct AndockOpenFile *source = NULL;
+	if (state != NULL && state->pending_offset_update) {
+		if (syscall_result > 0) {
+			struct AndockOpenFile *file = find_open_file(
+				tracee, (int)peek_reg(tracee, ORIGINAL, SYSARG_1));
+			if (file != NULL && file->description != NULL)
+				file->description->offset =
+					state->pending_offset + (off_t)syscall_result;
+		}
+		state->pending_offset_update = false;
+	}
 	if (state != NULL && state->sendmsg_pending) {
 		state->sendmsg_pending = false;
 		status = write_data(
@@ -2536,7 +2820,7 @@ static int handle_exit(Tracee *tracee)
 			add_open_file(tracee, result, state->pending_host_fd,
 				state->pending_path,
 				state->pending_inode, state->pending_nlink,
-				state->pending_is_directory);
+				state->pending_is_directory, state->pending_flags);
 		else if (state->pending_host_fd >= 0)
 			close(state->pending_host_fd);
 		state->pending_host_fd = -1;
@@ -2550,9 +2834,11 @@ static int handle_exit(Tracee *tracee)
 			break;
 		case PR_dup2:
 		case PR_dup3:
-			remove_open_file(tracee, result);
-			source = find_open_file(tracee,
-				(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+			if (result != (int)peek_reg(tracee, ORIGINAL, SYSARG_1)) {
+				remove_open_file(tracee, result);
+				source = find_open_file(tracee,
+					(int)peek_reg(tracee, ORIGINAL, SYSARG_1));
+			}
 			break;
 		case PR_fcntl:
 		case PR_fcntl64:
@@ -2568,8 +2854,8 @@ static int handle_exit(Tracee *tracee)
 			add_open_file_at_offset(tracee, result,
 				source->host_fd >= 0
 					? fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
-				source->path, source->inode, source->offset, source->nlink,
-				source->directory);
+				source->path, source->inode, 0, 0, source->nlink,
+				source->directory, source->description);
 	}
 	if (sysnum == PR_close && result == 0)
 		remove_open_file(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
@@ -2587,8 +2873,8 @@ static void inherit_open_files(Tracee *child, const Tracee *parent)
 		add_open_file_at_offset(child, file->fd,
 			file->host_fd >= 0
 				? fcntl(file->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
-			file->path, file->inode, file->offset,
-			file->nlink, file->directory);
+			file->path, file->inode, 0, 0,
+			file->nlink, file->directory, file->description);
 		file = file->next;
 	}
 }
