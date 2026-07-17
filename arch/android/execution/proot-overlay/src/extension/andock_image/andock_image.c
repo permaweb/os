@@ -465,8 +465,8 @@ static int fail_socket_chain(Tracee *tracee, struct AndockBrokerState *state,
 static struct AndockBrokerState *broker_state(Tracee *tracee)
 {
 	Extension *extension = get_extension(tracee, andock_image_callback);
-	return extension == NULL ? NULL : talloc_get_type_abort(
-		extension->config, struct AndockBrokerState);
+	return extension == NULL ? NULL
+		: (struct AndockBrokerState *) extension->config;
 }
 
 static struct AndockOpenFile *find_open_file(Tracee *tracee, int fd)
@@ -852,6 +852,60 @@ int andock_image_translate_executable_path(Tracee *tracee,
 		deref_final, true);
 }
 
+static int resolve_executable(Tracee *tracee, char result[PATH_MAX],
+		const char *path)
+{
+	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
+	int status = resolve_with_policy(
+		tracee, &response, AT_FDCWD, path, true, false, true);
+	if (status < 0)
+		return status;
+	if (response.type != ANDOCK_FILE) {
+		free_response(&response, true);
+		return -EACCES;
+	}
+	if (strlen(response.path) >= PATH_MAX) {
+		free_response(&response, true);
+		return -ENAMETOOLONG;
+	}
+	strcpy(result, response.path);
+	free_response(&response, true);
+	return 0;
+}
+
+int andock_image_find_executable(Tracee *tracee, char result[PATH_MAX],
+		const char *paths, const char *command)
+{
+	const char *cursor;
+	if (command == NULL)
+		command = "/bin/sh";
+	if (strchr(command, '/') != NULL)
+		return resolve_executable(tracee, result, command);
+
+	paths = paths != NULL ? paths : getenv("PATH");
+	if (paths == NULL || paths[0] == '\0')
+		return -ENOENT;
+	for (cursor = paths; ; ) {
+		const char *separator = strchr(cursor, ':');
+		size_t length = separator == NULL ? strlen(cursor)
+			: (size_t)(separator - cursor);
+		char candidate[PATH_MAX];
+		int written;
+		if (length == 0)
+			written = snprintf(candidate, sizeof(candidate), "./%s", command);
+		else
+			written = snprintf(candidate, sizeof(candidate), "%.*s/%s",
+				(int)length, cursor, command);
+		if (written >= 0 && written < (int)sizeof(candidate)
+		    && resolve_executable(tracee, result, candidate) == 0)
+			return 0;
+		if (separator == NULL)
+			break;
+		cursor = separator + 1;
+	}
+	return -ENOENT;
+}
+
 int andock_image_take_executable_path(Tracee *tracee, char result[PATH_MAX])
 {
 	struct AndockBrokerState *state = broker_state(tracee);
@@ -975,8 +1029,7 @@ static int begin_fd_transfer(Tracee *tracee, struct AndockBrokerState *state,
 
 static int handle_open_enter(Extension *extension, Tracee *tracee, Sysnum sysnum)
 {
-	struct AndockBrokerState *state = talloc_get_type_abort(
-		extension->config, struct AndockBrokerState);
+	struct AndockBrokerState *state = extension->config;
 	struct proot_open_how how = {};
 	char path[PATH_MAX];
 	Reg path_reg;
@@ -1056,7 +1109,7 @@ static int void_result(Tracee *tracee, int result)
 	struct AndockBrokerState *state;
 	if (extension == NULL)
 		return -ENOTCONN;
-	state = talloc_get_type_abort(extension->config, struct AndockBrokerState);
+	state = extension->config;
 	state->synthetic_result = (word_t) result;
 	state->synthetic_result_valid = true;
 	poke_reg(tracee, SYSARG_RESULT, (word_t) result);
@@ -2204,8 +2257,7 @@ static int handle_unix_socket_enter(Tracee *tracee,
 
 static int handle_enter(Extension *extension, Tracee *tracee)
 {
-	struct AndockBrokerState *state = talloc_get_type_abort(
-		extension->config, struct AndockBrokerState);
+	struct AndockBrokerState *state = extension->config;
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
 	int status;
 	char first[PATH_MAX];
@@ -2596,8 +2648,7 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		if (extension->config == NULL)
 			return -ENOMEM;
 		state = extension->config;
-		parent_state = talloc_get_type_abort(
-			parent_extension->config, struct AndockBrokerState);
+		parent_state = parent_extension->config;
 		state->host_socket_fd = -1;
 		state->host_listener_fd = -1;
 		state->tracee_channel_fd = -1;
@@ -2618,7 +2669,7 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		return 0;
 	}
 	tracee = TRACEE(extension);
-	state = talloc_get_type_abort(extension->config, struct AndockBrokerState);
+	state = extension->config;
 	switch (event) {
 	case SYSCALL_ENTER_START:
 		return handle_enter(extension, tracee);

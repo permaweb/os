@@ -16,6 +16,8 @@ extern int andock_image_translate_path(Tracee *tracee, char result[PATH_MAX],
 extern int andock_image_translate_executable_path(Tracee *tracee,
 		char result[PATH_MAX], int dir_fd, const char *user_path,
 		bool deref_final);
+extern int andock_image_find_executable(Tracee *tracee,
+		char result[PATH_MAX], const char *paths, const char *command);
 extern int andock_image_take_executable_path(Tracee *tracee,
 		char result[PATH_MAX]);
 extern int andock_image_translate_unix_socket(Tracee *tracee,

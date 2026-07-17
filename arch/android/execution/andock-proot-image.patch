@@ -41,6 +41,29 @@ index bbc6400..2472202 100644
  
  #include "build.h"
  
+@@ -277,13 +278,18 @@ static int initialize_exe(Tracee *tracee, const char *exe)
+ 	char path[PATH_MAX];
+ 	int status;
+ 
+-	status = which(tracee, tracee->reconf.paths, path, exe ?: "/bin/sh");
++	status = andock_image_enabled()
++		? andock_image_find_executable(
++			tracee, path, tracee->reconf.paths, exe ?: "/bin/sh")
++		: which(tracee, tracee->reconf.paths, path, exe ?: "/bin/sh");
+ 	if (status < 0)
+ 		return -1;
+ 
+-	status = detranslate_path(tracee, path, NULL);
+-	if (status < 0)
+-		return -1;
++	if (!andock_image_enabled()) {
++		status = detranslate_path(tracee, path, NULL);
++		if (status < 0)
++			return -1;
++	}
+ 
+ 	tracee->exe = talloc_strdup(tracee, path);
+ 	if (tracee->exe == NULL)
 @@ -467,6 +468,10 @@ int main(int argc, char *const argv[])
  		goto error;
  	tracee->pid = getpid();
