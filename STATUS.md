@@ -51,7 +51,7 @@ with a capability-backed filesystem that executes locally inside each Android
 isolated worker.
 
 - Worktree: `/Users/sam/.codex/worktrees/lapee-andock-image-fd`
-- Branch: `agent/andock-image-fd`
+- Branch: `agent/andock-image-fd-stable`
 - Original clean base: `b2fcf2fa2741018635c72b7b4663ddb820aa9e14`
   (`agent/hb-edge-e445`). Exact HyperBEAM fcdf is integrated in this branch at
   `8b6ed2c4`.
@@ -60,6 +60,13 @@ isolated worker.
 - The shared checkout `/Users/sam/src/lapee` remains dirty with another
   developer's work and must not be modified.
 - No push, publication, external infrastructure change, or wallet use.
+
+At 23:11:55 an unrelated process force-moved the former
+`agent/andock-image-fd` ref while this worktree was active. Every prior commit
+remained recoverable in the reflog. The exact tree and parent chain were
+reconstructed at `9707d6e` on the uniquely named stable branch above; neither
+active Andock subtask reported touching the old ref. The old mutable ref is no
+longer used as an integration anchor.
 
 The complete threat model, implementation sequence, performance gates, and
 validation matrix are in `decisions/andock-filesystem-capability.md`.
