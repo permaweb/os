@@ -75,8 +75,9 @@ def append(label):
     os.close(descriptor)
 
 
+context = multiprocessing.get_context("fork")
 workers = [
-    multiprocessing.Process(target=append, args=(label,))
+    context.Process(target=append, args=(label,))
     for label in ("a", "b")
 ]
 for worker in workers:
