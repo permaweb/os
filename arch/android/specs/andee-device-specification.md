@@ -171,6 +171,12 @@ out of `~meta@1.0` and the public boot measurement. Only the explicitly
 protected identity and runtime-control keys listed by the boot-config store are
 rejected.
 
+Apart from those protected top-level boot controls, operator configuration is
+merged without AndEE-specific key filtering. Private options such as provider
+credentials retain normal HyperBEAM semantics in the app-private effective
+configuration. Stock HyperBEAM private-key filtering, rather than Android-side
+name matching, keeps them out of `~meta@1.0` and the public boot measurement.
+
 ## 4. Stock `~meta@1.0`
 
 AndEE uses the stock HyperBEAM `~meta@1.0` device. `GET /~meta@1.0/info`

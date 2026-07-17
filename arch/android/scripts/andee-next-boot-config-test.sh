@@ -60,9 +60,12 @@ cat > "$OUT/next-boot-config.json" <<JSON
     "scope": "operator-requested"
   },
   "trusted-device-signers": ["operator-requested-signer"],
+  "priv-wallet": "operator-requested-wallet",
   "priv-ouroboros-keys": {
     "test-provider": {
       "api-key": "andee-private-test-key",
+      "private-key": "nested-private-key",
+      "secret": "nested-provider-secret",
       "base-url": "https://provider.example"
     }
   },
@@ -192,6 +195,7 @@ reserved_runtime_keys = (
     "cache-control",
     "http-extra-opts",
     "load-remote-devices",
+    "priv-wallet",
 )
 operator_only_needles = (
     "operator-requested-persistent-store",
@@ -306,6 +310,15 @@ if effective.get("andee-test-marker") != marker:
     fail("effective config did not include selected next-boot marker")
 if effective.get("measurement-device") != "andee@1.0":
     fail("effective config did not enforce andee measurement device")
+if effective.get("priv-ouroboros-keys") != {
+    "test-provider": {
+        "api-key": "andee-private-test-key",
+        "private-key": "nested-private-key",
+        "secret": "nested-provider-secret",
+        "base-url": "https://provider.example",
+    }
+}:
+    fail("effective config did not preserve normal nested private node options")
 for key in reserved_runtime_keys:
     if key in effective:
         fail(f"effective config preserved reserved runtime key: {key}")
@@ -317,13 +330,6 @@ if effective.get("trusted-device-signers") != ["operator-requested-signer"]:
     fail("effective config did not preserve trusted remote device signers")
 if effective.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
     fail("effective config did not preserve measured remote name resolvers")
-if effective.get("priv-ouroboros-keys") != {
-    "test-provider": {
-        "api-key": "andee-private-test-key",
-        "base-url": "https://provider.example",
-    }
-}:
-    fail("effective config did not preserve normal private node options")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]
@@ -344,6 +350,8 @@ if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
     fail("attested node message did not enforce andee measurement device")
+if "priv-ouroboros-keys" in attested_node:
+    fail("attested public node exposed private node options")
 if attested_node.get("access-remote-cache-for-client") not in (None, False, "false"):
     fail("attested node message preserved operator access-remote-cache-for-client override")
 if attested_node.get("load-remote-devices") not in (None, False, "false"):

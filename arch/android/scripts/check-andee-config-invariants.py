@@ -140,18 +140,18 @@ def main() -> int:
         fail("base config must use volatile Android private store")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
-        fail("operator config sanitizer must reserve measurement-body-source")
+        fail("operator config must reserve top-level measurement-body-source")
     operator_loop = 'hookList(operator.optJSONObject("on")?.opt("start"))'
     base_loop = 'hookList(base.optJSONObject("on")?.opt("start"))'
     if not (operator_loop in store_text and base_loop in store_text):
         fail("boot config store must merge operator and base on.start hooks")
     if store_text.index(operator_loop) > store_text.index(base_loop):
         fail("operator on.start hooks must run before base hooks")
-    if "copyOperatorValue(hook)" not in store_text:
-        fail("operator on.start hooks must be sanitized before merge")
+    if "copyValue(hook)" not in store_text:
+        fail("operator on.start hooks must be copied before merge")
     for key in ("store", "match-index", "arweave-index-store", "priv-store"):
         if f'copyBaseValue(base, merged, "{key}")' not in store_text:
-            fail(f"boot config store must preserve base {key} after operator sanitization")
+            fail(f"boot config store must preserve base {key} after operator merge")
     for key in (
         "access-remote-cache-for-client",
         "arweave-index-store",
@@ -161,13 +161,18 @@ def main() -> int:
         "load-remote-devices",
         "loaded-device-store",
         "match-index",
+        "measurement-body-source",
+        "preloaded-devices-index",
         "preloaded-store",
+        "priv-key-location",
         "priv-store",
+        "priv-wallet",
+        "private-key",
         "store",
         "store-defaults",
     ):
         if f'"{key}"' not in store_text:
-            fail(f"operator config sanitizer must reserve {key}")
+            fail(f"operator config must reserve top-level {key}")
     return 0
 
 

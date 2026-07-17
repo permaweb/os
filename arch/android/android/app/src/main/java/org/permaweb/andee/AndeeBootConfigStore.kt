@@ -61,7 +61,6 @@ object AndeeBootConfigStore {
     ): JSONObject {
         val merged = deepMerge(copyObject(base), operator)
         stripReservedTopLevelBootKeys(merged)
-        stripPrivateBootKeys(merged)
         copyBaseRuntimeDefaults(base, merged)
 
         merged.put("measurement-device", "andee@1.0")
@@ -78,7 +77,7 @@ object AndeeBootConfigStore {
     private fun mergedStartHooks(base: JSONObject, operator: JSONObject): Any {
         val hooks = JSONArray()
         for (hook in hookList(operator.optJSONObject("on")?.opt("start"))) {
-            hooks.put(copyOperatorValue(hook))
+            hooks.put(copyValue(hook))
         }
         for (hook in hookList(base.optJSONObject("on")?.opt("start"))) {
             hooks.put(copyValue(hook))
@@ -126,29 +125,6 @@ object AndeeBootConfigStore {
         }
     }
 
-    private fun stripPrivateBootKeys(value: JSONObject) {
-        val keys = value.keys().asSequence().toList()
-        for (key in keys) {
-            if (isPrivateBootKey(key)) {
-                value.remove(key)
-            } else {
-                when (val child = value.opt(key)) {
-                    is JSONObject -> stripPrivateBootKeys(child)
-                    is JSONArray -> stripPrivateBootKeys(child)
-                }
-            }
-        }
-    }
-
-    private fun stripPrivateBootKeys(value: JSONArray) {
-        for (index in 0 until value.length()) {
-            when (val child = value.opt(index)) {
-                is JSONObject -> stripPrivateBootKeys(child)
-                is JSONArray -> stripPrivateBootKeys(child)
-            }
-        }
-    }
-
     private fun copyBaseRuntimeDefaults(base: JSONObject, merged: JSONObject) {
         copyBaseValue(base, merged, "store")
         copyBaseValue(base, merged, "match-index")
@@ -182,22 +158,8 @@ object AndeeBootConfigStore {
         }
     }
 
-    private fun copyOperatorValue(value: Any?): Any? {
-        val copied = copyValue(value)
-        when (copied) {
-            is JSONObject -> stripPrivateBootKeys(copied)
-            is JSONArray -> stripPrivateBootKeys(copied)
-        }
-        return copied
-    }
-
     private fun isReservedTopLevelBootKey(key: String): Boolean {
         return canonicalConfigKey(key) in RESERVED_TOP_LEVEL_BOOT_KEYS
-    }
-
-    private fun isPrivateBootKey(key: String): Boolean {
-        val canonical = canonicalConfigKey(key)
-        return canonical in PRIVATE_BOOT_KEYS
     }
 
     private fun canonicalConfigKey(key: String): String = key.lowercase(Locale.US).replace('_', '-')
@@ -229,23 +191,19 @@ object AndeeBootConfigStore {
         "access-remote-cache-for-client",
         "arweave-index-store",
         "cache-control",
+        "forge-bootstrap",
         "http-extra-opts",
         "load-remote-devices",
+        "loaded-device-store",
         "match-index",
+        "measurement-body-source",
+        "preloaded-devices-index",
         "preloaded-store",
+        "priv-key-location",
         "priv-store",
-        "store",
-        "store-defaults",
-    )
-
-    private val PRIVATE_BOOT_KEYS = setOf(
         "priv-wallet",
         "private-key",
-        "priv-key-location",
-        "forge-bootstrap",
-        "loaded-device-store",
-        "secret",
-        "measurement-body-source",
-        "preloaded-store",
+        "store",
+        "store-defaults",
     )
 }
