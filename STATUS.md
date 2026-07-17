@@ -2,6 +2,25 @@
 
 Updated: 2026-07-16 America/New_York
 
+## Active execution
+
+The implementation is now authorized to proceed autonomously. Before Andock
+integration, the validated runtime base is being advanced on the isolated
+`agent/hb-edge-fcdf` branch to exact HyperBEAM edge
+`fcdf5867686c64a8abe79e04e10f3590fbd62b7f`.
+
+Parallel work is isolated as follows:
+
+- `agent/hb-edge-fcdf`: upstream runtime/NIF/build integration only;
+- `agent/andock-fs-spike`: one-time isolated filesystem capability proof;
+- `agent/ouroboros-portable-integrated`: portable device/UI/audit
+  reconciliation without publication; and
+- `agent/andock-image-fd`: architecture record and eventual clean integration.
+
+No component is merged to `main` until the final dependency graph, emulator
+runtime, package workloads, security assertions, and locally available target
+builds are green together.
+
 ## Objective and isolation
 
 Replace the correct but unacceptably slow per-path Binder filesystem prototype
