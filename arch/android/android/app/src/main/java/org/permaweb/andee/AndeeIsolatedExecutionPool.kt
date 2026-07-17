@@ -38,10 +38,12 @@ internal class AndeeIsolatedExecutionPool(
             cancelled.remove(memberId)
             worker = synchronized(poolLock) {
                 if (cancelled.remove(memberId)) throw ExecutionCancelledException()
-                workers[memberId]
+                val selected = workers[memberId]
                     ?.takeUnless(WorkerHandle::isDisconnected)
                     ?: replaceWorker(memberId)
-            }.also { it.active = true }
+                selected.active = true
+                selected
+            }
             worker.awaitConnected()
             val response = worker.service().execute(
                 command,
