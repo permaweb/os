@@ -76,6 +76,46 @@ pathname resolution, and mutation then occur inside the isolated worker. No
 guest filesystem operation sends a host path to HyperBEAM or the main Android
 app. The main app does not parse mutable guest filesystem structures.
 
+## Network capability
+
+Android denies `AF_INET` and `AF_INET6` socket creation to an isolated UID.
+An API 36 ARM64 probe established the narrow alternative: a TCP or UDP socket
+created by the normal application UID and transferred through Binder remains a
+native kernel socket in the isolated worker. IPv4 and IPv6 connect, TCP I/O,
+UDP DNS, polling, and ordinary socket options work without proxying payload
+bytes. Direct isolated creation and listening remain denied.
+
+Network-enabled commands therefore receive a per-command socket-creation
+capability. The syscall layer requests only IPv4/IPv6 TCP or UDP descriptors
+from the main app and injects them through its existing `SCM_RIGHTS` chain.
+Network-disabled commands receive no such capability, and every Internet
+socket request fails with `EACCES`. Raw, packet, netlink, SCTP, and ICMP sockets
+are not brokered.
+
+Transferred sockets can reach the phone itself—the probe connected to the
+live AndEE listener on `127.0.0.1:8734`—so creation alone is not a sufficient
+boundary. The syscall layer must authorize every numeric destination at
+`connect`, `sendto`, destination-bearing `sendmsg`, and each `sendmmsg` element.
+The v1 policy is public outbound networking:
+
+- deny loopback, unspecified, private, carrier-grade NAT, link-local,
+  multicast, broadcast, documentation, benchmark, and reserved destinations;
+- canonicalize IPv4-mapped IPv6 before applying the IPv4 policy;
+- deny every current Android interface address and directly attached prefix,
+  including globally routed IPv6 prefixes;
+- recheck redirects, reconnects, and every unconnected UDP datagram so DNS
+  rebinding cannot cross the boundary; and
+- permit private or link-local DNS only to the exact active-network resolver
+  addresses on TCP or UDP port 53.
+
+The guest resolver file is generated from the active Android network at
+command start. A copied binary, subprocess, static executable, Python socket,
+or alternate HTTP client encounters the same syscall policy; command-string
+inspection and environment interposition are not enforcement. Listening and
+inbound networking are explicitly unsupported in v1 because direct loopback
+would expose the AndEE node and other phone services. A later virtual loopback
+design may add it without weakening this boundary.
+
 Each member therefore sees one ordinary writable Linux filesystem. `/usr`,
 `/etc`, `/var`, `/tmp`, and `/root` require no overlay semantics and may be
 modified freely. The storage cost of duplicating the provisioned template is
