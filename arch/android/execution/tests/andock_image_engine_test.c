@@ -48,8 +48,8 @@ static struct andock_image_result open_file(
 
 static void close_tracked(struct andock_image_result *result)
 {
-	if (result->inode != 0) {
-		int status = andock_image_engine_release(result->inode);
+	if (result->cache_id != 0) {
+		int status = andock_image_engine_release(result->cache_id);
 		if (status < 0)
 			fail("release", status);
 	}
@@ -58,7 +58,7 @@ static void close_tracked(struct andock_image_result *result)
 
 static void track(struct andock_image_result *result)
 {
-	int status = andock_image_engine_retain(result->inode);
+	int status = andock_image_engine_retain(result->cache_id);
 	if (status < 0)
 		fail("retain", status);
 }
@@ -86,6 +86,43 @@ static void expect_bytes(int fd, off_t offset, const char *expected)
 	free(actual);
 }
 
+static void expect_fill(int fd, off_t offset, size_t size, unsigned char byte)
+{
+	unsigned char buffer[4096];
+	while (size > 0) {
+		size_t wanted = size > sizeof(buffer) ? sizeof(buffer) : size;
+		if (pread(fd, buffer, wanted, offset) != (ssize_t)wanted)
+			fail("pread-fill", -errno);
+		for (size_t index = 0; index < wanted; index++) {
+			if (buffer[index] != byte) {
+				fprintf(stderr,
+					"fill mismatch at %lld: expected %02x, got %02x\n",
+					(long long)(offset + (off_t)index), byte,
+					buffer[index]);
+				exit(1);
+			}
+		}
+		offset += (off_t)wanted;
+		size -= wanted;
+	}
+}
+
+static void verify_sparse_fixtures(void)
+{
+	struct andock_image_result full = open_file(
+		"/sparse-full", O_RDONLY | O_CLOEXEC, 0);
+	expect_fill(full.guest_fd, 0, 4096, 0x5a);
+	expect_fill(full.guest_fd, 4096, 3 * 4096, 0);
+	expect_fill(full.guest_fd, 4 * 4096, 4096, 0x5a);
+	andock_image_result_release(&full);
+
+	struct andock_image_result tail = open_file(
+		"/sparse-tail", O_RDONLY | O_CLOEXEC, 0);
+	expect_fill(tail.guest_fd, 0, 4096, 0x54);
+	expect_fill(tail.guest_fd, 4096, 123, 0);
+	andock_image_result_release(&tail);
+}
+
 static int raw_call(int operation, int flags, const char *path,
 		const char *second_path)
 {
@@ -110,6 +147,8 @@ int main(int argc, char **argv)
 	close(image_fd);
 	if (status < 0)
 		fail("start", status);
+	verify_sparse_fixtures();
+	uint64_t materializations = andock_image_engine_materializations();
 
 	struct andock_image_result directory = call(
 		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work", NULL);
@@ -118,8 +157,8 @@ int main(int argc, char **argv)
 		"/work/alpha", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0755);
 	track(&first);
 	write_at(first.guest_fd, 0, "abcdef");
-	if (andock_image_engine_mark_dirty(first.inode) < 0 ||
-		andock_image_engine_sync(first.inode) < 0)
+	if (andock_image_engine_mark_dirty(first.cache_id) < 0 ||
+		andock_image_engine_sync(first.cache_id) < 0)
 		fail("initial-sync", -EIO);
 
 	struct andock_image_result link = call(
@@ -129,7 +168,7 @@ int main(int argc, char **argv)
 		"/work/alpha.link", O_RDWR | O_CLOEXEC, 0);
 	track(&second);
 	if (first.inode != second.inode ||
-		andock_image_engine_materializations() != 1) {
+		andock_image_engine_materializations() != materializations + 1) {
 		fprintf(stderr, "inode cache did not reuse one materialization\n");
 		return 1;
 	}
@@ -143,8 +182,8 @@ int main(int argc, char **argv)
 	mapping[2] = 'Y';
 	if (msync(mapping, 6, MS_SYNC) != 0)
 		fail("msync", -errno);
-	if (andock_image_engine_mark_dirty(first.inode) < 0 ||
-		andock_image_engine_sync(first.inode) < 0)
+	if (andock_image_engine_mark_dirty(first.cache_id) < 0 ||
+		andock_image_engine_sync(first.cache_id) < 0)
 		fail("mmap-sync", -EIO);
 	munmap(mapping, 6);
 	mapping = mmap(NULL, 6, PROT_READ | PROT_EXEC,
@@ -157,8 +196,8 @@ int main(int argc, char **argv)
 		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/alpha", NULL);
 	andock_image_result_release(&removed);
 	write_at(first.guest_fd, 3, "X");
-	if (andock_image_engine_mark_dirty(first.inode) < 0 ||
-		andock_image_engine_sync(first.inode) < 0)
+	if (andock_image_engine_mark_dirty(first.cache_id) < 0 ||
+		andock_image_engine_sync(first.cache_id) < 0)
 		fail("hardlink-sync", -EIO);
 	struct andock_image_result via_link = open_file(
 		"/work/alpha.link", O_RDONLY | O_CLOEXEC, 0);
@@ -170,8 +209,8 @@ int main(int argc, char **argv)
 		"/work/alpha.link", "/work/moved");
 	andock_image_result_release(&renamed);
 	write_at(second.guest_fd, 4, "W");
-	if (andock_image_engine_mark_dirty(second.inode) < 0 ||
-		andock_image_engine_sync(second.inode) < 0)
+	if (andock_image_engine_mark_dirty(second.cache_id) < 0 ||
+		andock_image_engine_sync(second.cache_id) < 0)
 		fail("rename-sync", -EIO);
 	close_tracked(&second);
 	close_tracked(&first);
@@ -182,6 +221,7 @@ int main(int argc, char **argv)
 	if (image_fd < 0 || andock_image_engine_start(image_fd) < 0)
 		fail("restart", -errno);
 	close(image_fd);
+	verify_sparse_fixtures();
 	expect_status("old-link-missing",
 		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
 			"/work/alpha.link", NULL), -ENOENT);
@@ -194,13 +234,13 @@ int main(int argc, char **argv)
 		"/work/target", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
 	track(&target);
 	write_at(target.guest_fd, 0, "old");
-	andock_image_engine_mark_dirty(target.inode);
+	andock_image_engine_mark_dirty(target.cache_id);
 	close_tracked(&target);
 	struct andock_image_result source = open_file(
 		"/work/source", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
 	track(&source);
 	write_at(source.guest_fd, 0, "new");
-	andock_image_engine_mark_dirty(source.inode);
+	andock_image_engine_mark_dirty(source.cache_id);
 	close_tracked(&source);
 	struct andock_image_result replaced = call(
 		ANDOCK_IMAGE_RENAME, 0, 0, "/work/source", "/work/target");
@@ -213,13 +253,65 @@ int main(int argc, char **argv)
 	removed = call(ANDOCK_IMAGE_UNLINK, 0, 0, "/work/moved", NULL);
 	andock_image_result_release(&removed);
 	write_at(persisted.guest_fd, 0, "gone");
-	andock_image_engine_mark_dirty(persisted.inode);
-	if (andock_image_engine_sync(persisted.inode) < 0)
+	andock_image_engine_mark_dirty(persisted.cache_id);
+	if (andock_image_engine_sync(persisted.cache_id) < 0)
 		fail("unlinked-sync", -EIO);
 	close_tracked(&persisted);
 	expect_status("unlinked-missing",
 		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
 			"/work/moved", NULL), -ENOENT);
+
+	struct andock_image_result old_generation = open_file(
+		"/work/reuse-old", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+	track(&old_generation);
+	write_at(old_generation.guest_fd, 0, "old");
+	andock_image_engine_mark_dirty(old_generation.cache_id);
+	if (andock_image_engine_sync(old_generation.cache_id) < 0)
+		fail("reuse-old-sync", -EIO);
+	uint64_t reused_inode = old_generation.inode;
+	uint64_t old_cache_id = old_generation.cache_id;
+	removed = call(
+		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/reuse-old", NULL);
+	andock_image_result_release(&removed);
+	write_at(old_generation.guest_fd, 0, "still-open");
+	andock_image_engine_mark_dirty(old_generation.cache_id);
+	expect_bytes(old_generation.guest_fd, 0, "still-open");
+
+	struct andock_image_result new_generation;
+	char reused_path[64];
+	bool found_reuse = false;
+	for (int attempt = 0; attempt < 1024; attempt++) {
+		snprintf(reused_path, sizeof(reused_path),
+			"/work/reuse-%d", attempt);
+		new_generation = open_file(reused_path,
+			O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+		track(&new_generation);
+		if (new_generation.inode == reused_inode) {
+			found_reuse = true;
+			break;
+		}
+		close_tracked(&new_generation);
+		removed = call(
+			ANDOCK_IMAGE_UNLINK, 0, 0, reused_path, NULL);
+		andock_image_result_release(&removed);
+	}
+	if (!found_reuse || new_generation.cache_id == old_cache_id) {
+		fprintf(stderr, "unlinked inode generation was not isolated\n");
+		return 1;
+	}
+	write_at(new_generation.guest_fd, 0, "new-generation");
+	andock_image_engine_mark_dirty(new_generation.cache_id);
+	if (andock_image_engine_sync(new_generation.cache_id) < 0)
+		fail("reuse-new-sync", -EIO);
+	expect_bytes(new_generation.guest_fd, 0, "new-generation");
+	expect_bytes(old_generation.guest_fd, 0, "still-open");
+	close_tracked(&old_generation);
+	expect_bytes(new_generation.guest_fd, 0, "new-generation");
+	close_tracked(&new_generation);
+	struct andock_image_result reopened_generation = open_file(
+		reused_path, O_RDONLY | O_CLOEXEC, 0);
+	expect_bytes(reopened_generation.guest_fd, 0, "new-generation");
+	andock_image_result_release(&reopened_generation);
 
 	if (andock_image_engine_stop() < 0)
 		fail("final-stop", -EIO);

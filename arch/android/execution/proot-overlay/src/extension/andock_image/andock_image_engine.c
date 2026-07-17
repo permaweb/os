@@ -60,6 +60,7 @@ static int member_image_fd = -1;
 
 struct cached_inode {
 	uint64_t inode;
+	uint64_t cache_id;
 	int memory_fd;
 	unsigned int references;
 	bool dirty;
@@ -69,6 +70,7 @@ struct cached_inode {
 
 static struct cached_inode *inode_cache;
 static uint64_t materialization_count;
+static uint64_t next_cache_id;
 
 static int create_memory_file(const char *name, unsigned int flags)
 {
@@ -225,11 +227,36 @@ static struct cached_inode *find_cached_inode(uint64_t inode)
 {
 	struct cached_inode *entry = inode_cache;
 	while (entry != NULL) {
-		if (entry->inode == inode)
+		if (entry->inode == inode && !entry->unlinked)
 			return entry;
 		entry = entry->next;
 	}
 	return NULL;
+}
+
+static struct cached_inode *find_cached_id(uint64_t cache_id)
+{
+	struct cached_inode *entry = inode_cache;
+	while (entry != NULL) {
+		if (entry->cache_id == cache_id)
+			return entry;
+		entry = entry->next;
+	}
+	return NULL;
+}
+
+static void remove_cached_inode(struct cached_inode *cached)
+{
+	struct cached_inode **cursor = &inode_cache;
+	while (*cursor != NULL) {
+		if (*cursor == cached) {
+			*cursor = cached->next;
+			close(cached->memory_fd);
+			free(cached);
+			return;
+		}
+		cursor = &(*cursor)->next;
+	}
 }
 
 static void clear_inode_cache(void)
@@ -248,6 +275,7 @@ int andock_image_engine_start(int image_fd)
 		return -EBUSY;
 	inode_cache = NULL;
 	materialization_count = 0;
+	next_cache_id = 0;
 	member_image_fd = fcntl(image_fd, F_DUPFD_CLOEXEC, 0);
 	if (member_image_fd < 0)
 		return -errno;
@@ -557,6 +585,7 @@ static int load_cached_inode(const char *guest,
 {
 	struct cached_inode *cached = find_cached_inode(result->inode);
 	if (cached != NULL) {
+		result->cache_id = cached->cache_id;
 		*output = cached;
 		return 0;
 	}
@@ -647,10 +676,17 @@ static int load_cached_inode(const char *guest,
 		return -ENOMEM;
 	}
 	cached->inode = result->inode;
+	if (next_cache_id == UINT64_MAX) {
+		close(memory_fd);
+		free(cached);
+		return -EOVERFLOW;
+	}
+	cached->cache_id = ++next_cache_id;
 	cached->memory_fd = memory_fd;
 	cached->next = inode_cache;
 	inode_cache = cached;
 	materialization_count++;
+	result->cache_id = cached->cache_id;
 	*output = cached;
 	return 0;
 }
@@ -820,11 +856,11 @@ static int writeback_cached_inode(struct cached_inode *cached)
 	return result;
 }
 
-int andock_image_engine_retain(uint64_t inode)
+int andock_image_engine_retain(uint64_t cache_id)
 {
-	if (inode == 0)
+	if (cache_id == 0)
 		return 0;
-	struct cached_inode *cached = find_cached_inode(inode);
+	struct cached_inode *cached = find_cached_id(cache_id);
 	if (cached == NULL)
 		return -ENOENT;
 	if (cached->references == UINT_MAX)
@@ -833,18 +869,17 @@ int andock_image_engine_retain(uint64_t inode)
 	return 0;
 }
 
-int andock_image_engine_mark_dirty(uint64_t inode)
+int andock_image_engine_mark_dirty(uint64_t cache_id)
 {
-	struct cached_inode *cached = find_cached_inode(inode);
+	struct cached_inode *cached = find_cached_id(cache_id);
 	if (cached == NULL)
 		return -ENOENT;
 	cached->dirty = true;
 	return 0;
 }
 
-int andock_image_engine_sync(uint64_t inode)
+static int sync_cached_inode(struct cached_inode *cached)
 {
-	struct cached_inode *cached = find_cached_inode(inode);
 	if (cached == NULL || !cached->dirty)
 		return 0;
 	if (cached->unlinked) {
@@ -857,17 +892,27 @@ int andock_image_engine_sync(uint64_t inode)
 	return status;
 }
 
-int andock_image_engine_release(uint64_t inode)
+int andock_image_engine_sync(uint64_t cache_id)
 {
-	if (inode == 0)
+	return sync_cached_inode(find_cached_id(cache_id));
+}
+
+int andock_image_engine_release(uint64_t cache_id)
+{
+	if (cache_id == 0)
 		return 0;
-	struct cached_inode *cached = find_cached_inode(inode);
+	struct cached_inode *cached = find_cached_id(cache_id);
 	if (cached == NULL)
 		return -ENOENT;
 	if (cached->references == 0)
 		return -EINVAL;
 	cached->references--;
-	return cached->references == 0 ? andock_image_engine_sync(inode) : 0;
+	if (cached->references != 0)
+		return 0;
+	int status = sync_cached_inode(cached);
+	if (status == 0 && cached->unlinked)
+		remove_cached_inode(cached);
+	return status;
 }
 
 int andock_image_engine_sync_all(void)
@@ -875,7 +920,7 @@ int andock_image_engine_sync_all(void)
 	int first_error = 0;
 	struct cached_inode *cached = inode_cache;
 	while (cached != NULL) {
-		int status = andock_image_engine_sync(cached->inode);
+		int status = sync_cached_inode(cached);
 		if (status < 0 && first_error == 0)
 			first_error = status;
 		cached = cached->next;
@@ -1041,7 +1086,7 @@ static int unlink_operation(int flags, const char *path,
 		return status;
 	struct cached_inode *cached = find_cached_inode(existing.inode);
 	if (cached != NULL) {
-		status = andock_image_engine_sync(existing.inode);
+		status = sync_cached_inode(cached);
 		if (status < 0) {
 			andock_image_result_release(&existing);
 			return status;
@@ -1059,8 +1104,11 @@ static int unlink_operation(int flags, const char *path,
 		andock_image_result_release(&existing);
 		return -ext4_result;
 	}
-	if (cached != NULL && existing.links <= 1)
+	if (cached != NULL && existing.links <= 1) {
 		cached->unlinked = true;
+		if (cached->references == 0)
+			remove_cached_inode(cached);
+	}
 	andock_image_result_release(&existing);
 	return result_path(result, resolved);
 }
@@ -1100,7 +1148,7 @@ static int rename_operation(int flags, const char *source,
 			struct cached_inode *target_cached =
 				find_cached_inode(target_metadata.inode);
 			if (target_cached != NULL) {
-				status = andock_image_engine_sync(target_metadata.inode);
+				status = sync_cached_inode(target_cached);
 				if (status < 0) {
 					andock_image_result_release(&source_metadata);
 					andock_image_result_release(&target_metadata);
@@ -1128,8 +1176,11 @@ static int rename_operation(int flags, const char *source,
 		target_metadata.links <= 1) {
 		struct cached_inode *target_cached =
 			find_cached_inode(target_metadata.inode);
-		if (target_cached != NULL)
+		if (target_cached != NULL) {
 			target_cached->unlinked = true;
+			if (target_cached->references == 0)
+				remove_cached_inode(target_cached);
+		}
 	}
 	andock_image_result_release(&source_metadata);
 	andock_image_result_release(&target_metadata);

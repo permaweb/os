@@ -44,6 +44,7 @@ struct andock_image_result {
 	mode_t mode;
 	uint64_t size;
 	uint64_t inode;
+	uint64_t cache_id;
 	nlink_t links;
 	char *path;
 	uint8_t *data;
@@ -59,10 +60,10 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 		const void *data, size_t data_size,
 		struct andock_image_result *result);
 int andock_image_engine_flush(void);
-int andock_image_engine_retain(uint64_t inode);
-int andock_image_engine_release(uint64_t inode);
-int andock_image_engine_mark_dirty(uint64_t inode);
-int andock_image_engine_sync(uint64_t inode);
+int andock_image_engine_retain(uint64_t cache_id);
+int andock_image_engine_release(uint64_t cache_id);
+int andock_image_engine_mark_dirty(uint64_t cache_id);
+int andock_image_engine_sync(uint64_t cache_id);
 int andock_image_engine_sync_all(void);
 uint64_t andock_image_engine_materializations(void);
 void andock_image_result_release(struct andock_image_result *result);

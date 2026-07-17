@@ -87,12 +87,11 @@ index d5c9ec6..4263900 100644
  #include "cli/note.h"
  #include "build.h"
  
-@@ -321,6 +322,11 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
+@@ -321,6 +322,10 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
  	char guest_path[PATH_MAX];
  	int status;
  
-+	if (andock_image_enabled()
-+	    && !andock_image_is_kernel_path(user_path))
++	if (andock_image_enabled())
 +		return andock_image_translate_path(
 +			tracee, result, dir_fd, user_path, deref_final);
 +

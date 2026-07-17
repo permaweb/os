@@ -64,6 +64,11 @@ if ! grep -q 'regular_source = ext4_inode_is_type' \
     patch -d "$LWEXT4_SOURCE" -p1 \
         < "$ROOT/execution/lwext4-atomic-replace.patch"
 fi
+if ! grep -q 'bool hole = fblock == 0' \
+    "$LWEXT4_SOURCE/src/ext4.c"; then
+    patch -d "$LWEXT4_SOURCE" -p1 \
+        < "$ROOT/execution/lwext4-sparse-read.patch"
+fi
 
 if ! git -C "$SOURCE" rev-parse --git-dir >/dev/null 2>&1; then
     rm -rf "$SOURCE"
@@ -113,7 +118,7 @@ docker cp "$ROOT/execution/termux-tar-wrapper" "$CONTAINER:/usr/bin/tar"
 docker exec --user root "$CONTAINER" chmod 0755 /usr/bin/tar
 
 docker exec --user builder --workdir /home/builder/termux-packages \
-    "$CONTAINER" ./build-package.sh -a aarch64 proot
+    "$CONTAINER" ./build-package.sh -f -a aarch64 proot
 
 docker exec --user root "$CONTAINER" sh -euxc '
     rm -rf /tmp/andock-proot
