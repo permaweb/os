@@ -22,6 +22,12 @@ No component is merged to `main` until the final dependency graph, emulator
 runtime, package workloads, security assertions, and locally available target
 builds are green together.
 
+The measurement-layer decision is now fixed: `~measurement@1.0` and
+`~andee@1.0` do not change for Andock. The stable implementation will add only
+reserved Android execution facts to `~system@1.0/all` plus matching verifier
+policy/specification. The old `agent/andock-measurement` broker projection is
+rejected. See `decisions/andock-measurement.md`.
+
 ## Objective and isolation
 
 Replace the correct but unacceptably slow per-path Binder filesystem prototype
