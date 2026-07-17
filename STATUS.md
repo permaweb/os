@@ -79,6 +79,14 @@ run. This is 27 times the 5 s acceptance ceiling and isolates the current
 per-path overlay broker as the pathological surface; no installation, download,
 or file creation is included in that timing.
 
+The matching immutable-base control removed overlay lookup, whiteouts,
+hard-link markers, copy-up, and mutation entirely. The same 10,000-file
+`du -s /root/meta` took 24.380 s inside the guest and 24.990 s through the
+transport. The current overlay algorithm is a further 5.5x multiplier, but the
+per-operation isolated-socket/Binder round trip alone is still 4.9x slower than
+the 5 s ceiling. Caching or flattening only the host overlay cannot satisfy the
+accepted architecture.
+
 ## Directory capability result
 
 The disposable production-shaped probe used two separately named
