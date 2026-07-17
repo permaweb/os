@@ -109,6 +109,14 @@ sparse extent-preserving copy from the measured immutable template. Reflink
 may accelerate creation on supporting retail storage, but overlay, whiteout,
 copy-up, and runtime base lookup are explicitly out of scope for v1.
 
+The app-private filesystem does preserve sparse holes: a 1 GiB control file
+with one 4 KiB extent occupied 8 KiB (`st_blocks=16`). Android's Toybox `cp`
+materialized the same copy to 1,073,750,016 bytes (`st_blocks=2097168`), so
+member creation cannot delegate to the platform `cp`. The implementation must
+copy data extents explicitly, with a zero-scanning fallback where
+`SEEK_DATA`/`SEEK_HOLE` is unavailable, then `fsync` and atomically rename the
+completed image.
+
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
