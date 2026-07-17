@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -209,9 +210,11 @@ static void check_case(enum scenario scenario, int source_fd,
 static int probe_image_fd(void)
 {
 	const char *value = getenv("ANDOCK_IMAGE_FD");
+	const char *network_value = getenv("ANDOCK_NETWORK_FD");
 	char *end;
 	char content[12];
 	long image_fd;
+	long network_fd = -1;
 	DIR *directory;
 	struct dirent *entry;
 
@@ -224,6 +227,19 @@ static int probe_image_fd(void)
 		pread((int)image_fd, content, sizeof(content), 0) != 12 ||
 		memcmp(content, "andock-image", 12) != 0)
 		return 1;
+	if (network_value != NULL) {
+		int socket_type;
+		socklen_t socket_type_size = sizeof(socket_type);
+		errno = 0;
+		network_fd = strtol(network_value, &end, 10);
+		if (errno != 0 || *end != '\0' || network_fd < 0
+		    || network_fd > INT32_MAX
+		    || fcntl((int) network_fd, F_GETFD) != 0
+		    || getsockopt((int) network_fd, SOL_SOCKET, SO_TYPE,
+			&socket_type, &socket_type_size) < 0
+		    || socket_type != SOCK_SEQPACKET)
+			return 1;
+	}
 	directory = opendir("/proc/self/fd");
 	if (directory == NULL)
 		return 1;
@@ -237,7 +253,8 @@ static int probe_image_fd(void)
 		if (entry->d_name[0] == '.')
 			continue;
 		fd = strtol(entry->d_name, &parse_end, 10);
-		if (*parse_end != '\0' || fd <= 2 || fd == image_fd ||
+		if (*parse_end != '\0' || fd <= 2 || fd == image_fd
+		    || fd == network_fd ||
 			fd == dirfd(directory))
 			continue;
 		snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%ld", fd);
@@ -255,13 +272,18 @@ static int probe_image_fd(void)
 	return 0;
 }
 
-static void check_exec(const char *launcher, const char *test_program)
+static void check_exec(const char *launcher, const char *test_program,
+		bool with_network)
 {
-	char name[64];
-	int listener = open_listener(name, 1000);
+	char image_name[64];
+	char network_name[64];
+	int listener = open_listener(image_name, with_network ? 1001 : 1000);
+	int network_listener = with_network
+		? open_listener(network_name, 1002) : -1;
 	int source_fd = open_image(O_RDWR);
 	pid_t child = fork();
 	int status;
+	int network_client = -1;
 
 	if (child < 0) {
 		perror("fork");
@@ -269,8 +291,13 @@ static void check_exec(const char *launcher, const char *test_program)
 	}
 	if (child == 0) {
 		close_extra_fds();
-		execl(launcher, launcher, "--socket", name, "--",
-			test_program, "--probe", NULL);
+		if (with_network)
+			execl(launcher, launcher, "--socket", image_name,
+				"--network-socket", network_name, "--",
+				test_program, "--probe", NULL);
+		else
+			execl(launcher, launcher, "--socket", image_name, "--",
+				test_program, "--probe", NULL);
 		_exit(127);
 	}
 	int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
@@ -282,11 +309,22 @@ static void check_exec(const char *launcher, const char *test_program)
 	close(client);
 	close(listener);
 	close(source_fd);
+	if (with_network) {
+		network_client = accept4(
+			network_listener, NULL, NULL, SOCK_CLOEXEC);
+		close(network_listener);
+		if (network_client < 0) {
+			perror("accept network capability");
+			exit(1);
+		}
+	}
 	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
 		WEXITSTATUS(status) != 0) {
 		fprintf(stderr, "launcher exec path failed\n");
 		exit(1);
 	}
+	if (network_client >= 0)
+		close(network_client);
 }
 
 static void check_wrong_uid(void)
@@ -373,7 +411,8 @@ int main(int argc, char **argv)
 	close(pipe_fds[1]);
 	check_case(CAPABILITY_OK, pipe_fds[0], -1, -EINVAL);
 	check_wrong_uid();
-	check_exec(argv[1], argv[0]);
+	check_exec(argv[1], argv[0], false);
+	check_exec(argv[1], argv[0], true);
 	puts("ANDOCK_PROOT_LAUNCHER_TEST_OK");
 	return 0;
 }

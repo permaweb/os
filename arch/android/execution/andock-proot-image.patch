@@ -25,6 +25,7 @@ index 0adb88b..7252801 100644
  	extension/extension.o	\
 +	extension/andock_image/andock_image.o \
 +	extension/andock_image/andock_image_engine.o \
++	extension/andock_image/andock_network.o \
 +	$(LWEXT4_OBJECTS) \
  	extension/ashmem_memfd/ashmem_memfd.o \
  	extension/kompat/kompat.o \

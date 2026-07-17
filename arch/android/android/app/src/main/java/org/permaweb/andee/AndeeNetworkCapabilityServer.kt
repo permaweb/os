@@ -79,7 +79,11 @@ internal class AndeeNetworkCapabilityServer(
             }
         }
         listener.accept().use { accepted ->
-            require(accepted.peerCredentials.uid == Process.myUid()) {
+            val peer = accepted.peerCredentials
+            require(
+                peer.uid == Process.myUid() &&
+                    peer.getPid().toLong() == processId(guestProcess),
+            ) {
                 "Andock network capability requested by an unexpected UID"
             }
             this.accepted.set(true)
@@ -161,8 +165,12 @@ internal class AndeeNetworkCapabilityServer(
     }
 
     private companion object {
+        val PROCESS_PID = java.lang.Process::class.java.getMethod("pid")
         const val CONNECT_TIMEOUT_MS = 10_000L
         const val CLOSE_TIMEOUT_MS = 1_000L
+
+        fun processId(process: java.lang.Process): Long =
+            (PROCESS_PID.invoke(process) as Number).toLong()
     }
 }
 
