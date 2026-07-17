@@ -60,6 +60,12 @@ cat > "$OUT/next-boot-config.json" <<JSON
     "scope": "operator-requested"
   },
   "trusted-device-signers": ["operator-requested-signer"],
+  "priv-ouroboros-keys": {
+    "test-provider": {
+      "api-key": "andee-private-test-key",
+      "base-url": "https://provider.example"
+    }
+  },
   "on": {
     "request": []
   }
@@ -311,6 +317,13 @@ if effective.get("trusted-device-signers") != ["operator-requested-signer"]:
     fail("effective config did not preserve trusted remote device signers")
 if effective.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
     fail("effective config did not preserve measured remote name resolvers")
+if effective.get("priv-ouroboros-keys") != {
+    "test-provider": {
+        "api-key": "andee-private-test-key",
+        "base-url": "https://provider.example",
+    }
+}:
+    fail("effective config did not preserve normal private node options")
 if not hooks:
     fail("effective config has no on.start hook")
 first_hook = hooks[0]
@@ -325,6 +338,8 @@ if meta_node.get("andee-test-marker") != marker:
     fail("stock meta info did not include selected marker")
 if meta_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
     fail("stock meta info did not include measured remote name resolvers")
+if "priv-ouroboros-keys" in meta_node:
+    fail("stock meta info exposed private node options")
 if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
@@ -337,6 +352,8 @@ if attested_node.get("trusted-device-signers") != ["operator-requested-signer"]:
     fail("attested node message did not commit to trusted remote device signers")
 if attested_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
     fail("attested node message did not commit to measured remote name resolvers")
+if "priv-ouroboros-keys" in attested_node:
+    fail("attested public node exposed private node options")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
 if "store-defaults" in attested_node:

@@ -164,6 +164,13 @@ the `on.start` boot measurement hook, persist the v1 node key, inject an
 unmeasured `trusted-devices` map, or override HyperBEAM's stock store/cache
 configuration.
 
+Private node options such as `priv-ouroboros-keys` follow normal HyperBEAM
+configuration semantics. AndEE preserves them in the app-private effective
+configuration and relies on stock HyperBEAM private-key filtering to keep them
+out of `~meta@1.0` and the public boot measurement. Only the explicitly
+protected identity and runtime-control keys listed by the boot-config store are
+rejected.
+
 ## 4. Stock `~meta@1.0`
 
 AndEE uses the stock HyperBEAM `~meta@1.0` device. `GET /~meta@1.0/info`

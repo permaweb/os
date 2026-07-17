@@ -197,7 +197,7 @@ object AndeeBootConfigStore {
 
     private fun isPrivateBootKey(key: String): Boolean {
         val canonical = canonicalConfigKey(key)
-        return canonical.startsWith("priv") || canonical in PRIVATE_BOOT_KEYS
+        return canonical in PRIVATE_BOOT_KEYS
     }
 
     private fun canonicalConfigKey(key: String): String = key.lowercase(Locale.US).replace('_', '-')
