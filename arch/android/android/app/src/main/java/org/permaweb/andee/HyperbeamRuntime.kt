@@ -58,6 +58,8 @@ class HyperbeamRuntime(
                     digestFileSet(nativeLibraries())
                 builder.environment()["ANDEE_ENCRYPTED_STORE_ROOT"] =
                     AndeePaths.encryptedStoreRoot(context).absolutePath
+                builder.environment()["ANDEE_EXECUTION_SOCKET"] =
+                    AndeePaths.executionSocketFile(context).absolutePath
             }
             .start()
 
