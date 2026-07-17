@@ -11,8 +11,9 @@ Andock implementation.
 
 Parallel work is isolated as follows:
 
-- `agent/hb-edge-fcdf`: upstream runtime/NIF/build integration only;
-- `agent/andock-fs-spike`: one-time isolated filesystem capability proof;
+- `agent/hb-edge-fcdf`: completed upstream runtime/NIF/build integration;
+- `agent/andock-fs-spike`: completed and rejected the one-time directory
+  capability route on stock Android;
 - `agent/ouroboros-portable-integrated`: portable device/UI/audit
   reconciliation without publication; and
 - `agent/andock-image-fd`: architecture record and eventual clean integration.
@@ -29,8 +30,9 @@ isolated worker.
 
 - Worktree: `/Users/sam/.codex/worktrees/lapee-andock-image-fd`
 - Branch: `agent/andock-image-fd`
-- Exact base: `b2fcf2fa2741018635c72b7b4663ddb820aa9e14`
-  (`agent/hb-edge-e445`).
+- Original clean base: `b2fcf2fa2741018635c72b7b4663ddb820aa9e14`
+  (`agent/hb-edge-e445`). Exact HyperBEAM fcdf is integrated in this branch at
+  `8b6ed2c4`.
 - The prototype is parked at `492c34dcb852552d7c376abcae1ac769a46b906e`
   on `agent/andock-1.0` and is not merged into this branch.
 - The shared checkout `/Users/sam/src/lapee` remains dirty with another
@@ -44,10 +46,11 @@ validation matrix are in `decisions/andock-filesystem-capability.md`.
 
 1. Capture reproducible current-broker metadata and package baselines.
 2. Remove the repeated regular-file `TCGETS`/SELinux audit storm and remeasure.
-3. Test whether a received app-private directory FD supports safe `openat2`
-   mutation from an isolated UID.
-4. If it does not, prove a local userspace filesystem image through one passed
-   FD and select the filesystem/storage representation using measured results.
+3. The received app-private directory capability was rejected at `07eafbd`:
+   Binder refuses to translate both `O_PATH` and read-only directory FDs into
+   the isolated worker under the stock policy.
+4. Prove a local userspace filesystem image through one passed regular-file FD
+   and select the filesystem/storage representation using measured results.
 5. Implement locally resolved filesystem syscalls and delete the per-operation
    socket/Binder/Kotlin host broker.
 
@@ -75,6 +78,20 @@ guest traversal. `du -s /root/meta` took 135.177 s inside the guest and
 run. This is 27 times the 5 s acceptance ceiling and isolates the current
 per-path overlay broker as the pathological surface; no installation, download,
 or file creation is included in that timing.
+
+## Directory capability result
+
+The disposable production-shaped probe used two separately named
+`bindIsolatedService` instances. The application ran as UID 10250; the workers
+ran as UIDs 99043 and 99044. Each worker called back into an application-UID
+broker, matching the real Andock Binder direction. Android's Binder driver
+rejected the app-private directory FD before worker code could use it and
+logged `translate fd failed` for both instances. The API 36 ARM64 kernel also
+has `CONFIG_SECURITY_LANDLOCK`, `CONFIG_USER_NS`, and `CONFIG_FANOTIFY` unset.
+
+This closes the direct-directory route without relaxing owner-only modes,
+SELinux, or the isolated UID. The complete probe, exact APK hashes, runtime
+report, and decision rule are on `agent/andock-fs-spike` at `07eafbd`.
 
 ## Non-negotiable acceptance
 
