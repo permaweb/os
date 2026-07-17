@@ -1,6 +1,6 @@
 # Andock filesystem-capability status
 
-Updated: 2026-07-16 America/New_York
+Updated: 2026-07-17 America/New_York
 
 ## Active execution
 
@@ -87,17 +87,20 @@ validation matrix are in `decisions/andock-filesystem-capability.md`.
 
 ## Immediate work
 
-1. Capture reproducible current-broker metadata and package baselines.
-2. Remove the repeated regular-file `TCGETS`/SELinux audit storm and remeasure.
-3. The received app-private directory capability was rejected at `07eafbd`:
-   Binder refuses to translate both `O_PATH` and read-only directory FDs into
-   the isolated worker under the stock policy.
-4. The regular-file image route and the actual populated Ubuntu tree are now
-   proven through pinned lwext4; production template ownership/xattr fidelity
-   remains a build-pipeline gate.
-5. Complete the local PRoot syscall adapter, coherent inode materialization,
-   Android lifecycle, and network-only brokerage, then delete every
-   filesystem-path socket/Binder/Kotlin broker.
+1. Complete the syscall-layer synthetic `/dev` and bounded `/proc/self`
+   surface without broad host binds, writable host temporary directories, or
+   Android-root escape.
+2. Integrate the pinned ARM64 native adapter and deterministic Ubuntu sparse
+   template into the release runtime builder, with manifest validation and no
+   generated image committed to git.
+3. Run the full emulator contract, package-manager, Python/Node/Transformers/
+   PyTorch, lifecycle, cancellation, concurrency, and adversarial network/
+   app-private isolation matrix.
+4. Recursively deep-clean the implementation and preserve the component branch
+   split before composing the final dependency branch.
+5. Validate the ordinary trusted Ouroboros packages and Arweave UI manifest on
+   stock HyperBEAM and AndEE without auth, session, wallet, identity, or
+   application-server changes.
 
 ## Dedicated emulator baseline
 
@@ -192,6 +195,76 @@ Linux builder/directly from the numeric-owner OCI export and assert service
 ownership and Linux xattr/capability fidelity. The PRoot syscall adapter,
 coherent repeated-open behavior, writable `mmap`, Android lifecycle, and
 checker strategy remain explicit gates.
+
+## Local-image Android integration checkpoint
+
+The Android service implementation now compiles and launches the execution
+manager beneath the stock HyperBEAM process. A standard Android sparse image
+in the runtime ZIP expands to a hole-preserving app-private raw image, and the
+manager atomically creates one complete writable sparse image per member. The
+2 GiB integration fixture occupies 805 MiB on the emulator; the persisted
+member image survived an in-place APK replacement.
+
+The corrected PRoot adapter removed both the Termux-incompatible talloc abort
+and the failed-initialization null cleanup crash. The isolated worker runs under
+`u:r:isolated_app:s0:c512,c768`; it cannot read the application data root,
+crypto socket, effective config, encrypted-zone state, or execution-state
+directory. A one-shot abstract `SOCK_SEQPACKET` capability handoff now restores
+the member image descriptor that Android's `ProcessBuilder` deliberately
+closes. Its native launcher requires the same isolated UID, exactly one regular
+read-write image descriptor, a fixed capability byte, no truncation, and no
+extra descriptors before replacing itself with PRoot.
+
+The next exact Android failure was SELinux denial of `open(/proc/self/fd/N)` on
+the materialized `memfd:andock-file`; direct probes proved that memfd creation,
+read/write, duplication, and executable mappings work while all proc-fd reopen
+variants fail with `EACCES`. The native layer no longer reopens proc-fd paths.
+It uses `F_DUPFD_CLOEXEC` and preserves Linux open-file-description semantics
+inside the tracer: independent positions across separate opens; shared
+positions/flags across dup and fork; positional read/write vector rewrites;
+synthetic `lseek`, `F_GETFL`, and `F_SETFL`; logical access-mode checks; and
+ext4 identity/capacity for both `statfs` and `fstatfs`. Host image-engine and
+launcher regressions are green, the first ARM64 cross-build linked, and the
+final artifact rebuild is running before emulator integration. This change is
+entirely within the filesystem compatibility layer; it does not alter identity,
+authorization, or credentials.
+
+The deterministic production template is complete at `5e1b23c`. Two clean,
+pinned builders produced byte-identical 8 GiB raw ext4 images, Android sparse
+images, manifests, and 26,938-entry metadata inventories. The raw image SHA-256
+is `a2da758ebe2b780a2a4b271d35747a3d7116ffb91677395484c1f8f0fccb32a5`, the
+sparse image SHA-256 is
+`febb51845e8becf078195c0c805c34df91dd7bc8e9f709ec595488691892dc63`, and the
+manifest SHA-256 is
+`1b1e4af37819ca92b20eb80c16e42a39ba57bab582ec3be66baf92f972eb90ab`;
+standard `simg2img` and the pinned lwext4 probe both independently reopen the
+result. Raw images remain ignored build artifacts and are never packaged.
+
+The native build is content-addressed: an unchanged pinned source/patch/output
+set validates and exits in 0.05 s, while a tampered binary fails validation.
+No authentication, session, bearer-token, wallet, identity, or member-context
+file is changed in the Andock, portable Ouroboros, or Android service diffs.
+
+The first complete writable-image service checkpoint is committed at
+`c952ade0f72370f5a32c4e96c296901c6351c2f8`. On a clean APK install, the
+production-shaped 8 GiB Ubuntu image expanded sparsely and the first member
+clone plus command completed in 1.12 s. The guest reported 987 MiB used and
+7.1 GiB free. Binary/UTF-8 file content round-tripped exactly; a second member
+could not read it; state survived a service/process restart; destroy removed
+it; and a 500 ms command deadline returned exit 124 with `timed-out=true` in
+1.25 s without crashing the isolated service. `/proc/self/root` resolved to
+`/system`, app-private paths were absent, and the tracee exposed only its own
+stdio descriptors. A cancellation race found during this run is fixed in the
+checkpoint and awaits the next installed-APK repetition.
+
+The remaining real guest failure is not image or CPU performance. Because the
+safe root remains `/system`, stock PRoot's normal host-path translation cannot
+provide `/dev/null` or its peers, and PRoot bind glue cannot create targets:
+the isolated UID deliberately has no writable host directory for
+`PROOT_TMP_DIR`. Broad `/dev`, Android-root, or app-data binds are rejected.
+The bounded fix is direct syscall-layer FD injection plus synthetic metadata
+for safe device paths, with adversarial denial of `/proc/self/root`, `cwd`,
+`exe`, arbitrary descriptors, and all non-self process paths.
 
 ## Non-negotiable acceptance
 
