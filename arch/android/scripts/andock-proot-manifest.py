@@ -13,6 +13,7 @@ def digest(path):
 def inputs(root):
     paths = [
         root / "scripts/build-andock-proot-image.sh",
+        root / "scripts/andock-lwext4-source.sh",
         root / "scripts/andock-proot-manifest.py",
         root / "execution/termux-proot-prefix.patch",
         root / "execution/termux-proot-launcher.patch",
@@ -21,9 +22,9 @@ def inputs(root):
         root / "execution/lwext4-open-inode.patch",
         root / "execution/lwext4-atomic-replace.patch",
         root / "execution/lwext4-sparse-read.patch",
+        root / "execution/lwext4/include/generated/ext4_config.h",
+        root / "execution/lwext4/patches/xattr-list-size.patch",
         root / "runtime-src/andock_proot_launcher.c",
-        root / "native/andock-image-engine-probe/include/generated/ext4_config.h",
-        root / "native/andock-image-engine-probe/patches/0001-fix-xattr-list-size-ub.patch",
     ]
     paths.extend(sorted(
         path for path in

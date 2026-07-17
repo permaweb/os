@@ -291,11 +291,8 @@ for all descriptors to close, and then removes only that member image.
 ### Phase 1: isolated capability bootstrap
 
 - Define a minimal versioned Binder bootstrap used once per worker.
-- Bind every capability to the exact member identifier, isolated UID, worker
-  token, network policy, and lifecycle generation.
-- Pass descriptors rather than paths or caller-controlled descriptor numbers.
-- Make replay, cross-member reuse, stale-generation reuse, and duplicate active
-  binding fail closed.
+- Pass the selected member-image descriptor directly to the exact isolated
+  worker rather than passing a path or caller-controlled descriptor number.
 - Close every unrelated inherited descriptor before guest execution.
 - Kill the complete process tree when the service, binder peer, app process,
   timeout, or command transport dies.

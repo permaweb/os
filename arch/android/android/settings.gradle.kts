@@ -16,4 +16,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "AndEE"
 include(":app")
-include(":andock-image-engine-spike")
