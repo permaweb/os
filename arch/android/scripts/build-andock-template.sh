@@ -120,8 +120,8 @@ printf 'template=%s\n' "$OUTPUT"
 printf 'template-sha256=%s\n' "$(sha256_file "$OUTPUT")"
 printf 'template-logical-bytes=%s\n' "$(stat -f %z "$OUTPUT")"
 printf 'template-allocated-bytes-on-host=%s\n' "$((HOST_BLOCKS * 512))"
-printf 'android-sparse-image=%s\n' "${OUTPUT%.ext4}.simg"
+printf 'android-sparse-image=%s\n' "$OUTPUT.simg"
 printf 'android-sparse-image-sha256=%s\n' \
-    "$(sha256_file "${OUTPUT%.ext4}.simg")"
+    "$(sha256_file "$OUTPUT.simg")"
 printf 'android-sparse-image-bytes=%s\n' \
-    "$(stat -f %z "${OUTPUT%.ext4}.simg")"
+    "$(stat -f %z "$OUTPUT.simg")"

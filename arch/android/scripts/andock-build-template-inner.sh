@@ -29,7 +29,7 @@ INVENTORY="$WORK/tools/andock-metadata-inventory.py"
 XATTR_REPLAYER="$WORK/tools/andock-replay-xattrs.py"
 SPARSE_CONVERTER="$WORK/tools/andock-android-sparse.py"
 OUTPUT="/output/$ANDEE_OUTPUT_BASENAME"
-OUTPUT_SIMG="${OUTPUT%.ext4}.simg"
+OUTPUT_SIMG="$OUTPUT.simg"
 TMP_IMAGE="$OUTPUT.tmp"
 TMP_SIMG="$OUTPUT_SIMG.tmp"
 
