@@ -110,6 +110,9 @@ separate base/member fallback with independently tested persistence semantics.
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
+- Direct `~andock@1.0` requests cannot self-authorize by supplying a member ID
+  and `member-context`; verified workspace authorization is required before a
+  member image is opened or a worker is allocated.
 - No guest host-path concatenation or descriptor exposure.
 - PyTorch install and post-install traversal meet the explicit performance
   gates in the decision record.

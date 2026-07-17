@@ -83,6 +83,29 @@ the filesystem only through the local syscall layer. Even if it escapes that
 translation layer, the kernel still confines it to the isolated UID and
 SELinux domain.
 
+## Execution admission boundary
+
+The isolated UID protects Android and HyperBEAM from guest code; it does not
+authorize access to an existing member filesystem. A caller must not be able
+to select a member ID, manufacture a `member-context`, and invoke
+`~andock@1.0` directly.
+
+- The public Andock route rejects execution without a verified AO/HyperBEAM
+  authorization produced by the configured workspace authority.
+- The authorization binds the exact member ID, allowed operation, network
+  policy, request body, lifecycle generation, and measured Andock subject.
+- Authorization is checked before allocating a worker or opening a member
+  image. Admin bypass, where configured, is explicit and measured.
+- A valid wallet signature proves identity only. It does not create workspace
+  membership, grant tools, or make another member's image addressable.
+- The design uses normal HyperBEAM signatures and committed AO messages. It
+  does not introduce a bearer secret, caller-supplied trusted JSON, or an
+  AndEE-only authentication protocol.
+
+The parked prototype's `member-context` tool-list check is contract-shape
+validation, not an authorization boundary. It may be retained only after the
+request has crossed the verified admission boundary above.
+
 ## Path safety invariants
 
 The filesystem engine resolves guest paths by filesystem inode, never by
@@ -187,6 +210,9 @@ behavior, corruption handling, and exact device/kernel/filesystem facts.
 
 ### Phase 1: isolated capability bootstrap
 
+- Enforce the execution admission boundary before opening any filesystem
+  capability; add direct-device, forged-context, replay, expired-generation,
+  and cross-member denial tests.
 - Define a minimal versioned Binder bootstrap used once per worker.
 - Bind every capability to the exact member identifier, isolated UID, worker
   token, network policy, and lifecycle generation.
