@@ -60,10 +60,12 @@ validation matrix are in `decisions/andock-filesystem-capability.md`.
 3. The received app-private directory capability was rejected at `07eafbd`:
    Binder refuses to translate both `O_PATH` and read-only directory FDs into
    the isolated worker under the stock policy.
-4. Prove a local userspace filesystem image through one passed regular-file FD
-   and select the filesystem/storage representation using measured results.
-5. Implement locally resolved filesystem syscalls and delete the per-operation
-   socket/Binder/Kotlin host broker.
+4. The regular-file image route and the actual populated Ubuntu tree are now
+   proven through pinned lwext4; production template ownership/xattr fidelity
+   remains a build-pipeline gate.
+5. Complete the local PRoot syscall adapter, coherent inode materialization,
+   Android lifecycle, and network-only brokerage, then delete every
+   filesystem-path socket/Binder/Kotlin broker.
 
 ## Dedicated emulator baseline
 
@@ -142,8 +144,21 @@ denial.
 The 64 MiB fixture occupied 1,409,024 bytes after copy. Three Android
 `SEEK_DATA`/`SEEK_HOLE` copies took 1.859, 2.095, and 1.741 ms (1.859 ms
 median). This accepts the one-time regular-file capability route but does not
-yet accept lwext4 for production: the actual 823 MiB, 26,931-entry Ubuntu
-template, PRoot syscall adapter, writable `mmap`, torn-write recovery, and
+The actual populated-tree checkpoint is green at `78661a8`. Three independent
+2 GiB templates made from the pinned 823 MiB source tree were byte-identical at
+`1935843759cb448ebfb95115021d210a908b5595a89dab4e10ca9e1567df42f9`
+and occupied 938,082,304 bytes. The gate enumerated all 26,931 imported entries,
+read the exact AArch64 glibc/Python/Node ELFs and usr-merge symlinks, persisted
+hard links, symlinks, modes, timestamps, and `user.*` xattrs, and recovered a
+committed rename after deliberate process death. Three complete sparse copies
+took 149.034, 109.940, and 123.512 ms.
+
+This accepts the populated image format, but not the prototype's macOS staging
+metadata. Host extraction collapsed numeric OCI ownership and Linux xattrs to
+the macOS user. The production template must be built as root inside the pinned
+Linux builder/directly from the numeric-owner OCI export and assert service
+ownership and Linux xattr/capability fidelity. The PRoot syscall adapter,
+coherent repeated-open behavior, writable `mmap`, Android lifecycle, and
 checker strategy remain explicit gates.
 
 ## Non-negotiable acceptance
