@@ -362,6 +362,8 @@ mkdir -p "$WORK/config" "$WORK/native-links" "$(dirname "$OUT")" \
     "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 rm -f "$OUT"
 
+"$ROOT/scripts/stage-andock-runtime.sh" "$WORK" "$JNI_DIR"
+
 if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
@@ -608,6 +610,23 @@ links = {
     p.stem: len([line for line in p.read_text().splitlines() if line.strip()])
     for p in sorted((work / "native-links").glob("*.txt"))
 }
+andock_native = json.loads(
+    (work / "execution/andock/andock-proot-arm64.manifest.json").read_text()
+)
+andock_template = json.loads(
+    (work / "execution/andock/andock-ubuntu-arm64.ext4.manifest.json").read_text()
+)
+andock_files = {
+    "usr/bin/proot": "libandee_proot.so",
+    "usr/libexec/andock/proot-launcher": "libandee_andock_launcher.so",
+    "usr/libexec/proot/loader": "libandee_proot_loader.so",
+}
+for source, packaged in andock_files.items():
+    path = jni_dir / "arm64-v8a" / packaged
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    expected = andock_native["files"].get(source)
+    if actual != expected:
+        raise SystemExit(f"Andock native digest mismatch: {packaged}")
 manifest.parent.mkdir(parents=True, exist_ok=True)
 manifest.write_text(json.dumps({
     "artifact": str(zip_path),
@@ -619,6 +638,15 @@ manifest.write_text(json.dumps({
     "native-payload-count": len(native),
     "native-link-counts": links,
     "native-libraries": native,
+    "andock": {
+        "architecture": andock_native["architecture"],
+        "native-files": andock_native["files"],
+        "proot-version": andock_native["proot-version"],
+        "template-image-sha256": andock_template["image-sha256"],
+        "template-provision-revision": andock_template["provision-revision"],
+        "template-sparse-sha256": andock_template["sparse-image-sha256"],
+        "toolchain-revision": andock_native["toolchain-revision"],
+    },
 }, indent=2) + "\n")
 PY
 echo "runtime zip: $OUT"
