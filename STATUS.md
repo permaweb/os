@@ -266,6 +266,26 @@ The bounded fix is direct syscall-layer FD injection plus synthetic metadata
 for safe device paths, with adversarial denial of `/proc/self/root`, `cwd`,
 `exe`, arbitrary descriptors, and all non-self process paths.
 
+The release staging path is committed at `8c497df`: it validates the pinned
+template recipe and both sparse/raw digests, stages only the Android sparse
+image plus its manifest, and stages content-addressed ARM64 PRoot/launcher/
+loader binaries into the APK native payload. The direct ARM64 emulator suite
+is committed at `12477e4`; it covers the actual app-private Unix socket,
+isolated UID/SELinux process, binary and unusual filenames, exact 20 MiB
+clipping, timeout, concurrent cancellation, network denial, app-private
+isolation, restart persistence, and destroy.
+
+Three additional fresh-member clone-plus-`true` measurements over the real
+Android transport took 0.636, 0.700, and 0.757 seconds. Each member was
+destroyed immediately after its run. This is the complete writable-image path,
+not the old per-path broker or an overlay shortcut.
+
+Scope remains frozen. The current HyperBEAM pin, portable Ouroboros package,
+standalone `~andock@1.0` adapter, native adapter, template builder, and Android
+service diffs contain no authentication, bearer, session, wallet, member-
+identity, or credential-processing change. The expansive reviewer was stopped;
+those concerns belong to the separate authentication effort.
+
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
