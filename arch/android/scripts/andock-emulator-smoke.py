@@ -3,6 +3,7 @@
 import argparse
 import base64
 import json
+import math
 import subprocess
 import struct
 import threading
@@ -35,10 +36,12 @@ class Client:
             "member-id": member,
             **fields,
         }, separators=(",", ":")).encode()
+        command_timeout_ms = fields.get("timeout-ms", 0)
+        socket_timeout = max(60, math.ceil(command_timeout_ms / 1000) + 15)
         process = subprocess.Popen(
             [
                 self.adb, "-s", self.serial, "shell", "run-as", PACKAGE,
-                "toybox", "nc", "-W", "60", "-U", SOCKET,
+                "toybox", "nc", "-W", str(socket_timeout), "-U", SOCKET,
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -46,7 +49,7 @@ class Client:
         )
         output, error = process.communicate(
             struct.pack(">I", len(payload)) + payload,
-            timeout=70,
+            timeout=socket_timeout + 10,
         )
         if process.returncode != 0:
             raise RuntimeError(error.decode(errors="replace"))
@@ -93,13 +96,13 @@ def success(response):
     return response["body"]
 
 
-def exec_command(client, member, command, timeout=30_000):
+def exec_command(client, member, command, timeout=30_000, allow_network=False):
     response = client.request(
         "exec",
         member,
         cwd="/root",
         command=command,
-        **{"timeout-ms": timeout, "allow-network": False},
+        **{"timeout-ms": timeout, "allow-network": allow_network},
     )
     success(response)
     return response
