@@ -101,6 +101,12 @@ This closes the direct-directory route without relaxing owner-only modes,
 SELinux, or the isolated UID. The complete probe, exact APK hashes, runtime
 report, and decision rule are on `agent/andock-fs-spike` at `07eafbd`.
 
+The base-plus-member representation also cannot assume reflinks on the
+emulator: GNU `cp --reflink=always` over two brokered app-private regular files
+returned `EOPNOTSUPP` for a 16 MiB control. Reflink remains a valid optional
+fast path on supporting retail storage, but the baseline needs a sparse-copy or
+separate base/member fallback with independently tested persistence semantics.
+
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
