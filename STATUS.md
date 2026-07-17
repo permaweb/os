@@ -1,134 +1,147 @@
-# HyperBEAM e445 LapEE/AndEE Integration Status
+# HyperBEAM fcdf LapEE/AndEE Integration Status
 
 Updated: 2026-07-16 America/New_York
 
 ## Objective and isolation
 
-Update the stock HyperBEAM runtime packaged by LapEE and AndEE to
-`e445aad9da2a3017023ce99bd934540729e3b872`, close its native-build and device
-loading contract changes, and leave a coherent standalone branch.
+Advance the stock HyperBEAM runtime packaged by LapEE and AndEE from
+`e445aad9da2a3017023ce99bd934540729e3b872` to exact edge
+`fcdf5867686c64a8abe79e04e10f3590fbd62b7f`, preserving the native-build,
+device-loading, configuration, and measurement contracts established by the
+e445 integration.
 
-- Worktree: `/Users/sam/.codex/worktrees/lapee-hb-edge-e445`
-- Branch: `agent/hb-edge-e445`
-- Exact LapEE base: `754587198b712be6eb7db0e1a9b3623abf1050a3`
-- Base contains `a2e3d90bae42522fc802f7f9ef76752d1ed02adc`.
-- No edits to `/Users/sam/src/lapee`, upstream HyperBEAM, measurement devices,
-  another worktree, emulator, or shared process.
+- Worktree: `/Users/sam/.codex/worktrees/lapee-hb-edge-fcdf`
+- Branch: `agent/hb-edge-fcdf`
+- LapEE base: `b2fcf2fa2741018635c72b7b4663ddb820aa9e14`
+- No edits to `/Users/sam/src/lapee`, upstream HyperBEAM, another worktree,
+  emulator, shared process, remote, or external infrastructure.
 - No push or publication.
 
-## Completed runtime contracts
+## Upstream assessment
 
-- [x] HyperBEAM, Forge plugin, and both dependency locks use exact e445.
-- [x] Forge plugin path follows e445's `src/forge/plugin` layout.
-- [x] The generated preloaded-index header/environment convention is removed;
-  packaging resolves e445's real LMDB
-  `~meta@1.0/preloaded-devices-index` link instead.
-- [x] `trusted-device-signers` is the sole e445 remote-loading switch and
-  remains part of the effective, measured node message. The obsolete
-  `load-remote-devices` operator key is stripped.
-- [x] Android packages real NDK builds of `b64veryfast`, `elmdb`, `hb_beamr`,
-  `hb_keccak`, `hb_util_string`, and secp256k1 for ARM64 and the existing
-  emulator ABI. No pure-Erlang base64 substitute remains.
-- [x] Buildroot separates host Forge executables/NIFs from the x86-64 target
-  release, passes the real `BR2_ARCH`, and rejects foreign target ELF.
-- [x] `hb_buildinfo` is normalized after the final build hook to the source
-  SHA, 12-character short SHA, and commit epoch `1784173208`.
-- [x] Buildroot hashes and copies only five declared PermawebOS device inputs;
-  ignored `_build` caches and `hyperbeam-key.json` cannot enter the image.
-- [x] Generic AO decoding and normal device resolution are unchanged.
-- [x] No `dev_measurement` change is needed: existing measurement already
-  commits the effective node message and packaged runtime artifacts.
+The final HyperBEAM tree delta from e445 to fcdf is one file and 25 added
+lines:
+
+```text
+ src/core/http/hb_http.erl | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+```
+
+The change adds the request host to HTTP response logs. `rebar.config`,
+`rebar.lock`, `src/forge`, native sources, scripts, Makefiles, and submodules
+are unchanged. Intermediate commits in the range touched name-device code, but
+those edits cancel in the final fcdf tree; packaging is based on the final tree,
+not the intermediate history.
+
+Consequently this upgrade requires only the exact source/Forge/lock pins and
+the normalized source epoch to change. The e445 native, preloaded-store,
+remote-device trust, generic AO decoding, and measurement decisions remain
+valid. No measurement-device or effective-config change is warranted.
+
+## Completed pin update
+
+- [x] Common and Android HyperBEAM dependencies use exact fcdf.
+- [x] Common and Android Forge plugin dependencies use exact fcdf.
+- [x] Both checked-in dependency locks use exact fcdf and remain byte-identical.
+- [x] AndEE's runtime builder rejects any HyperBEAM source other than fcdf.
+- [x] Buildroot uses exact fcdf and commit epoch `1784211633`.
+- [x] No active e445 source or epoch pin remains under `arch/`, `devices/`, or
+  `scripts/`.
 
 ## Validation ledger
 
-All listed commands exited 0 unless explicitly described as an earlier probe.
+All commands below exited 0 unless a diagnostic probe is explicitly described.
 
-### Dependency and device package
+### Dependency and device packages
 
-- `devices/common`: `../../arch/android/scripts/verified-rebar3.sh compile`
-  built against e445. An initial probe caught e445's new direct `lmdb-sys`
-  dependency; the checked-in upstream lock was updated and the clean compile
-  passed.
-- Real Forge preload completed and `hb_store_lmdb` resolved
-  `~meta@1.0/preloaded-devices-index` to
-  `8K834mDI2S0fVHsUkDnoXOMQ1A1HkhpGWE0HnC1e9Vw`.
-- `../../arch/android/scripts/verified-rebar3.sh eunit
-  --application=lapee_devices`: 32 tests, 0 failures.
-- Staged Android `eunit --application=andee_devices`: 39 tests, 0 failures.
-- Both `rebar.lock` files are byte-identical.
+- Clean common compile:
+  `cd devices/common && ../../arch/android/scripts/verified-rebar3.sh compile`.
+  The resolved HyperBEAM and Forge plugin repositories both have HEAD fcdf.
+- Common device EUnit:
+  `../../arch/android/scripts/verified-rebar3.sh eunit
+  --application=lapee_devices`: 32 tests, 0 failures. Expected warnings report
+  the absence of laptop-only TPM/SNP NIFs on the macOS host.
+- Staged Android device EUnit:
+  `cd arch/android/build/android-devices &&
+  ../../scripts/verified-rebar3.sh eunit --application=andee_devices`: 40 tests,
+  0 failures.
+- `cmp devices/android/rebar.lock devices/common/rebar.lock`: identical.
 
-### Android cross-build and native behavior
+### Native behavior
 
-- `make -C arch/android runtime`: passed from the exact branch source.
-- Runtime manifest: 54 native APK payloads and 26 runtime links per ABI.
-- Every packaged native payload has the expected ELF machine. The ARM64
-  critical NIFs/drivers are AArch64 ELF; the emulator copies are x86-64 ELF.
-- Android `DT_NEEDED` closure is only `libandroid.so`, `libc.so`, `libdl.so`,
-  `liblog.so`, and `libm.so`.
-- Host Forge's cached `b64veryfast.so` is a native arm64 Mach-O bundle, proving
-  the build host never executes an Android target object.
-- `hb_util_string,secp256k1_nif` targeted EUnit: 7 tests, 0 failures.
-- `hb_ecdsa_tests`: 61 tests, 0 failures against the native secp NIF.
-- `hb_beamr,hb_beamr_io`: 11 tests, 0 failures; benchmark observed 92,900
-  calls/s in this run.
+- `hb_util_string,hb_ecdsa_tests`: 68 tests, 0 failures.
+- `hb_beamr,hb_beamr_io`: 11 tests, 0 failures from the exact HyperBEAM source
+  root; benchmark observed 74,096 calls/s.
 - Native `b64veryfast` round-tripped 1,048,576 random bytes.
-- `make -C arch/android apk`: passed (`BUILD SUCCESSFUL`).
+- A direct `rebar3 eunit --module=hb_http` diagnostic cancelled before tests
+  because the standalone harness starts `hb_http_client` before hackney's pool
+  ETS table exists. The Forge core-device selector also has no `hb_http`
+  module target. Neither probe reports an assertion failure, and the upstream
+  fcdf change itself is compile-covered by all complete builds below.
+
+### Android runtime and APK
+
+- Clean `JOBS=8 make -C arch/android runtime`: passed for ARM64 and the existing
+  emulator ABI.
+- Runtime manifest: 54 native APK payloads, 54 native libraries, and 26 runtime
+  links per ABI.
+- All 54 packaged JNI/native payloads have the expected architecture. Android
+  `DT_NEEDED` closure is limited to `libandroid.so`, `libc.so`, `libdl.so`,
+  `liblog.so`, and `libm.so`.
+- Both ABI runtime trees carry exact fcdf `hb_buildinfo`, short source
+  `fcdf5867686c`, and commit epoch `1784211633`.
+- `JOBS=8 make -C arch/android apk`: passed (`BUILD SUCCESSFUL`).
 - `make -C arch/android android-check`: passed.
 - `make -C arch/android erl-compile`: passed.
 - `make -C arch/android verify-config-invariants`: passed.
-- Runtime ZIP from this build:
-  `ce2ff8797d1a6d7b351337ce50a92f64d041170e2dab389d4cea2c7137efbab6`
-  (62,477,527 bytes).
-- Debug APK from this build:
-  `7f1003c88bfd76091f72d9b02514618586cd01bced77f1cee150d69430a610bf`
-  (78,612,947 bytes).
+- Runtime ZIP:
+  `64112eb87321c21afbc3436193579ddc51373bf05327dfb0134c0a2cb28f8627`
+  (62,584,707 bytes).
+- Debug APK:
+  `e247dcc17785cedc4961432f69e8ef2663b4a26a6312e56d7e1e43dfc8bb620e`
+  (78,719,751 bytes).
 
 ### Linux / Buildroot
 
-- Full isolated build command:
-  `make buildroot BUILD_IMAGE=lapee-hb-edge-e445-build:local
-  BUILDROOT_VOLUME=lapee-hb-edge-e445-buildroot`.
-- The first cross-only probe correctly failed because Forge is a host tool and
-  cannot load x86-64 target NIFs on an ARM64 build host. The final build first
-  compiles host-native Forge dependencies, creates the store, cleans native
-  state, then produces the target runtime.
-- Exact source replay completed from the persistent isolated volume without a
-  HyperBEAM rebuild marker, proving the recipe hash excludes ignored caches
-  and wallet material.
-- Copied device input closure: 916 KiB containing exactly `cargo-locks`,
-  `native`, `src`, `rebar.config`, and `rebar.lock`.
-- All ELF under `/usr/lib/hyperbeam` is x86-64. Required native artifacts are
-  present for b64, LMDB, Beamr/WAMR, Keccak, string utilities, and secp256k1.
-- Runtime native dependencies are limited to the target loader/libc,
-  `libcrypto.so.3`, and `libgcc_s.so.1`.
-- The packaged preloaded LMDB is 7.9 MiB. No `b64rs`, generated preload header,
-  wallet, or foreign ELF is present.
-- Both shipped `hb_buildinfo` copies (`bin/priv` and the `hb` application) have
-  the exact e445 SHA, 12-character short SHA, and commit epoch. A final audit
-  caught and corrected relx's duplicate `bin/priv` copy before commit.
-- Final initramfs:
-  `a4cd80c2e95ab6d94c917db21589db30a92b5bea1faeae8a887ae722c3ee368a`.
-- Final kernel:
-  `470ef8caa1f2e67ed1204db4e0d0cd210767ee6ad248db55120481804b10bfe8`.
-- The final no-change replay produced those same hashes, retained the 916 KiB
-  five-path device closure, and contained no HyperBEAM rebuild marker.
-- Buildroot's transient container name now derives from its selected volume
-  (or `BUILDROOT_CONTAINER`), so isolated worktrees cannot remove one another's
-  in-progress build container. The final replay exercised that path and left
-  no container behind.
-- A clean Forge preload uses a fresh build-only signing identity by default,
-  so this branch does not claim the signed LMDB store is byte-reproducible
-  across clean builds. The private build wallet is never copied into the
-  builder or runtime; measurement commits the resulting immutable store.
+- The pinned local Debian builder image rebuilt successfully from
+  `arch/common/linux/docker/Dockerfile`. Docker's registry API returned one
+  transient HTTP 500 while `make toolchain` attempted a redundant pull; the
+  exact cached-image build completed locally without changing inputs.
+- Full isolated build:
+  `JOBS=8 make buildroot BUILD_IMAGE=lapee-hb-edge-fcdf-build:local
+  BUILDROOT_VOLUME=lapee-hb-edge-fcdf-buildroot`.
+- The build compiled host-native Forge, produced a real preloaded LMDB, then
+  cleanly cross-compiled the x86-64 HyperBEAM release and every mandatory NIF.
+- The resolved preloaded-device index was
+  `FjrwNyFV0FutEBDmCfeghpOFOvfYoYNrgQKbnQT2r6Q`.
+- The declared PermawebOS device input closure remains 916 KiB containing
+  exactly `cargo-locks`, `native`, `src`, `rebar.config`, and `rebar.lock`.
+- Every executable/runtime ELF under `/usr/lib/hyperbeam` is x86-64. Required
+  native artifacts are present for ASN.1, b64, LMDB, Beamr/WAMR, Keccak, string
+  utilities, and secp256k1. Non-x86 ELF files elsewhere in the target are
+  hardware firmware blobs, not host-executable runtime code.
+- The packaged preloaded LMDB is 8.0 MiB. No `b64rs`, generated preload header,
+  private wallet/key material, or foreign runtime ELF is present. The
+  `ar_wallet.beam` module name is code, not packaged credential material.
+- Both shipped `hb_buildinfo` copies contain exact fcdf, short source
+  `fcdf5867686c`, and epoch `1784211633`.
+- Kernel:
+  `27054ee53e78c02773fd9e64c528c6020572fe6260bcad186ad7ba87b9aad808`.
+- Initramfs:
+  `70c037b7bc3255153ef23a3cf3eb6e8a3147658652005f97f35408ad29b887ab`.
+- An unchanged replay completed with the same two hashes. Buildroot reruns the
+  deterministic kernel configuration and image-generation phases, but did not
+  rebuild the already stamped fcdf HyperBEAM package.
 
 ### Static gates
 
-- `make verify-config-invariants`: passed.
-- Edited shell files pass `bash -n`; edited Python files pass `py_compile`.
+- Root `make verify-config-invariants`: passed.
+- Edited shell files pass `bash -n`; the config-invariant script passes
+  `py_compile`.
 - `git diff --check`: passed.
-- Stale pin, obsolete preload-header, removed b64 fallback, generic-decoder,
-  and signer-policy scans completed.
-- Final static/invariant gates were repeated after the last source edit.
+- Active-pin, stale-pin, upstream-delta, lock-identity, packaged-architecture,
+  native-dependency, credential, and runtime-buildinfo audits passed.
 
-Non-obvious design reasoning is recorded in
-`decisions/hyperbeam-e445-runtime-contracts.md`.
+The retained e445 architectural reasoning is in
+`decisions/hyperbeam-e445-runtime-contracts.md`; the incremental fcdf decision
+is in `decisions/hyperbeam-fcdf-runtime-contracts.md`.
