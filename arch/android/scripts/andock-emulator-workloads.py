@@ -278,7 +278,7 @@ def main():
             "linux-ipc-and-mmap",
             "set -eu; python3 - <<'PY'\n"
             "from multiprocessing import shared_memory\n"
-            "import mmap, os, socket\n"
+            "import mmap\n"
             "shared = shared_memory.SharedMemory(create=True, size=32)\n"
             "shared.buf[:4] = b'good'\n"
             "assert bytes(shared.buf[:4]) == b'good'\n"
@@ -287,11 +287,18 @@ def main():
             "    output.truncate(4096)\n"
             "    with mmap.mmap(output.fileno(), 4096) as mapped:\n"
             "        mapped[:4] = b'mmap'; mapped.flush()\n"
-            "server = socket.socket(socket.AF_UNIX)\n"
-            "server.bind('/root/andock.sock'); server.close()\n"
-            "os.unlink('/root/andock.sock')\n"
             "PY\n"
             "test \"$(head -c 4 /root/mmap-data)\" = mmap",
+        )
+        unix_semantics = (
+            Path(__file__).parent.parent
+            / "execution/tests/andock_unix_semantics.py"
+        ).read_text()
+        workloads.write("/root/andock_unix_semantics.py", unix_semantics)
+        workloads.run(
+            "linux-umask-and-unix-sockets",
+            "python3 /root/andock_unix_semantics.py",
+            timeout=300_000,
         )
         semantics = (
             Path(__file__).parent.parent
@@ -407,6 +414,27 @@ def main():
             "shell", "am", "start", "-W", "-n", f"{PACKAGE}/.OrnamentActivity",
         )
         client.wait_until_ready()
+        workloads.run(
+            "unix-socket-restart",
+            "python3 - <<'PY'\n"
+            "import errno, os, socket, stat\n"
+            "path = '/root/andock-stale.sock'\n"
+            "assert stat.S_ISSOCK(os.lstat(path).st_mode)\n"
+            "client = socket.socket(socket.AF_UNIX)\n"
+            "try:\n"
+            "    client.connect(path)\n"
+            "except OSError as failure:\n"
+            "    assert failure.errno == errno.ECONNREFUSED, failure\n"
+            "else:\n"
+            "    raise AssertionError('stale socket unexpectedly connected')\n"
+            "finally:\n"
+            "    client.close()\n"
+            "os.unlink(path)\n"
+            "replacement = socket.socket(socket.AF_UNIX)\n"
+            "replacement.bind(path); replacement.close()\n"
+            "os.unlink(path)\n"
+            "PY",
+        )
         workloads.run(
             "restart-persistence",
             "set -eu; andock-apt-check; tree --version | head -1; "
