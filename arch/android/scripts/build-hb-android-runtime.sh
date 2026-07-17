@@ -11,7 +11,7 @@ NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
 REBAR3="$ROOT/scripts/verified-rebar3.sh"
 PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
-EXPECTED_HYPERBEAM_VERSION="e445aad9da2a3017023ce99bd934540729e3b872"
+EXPECTED_HYPERBEAM_VERSION="fcdf5867686c64a8abe79e04e10f3590fbd62b7f"
 
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
