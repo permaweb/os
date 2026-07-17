@@ -4025,6 +4025,7 @@ static int handle_path_stat(Tracee *tracee, Sysnum sysnum)
 			if (fstat(file->host_fd, &output) < 0)
 				return -errno;
 			output.st_dev = 1;
+			output.st_ino = file->inode;
 			output.st_nlink = file->nlink;
 			output.st_uid = 0;
 			output.st_gid = 0;
@@ -4066,7 +4067,9 @@ static int handle_path_stat(Tracee *tracee, Sysnum sysnum)
 		return status;
 	}
 	output.st_dev = 1;
-	if (response.fd < 0)
+	if (response.inode != 0)
+		output.st_ino = response.inode;
+	else if (response.fd < 0)
 		output.st_ino = path_inode(response.path);
 	output.st_nlink = response_nlink(&response);
 	output.st_mode = response.mode;
@@ -4102,7 +4105,8 @@ static int handle_path_statx(Tracee *tracee, Sysnum sysnum)
 	}
 	output.stx_mask = STATX_BASIC_STATS;
 	output.stx_blksize = 4096;
-	output.stx_ino = response.fd >= 0 ? metadata.st_ino : path_inode(response.path);
+	output.stx_ino = response.inode != 0 ? response.inode
+		: response.fd >= 0 ? metadata.st_ino : path_inode(response.path);
 	output.stx_nlink = response_nlink(&response);
 	output.stx_mode = response.mode;
 	output.stx_size = response.size;
