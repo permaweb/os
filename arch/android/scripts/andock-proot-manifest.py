@@ -21,6 +21,7 @@ def inputs(root):
         root / "execution/andock-proot-image.patch",
         root / "execution/lwext4-open-inode.patch",
         root / "execution/lwext4-atomic-replace.patch",
+        root / "execution/lwext4-nondirectory-replace.patch",
         root / "execution/lwext4-sparse-read.patch",
         root / "execution/lwext4/include/generated/ext4_config.h",
         root / "execution/lwext4/patches/xattr-list-size.patch",

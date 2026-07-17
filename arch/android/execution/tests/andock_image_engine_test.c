@@ -308,6 +308,57 @@ int main(int argc, char **argv)
 	expect_status("socket-current-generation-cancelled",
 		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
 			"/work/socket-generation", NULL), -ENOENT);
+	struct andock_image_result rename_source_socket = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0755,
+		"/work/rename-source.socket", NULL);
+	uint64_t rename_source_inode = rename_source_socket.inode;
+	uint64_t rename_source_token = rename_source_socket.token;
+	andock_image_result_release(&rename_source_socket);
+	struct andock_image_result rename_target_socket = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0700,
+		"/work/rename-target.socket", NULL);
+	uint64_t rename_target_inode = rename_target_socket.inode;
+	uint64_t rename_target_token = rename_target_socket.token;
+	andock_image_result_release(&rename_target_socket);
+	if (rename_source_inode == rename_target_inode) {
+		fprintf(stderr, "socket rename fixtures unexpectedly share an inode\n");
+		return 1;
+	}
+	struct andock_image_result renamed_socket = call(
+		ANDOCK_IMAGE_RENAME, 0, 0,
+		"/work/rename-source.socket", "/work/rename-target.socket");
+	andock_image_result_release(&renamed_socket);
+	expect_status("socket-rename-source-removed",
+		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
+			"/work/rename-source.socket", NULL), -ENOENT);
+	struct andock_image_result renamed_socket_target = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/work/rename-target.socket", NULL);
+	if (renamed_socket_target.type != ANDOCK_IMAGE_SOCKET
+	    || renamed_socket_target.inode != rename_source_inode) {
+		fprintf(stderr, "socket rename-over-existing kept the wrong node\n");
+		return 1;
+	}
+	andock_image_result_release(&renamed_socket_target);
+	expect_status("socket-renamed-target-stale-cancel",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL,
+			"/work/rename-target.socket", &rename_target_token,
+			sizeof(rename_target_token)), 0);
+	renamed_socket_target = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/work/rename-target.socket", NULL);
+	if (renamed_socket_target.inode != rename_source_inode) {
+		fprintf(stderr, "replaced socket reservation deleted source node\n");
+		return 1;
+	}
+	andock_image_result_release(&renamed_socket_target);
+	expect_status("socket-renamed-source-cancel",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL,
+			"/work/rename-target.socket", &rename_source_token,
+			sizeof(rename_source_token)), 0);
+	expect_status("socket-renamed-source-cancelled",
+		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
+			"/work/rename-target.socket", NULL), -ENOENT);
 	materializations = andock_image_engine_materializations();
 	struct andock_image_result first = open_file(
 		"/work/alpha", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0755);

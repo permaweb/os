@@ -1,0 +1,27 @@
+diff --git a/src/ext4.c b/src/ext4.c
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -1200,16 +1200,19 @@ static int ext4_create_hardlink(const char *path,
+ 			if (r != EOK)
+ 				break;
+-			bool regular_source = ext4_inode_is_type(
+-				sb, child_ref->inode, EXT4_INODE_MODE_FILE);
+ 			bool regular_target = ext4_inode_is_type(
+ 				sb, replaced.inode, EXT4_INODE_MODE_FILE);
+-			if (!regular_source || !regular_target) {
++			bool directory_source = ext4_inode_is_type(
++				sb, child_ref->inode, EXT4_INODE_MODE_DIRECTORY);
++			bool directory_target = ext4_inode_is_type(
++				sb, replaced.inode, EXT4_INODE_MODE_DIRECTORY);
++			if (directory_source || directory_target) {
+ 				ext4_fs_put_inode_ref(&replaced);
+ 				r = EEXIST;
+ 				break;
+ 			}
+ 
+-			if (ext4_inode_get_links_cnt(replaced.inode) == 1) {
++			if (regular_target
++			    && ext4_inode_get_links_cnt(replaced.inode) == 1) {
+ 				ext4_block_cache_write_back(mp->fs.bdev, 1);
+ 				r = ext4_trunc_inode(mp, replaced.index, 0);
+ 				ext4_block_cache_write_back(mp->fs.bdev, 0);
