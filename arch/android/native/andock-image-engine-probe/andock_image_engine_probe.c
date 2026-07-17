@@ -358,6 +358,276 @@ static bool xattr_list_has(const char *list, size_t length, const char *name)
 	return false;
 }
 
+struct tree_counts {
+	uint64_t entries;
+	uint64_t regular_files;
+	uint64_t directories;
+	uint64_t symlinks;
+	uint64_t other;
+};
+
+static int inode_type_from_mode(const char *path)
+{
+	struct ext4_inode inode;
+	if (ext4_raw_inode_fill(path, NULL, &inode) != EOK)
+		return EXT4_DE_UNKNOWN;
+	switch (inode.mode & EXT4_INODE_MODE_TYPE_MASK) {
+	case EXT4_INODE_MODE_FILE:
+		return EXT4_DE_REG_FILE;
+	case EXT4_INODE_MODE_DIRECTORY:
+		return EXT4_DE_DIR;
+	case EXT4_INODE_MODE_SOFTLINK:
+		return EXT4_DE_SYMLINK;
+	default:
+		return EXT4_DE_UNKNOWN;
+	}
+}
+
+static int walk_tree(const char *path, struct tree_counts *counts)
+{
+	ext4_dir directory;
+	int result = ext4_dir_open(&directory, path);
+	if (result != EOK)
+		return result;
+
+	const ext4_direntry *entry;
+	while ((entry = ext4_dir_entry_next(&directory)) != NULL) {
+		if ((entry->name_length == 1 && entry->name[0] == '.') ||
+			(entry->name_length == 2 && entry->name[0] == '.' &&
+			entry->name[1] == '.'))
+			continue;
+		char child[4096];
+		size_t path_length = strlen(path);
+		bool separator = path_length > 0 && path[path_length - 1] != '/';
+		if (path_length + (separator ? 1 : 0) + entry->name_length + 1 >
+			sizeof(child)) {
+			result = ENAMETOOLONG;
+			break;
+		}
+		memcpy(child, path, path_length);
+		size_t offset = path_length;
+		if (separator)
+			child[offset++] = '/';
+		memcpy(child + offset, entry->name, entry->name_length);
+		child[offset + entry->name_length] = 0;
+
+		int type = entry->inode_type;
+		if (type == EXT4_DE_UNKNOWN)
+			type = inode_type_from_mode(child);
+		counts->entries++;
+		switch (type) {
+		case EXT4_DE_REG_FILE:
+			counts->regular_files++;
+			break;
+		case EXT4_DE_DIR:
+			counts->directories++;
+			result = walk_tree(child, counts);
+			break;
+		case EXT4_DE_SYMLINK:
+			counts->symlinks++;
+			break;
+		default:
+			counts->other++;
+			break;
+		}
+		if (result != EOK)
+			break;
+	}
+	int close_result = ext4_dir_close(&directory);
+	return result != EOK ? result : close_result;
+}
+
+static int normalize_tree_owners(const char *path, uint64_t *updated)
+{
+	ext4_dir directory;
+	int result = ext4_dir_open(&directory, path);
+	if (result != EOK)
+		return result;
+
+	const ext4_direntry *entry;
+	while ((entry = ext4_dir_entry_next(&directory)) != NULL) {
+		if ((entry->name_length == 1 && entry->name[0] == '.') ||
+			(entry->name_length == 2 && entry->name[0] == '.' &&
+			entry->name[1] == '.'))
+			continue;
+		char child[4096];
+		size_t path_length = strlen(path);
+		bool separator = path_length > 0 && path[path_length - 1] != '/';
+		if (path_length + (separator ? 1 : 0) + entry->name_length + 1 >
+			sizeof(child)) {
+			result = ENAMETOOLONG;
+			break;
+		}
+		memcpy(child, path, path_length);
+		size_t offset = path_length;
+		if (separator)
+			child[offset++] = '/';
+		memcpy(child + offset, entry->name, entry->name_length);
+		child[offset + entry->name_length] = 0;
+
+		result = ext4_owner_set(child, 0, 0);
+		if (result != EOK)
+			break;
+		(*updated)++;
+		int type = entry->inode_type;
+		if (type == EXT4_DE_UNKNOWN)
+			type = inode_type_from_mode(child);
+		if (type == EXT4_DE_DIR)
+			result = normalize_tree_owners(child, updated);
+		if (result != EOK)
+			break;
+	}
+	int close_result = ext4_dir_close(&directory);
+	return result != EOK ? result : close_result;
+}
+
+static void report_elf(struct report *report, const char *name,
+		const char *path, uint64_t expected_size)
+{
+	char magic[4] = {0};
+	size_t length = 0;
+	int result = read_file(path, magic, sizeof(magic), &length);
+	char result_name[96];
+	snprintf(result_name, sizeof(result_name), "%s-read", name);
+	report_rc(report, result_name, result);
+	snprintf(result_name, sizeof(result_name), "%s-elf", name);
+	report_bool(
+		report,
+		result_name,
+		result == EOK && length == sizeof(magic) && magic[0] == 0x7f &&
+		magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F'
+	);
+	ext4_file file;
+	result = ext4_fopen(&file, path, "r");
+	uint64_t size = result == EOK ? ext4_fsize(&file) : 0;
+	if (result == EOK)
+		ext4_fclose(&file);
+	snprintf(result_name, sizeof(result_name), "%s-size", name);
+	report_bool(report, result_name, size == expected_size);
+}
+
+static void report_symlink(struct report *report, const char *name,
+		const char *path, const char *expected)
+{
+	char target[256] = {0};
+	size_t length = 0;
+	int result = ext4_readlink(path, target, sizeof(target), &length);
+	char result_name[96];
+	snprintf(result_name, sizeof(result_name), "%s-readlink", name);
+	report_rc(report, result_name, result);
+	snprintf(result_name, sizeof(result_name), "%s-target", name);
+	report_bool(
+		report,
+		result_name,
+		result == EOK && length == strlen(expected) &&
+		memcmp(target, expected, length) == 0
+	);
+}
+
+static void inspect_populated_root(struct report *report)
+{
+	struct tree_counts counts;
+	memset(&counts, 0, sizeof(counts));
+	int result = walk_tree(MOUNT_POINT, &counts);
+	report_rc(report, "population-enumerate", result);
+	report_append(report, "population-entries=%" PRIu64 "\n", counts.entries);
+	report_append(report, "population-regular-files=%" PRIu64 "\n",
+		counts.regular_files);
+	report_append(report, "population-directories=%" PRIu64 "\n",
+		counts.directories);
+	report_append(report, "population-symlinks=%" PRIu64 "\n", counts.symlinks);
+	report_append(report, "population-other=%" PRIu64 "\n", counts.other);
+	report_bool(
+		report,
+		"population-counts",
+		result == EOK && counts.entries == 26931 &&
+		counts.regular_files == 22483 && counts.directories == 3485 &&
+		counts.symlinks == 963 && counts.other == 0
+	);
+
+	report_elf(
+		report,
+		"population-glibc",
+		MOUNT_POINT "usr/lib/aarch64-linux-gnu/libc.so.6",
+		1722920
+	);
+	report_elf(
+		report,
+		"population-python",
+		MOUNT_POINT "usr/bin/python3.12",
+		7845048
+	);
+	report_elf(
+		report,
+		"population-node",
+		MOUNT_POINT "usr/local/bin/node",
+		122162360
+	);
+	report_symlink(report, "population-bin", MOUNT_POINT "bin", "usr/bin");
+	report_symlink(report, "population-shell", MOUNT_POINT "usr/bin/sh", "dash");
+	report_symlink(
+		report,
+		"population-python-link",
+		MOUNT_POINT "usr/bin/python3",
+		"python3.12"
+	);
+	report_symlink(report, "population-lib", MOUNT_POINT "lib", "usr/lib");
+	report_symlink(
+		report,
+		"population-loader-link",
+		MOUNT_POINT "usr/lib/ld-linux-aarch64.so.1",
+		"aarch64-linux-gnu/ld-linux-aarch64.so.1"
+	);
+	report_symlink(
+		report,
+		"population-os-release-link",
+		MOUNT_POINT "etc/os-release",
+		"../usr/lib/os-release"
+	);
+
+	char os_release[4096] = {0};
+	size_t length = 0;
+	result = read_file(
+		MOUNT_POINT "usr/lib/os-release",
+		os_release,
+		sizeof(os_release) - 1,
+		&length
+	);
+	report_rc(report, "population-os-release-read", result);
+	report_bool(
+		report,
+		"population-os-release",
+		result == EOK && length > 0 && strstr(os_release, "Ubuntu") != NULL
+	);
+
+	uint32_t mode = 0;
+	result = ext4_mode_get(MOUNT_POINT "usr/bin/passwd", &mode);
+	report_rc(report, "population-setuid-mode-read", result);
+	report_bool(
+		report,
+		"population-setuid-mode",
+		result == EOK && (mode & 04755) == 04755
+	);
+	uint32_t uid = UINT32_MAX;
+	uint32_t gid = UINT32_MAX;
+	result = ext4_owner_get(MOUNT_POINT "usr/bin/passwd", &uid, &gid);
+	report_rc(report, "population-owner-read", result);
+	report_append(report, "population-passwd-uid=%" PRIu32 "\n", uid);
+	report_append(report, "population-passwd-gid=%" PRIu32 "\n", gid);
+	char xattrs[256] = {0};
+	length = 0;
+	result = ext4_listxattr(
+		MOUNT_POINT "usr/bin/passwd",
+		xattrs,
+		sizeof(xattrs),
+		&length
+	);
+	report_rc(report, "population-xattr-list", result);
+	report_append(report, "population-xattr-bytes=%zu\n", length);
+	report_bool(report, "population-source-xattrs-absent",
+		result == EOK && length == 0);
+}
+
 static void create_fixture(struct report *report)
 {
 	static const char payload[] = "andock-image-engine-payload";
@@ -551,10 +821,13 @@ static void verify_fixture(struct report *report, bool require_crash_file)
 	}
 }
 
-static void finish_report(struct report *report)
+static void finish_report(struct report *report, int fd)
 {
+	struct stat status;
 	report_append(report, "engine=lwext4\n");
-	report_append(report, "image-bytes=%" PRIu64 "\n", (uint64_t)IMAGE_BYTES);
+	if (fd >= 0 && fstat(fd, &status) == 0)
+		report_append(report, "image-bytes=%" PRIu64 "\n",
+			(uint64_t)status.st_size);
 	report_append(report, "result=%s\n", report->ok ? "ok" : "failed");
 }
 
@@ -563,7 +836,7 @@ static void initialize_probe(int fd, struct report *report)
 	report_init(report);
 	report_rc(report, "format", format_image(fd));
 	if (!report->ok) {
-		finish_report(report);
+		finish_report(report, fd);
 		return;
 	}
 	int result = mount_image(fd, true);
@@ -578,7 +851,7 @@ static void initialize_probe(int fd, struct report *report)
 		verify_fixture(report, false);
 		report_rc(report, "reopen-unmount", unmount_image());
 	}
-	finish_report(report);
+	finish_report(report, fd);
 }
 
 static void verify_probe(int fd, struct report *report)
@@ -590,7 +863,77 @@ static void verify_probe(int fd, struct report *report)
 		verify_fixture(report, true);
 		report_rc(report, "recovery-unmount", unmount_image());
 	}
-	finish_report(report);
+	finish_report(report, fd);
+}
+
+static void inspect_populated_probe(int fd, struct report *report)
+{
+	report_init(report);
+	int result = mount_image(fd, true);
+	report_rc(report, "population-mount", result);
+	if (result == EOK) {
+		inspect_populated_root(report);
+		report_rc(report, "population-unmount", unmount_image());
+	}
+	finish_report(report, fd);
+}
+
+static void initialize_populated_probe(int fd, struct report *report)
+{
+	report_init(report);
+	int result = mount_image(fd, true);
+	report_rc(report, "population-mount", result);
+	if (result == EOK) {
+		inspect_populated_root(report);
+		if (report->ok)
+			create_fixture(report);
+		report_rc(report, "population-mutation-unmount", unmount_image());
+	}
+	if (report->ok) {
+		result = mount_image(fd, true);
+		report_rc(report, "population-reopen", result);
+		if (result == EOK) {
+			verify_fixture(report, false);
+			report_rc(report, "population-reopen-unmount", unmount_image());
+		}
+	}
+	finish_report(report, fd);
+}
+
+static void normalize_populated_owners_probe(int fd, struct report *report)
+{
+	report_init(report);
+	int result = mount_image(fd, true);
+	report_rc(report, "owner-normalization-mount", result);
+	uint64_t updated = 0;
+	if (result == EOK) {
+		result = ext4_owner_set(MOUNT_POINT, 0, 0);
+		if (result == EOK) {
+			updated++;
+			result = normalize_tree_owners(MOUNT_POINT, &updated);
+		}
+		report_rc(report, "owner-normalization", result);
+		report_append(report, "owner-normalization-inodes=%" PRIu64 "\n", updated);
+		if (result == EOK)
+			report_rc(report, "owner-normalization-flush",
+				ext4_cache_flush(MOUNT_POINT));
+		report_rc(report, "owner-normalization-unmount", unmount_image());
+	}
+	if (report->ok) {
+		result = mount_image(fd, true);
+		report_rc(report, "owner-normalization-reopen", result);
+		if (result == EOK) {
+			uint32_t uid = UINT32_MAX;
+			uint32_t gid = UINT32_MAX;
+			result = ext4_owner_get(MOUNT_POINT "usr/bin/passwd", &uid, &gid);
+			report_rc(report, "owner-normalization-read", result);
+			report_bool(report, "owner-normalization-root",
+				result == EOK && uid == 0 && gid == 0);
+			report_rc(report, "owner-normalization-reopen-unmount",
+				unmount_image());
+		}
+	}
+	finish_report(report, fd);
 }
 
 static void crash_after_mutation(int fd)
@@ -678,7 +1021,7 @@ static void malformed_probe(int fd, int kind, struct report *report)
 		report_append(report, "malformed-mount-error=%d\n", result);
 		report_bool(report, "malformed-rejected", result != EOK);
 	}
-	finish_report(report);
+	finish_report(report, fd);
 }
 
 static int copy_bytes(int source, int destination, off_t begin, off_t end)
@@ -808,7 +1151,7 @@ static void sparse_copy_probe(int source, int destination, struct report *report
 	} else if (result == EOK) {
 		report_bool(report, "sparse-copy-stat", false);
 	}
-	finish_report(report);
+	finish_report(report, destination);
 }
 
 #ifdef __ANDROID__
@@ -876,6 +1219,23 @@ static int open_image(const char *path, bool truncate_image)
 	return open(path, flags, 0600);
 }
 
+static int open_existing_image(const char *path)
+{
+	return open(path, O_RDWR);
+}
+
+static int wait_for_expected_crash(pid_t child)
+{
+	int status = 0;
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+		WEXITSTATUS(status) != CRASH_EXIT_CODE) {
+		fprintf(stderr, "crash child status=%d\n", status);
+		return 1;
+	}
+	printf("crash-process-exit=%d\n", WEXITSTATUS(status));
+	return 0;
+}
+
 static int run_host_probe(const char *path)
 {
 	int fd = open_image(path, true);
@@ -903,13 +1263,8 @@ static int run_host_probe(const char *path)
 			_exit(91);
 		crash_after_mutation(fd);
 	}
-	int status = 0;
-	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
-		WEXITSTATUS(status) != CRASH_EXIT_CODE) {
-		fprintf(stderr, "crash child status=%d\n", status);
+	if (wait_for_expected_crash(child) != 0)
 		return 1;
-	}
-	printf("crash-process-exit=%d\n", WEXITSTATUS(status));
 
 	fd = open_image(path, false);
 	if (fd < 0) {
@@ -974,12 +1329,116 @@ static int run_host_probe(const char *path)
 	return 0;
 }
 
+static int inspect_host_populated(const char *path)
+{
+	int fd = open_existing_image(path);
+	if (fd < 0) {
+		perror("open populated image");
+		return 1;
+	}
+	struct report report;
+	inspect_populated_probe(fd, &report);
+	fputs(report.data, stdout);
+	close(fd);
+	return report.ok ? 0 : 1;
+}
+
+static int verify_host_populated(const char *path)
+{
+	int fd = open_existing_image(path);
+	if (fd < 0) {
+		perror("open populated image");
+		return 1;
+	}
+	struct report report;
+	initialize_populated_probe(fd, &report);
+	fputs(report.data, stdout);
+	close(fd);
+	if (!report.ok)
+		return 1;
+
+	pid_t child = fork();
+	if (child < 0) {
+		perror("fork");
+		return 1;
+	}
+	if (child == 0) {
+		fd = open_existing_image(path);
+		if (fd < 0)
+			_exit(91);
+		crash_after_mutation(fd);
+	}
+	if (wait_for_expected_crash(child) != 0)
+		return 1;
+
+	fd = open_existing_image(path);
+	if (fd < 0) {
+		perror("reopen populated image");
+		return 1;
+	}
+	verify_probe(fd, &report);
+	fputs(report.data, stdout);
+	close(fd);
+	if (!report.ok)
+		return 1;
+	puts("host-populated-probe=ok");
+	return 0;
+}
+
+static int normalize_host_populated_owners(const char *path)
+{
+	int fd = open_existing_image(path);
+	if (fd < 0) {
+		perror("open populated image");
+		return 1;
+	}
+	struct report report;
+	normalize_populated_owners_probe(fd, &report);
+	fputs(report.data, stdout);
+	close(fd);
+	return report.ok ? 0 : 1;
+}
+
+static int sparse_copy_host(const char *source_path, const char *destination_path)
+{
+	int source = open_existing_image(source_path);
+	if (source < 0) {
+		perror("open sparse copy");
+		return 1;
+	}
+	int destination = open_image(destination_path, true);
+	if (destination < 0) {
+		perror("open sparse copy");
+		close(source);
+		return 1;
+	}
+	struct report report;
+	sparse_copy_probe(source, destination, &report);
+	fputs(report.data, stdout);
+	close(source);
+	close(destination);
+	return report.ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
-	if (argc != 2) {
-		fprintf(stderr, "usage: %s IMAGE\n", argv[0]);
-		return 2;
-	}
-	return run_host_probe(argv[1]);
+	if (argc == 2)
+		return run_host_probe(argv[1]);
+	if (argc == 3 && strcmp(argv[1], "--inspect-populated") == 0)
+		return inspect_host_populated(argv[2]);
+	if (argc == 3 && strcmp(argv[1], "--verify-populated") == 0)
+		return verify_host_populated(argv[2]);
+	if (argc == 3 && strcmp(argv[1], "--normalize-populated-owners") == 0)
+		return normalize_host_populated_owners(argv[2]);
+	if (argc == 4 && strcmp(argv[1], "--sparse-copy") == 0)
+		return sparse_copy_host(argv[2], argv[3]);
+	fprintf(
+		stderr,
+		"usage: %s IMAGE | --inspect-populated IMAGE | "
+		"--verify-populated IMAGE | --normalize-populated-owners IMAGE | "
+		"--sparse-copy SOURCE DESTINATION\n",
+		argv[0]
+	);
+	return 2;
 }
 #endif

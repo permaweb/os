@@ -1,7 +1,8 @@
 # Andock regular-file image engine spike
 
 Status: regular-file image capability proven on the owned ARM64 Android
-emulator; production Ubuntu-image population and PRoot integration remain.
+emulator and the pinned Ubuntu tree proven in a host-built ext4 image; Android
+population performance and PRoot integration remain.
 
 ## Decision
 
@@ -116,6 +117,74 @@ claim. The APK instrumentation reports the selected copy mode, elapsed
 nanoseconds, logical bytes, and physical `st_blocks * 512` bytes on the target
 emulator or phone.
 
+## Pinned Ubuntu population gate
+
+The host-only population gate consumes the existing ARM64 Ubuntu 24.04 tree
+whose manifest commits to tree SHA-256
+`c1652db388f6c7bf0b5e37d43a52a7cc2fd4fe78d0731ea50b6f5729b1d7484f`.
+The source occupies 842,332 KiB and contains 26,930 entries below its root:
+22,483 regular files, 3,484 directories, and 963 symlinks. `mke2fs` adds
+`lost+found`, yielding the 26,931 entries enumerated through `lwext4`.
+
+The gate uses explicit ext4 features, a fixed UUID and directory-hash seed,
+`SOURCE_DATE_EPOCH=1735689600`, and a pinned host builder:
+
+- `mke2fs 1.47.2 (1-Jan-2025)`, Android platform ext2fs library
+  `android-platform-15.0.0_r5-314-ga1f793f6b`;
+- builder SHA-256
+  `e1cb9ae14ce0cee376e9237e9134387adea7e8c5f13d957752bbe18039d830b8`;
+- output UUID `4b7e4af2-25cd-4ae5-a14d-8f8628b88f5d`; and
+- output label `andock-ubuntu`.
+
+Three independent clean-template builds were byte-for-byte identical at
+SHA-256
+`1935843759cb448ebfb95115021d210a908b5595a89dab4e10ca9e1567df42f9`.
+Each image is 2,147,483,648 logical bytes and 938,082,304 physically allocated
+bytes on APFS. The first cold-ish `mke2fs -d` observation was 3.65 seconds;
+the final warm clean-template population took 1,365,688,000 ns. A separately
+measured owner-normalization pass on a disposable member copy took 0.25
+seconds. These are host build observations, not Android startup latency.
+
+The pinned `lwext4` build opened the populated image, enumerated the exact
+counts, and read representative AArch64 ELF payloads with their exact sizes:
+glibc, Python 3.12, and Node 22. It also verified the usr-merge symlinks,
+`/etc/os-release`, and the setuid mode on `/usr/bin/passwd`. The source tree has
+no hardlinked regular files and its Mac staging representation contains no
+Linux xattrs. The post-population mutation suite therefore adds and persists a
+hard link and `user.andock` xattr, alongside the existing file, link, mode,
+timestamp, reopen, and deliberate-crash recovery checks.
+
+Three byte-identical copies of the complete clean template used the explicit
+`SEEK_DATA`/`SEEK_HOLE` copier and retained 938,082,304 allocated bytes:
+
+| Run | Nanoseconds |
+|---:|---:|
+| 1 | 149,034,000 |
+| 2 | 109,940,000 |
+| 3 | 123,512,000 |
+
+Median: 123.512 ms. The copied image was then reopened, inspected, mutated,
+closed, reopened, deliberately process-crashed after a committed rename, and
+journal-recovered successfully.
+
+The ownership result is a build-pipeline finding, not an accepted production
+policy. The current macOS extractor discarded the OCI numeric owners, so
+`mke2fs -d` faithfully imported host owner `501:20`. The clean immutable
+template retains that evidence. The spike normalized all 26,932 inodes in a
+disposable member copy to `0:0` solely to prove that `lwext4` can operate on
+the provisioned content. That is not Docker parity: service-account ownership
+and Linux security xattrs or capabilities must not be flattened. A production
+template must be generated inside the root-owned build container, or imported
+directly from the numeric-owner OCI export, and must verify representative
+system-account owners and Linux xattrs before it can replace the Docker base.
+
+The complete reproducible host command is:
+
+```sh
+arch/android/scripts/test-andock-populated-image.sh \
+  /path/to/pinned/arm64/rootfs
+```
+
 ## Build evidence
 
 Host: Mac17,6, ARM64, macOS 26.4.1 (25E253).
@@ -130,14 +199,14 @@ normal and ASan/UBSan native suites to `host-native-probe=ok`.
 Current ARM64 artifacts:
 
 - native probe `.so` SHA-256:
-  `0a234d9b1c25fc622bb1e3b439e984115df5d50acf2ae1921ef2d4a6740428a7`
+  `8d34c20306883910f1cb5240bde8d0632d41e887bb123f90902e9de3921d0ddf`
 - test app APK SHA-256:
-  `ea3f0dcee34e636a0881b0dbc7470ed8167f258e008f04ab6d5a86fab3d635b9`
+  `5ad1b8cfa3833149b4141626e4e48694752def93ddde8818ed3bf083c6811fa2`
 - instrumentation APK SHA-256:
   `f0fa4e6bfe90b74096643bd3085e37ca0ace9bce821c1fd6da75e2b80de6b99a`
 
 The unstripped ARM64 ELF is AArch64, has no foreign-architecture payload, and
-has 143,160 bytes of text, 2,576 bytes of data, and 6,644 bytes of BSS. Its only
+has 143,224 bytes of text, 2,576 bytes of data, and 6,580 bytes of BSS. Its only
 dynamic dependencies are Android `libdl.so` and `libc.so`.
 
 The root Android harness can execute the built probe without rebuilding:
