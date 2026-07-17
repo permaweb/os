@@ -1,20 +1,52 @@
-# HyperBEAM e445 LapEE/AndEE Integration Status
+# Andock filesystem-capability status
 
 Updated: 2026-07-16 America/New_York
 
 ## Objective and isolation
 
-Update the stock HyperBEAM runtime packaged by LapEE and AndEE to
-`e445aad9da2a3017023ce99bd934540729e3b872`, close its native-build and device
-loading contract changes, and leave a coherent standalone branch.
+Replace the correct but unacceptably slow per-path Binder filesystem prototype
+with a capability-backed filesystem that executes locally inside each Android
+isolated worker.
 
-- Worktree: `/Users/sam/.codex/worktrees/lapee-hb-edge-e445`
-- Branch: `agent/hb-edge-e445`
-- Exact LapEE base: `754587198b712be6eb7db0e1a9b3623abf1050a3`
-- Base contains `a2e3d90bae42522fc802f7f9ef76752d1ed02adc`.
-- No edits to `/Users/sam/src/lapee`, upstream HyperBEAM, measurement devices,
-  another worktree, emulator, or shared process.
-- No push or publication.
+- Worktree: `/Users/sam/.codex/worktrees/lapee-andock-image-fd`
+- Branch: `agent/andock-image-fd`
+- Exact base: `b2fcf2fa2741018635c72b7b4663ddb820aa9e14`
+  (`agent/hb-edge-e445`).
+- The prototype is parked at `492c34dcb852552d7c376abcae1ac769a46b906e`
+  on `agent/andock-1.0` and is not merged into this branch.
+- The shared checkout `/Users/sam/src/lapee` remains dirty with another
+  developer's work and must not be modified.
+- No push, publication, external infrastructure change, or wallet use.
+
+The complete threat model, implementation sequence, performance gates, and
+validation matrix are in `decisions/andock-filesystem-capability.md`.
+
+## Immediate work
+
+1. Capture reproducible current-broker metadata and package baselines.
+2. Remove the repeated regular-file `TCGETS`/SELinux audit storm and remeasure.
+3. Test whether a received app-private directory FD supports safe `openat2`
+   mutation from an isolated UID.
+4. If it does not, prove a local userspace filesystem image through one passed
+   FD and select the filesystem/storage representation using measured results.
+5. Implement locally resolved filesystem syscalls and delete the per-operation
+   socket/Binder/Kotlin host broker.
+
+## Non-negotiable acceptance
+
+- Android isolated UID and SELinux remain the security boundary.
+- No guest host-path concatenation or descriptor exposure.
+- PyTorch install and post-install traversal meet the explicit performance
+  gates in the decision record.
+- The seven-tool contract, package-manager parity, network policy, lifecycle,
+  persistence, destroy, and cross-member isolation pass on emulator and real
+  ARM64 hardware.
+- Measurement changes follow the stable implementation rather than naming the
+  parked `android-app-broker@1` design.
+
+---
+
+# Inherited HyperBEAM e445 LapEE/AndEE integration record
 
 ## Completed runtime contracts
 
