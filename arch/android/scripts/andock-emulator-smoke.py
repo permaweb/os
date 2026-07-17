@@ -130,7 +130,9 @@ def main():
             "pwd; id; python3 --version; node --version; "
             "printf x >/dev/null; "
             "test \"$(dd if=/dev/zero bs=4 count=1 2>/dev/null | od -An -tx1)\" "
-            "= \" 00 00 00 00\"; head -c 16 /dev/urandom | wc -c",
+            "= \" 00 00 00 00\"; head -c 16 /dev/urandom | wc -c; "
+            "printf shm >/dev/shm/andock-smoke; "
+            "test \"$(cat /dev/shm/andock-smoke)\" = shm",
         )
         environment_output = decode_output(environment)
         require(environment["body"]["exit-code"] == 0, environment_output)
@@ -217,7 +219,16 @@ def main():
         isolation = exec_command(
             client,
             member,
-            "test \"$(readlink /proc/self/root)\" = /system; "
+            "test \"$(readlink /proc/self/root)\" = /; "
+            "test \"$(readlink /proc/self/cwd)\" = /root; "
+            "test \"$(readlink /proc/self/exe)\" = /usr/bin/bash; "
+            "fds=$(find /proc/self/fd -mindepth 1 -maxdepth 1 "
+            "-printf '%f\\n' | sort -n | tr '\\n' ' '); "
+            "case \"$fds\" in '0 1 2 '*) ;; *) exit 1;; esac; "
+            "for descriptor in /proc/self/fd/*; do "
+            "case \"$(readlink \"$descriptor\")\" in "
+            "*/data/*|*org.permaweb.andee*|*execution-state*|*andock.image*) "
+            "exit 1;; esac; done; "
             "test ! -r /data/user/0/org.permaweb.andee; "
             "test ! -r /data/data/org.permaweb.andee; "
             "test ! -e /proc/self/root/data/user/0/org.permaweb.andee",
