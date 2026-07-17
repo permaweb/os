@@ -2614,8 +2614,12 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		status = andock_image_engine_start((int)image_fd);
 		close((int)image_fd);
 		unsetenv("ANDOCK_IMAGE_FD");
-		if (status < 0)
+		if (status < 0) {
+			dprintf(STDERR_FILENO,
+				"andock: member image initialization failed: %s (%d)\n",
+				strerror(-status), status);
 			return status;
+		}
 		extension->config = talloc_zero(extension, struct AndockBrokerState);
 		if (extension->config == NULL) {
 			andock_image_engine_stop();
