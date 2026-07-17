@@ -56,6 +56,10 @@ class Client:
         return json.loads(output[4:])
 
     def wait_until_ready(self):
+        self.adb_command(
+            "shell", "am", "start", "-W", "-n",
+            f"{PACKAGE}/.OrnamentActivity",
+        )
         deadline = time.monotonic() + 60
         last_error = None
         while time.monotonic() < deadline:
