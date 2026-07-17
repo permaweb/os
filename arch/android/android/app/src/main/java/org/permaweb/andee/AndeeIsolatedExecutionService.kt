@@ -142,7 +142,6 @@ class AndeeIsolatedExecutionService : Service() {
                     .redirectErrorStream(mergeError)
                     .also { builder ->
                         builder.environment()["PROOT_LOADER"] = loader.absolutePath
-                        builder.environment()["PROOT_NO_SECCOMP"] = "1"
                         builder.environment()["PROOT_F2FS_WORKAROUND"] = "0"
                         builder.environment()["LD_LIBRARY_PATH"] = nativeRoot
                         builder.environment()["PATH"] =

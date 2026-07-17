@@ -5562,6 +5562,7 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		}
 		return 0;
 	case SYSCALL_ENTER_START:
+		state->synthetic_result_valid = false;
 		return handle_enter(extension, tracee);
 	case SYSCALL_EXIT_START:
 		if (state->socket_state != ANDOCK_SOCKET_IDLE)

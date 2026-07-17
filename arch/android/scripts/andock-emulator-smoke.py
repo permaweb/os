@@ -53,7 +53,8 @@ def main():
         environment = exec_command(
             client,
             member,
-            "pwd; id; python3 --version; node --version; "
+            "pwd; id; test -x /usr/bin/true; /usr/bin/true; "
+            "python3 --version; node --version; "
             "printf x >/dev/null; "
             "test \"$(dd if=/dev/zero bs=4 count=1 2>/dev/null | od -An -tx1)\" "
             "= \" 00 00 00 00\"; head -c 16 /dev/urandom | wc -c; "
