@@ -75,7 +75,8 @@ release-apk: runtime release-keystore
 runtime:
 	./scripts/build-hb-android-runtime.sh
 
-android-build: runtime apk
+android-build: runtime
+	$(MAKE) apk
 
 emulator-start:
 	AVD_NAME="$(AVD_NAME)" ./scripts/start-emulator.sh
