@@ -184,7 +184,7 @@ def main():
             "print('torch', torch.__version__)\n"
             "print('transformers', transformers.__version__)\n"
             "PY",
-            timeout=2_700_000,
+            timeout=1_800_000,
             allow_network=True,
         )
         workloads.run(
