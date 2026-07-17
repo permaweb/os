@@ -1,7 +1,7 @@
 # Andock regular-file image engine spike
 
-Status: build-complete feasibility evidence; Android runtime execution pending
-the root integration harness.
+Status: regular-file image capability proven on the owned ARM64 Android
+emulator; production Ubuntu-image population and PRoot integration remain.
 
 ## Decision
 
@@ -134,7 +134,7 @@ Current ARM64 artifacts:
 - test app APK SHA-256:
   `ea3f0dcee34e636a0881b0dbc7470ed8167f258e008f04ab6d5a86fab3d635b9`
 - instrumentation APK SHA-256:
-  `dae354761ada35c78b4502110e60dc698bf14ad69cae27634bcbe2e3825e3639`
+  `f0fa4e6bfe90b74096643bd3085e37ca0ace9bce821c1fd6da75e2b80de6b99a`
 
 The unstripped ARM64 ELF is AArch64, has no foreign-architecture payload, and
 has 143,160 bytes of text, 2,576 bytes of data, and 6,644 bytes of BSS. Its only
@@ -146,10 +146,36 @@ The root Android harness can execute the built probe without rebuilding:
 arch/android/scripts/run-andock-image-engine-spike.sh emulator-5562
 ```
 
-The runtime acceptance line is `regular-file-image-capability=ok`, accompanied
-by distinct owner/isolated UIDs, a changed service PID after the deliberate
-crash, all native operation results, malformed rejection, and Android sparse
-copy allocation/timing.
+## Android runtime evidence
+
+Target: `emulator-5562`, AVD `codex-handee-4g`, ARM64, Android 16/API 36,
+kernel `6.12.38-android16-5-gbb9513914902-ab13996879-4k`, SELinux enforcing,
+4 GiB RAM.
+
+The first runtime attempt exposed an invalid hyphenated
+`bindIsolatedService` instance name before service creation. The fixed probe
+uses an Android-valid underscore name; it does not weaken the isolated-service
+boundary.
+
+Three independent clean instrumentation runs exited 0 with
+`regular-file-image-capability=ok`. The application UID was 10252 and the
+isolated UIDs differed on each run (99048, 99050, and 99052). In the full first
+run the deliberate crash changed the isolated service PID from 17996 to 18008,
+then journal recovery, complete semantic verification, sparse-copy reopen,
+and all four malformed-image rejection classes passed. No matching SELinux
+denial was present in logcat.
+
+All three Android copies selected `seek-data-hole`, preserved the 64 MiB
+logical length in 1,409,024 physical bytes, and took:
+
+| Run | Nanoseconds |
+|---:|---:|
+| 1 | 1,858,834 |
+| 2 | 2,094,792 |
+| 3 | 1,741,250 |
+
+Median: 1.859 ms. These are small-fixture capability timings, not a prediction
+for the 823 MiB provisioned Ubuntu template.
 
 ## Limits and next decision
 

@@ -158,7 +158,7 @@ public final class ImageEngineProbeInstrumentation extends Instrumentation {
         if (!context.bindIsolatedService(
                 intent,
                 Context.BIND_AUTO_CREATE,
-                "image-probe-" + INSTANCE.incrementAndGet(),
+                "image_probe_" + INSTANCE.incrementAndGet(),
                 context.getMainExecutor(),
                 result.connection)) {
             throw new IllegalStateException("bindIsolatedService returned false");
