@@ -91,6 +91,23 @@ the filesystem only through the local syscall layer. Even if it escapes that
 translation layer, the kernel still confines it to the isolated UID and
 SELinux domain.
 
+## Device and package boundary
+
+The seven-tool AO contract remains in Ouroboros's single
+`lib_ouroboros_execution` implementation. The trusted `~andock@1.0` Ouroboros
+device package supplies only its backend adapter and selects the Android local
+execution transport, just as the Docker and QEMU packages select their backend
+modules. It is loaded through the normal trusted-device/package path; it is not
+reimplemented in LapEE.
+
+AndEE packages the immutable image engine, PRoot syscall layer, isolated-service
+lifecycle, member-image store, and a private local transport. Those components
+are generic Linux execution infrastructure and contain no Ouroboros router,
+member, provider, UI, Python development server, or authorization logic. This
+keeps node configuration in the ordinary AO node message and permits the same
+Ouroboros packages and UI manifest to run on stock HyperBEAM nodes with a
+different execution backend.
+
 ## Path safety invariants
 
 The filesystem engine resolves guest paths by filesystem inode, never by
@@ -403,6 +420,9 @@ isolation cannot satisfy these gates.
 - Existing AndEE config invariants, Android build, smoke, scenarios, zone
   storage, Android smoke, and mixed smoke.
 - `~andock@1.0` package closure and Forge verification.
+- Prove the Andock backend package loads through the same trusted remote-device
+  path as the other portable Ouroboros packages; do not preload a forked copy
+  of `lib_ouroboros_execution` in the APK.
 - Normal AO resolution with configurable execution device; no AndEE-specific
   Ouroboros server or source staging.
 - Full browser flow: load the immutable UI manifest, create a workspace and two
