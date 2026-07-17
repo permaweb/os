@@ -3,6 +3,7 @@
 import errno
 import os
 from pathlib import Path
+import select
 import shutil
 import socket
 import stat
@@ -189,6 +190,74 @@ relative_server.close()
 os.unlink("target.sock")
 os.unlink("link.sock")
 os.chdir(original_cwd)
+
+# Renaming or hard-linking the node changes filesystem lookup, not the bound
+# kernel address reported by getsockname. Replacing an existing socket node
+# must route new connects to the source server while the replaced server stays
+# alive only for already-established peers.
+rename_source = str(ROOT / "rename-source.sock")
+rename_target = str(ROOT / "rename-target.sock")
+source_server = socket.socket(socket.AF_UNIX)
+target_server = socket.socket(socket.AF_UNIX)
+source_server.bind(rename_source)
+target_server.bind(rename_target)
+source_server.listen()
+target_server.listen()
+os.rename(rename_source, rename_target)
+assert source_server.getsockname() == rename_source
+assert target_server.getsockname() == rename_target
+renamed_client = socket.socket(socket.AF_UNIX)
+renamed_client.connect(rename_target)
+readable, _, _ = select.select([source_server, target_server], [], [], 2)
+assert readable == [source_server], readable
+renamed_peer, _ = source_server.accept()
+renamed_client.sendall(b"renamed")
+assert renamed_peer.recv(64) == b"renamed"
+renamed_peer.close()
+renamed_client.close()
+source_server.close()
+target_server.close()
+os.unlink(rename_target)
+
+old_parent = ROOT / "old-parent"
+new_parent = ROOT / "new-parent"
+old_parent.mkdir()
+parent_source = str(old_parent / "nested.sock")
+parent_target = str(new_parent / "nested.sock")
+parent_server = socket.socket(socket.AF_UNIX)
+parent_server.bind(parent_source)
+parent_server.listen()
+os.rename(old_parent, new_parent)
+assert parent_server.getsockname() == parent_source
+parent_client = socket.socket(socket.AF_UNIX)
+parent_client.connect(parent_target)
+parent_peer, _ = parent_server.accept()
+parent_client.sendall(b"parent-renamed")
+assert parent_peer.recv(64) == b"parent-renamed"
+parent_peer.close()
+parent_client.close()
+parent_server.close()
+os.unlink(parent_target)
+new_parent.rmdir()
+
+link_source = str(ROOT / "link-source.sock")
+link_alias = str(ROOT / "link-alias.sock")
+link_server = socket.socket(socket.AF_UNIX)
+link_server.bind(link_source)
+link_server.listen()
+os.link(link_source, link_alias)
+assert os.stat(link_source).st_ino == os.stat(link_alias).st_ino
+assert link_server.getsockname() == link_source
+link_client = socket.socket(socket.AF_UNIX)
+link_client.connect(link_alias)
+link_peer, _ = link_server.accept()
+link_client.sendall(b"hard-link")
+assert link_peer.recv(64) == b"hard-link"
+link_peer.close()
+link_client.close()
+link_server.close()
+os.unlink(link_source)
+os.unlink(link_alias)
 
 # Datagram source addresses must be detranslated back to guest paths.
 datagram_a_path = str(ROOT / "datagram-a.sock")
