@@ -30,6 +30,8 @@ internal class AndeeIsolatedExecutionPool(
         image: ParcelFileDescriptor,
         input: ParcelFileDescriptor?,
         output: ParcelFileDescriptor,
+        networkBroker: IAndeeNetworkBroker?,
+        resolverConfiguration: String?,
     ): JSONObject {
         var worker: WorkerHandle? = null
         return try {
@@ -49,6 +51,8 @@ internal class AndeeIsolatedExecutionPool(
                 image,
                 input,
                 output,
+                networkBroker,
+                resolverConfiguration,
             )
             JSONObject(response).also {
                 if (it.optBoolean("timed-out")) stopWorker(memberId)

@@ -1,6 +1,7 @@
 package org.permaweb.andee;
 
 import android.os.ParcelFileDescriptor;
+import org.permaweb.andee.IAndeeNetworkBroker;
 
 interface IAndeeExecutionWorker {
     String execute(
@@ -10,7 +11,9 @@ interface IAndeeExecutionWorker {
         boolean mergeError,
         in ParcelFileDescriptor image,
         in ParcelFileDescriptor input,
-        in ParcelFileDescriptor output
+        in ParcelFileDescriptor output,
+        @nullable IAndeeNetworkBroker networkBroker,
+        @nullable String resolverConfiguration
     );
     void stop();
 }

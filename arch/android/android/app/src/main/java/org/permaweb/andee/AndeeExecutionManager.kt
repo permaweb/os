@@ -19,7 +19,7 @@ import kotlin.concurrent.withLock
 
 /** Owns member images, serialization, isolated workers, and local transport. */
 internal class AndeeExecutionManager(
-    context: Context,
+    private val context: Context,
     runtimeRoot: File,
 ) : AutoCloseable {
     private val storage = AndeeExecutionStorage(context, runtimeRoot)
@@ -137,15 +137,13 @@ internal class AndeeExecutionManager(
         timeoutMs: Int,
         allowNetwork: Boolean,
     ): JSONObject {
-        if (allowNetwork) {
-            throw ExecutionFailure(501, "network-enabled-execution-unavailable")
-        }
         val result = command(
             memberId,
             cwd,
             "umask 022; $command",
             timeoutMs,
             true,
+            allowNetwork = allowNetwork,
         )
         return success(
             JSONObject()
@@ -164,7 +162,9 @@ internal class AndeeExecutionManager(
         timeoutMs: Int,
         mergeError: Boolean,
         input: ByteArray? = null,
+        allowNetwork: Boolean = false,
     ): CommandResult {
+        val networkSnapshot = if (allowNetwork) AndeeNetworkSnapshot.capture(context) else null
         val outputPipe = ParcelFileDescriptor.createPipe()
         val output = ByteArrayOutputStream()
         val truncated = AtomicBoolean(false)
@@ -194,6 +194,7 @@ internal class AndeeExecutionManager(
                 }.onFailure { streamFailure.compareAndSet(null, it) }
             }
         }
+        val networkBroker = networkSnapshot?.let { AndeeNetworkBroker(it.policy) }
         var status: JSONObject? = null
         var commandFailure: Throwable? = null
         try {
@@ -208,11 +209,14 @@ internal class AndeeExecutionManager(
                         image,
                         inputPipe?.get(0),
                         outputPipe[1],
+                        networkBroker,
+                        networkSnapshot?.resolverConfiguration,
                     )
                 }
             } catch (failure: Throwable) {
                 commandFailure = failure
             } finally {
+                networkBroker?.close()
                 runCatching { outputPipe[1].close() }
                 runCatching { inputPipe?.get(0)?.close() }
             }

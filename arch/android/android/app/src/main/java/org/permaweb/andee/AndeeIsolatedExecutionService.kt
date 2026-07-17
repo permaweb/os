@@ -33,6 +33,8 @@ class AndeeIsolatedExecutionService : Service() {
             image: ParcelFileDescriptor,
             input: ParcelFileDescriptor?,
             output: ParcelFileDescriptor,
+            networkBroker: IAndeeNetworkBroker?,
+            resolverConfiguration: String?,
         ): String = runCommand(
             command,
             cwd,
@@ -41,6 +43,8 @@ class AndeeIsolatedExecutionService : Service() {
             image,
             input,
             output,
+            networkBroker,
+            resolverConfiguration,
         ).toString()
 
         override fun stop() {
@@ -63,7 +67,18 @@ class AndeeIsolatedExecutionService : Service() {
         image: ParcelFileDescriptor,
         input: ParcelFileDescriptor?,
         output: ParcelFileDescriptor,
+        networkBroker: IAndeeNetworkBroker?,
+        resolverConfiguration: String?,
     ): JSONObject {
+        require((networkBroker == null) == (resolverConfiguration == null)) {
+            "network broker and resolver configuration must be provided together"
+        }
+        resolverConfiguration?.let {
+            require(it.toByteArray(Charsets.UTF_8).size <= MAX_RESOLVER_BYTES) {
+                "resolver configuration is too large"
+            }
+            require(it.isNotEmpty()) { "resolver configuration cannot be empty" }
+        }
         val nativeRoot = applicationInfo.nativeLibraryDir
         val launcher = File(nativeRoot, PROOT_LAUNCHER)
         val proot = File(nativeRoot, PROOT_EXECUTABLE)
@@ -76,20 +91,35 @@ class AndeeIsolatedExecutionService : Service() {
         }
         require(loader.isFile && loader.canExecute()) { "missing packaged PRoot loader" }
 
-        val capabilityName = capabilityName()
+        val capabilityName = capabilityName("image")
         val capabilityListener = LocalSocket(LocalSocket.SOCKET_SEQPACKET).apply {
             bind(LocalSocketAddress(capabilityName, LocalSocketAddress.Namespace.ABSTRACT))
         }
         val capabilitySocket = LocalServerSocket(capabilityListener.fileDescriptor)
+        val networkCapabilityName = networkBroker?.let { capabilityName("network") }
+        val networkCapabilityListener = networkCapabilityName?.let { name ->
+            LocalSocket(LocalSocket.SOCKET_SEQPACKET).apply {
+                bind(LocalSocketAddress(name, LocalSocketAddress.Namespace.ABSTRACT))
+            }
+        }
+        val networkCapabilitySocket = networkCapabilityListener?.let {
+            LocalServerSocket(it.fileDescriptor)
+        }
         var process: java.lang.Process? = null
+        var networkServer: AndeeNetworkCapabilityServer? = null
         val errors = ByteArrayOutputStream()
         try {
             process = synchronized(this) {
                 check(active?.isAlive != true) { "isolated worker already has an active command" }
-                ProcessBuilder(
+                val arguments = mutableListOf(
                     launcher.absolutePath,
                     "--socket",
                     capabilityName,
+                )
+                networkCapabilityName?.let {
+                    arguments += listOf("--network-socket", it)
+                }
+                arguments += listOf(
                     "--",
                     proot.absolutePath,
                     "--kill-on-exit",
@@ -102,9 +132,13 @@ class AndeeIsolatedExecutionService : Service() {
                     "-C",
                     cwd,
                     "/bin/bash",
-                    "-lc",
-                    command,
                 )
+                if (networkBroker == null) {
+                    arguments += listOf("-lc", command)
+                } else {
+                    arguments += listOf("-c", NETWORK_COMMAND, "andock-network-init", command)
+                }
+                ProcessBuilder(arguments)
                     .redirectErrorStream(mergeError)
                     .also { builder ->
                         builder.environment()["PROOT_LOADER"] = loader.absolutePath
@@ -121,13 +155,26 @@ class AndeeIsolatedExecutionService : Service() {
                         builder.environment()["LANG"] = "C.UTF-8"
                         builder.environment()["DEBIAN_FRONTEND"] = "noninteractive"
                         builder.environment()["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
+                        resolverConfiguration?.let {
+                            builder.environment()["ANDOCK_RESOLV_CONF"] = it
+                        }
                     }
                     .start()
                     .also { active = it }
             }
+            if (networkBroker != null && networkCapabilitySocket != null) {
+                networkServer = AndeeNetworkCapabilityServer(
+                    networkCapabilitySocket,
+                    networkBroker,
+                    process,
+                ).also(AndeeNetworkCapabilityServer::start)
+            }
             sendImageCapability(capabilitySocket, image, process)
+            networkServer?.awaitConnected()
         } catch (failure: Throwable) {
             process?.let(::terminateGuestProcesses)
+            networkServer?.close()
+            networkCapabilityListener?.close()
             throw failure
         } finally {
             capabilitySocket.close()
@@ -184,6 +231,7 @@ class AndeeIsolatedExecutionService : Service() {
             stdout.join()
             stderr?.join()
             if (completed) streamFailure.get()?.let { throw it }
+            if (completed) networkServer?.throwIfFailed()
             return JSONObject()
                 .put("exit-code", if (completed) process.exitValue() else 124)
                 .put("timed-out", !completed)
@@ -193,6 +241,8 @@ class AndeeIsolatedExecutionService : Service() {
                 if (active === process) active = null
             }
             signalOtherUidProcesses(OsConstants.SIGKILL)
+            networkServer?.close()
+            networkCapabilityListener?.close()
             input?.close()
             output.close()
         }
@@ -252,10 +302,10 @@ class AndeeIsolatedExecutionService : Service() {
         }
     }
 
-    private fun capabilityName(): String {
+    private fun capabilityName(kind: String): String {
         val nonce = ByteArray(18)
         SecureRandom().nextBytes(nonce)
-        return "andock.image.${encode(nonce)}"
+        return "andock.$kind.${encode(nonce)}"
     }
 
     private fun encode(value: ByteArray): String = Base64.encodeToString(
@@ -269,5 +319,9 @@ class AndeeIsolatedExecutionService : Service() {
         const val PROOT_LOADER = "libandee_proot_loader.so"
         const val CAPABILITY_TIMEOUT_MS = 10_000
         const val IMAGE_CAPABILITY_BYTE = 0x41
+        const val MAX_RESOLVER_BYTES = 4 * 1024
+        const val NETWORK_COMMAND =
+            "umask 022; printf '%s' \"\$ANDOCK_RESOLV_CONF\" > /etc/resolv.conf || exit 125; " +
+                "unset ANDOCK_RESOLV_CONF; exec /bin/bash -lc \"\$1\""
     }
 }
