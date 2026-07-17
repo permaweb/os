@@ -83,6 +83,14 @@ def main():
         require("arch=aarch64" in base, base)
 
         workloads.run(
+            "path-search-clean-stderr",
+            "set -eu; "
+            "PATH=/definitely/missing:/usr/bin:/bin /usr/bin/env true "
+            "2>/root/path-search.err >/dev/null; "
+            "test ! -s /root/path-search.err",
+        )
+
+        workloads.run(
             "apt-install",
             "set -eu; apt-get update; "
             "apt-get install -y --no-install-recommends "
@@ -126,7 +134,8 @@ def main():
             "void Answer(const FunctionCallbackInfo<Value>& args) {\n"
             "  args.GetReturnValue().Set(Number::New(args.GetIsolate(), 42));\n"
             "}\n"
-            "void Init(Object exports) { NODE_SET_METHOD(exports, \"answer\", Answer); }\n"
+            "void Init(v8::Local<Object> exports) { "
+            "NODE_SET_METHOD(exports, \"answer\", Answer); }\n"
             "NODE_MODULE(NODE_GYP_MODULE_NAME, Init)\n"
             "}\n",
         )
@@ -183,6 +192,38 @@ def main():
             "python3 /root/andock_linux_semantics.py",
             timeout=300_000,
         )
+
+        network_syscalls = (
+            Path(__file__).parent.parent
+            / "execution/tests/andock_network_syscalls.c"
+        ).read_text()
+        workloads.write("/root/andock_network_syscalls.c", network_syscalls)
+        race_port = 45733
+        race_output = "/data/local/tmp/andock-network-race.bin"
+        race_pid = int(client.adb_command(
+            "shell", "sh", "-c",
+            f"set -eu; rm -f {race_output}; "
+            f"nc -4 -u -s 127.0.0.1 -p {race_port} -l "
+            f">{race_output} 2>/dev/null </dev/null & "
+            "pid=$!; sleep 1; kill -0 $pid; printf '%s' $pid",
+        ).stdout)
+        try:
+            workloads.run(
+                "network-syscall-boundary",
+                "set -eu; cc -std=c11 -O2 -Wall -Wextra -Werror -pthread "
+                "/root/andock_network_syscalls.c "
+                "-o /root/andock_network_syscalls; "
+                f"/root/andock_network_syscalls --race-port {race_port}",
+                timeout=300_000,
+                allow_network=True,
+            )
+        finally:
+            race_bytes = int(client.adb_command(
+                "shell", "sh", "-c",
+                f"kill {race_pid} 2>/dev/null || true; sleep 1; "
+                f"wc -c <{race_output}; rm -f {race_output}",
+            ).stdout)
+        require(race_bytes == 0, f"raced loopback received {race_bytes} bytes")
 
         workloads.run(
             "python-ml-install",
@@ -255,18 +296,33 @@ def main():
         workloads.run(
             "network-disabled",
             "python3 - <<'PY'\n"
-            "import errno, socket\n"
-            "probes = [(socket.AF_INET, socket.SOCK_STREAM), "
-            "(socket.AF_INET, socket.SOCK_DGRAM), "
-            "(socket.AF_INET6, socket.SOCK_STREAM)]\n"
-            "for family, kind in probes:\n"
+            "import ctypes, errno, socket\n"
+            "probes = [(socket.AF_INET, socket.SOCK_STREAM, 0), "
+            "(socket.AF_INET, socket.SOCK_DGRAM, 0), "
+            "(socket.AF_INET6, socket.SOCK_STREAM, 0), "
+            "(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE), "
+            "(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)), "
+            "(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP), "
+            "(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)]\n"
+            "for family, kind, protocol in probes:\n"
             "    try:\n"
-            "        socket.socket(family, kind)\n"
+            "        socket.socket(family, kind, protocol)\n"
             "    except OSError as failure:\n"
             "        assert failure.errno in (errno.EACCES, errno.EPERM), failure\n"
             "    else:\n"
             "        raise AssertionError((family, kind))\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "for number, arguments in [(425, (1, 0)), (438, (-1, -1, 0))]:\n"
+            "    ctypes.set_errno(0)\n"
+            "    assert libc.syscall(number, *arguments) == -1\n"
+            "    assert ctypes.get_errno() == errno.EPERM\n"
             "PY\n"
+            "node -e \"const net=require('net'); "
+            "const socket=net.connect(443,'1.1.1.1'); "
+            "socket.on('connect',()=>process.exit(2)); "
+            "socket.on('error',error=>process.exit("
+            "['EACCES','EPERM'].includes(error.code)?0:3)); "
+            "setTimeout(()=>process.exit(4),2000)\"; "
             "! curl -fsSL --max-time 5 https://example.com >/dev/null 2>&1; "
             "! /root/copied-curl -fsSL --max-time 5 "
             "https://example.com >/dev/null 2>&1",

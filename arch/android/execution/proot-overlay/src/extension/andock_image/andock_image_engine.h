@@ -11,6 +11,7 @@ enum {
 	ANDOCK_IMAGE_DIRECTORY = 2,
 	ANDOCK_IMAGE_SYMLINK = 3,
 	ANDOCK_IMAGE_OTHER = 4,
+	ANDOCK_IMAGE_SOCKET = 5,
 };
 
 enum {
@@ -24,6 +25,7 @@ enum {
 	ANDOCK_IMAGE_SYMLINK_CREATE = 8,
 	ANDOCK_IMAGE_CHMOD = 9,
 	ANDOCK_IMAGE_TRUNCATE = 10,
+	ANDOCK_IMAGE_SOCKET_CREATE = 11,
 	ANDOCK_IMAGE_STATFS = 12,
 	ANDOCK_IMAGE_UTIMENS = 13,
 	ANDOCK_IMAGE_LINK = 14,
@@ -31,6 +33,8 @@ enum {
 	ANDOCK_IMAGE_GET_XATTR = 16,
 	ANDOCK_IMAGE_SET_XATTR = 17,
 	ANDOCK_IMAGE_REMOVE_XATTR = 18,
+	ANDOCK_IMAGE_SOCKET_CANCEL = 19,
+	ANDOCK_IMAGE_SOCKET_COMMIT = 20,
 };
 
 enum {
@@ -45,6 +49,7 @@ struct andock_image_result {
 	uint64_t size;
 	uint64_t inode;
 	uint64_t cache_id;
+	uint64_t token;
 	nlink_t links;
 	char *path;
 	uint8_t *data;

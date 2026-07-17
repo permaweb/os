@@ -19,7 +19,7 @@ index 0adb88b..7252801 100644
 +LWEXT4_OBJECTS := $(patsubst $(VPATH)%.c,%.o,$(LWEXT4_SOURCES))
  
  OBJECTS += \
-@@ -60,6 +67,9 @@ OBJECTS += \
+@@ -60,6 +67,10 @@ OBJECTS += \
  	ptrace/user.o		\
  	ptrace/wait.o		\
  	extension/extension.o	\
@@ -264,3 +264,51 @@ index ec74950..a1090e1 100644
  	/* Be careful: sun_path doesn't have to be null-terminated.  */
 +	bzero(sockaddr.sun_path, sizeof(sockaddr.sun_path));
  	size = offsetof_path + strlen(path) + 1;
+diff --git a/src/syscall/sysnums.list b/src/syscall/sysnums.list
+index da9b888..24cfbe6 100644
+--- a/src/syscall/sysnums.list
++++ b/src/syscall/sysnums.list
+@@ -41,6 +41,7 @@ SYSNUM(clock_settime)
+ SYSNUM(clone)
+ SYSNUM(clone3)
+ SYSNUM(close)
++SYSNUM(close_range)
+ SYSNUM(connect)
+ SYSNUM(copy_file_range)
+ SYSNUM(creat)
+@@ -144,5 +145,6 @@ SYSNUM(io_getevents)
+ SYSNUM(io_setup)
+ SYSNUM(io_submit)
++SYSNUM(io_uring_setup)
+ SYSNUM(ioctl)
+ SYSNUM(ioperm)
+ SYSNUM(iopl)
+@@ -233,6 +235,7 @@ SYSNUM(perf_event_open)
+ SYSNUM(personality)
+ SYSNUM(pipe)
+ SYSNUM(pipe2)
++SYSNUM(pidfd_getfd)
+ SYSNUM(pivot_root)
+ SYSNUM(pkey_alloc)
+ SYSNUM(pkey_free)
+diff --git a/src/syscall/sysnums-arm64.h b/src/syscall/sysnums-arm64.h
+index 43e1f73..a4100aa 100644
+--- a/src/syscall/sysnums-arm64.h
++++ b/src/syscall/sysnums-arm64.h
+@@ -278,7 +278,10 @@ const Sysnum sysnums_arm64[] = {
+-	[ 289 ] = PR_pkey_alloc,
+-	[ 290 ] = PR_pkey_free,
+-	[ 291 ] = PR_statx,
+-	[ 435 ] = PR_clone3,
+-	[ 437 ] = PR_openat2,
+-	[ 439 ] = PR_faccessat2,
++	[ 289 ] = PR_pkey_alloc,
++	[ 290 ] = PR_pkey_free,
++	[ 291 ] = PR_statx,
++	[ 425 ] = PR_io_uring_setup,
++	[ 435 ] = PR_clone3,
++	[ 436 ] = PR_close_range,
++	[ 437 ] = PR_openat2,
++	[ 438 ] = PR_pidfd_getfd,
++	[ 439 ] = PR_faccessat2,
+ };

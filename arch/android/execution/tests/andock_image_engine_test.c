@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <ext4.h>
+
 #include "extension/andock_image/andock_image_engine.h"
 
 static void fail(const char *step, int status)
@@ -86,6 +88,18 @@ static void expect_bytes(int fd, off_t offset, const char *expected)
 	free(actual);
 }
 
+static void expect_size(int fd, off_t expected)
+{
+	struct stat status;
+	if (fstat(fd, &status) != 0)
+		fail("fstat", -errno);
+	if (status.st_size != expected) {
+		fprintf(stderr, "size mismatch: expected %lld, got %lld\n",
+			(long long) expected, (long long) status.st_size);
+		exit(1);
+	}
+}
+
 static void expect_fill(int fd, off_t offset, size_t size, unsigned char byte)
 {
 	unsigned char buffer[4096];
@@ -134,6 +148,17 @@ static int raw_call(int operation, int flags, const char *path,
 	return status;
 }
 
+static int raw_data_call(int operation, const char *path,
+		const void *data, size_t data_size)
+{
+	struct andock_image_result result;
+	int status = andock_image_engine_call(operation, 0, 0,
+		path, NULL, data, data_size, &result);
+	if (status == 0)
+		andock_image_result_release(&result);
+	return status;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -153,6 +178,137 @@ int main(int argc, char **argv)
 	struct andock_image_result directory = call(
 		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work", NULL);
 	andock_image_result_release(&directory);
+	directory = call(
+		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work/non-empty", NULL);
+	andock_image_result_release(&directory);
+	struct andock_image_result child = open_file(
+		"/work/non-empty/child", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
+		0644);
+	track(&child);
+	write_at(child.guest_fd, 0, "preserved-child");
+	andock_image_engine_mark_dirty(child.cache_id);
+	if (andock_image_engine_sync(child.cache_id) < 0)
+		fail("non-empty-child-sync", -EIO);
+	expect_status("non-empty-rmdir",
+		raw_call(ANDOCK_IMAGE_UNLINK, AT_REMOVEDIR,
+			"/work/non-empty", NULL), -ENOTEMPTY);
+	expect_bytes(child.guest_fd, 0, "preserved-child");
+	struct andock_image_result child_reopened = open_file(
+		"/work/non-empty/child", O_RDONLY | O_CLOEXEC, 0);
+	expect_bytes(child_reopened.guest_fd, 0, "preserved-child");
+	andock_image_result_release(&child_reopened);
+	struct andock_image_result removed = call(
+		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/non-empty/child", NULL);
+	andock_image_result_release(&removed);
+	expect_bytes(child.guest_fd, 0, "preserved-child");
+	removed = call(ANDOCK_IMAGE_UNLINK, AT_REMOVEDIR, 0,
+		"/work/non-empty", NULL);
+	andock_image_result_release(&removed);
+	close_tracked(&child);
+	struct andock_image_result socket_node = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0755, "/work/socket", NULL);
+	if (socket_node.type != ANDOCK_IMAGE_SOCKET
+	    || !S_ISSOCK(socket_node.mode)
+	    || (socket_node.mode & 0777) != 0755) {
+		fprintf(stderr, "socket node metadata mismatch\n");
+		return 1;
+	}
+	uint64_t socket_inode = socket_node.inode;
+	uint64_t socket_token = socket_node.token;
+	andock_image_result_release(&socket_node);
+	expect_status("socket-exists",
+		raw_call(ANDOCK_IMAGE_SOCKET_CREATE, 0, "/work/socket", NULL),
+		-EEXIST);
+	uint64_t wrong_socket_token = socket_token + 1;
+	expect_status("socket-cancel-wrong-generation",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL, "/work/socket",
+			&wrong_socket_token, sizeof(wrong_socket_token)), 0);
+	struct andock_image_result socket_still_present = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/work/socket", NULL);
+	if (socket_still_present.type != ANDOCK_IMAGE_SOCKET
+	    || socket_still_present.inode != socket_inode) {
+		fprintf(stderr, "socket cancellation removed the wrong generation\n");
+		return 1;
+	}
+	andock_image_result_release(&socket_still_present);
+	expect_status("socket-cancel-generation",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL, "/work/socket",
+			&socket_token, sizeof(socket_token)), 0);
+	expect_status("socket-cancelled",
+		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
+			"/work/socket", NULL), -ENOENT);
+	socket_node = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0700, "/work/socket", NULL);
+	if (!S_ISSOCK(socket_node.mode) || (socket_node.mode & 0777) != 0700) {
+		fprintf(stderr, "socket retry metadata mismatch\n");
+		return 1;
+	}
+	socket_inode = socket_node.inode;
+	andock_image_result_release(&socket_node);
+	struct andock_image_result socket_link = call(
+		ANDOCK_IMAGE_LINK, 0, 0, "/work/socket", "/work/socket.link");
+	if (socket_link.type != ANDOCK_IMAGE_SOCKET
+	    || socket_link.inode != socket_inode) {
+		fprintf(stderr, "socket hard link metadata mismatch\n");
+		return 1;
+	}
+	andock_image_result_release(&socket_link);
+	removed = call(ANDOCK_IMAGE_UNLINK, 0, 0, "/work/socket", NULL);
+	andock_image_result_release(&removed);
+	expect_status("socket-unlinked",
+		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
+			"/work/socket", NULL), -ENOENT);
+	struct andock_image_result socket_alias = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/work/socket.link", NULL);
+	if (socket_alias.type != ANDOCK_IMAGE_SOCKET
+	    || socket_alias.inode != socket_inode) {
+		fprintf(stderr, "socket hard link did not survive source unlink\n");
+		return 1;
+	}
+	andock_image_result_release(&socket_alias);
+	removed = call(ANDOCK_IMAGE_UNLINK, 0, 0, "/work/socket.link", NULL);
+	andock_image_result_release(&removed);
+	struct andock_image_result old_socket_generation = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0755,
+		"/work/socket-generation", NULL);
+	uint64_t old_generation_inode = old_socket_generation.inode;
+	uint64_t old_generation_token = old_socket_generation.token;
+	andock_image_result_release(&old_socket_generation);
+	removed = call(
+		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/socket-generation", NULL);
+	andock_image_result_release(&removed);
+	struct andock_image_result new_socket_generation = call(
+		ANDOCK_IMAGE_SOCKET_CREATE, 0, 0755,
+		"/work/socket-generation", NULL);
+	if (new_socket_generation.inode != old_generation_inode) {
+		fprintf(stderr, "socket generation test did not force inode reuse\n");
+		return 1;
+	}
+	uint64_t new_generation_token = new_socket_generation.token;
+	andock_image_result_release(&new_socket_generation);
+	expect_status("socket-cancel-stale-reused-inode",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL,
+			"/work/socket-generation", &old_generation_token,
+			sizeof(old_generation_token)), 0);
+	struct andock_image_result generation_still_present = call(
+		ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL, 0,
+		"/work/socket-generation", NULL);
+	if (generation_still_present.type != ANDOCK_IMAGE_SOCKET
+	    || generation_still_present.token != 0) {
+		fprintf(stderr, "stale cancellation removed reused socket inode\n");
+		return 1;
+	}
+	andock_image_result_release(&generation_still_present);
+	expect_status("socket-cancel-current-reused-inode",
+		raw_data_call(ANDOCK_IMAGE_SOCKET_CANCEL,
+			"/work/socket-generation", &new_generation_token,
+			sizeof(new_generation_token)), 0);
+	expect_status("socket-current-generation-cancelled",
+		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
+			"/work/socket-generation", NULL), -ENOENT);
+	materializations = andock_image_engine_materializations();
 	struct andock_image_result first = open_file(
 		"/work/alpha", O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0755);
 	track(&first);
@@ -192,7 +348,7 @@ int main(int argc, char **argv)
 		fail("mmap-exec", -errno);
 	munmap(mapping, 6);
 
-	struct andock_image_result removed = call(
+	removed = call(
 		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/alpha", NULL);
 	andock_image_result_release(&removed);
 	write_at(first.guest_fd, 3, "X");
@@ -273,9 +429,10 @@ int main(int argc, char **argv)
 	removed = call(
 		ANDOCK_IMAGE_UNLINK, 0, 0, "/work/reuse-old", NULL);
 	andock_image_result_release(&removed);
-	write_at(old_generation.guest_fd, 0, "still-open");
+	write_at(old_generation.guest_fd, 0, "still-open-old-generation");
 	andock_image_engine_mark_dirty(old_generation.cache_id);
-	expect_bytes(old_generation.guest_fd, 0, "still-open");
+	expect_bytes(old_generation.guest_fd, 0,
+		"still-open-old-generation");
 
 	struct andock_image_result new_generation;
 	char reused_path[64];
@@ -284,7 +441,7 @@ int main(int argc, char **argv)
 		snprintf(reused_path, sizeof(reused_path),
 			"/work/reuse-%d", attempt);
 		new_generation = open_file(reused_path,
-			O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+			O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
 		track(&new_generation);
 		if (new_generation.inode == reused_inode) {
 			found_reuse = true;
@@ -299,18 +456,58 @@ int main(int argc, char **argv)
 		fprintf(stderr, "unlinked inode generation was not isolated\n");
 		return 1;
 	}
-	write_at(new_generation.guest_fd, 0, "new-generation");
+	write_at(new_generation.guest_fd, 0, "new");
 	andock_image_engine_mark_dirty(new_generation.cache_id);
 	if (andock_image_engine_sync(new_generation.cache_id) < 0)
 		fail("reuse-new-sync", -EIO);
-	expect_bytes(new_generation.guest_fd, 0, "new-generation");
-	expect_bytes(old_generation.guest_fd, 0, "still-open");
+	expect_size(new_generation.guest_fd, 3);
+	expect_bytes(new_generation.guest_fd, 0, "new");
+	expect_bytes(old_generation.guest_fd, 0,
+		"still-open-old-generation");
 	close_tracked(&old_generation);
-	expect_bytes(new_generation.guest_fd, 0, "new-generation");
+	expect_size(new_generation.guest_fd, 3);
+	expect_bytes(new_generation.guest_fd, 0, "new");
 	close_tracked(&new_generation);
 	struct andock_image_result reopened_generation = open_file(
 		reused_path, O_RDONLY | O_CLOEXEC, 0);
-	expect_bytes(reopened_generation.guest_fd, 0, "new-generation");
+	expect_size(reopened_generation.guest_fd, 3);
+	expect_bytes(reopened_generation.guest_fd, 0, "new");
+	andock_image_result_release(&reopened_generation);
+
+	struct andock_image_result stale_generation = open_file(
+		"/work/no-truncate", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+	track(&stale_generation);
+	write_at(stale_generation.guest_fd, 0, "old-generation-with-long-tail");
+	andock_image_engine_mark_dirty(stale_generation.cache_id);
+	if (andock_image_engine_sync(stale_generation.cache_id) < 0)
+		fail("no-truncate-old-sync", -EIO);
+	uint64_t stale_inode = stale_generation.inode;
+	uint64_t stale_cache_id = stale_generation.cache_id;
+	if (ext4_fremove("/andock/work/no-truncate") != EOK)
+		fail("no-truncate-raw-remove", -EIO);
+	struct andock_image_result fresh_generation = open_file(
+		"/work/no-truncate", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+	track(&fresh_generation);
+	if (fresh_generation.inode != stale_inode
+	    || fresh_generation.cache_id == stale_cache_id) {
+		fprintf(stderr,
+			"created inode generation reused stale materialization\n");
+		return 1;
+	}
+	write_at(fresh_generation.guest_fd, 0, "new");
+	andock_image_engine_mark_dirty(fresh_generation.cache_id);
+	if (andock_image_engine_sync(fresh_generation.cache_id) < 0)
+		fail("no-truncate-new-sync", -EIO);
+	expect_size(fresh_generation.guest_fd, 3);
+	expect_bytes(fresh_generation.guest_fd, 0, "new");
+	expect_bytes(stale_generation.guest_fd, 0,
+		"old-generation-with-long-tail");
+	close_tracked(&stale_generation);
+	close_tracked(&fresh_generation);
+	reopened_generation = open_file(
+		"/work/no-truncate", O_RDONLY | O_CLOEXEC, 0);
+	expect_size(reopened_generation.guest_fd, 3);
+	expect_bytes(reopened_generation.guest_fd, 0, "new");
 	andock_image_result_release(&reopened_generation);
 
 	if (andock_image_engine_stop() < 0)

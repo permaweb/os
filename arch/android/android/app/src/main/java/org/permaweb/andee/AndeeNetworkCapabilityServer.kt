@@ -8,6 +8,7 @@ import android.os.RemoteException
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructPollfd
+import java.io.File
 import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -82,9 +83,9 @@ internal class AndeeNetworkCapabilityServer(
             val peer = accepted.peerCredentials
             require(
                 peer.uid == Process.myUid() &&
-                    peer.getPid().toLong() == processId(guestProcess),
+                    isDirectChild(peer.getPid()),
             ) {
-                "Andock network capability requested by an unexpected UID"
+                "Andock network capability requested by an unexpected process"
             }
             this.accepted.set(true)
             client.set(accepted)
@@ -165,14 +166,22 @@ internal class AndeeNetworkCapabilityServer(
     }
 
     private companion object {
-        val PROCESS_PID = java.lang.Process::class.java.getMethod("pid")
         const val CONNECT_TIMEOUT_MS = 10_000L
         const val CLOSE_TIMEOUT_MS = 1_000L
 
-        fun processId(process: java.lang.Process): Long =
-            (PROCESS_PID.invoke(process) as Number).toLong()
+        fun isDirectChild(pid: Int): Boolean = runCatching {
+            File("/proc/$pid/status").useLines { lines ->
+                isDirectChildProcess(lines, Process.myPid())
+            }
+        }.getOrDefault(false)
     }
 }
+
+internal fun isDirectChildProcess(status: Sequence<String>, expectedParent: Int): Boolean =
+    status.firstOrNull { it.startsWith("PPid:") }
+        ?.substringAfter(':')
+        ?.trim()
+        ?.toIntOrNull() == expectedParent
 
 internal sealed class AndeeNetworkRequest(
     open val id: Long,

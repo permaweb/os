@@ -4,17 +4,20 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/uio.h>
 #include <sys/vfs.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
@@ -24,6 +27,7 @@
 #include "compat.h"
 #include "extension/andock_image/andock_image.h"
 #include "extension/andock_image/andock_image_engine.h"
+#include "extension/andock_image/andock_network.h"
 #include "path/path.h"
 #include "syscall/chain.h"
 #include "syscall/socket.h"
@@ -34,6 +38,16 @@
 #include "tracee/statx.h"
 
 #define ANDOCK_MAX_PENDING_FDS 32
+#define ANDOCK_MAX_NETWORK_IO (64U * 1024U * 1024U)
+#define ANDOCK_MAX_NETWORK_IOVECS 1024U
+
+#ifndef CLOSE_RANGE_UNSHARE
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#endif
+
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
 
 enum {
 	ANDOCK_RESOLVE = 1,
@@ -54,6 +68,8 @@ enum {
 	ANDOCK_GET_XATTR = 16,
 	ANDOCK_SET_XATTR = 17,
 	ANDOCK_REMOVE_XATTR = 18,
+	ANDOCK_SOCKET_CANCEL = 19,
+	ANDOCK_SOCKET_COMMIT = 20,
 };
 
 #ifndef AT_EMPTY_PATH
@@ -86,6 +102,7 @@ struct AndockResponse {
 	uint64_t size;
 	uint64_t inode;
 	uint64_t cache_id;
+	uint64_t token;
 	char *path;
 	uint8_t *data;
 	size_t data_size;
@@ -106,9 +123,24 @@ struct AndockFileLock {
 	struct AndockFileLock *next;
 };
 
+struct AndockRecordLockOwner {
+	pid_t pid;
+	unsigned int references;
+};
+
+struct AndockRecordLock {
+	uint64_t inode;
+	uint64_t start;
+	uint64_t end;
+	short type;
+	struct AndockRecordLockOwner *owner;
+	struct AndockRecordLock *next;
+};
+
 struct AndockOpenFile {
 	int fd;
 	int host_fd;
+	bool close_on_exec;
 	nlink_t nlink;
 	uint64_t inode;
 	uint64_t cache_id;
@@ -123,7 +155,8 @@ struct AndockFileTable {
 };
 
 struct AndockUnixSocketPath {
-	char *guest_path;
+	char *reported_path;
+	char *visible_path;
 	char host_name[sizeof(((struct sockaddr_un *) 0)->sun_path) - 1];
 	size_t host_name_size;
 	struct AndockUnixSocketPath *next;
@@ -131,10 +164,36 @@ struct AndockUnixSocketPath {
 
 struct AndockUnixSocketTable {
 	struct AndockUnixSocketPath *paths;
+	uint64_t sequence;
+};
+
+struct AndockFsContext {
+	mode_t mask;
+};
+
+struct AndockNetworkDescription {
+	int host_fd;
+	int family;
+	int type;
+	int protocol;
+	unsigned int references;
+	bool authorized_connected;
+};
+
+struct AndockNetworkFile {
+	int fd;
+	bool close_on_exec;
+	struct AndockNetworkDescription *description;
+	struct AndockNetworkFile *next;
+};
+
+struct AndockNetworkTable {
+	struct AndockNetworkFile *files;
 };
 
 static bool image_active;
 static struct AndockFileLock *file_locks;
+static struct AndockRecordLock *record_locks;
 
 static void release_file_locks(struct AndockFileDescription *owner)
 {
@@ -147,6 +206,53 @@ static void release_file_locks(struct AndockFileDescription *owner)
 		} else {
 			cursor = &(*cursor)->next;
 		}
+	}
+}
+
+static void release_record_locks_matching(
+		struct AndockRecordLockOwner *owner, uint64_t inode,
+		bool all_inodes)
+{
+	struct AndockRecordLock **cursor = &record_locks;
+	while (*cursor != NULL) {
+		if ((owner == NULL || (*cursor)->owner == owner)
+		    && (all_inodes || (*cursor)->inode == inode)) {
+			struct AndockRecordLock *removed = *cursor;
+			*cursor = removed->next;
+			free(removed);
+		}
+		else {
+			cursor = &(*cursor)->next;
+		}
+	}
+}
+
+static void release_record_locks(
+		struct AndockRecordLockOwner *owner, uint64_t inode)
+{
+	release_record_locks_matching(owner, inode, false);
+}
+
+static void release_all_record_locks(struct AndockRecordLockOwner *owner)
+{
+	release_record_locks_matching(owner, 0, true);
+}
+
+static struct AndockRecordLockOwner *new_record_lock_owner(pid_t pid)
+{
+	struct AndockRecordLockOwner *owner = calloc(1, sizeof(*owner));
+	if (owner != NULL) {
+		owner->pid = pid;
+		owner->references = 1;
+	}
+	return owner;
+}
+
+static void release_record_lock_owner(struct AndockRecordLockOwner *owner)
+{
+	if (owner != NULL && --owner->references == 0) {
+		release_all_record_locks(owner);
+		free(owner);
 	}
 }
 
@@ -178,6 +284,10 @@ enum AndockSocketState {
 static void add_open_file(Tracee *tracee, int fd, int host_fd,
 	const char *path, uint64_t inode, uint64_t cache_id, nlink_t nlink,
 	bool is_directory, int flags);
+static void release_network_description(
+		struct AndockNetworkDescription *description);
+static int add_network_file(Tracee *tracee, int fd, bool close_on_exec,
+		struct AndockNetworkDescription *description, bool take_reference);
 
 struct AndockBrokerState {
 	enum AndockSocketState socket_state;
@@ -191,7 +301,14 @@ struct AndockBrokerState {
 	struct sockaddr_un transfer_address;
 	socklen_t transfer_address_size;
 	struct AndockFileTable *files;
+	struct AndockRecordLockOwner *record_lock_owner;
 	struct AndockUnixSocketTable *unix_sockets;
+	struct AndockFsContext *fs_context;
+	struct AndockNetworkTable *network_files;
+	struct AndockNetworkDescription *pending_network;
+	char *pending_unix_bind_path;
+	uint64_t pending_unix_bind_token;
+	struct AndockUnixSocketPath *pending_unix_bind_mapping;
 	char *pending_path;
 	char *pending_executable_path;
 	nlink_t pending_nlink;
@@ -245,7 +362,10 @@ static uint64_t image_instance_nonce;
 static uint64_t transfer_sequence;
 
 static const FilteredSysnum filtered_sysnums[] = {
+	{ PR_bind, FILTER_SYSEXIT },
 	{ PR_close, FILTER_SYSEXIT },
+	{ PR_close_range, FILTER_SYSEXIT },
+	{ PR_connect, FILTER_SYSEXIT },
 	{ PR_copy_file_range, FILTER_SYSEXIT },
 	{ PR_dup, FILTER_SYSEXIT },
 	{ PR_dup2, FILTER_SYSEXIT },
@@ -259,6 +379,8 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_ftruncate, FILTER_SYSEXIT },
 	{ PR_ftruncate64, FILTER_SYSEXIT },
 	{ PR_getdents64, FILTER_SYSEXIT },
+	{ PR_io_uring_setup, FILTER_SYSEXIT },
+	{ PR_listen, FILTER_SYSEXIT },
 	{ PR_lseek, FILTER_SYSEXIT },
 	{ PR_mmap, FILTER_SYSEXIT },
 	{ PR_mmap2, FILTER_SYSEXIT },
@@ -267,6 +389,7 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_pread64, FILTER_SYSEXIT },
 	{ PR_preadv, FILTER_SYSEXIT },
 	{ PR_preadv2, FILTER_SYSEXIT },
+	{ PR_pidfd_getfd, FILTER_SYSEXIT },
 	{ PR_pwrite64, FILTER_SYSEXIT },
 	{ PR_pwritev, FILTER_SYSEXIT },
 	{ PR_pwritev2, FILTER_SYSEXIT },
@@ -274,7 +397,14 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_readv, FILTER_SYSEXIT },
 	{ PR_sendfile, FILTER_SYSEXIT },
 	{ PR_sendfile64, FILTER_SYSEXIT },
+	{ PR_sendmmsg, FILTER_SYSEXIT },
+	{ PR_sendmsg, FILTER_SYSEXIT },
+	{ PR_sendto, FILTER_SYSEXIT },
+	{ PR_setsockopt, FILTER_SYSEXIT },
+	{ PR_socket, FILTER_SYSEXIT },
 	{ PR_splice, FILTER_SYSEXIT },
+	{ PR_umask, FILTER_SYSEXIT },
+	{ PR_unshare, FILTER_SYSEXIT },
 	{ PR_write, FILTER_SYSEXIT },
 	{ PR_writev, FILTER_SYSEXIT },
 	FILTERED_SYSNUM_END,
@@ -370,6 +500,7 @@ static int broker_call(int operation, int flags, int mode,
 	response->size = result.size;
 	response->inode = result.inode;
 	response->cache_id = result.cache_id;
+	response->token = result.token;
 	response->path = result.path;
 	response->data = result.data;
 	response->data_size = result.data_size;
@@ -567,6 +698,10 @@ static int fail_socket_chain(Tracee *tracee, struct AndockBrokerState *state,
 		state->pending_host_fd = -1;
 	}
 	release_pending_cache(state);
+	if (state->pending_network != NULL) {
+		release_network_description(state->pending_network);
+		state->pending_network = NULL;
+	}
 	TALLOC_FREE(state->pending_path);
 	close_socket_state(state);
 	return 1;
@@ -582,6 +717,10 @@ static int fail_received_fd_transfer(Tracee *tracee,
 		state->pending_host_fd = -1;
 	}
 	release_pending_cache(state);
+	if (state->pending_network != NULL) {
+		release_network_description(state->pending_network);
+		state->pending_network = NULL;
+	}
 	TALLOC_FREE(state->pending_path);
 	close_status = register_chained_syscall(
 		tracee, PR_close, received_fd, 0, 0, 0, 0, 0);
@@ -595,6 +734,159 @@ static struct AndockBrokerState *broker_state(Tracee *tracee)
 	Extension *extension = get_extension(tracee, andock_image_callback);
 	return extension == NULL ? NULL
 		: (struct AndockBrokerState *) extension->config;
+}
+
+static void release_network_description(
+		struct AndockNetworkDescription *description)
+{
+	if (description != NULL && --description->references == 0) {
+		close(description->host_fd);
+		free(description);
+	}
+}
+
+static int close_network_file(struct AndockNetworkFile *file)
+{
+	release_network_description(file->description);
+	return 0;
+}
+
+static struct AndockNetworkFile *find_network_file(Tracee *tracee, int fd)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkFile *file = state == NULL || state->network_files == NULL
+		? NULL : state->network_files->files;
+	while (file != NULL) {
+		if (file->fd == fd)
+			return file;
+		file = file->next;
+	}
+	return NULL;
+}
+
+static void remove_network_file(Tracee *tracee, int fd)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkFile **cursor;
+	if (state == NULL || state->network_files == NULL)
+		return;
+	cursor = &state->network_files->files;
+	while (*cursor != NULL) {
+		if ((*cursor)->fd == fd) {
+			struct AndockNetworkFile *removed = *cursor;
+			*cursor = removed->next;
+			TALLOC_FREE(removed);
+			return;
+		}
+		cursor = &(*cursor)->next;
+	}
+}
+
+static void update_network_close_range(Tracee *tracee, unsigned int first,
+		unsigned int last, bool close_on_exec)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkFile **cursor;
+	if (state == NULL || state->network_files == NULL)
+		return;
+	cursor = &state->network_files->files;
+	while (*cursor != NULL) {
+		struct AndockNetworkFile *file = *cursor;
+		if ((unsigned int) file->fd < first
+		    || (unsigned int) file->fd > last) {
+			cursor = &file->next;
+			continue;
+		}
+		if (close_on_exec) {
+			file->close_on_exec = true;
+			cursor = &file->next;
+		}
+		else {
+			*cursor = file->next;
+			TALLOC_FREE(file);
+		}
+	}
+}
+
+static void remove_close_on_exec_network_files(Tracee *tracee)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkFile **cursor;
+	if (state == NULL || state->network_files == NULL)
+		return;
+	cursor = &state->network_files->files;
+	while (*cursor != NULL) {
+		struct AndockNetworkFile *file = *cursor;
+		if (!file->close_on_exec) {
+			cursor = &file->next;
+			continue;
+		}
+		*cursor = file->next;
+		TALLOC_FREE(file);
+	}
+}
+
+static int unshare_network_files_for_exec(Tracee *tracee)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkTable *shared;
+	struct AndockNetworkTable *replacement;
+	struct AndockNetworkFile *file;
+	int status;
+	if (state == NULL || state->network_files == NULL)
+		return 0;
+	shared = state->network_files;
+	replacement = talloc_zero(state, struct AndockNetworkTable);
+	if (replacement == NULL)
+		return -ENOMEM;
+	state->network_files = replacement;
+	file = shared->files;
+	while (file != NULL) {
+		status = add_network_file(tracee, file->fd, file->close_on_exec,
+			file->description, false);
+		if (status < 0) {
+			TALLOC_FREE(replacement);
+			state->network_files = shared;
+			return status;
+		}
+		file = file->next;
+	}
+	talloc_unlink(state, shared);
+	return 0;
+}
+
+static int add_network_file(Tracee *tracee, int fd, bool close_on_exec,
+		struct AndockNetworkDescription *description, bool take_reference)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkFile *file;
+	if (state == NULL || state->network_files == NULL || description == NULL)
+		return -ENOTCONN;
+	remove_network_file(tracee, fd);
+	file = talloc_zero(state->network_files, struct AndockNetworkFile);
+	if (file == NULL)
+		return -ENOMEM;
+	if (!take_reference)
+		description->references++;
+	file->fd = fd;
+	file->close_on_exec = close_on_exec;
+	file->description = description;
+	talloc_set_destructor(file, close_network_file);
+	file->next = state->network_files->files;
+	state->network_files->files = file;
+	return 0;
+}
+
+static bool has_network_files(const struct AndockBrokerState *state)
+{
+	return state != NULL && state->network_files != NULL
+		&& state->network_files->files != NULL;
+}
+
+static bool has_open_files(const struct AndockBrokerState *state)
+{
+	return state != NULL && state->files != NULL
+		&& state->files->open_files != NULL;
 }
 
 static struct AndockOpenFile *find_open_file(Tracee *tracee, int fd)
@@ -1087,11 +1379,75 @@ static struct AndockUnixSocketPath *find_unix_socket_by_guest(
 	struct AndockUnixSocketPath *entry =
 		table == NULL ? NULL : table->paths;
 	while (entry != NULL) {
-		if (strcmp(entry->guest_path, guest_path) == 0)
+		if (entry->visible_path != NULL
+		    && strcmp(entry->visible_path, guest_path) == 0)
 			return entry;
 		entry = entry->next;
 	}
 	return NULL;
+}
+
+static bool path_at_or_below(const char *path, const char *parent)
+{
+	size_t parent_length = strlen(parent);
+	return strcmp(path, parent) == 0
+		|| (strncmp(path, parent, parent_length) == 0
+		    && path[parent_length] == '/');
+}
+
+static void update_unix_socket_paths(struct AndockUnixSocketTable *table,
+		const char *source, const char *target)
+{
+	struct AndockUnixSocketPath *entry;
+	size_t source_length = strlen(source);
+	if (table == NULL || strcmp(source, target) == 0)
+		return;
+	for (entry = table->paths; entry != NULL; entry = entry->next) {
+		if (entry->visible_path != NULL
+		    && path_at_or_below(entry->visible_path, target))
+			TALLOC_FREE(entry->visible_path);
+	}
+	for (entry = table->paths; entry != NULL; entry = entry->next) {
+		if (entry->visible_path == NULL
+		    || !path_at_or_below(entry->visible_path, source))
+			continue;
+		const char *suffix = entry->visible_path + source_length;
+		size_t length = strlen(target) + strlen(suffix) + 1;
+		char *updated = talloc_size(entry, length);
+		if (updated == NULL) {
+			TALLOC_FREE(entry->visible_path);
+			continue;
+		}
+		strcpy(updated, target);
+		strcat(updated, suffix);
+		TALLOC_FREE(entry->visible_path);
+		entry->visible_path = updated;
+	}
+}
+
+static int add_unix_socket_alias(struct AndockUnixSocketTable *table,
+		const char *source, const char *target)
+{
+	struct AndockUnixSocketPath *source_entry =
+		find_unix_socket_by_guest(table, source);
+	struct AndockUnixSocketPath *alias;
+	if (source_entry == NULL)
+		return 0;
+	alias = talloc_zero(table, struct AndockUnixSocketPath);
+	if (alias == NULL)
+		return -ENOMEM;
+	alias->reported_path = talloc_strdup(alias, source_entry->reported_path);
+	alias->visible_path = talloc_strdup(alias, target);
+	if (alias->reported_path == NULL || alias->visible_path == NULL) {
+		TALLOC_FREE(alias);
+		return -ENOMEM;
+	}
+	memcpy(alias->host_name, source_entry->host_name,
+		source_entry->host_name_size);
+	alias->host_name_size = source_entry->host_name_size;
+	alias->next = table->paths;
+	table->paths = alias;
+	return 0;
 }
 
 static struct AndockUnixSocketPath *find_unix_socket_by_host(
@@ -1109,6 +1465,56 @@ static struct AndockUnixSocketPath *find_unix_socket_by_host(
 	return NULL;
 }
 
+static void remove_unix_socket_mapping(struct AndockUnixSocketTable *table,
+		struct AndockUnixSocketPath *mapping)
+{
+	struct AndockUnixSocketPath **cursor;
+	if (table == NULL || mapping == NULL)
+		return;
+	cursor = &table->paths;
+	while (*cursor != NULL) {
+		if (*cursor == mapping) {
+			*cursor = mapping->next;
+			TALLOC_FREE(mapping);
+			return;
+		}
+		cursor = &(*cursor)->next;
+	}
+}
+
+static void cancel_pending_unix_bind(struct AndockBrokerState *state)
+{
+	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
+	if (state == NULL || state->pending_unix_bind_path == NULL)
+		return;
+	broker_call(ANDOCK_SOCKET_CANCEL, 0, 0,
+		state->pending_unix_bind_path, NULL,
+		&state->pending_unix_bind_token,
+		sizeof(state->pending_unix_bind_token), &response);
+	free_response(&response, true);
+	remove_unix_socket_mapping(
+		state->unix_sockets, state->pending_unix_bind_mapping);
+	state->pending_unix_bind_mapping = NULL;
+	state->pending_unix_bind_token = 0;
+	TALLOC_FREE(state->pending_unix_bind_path);
+}
+
+static void commit_pending_unix_bind(struct AndockBrokerState *state)
+{
+	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
+	if (state == NULL)
+		return;
+	if (state->pending_unix_bind_path != NULL)
+		broker_call(ANDOCK_SOCKET_COMMIT, 0, 0,
+			state->pending_unix_bind_path, NULL,
+			&state->pending_unix_bind_token,
+			sizeof(state->pending_unix_bind_token), &response);
+	free_response(&response, true);
+	state->pending_unix_bind_mapping = NULL;
+	state->pending_unix_bind_token = 0;
+	TALLOC_FREE(state->pending_unix_bind_path);
+}
+
 int andock_image_translate_unix_socket(Tracee *tracee,
 		struct sockaddr_un *address, const char *user_path)
 {
@@ -1117,21 +1523,58 @@ int andock_image_translate_unix_socket(Tracee *tracee,
 	struct AndockUnixSocketPath *entry;
 	int length;
 	int status;
+	bool binding = get_sysnum(tracee, ORIGINAL) == PR_bind;
 
 	if (state == NULL || state->unix_sockets == NULL)
 		return -ENOTCONN;
-	status = resolve(tracee, &response, AT_FDCWD, user_path, true, true);
+	status = resolve(tracee, &response, AT_FDCWD, user_path, true, binding);
 	if (status < 0)
 		return status;
-	entry = find_unix_socket_by_guest(state->unix_sockets, response.path);
+	if (binding && response.type != ANDOCK_MISSING) {
+		free_response(&response, true);
+		return -EADDRINUSE;
+	}
+	if (!binding && response.type != ANDOCK_SOCKET_TYPE) {
+		free_response(&response, true);
+		return -ECONNREFUSED;
+	}
+	if (binding) {
+		struct AndockResponse created = { .fd = -1, .backing_fd = -1 };
+		mode_t mode = 0777 & ~state->fs_context->mask;
+		status = broker_call(ANDOCK_SOCKET, 0, mode,
+			response.path, NULL, NULL, 0, &created);
+		free_response(&response, true);
+		if (status == -EEXIST)
+			return -EADDRINUSE;
+		if (status < 0)
+			return status;
+		response = created;
+	}
+	entry = binding ? NULL
+		: find_unix_socket_by_guest(state->unix_sockets, response.path);
 	if (entry == NULL) {
+		if (state->unix_sockets->sequence == UINT64_MAX) {
+			free_response(&response, true);
+			return -EOVERFLOW;
+		}
 		entry = talloc_zero(state->unix_sockets, struct AndockUnixSocketPath);
 		if (entry == NULL) {
+			if (binding) {
+				struct AndockResponse cancelled = {
+					.fd = -1,
+					.backing_fd = -1,
+				};
+				broker_call(ANDOCK_SOCKET_CANCEL, 0, 0,
+					response.path, NULL, &response.token,
+					sizeof(response.token), &cancelled);
+				free_response(&cancelled, true);
+			}
 			free_response(&response, true);
 			return -ENOMEM;
 		}
-		entry->guest_path = talloc_strdup(entry, response.path);
-		if (entry->guest_path == NULL) {
+		entry->reported_path = talloc_strdup(entry, response.path);
+		entry->visible_path = talloc_strdup(entry, response.path);
+		if (entry->reported_path == NULL || entry->visible_path == NULL) {
 			TALLOC_FREE(entry);
 			free_response(&response, true);
 			return -ENOMEM;
@@ -1139,15 +1582,46 @@ int andock_image_translate_unix_socket(Tracee *tracee,
 		length = snprintf(entry->host_name, sizeof(entry->host_name),
 			"andock.%016" PRIx64 ".%016" PRIx64,
 			image_instance_nonce,
-			hash_unix_socket_path(response.path));
+			hash_unix_socket_path(response.path)
+				^ ++state->unix_sockets->sequence);
 		if (length < 0 || (size_t) length >= sizeof(entry->host_name)) {
 			TALLOC_FREE(entry);
+			if (binding) {
+				struct AndockResponse cancelled = {
+					.fd = -1,
+					.backing_fd = -1,
+				};
+				broker_call(ANDOCK_SOCKET_CANCEL, 0, 0,
+					response.path, NULL, &response.token,
+					sizeof(response.token), &cancelled);
+				free_response(&cancelled, true);
+			}
 			free_response(&response, true);
 			return -ENAMETOOLONG;
 		}
 		entry->host_name_size = (size_t) length;
 		entry->next = state->unix_sockets->paths;
 		state->unix_sockets->paths = entry;
+	}
+	if (binding) {
+		cancel_pending_unix_bind(state);
+		state->pending_unix_bind_path =
+			talloc_strdup(state, response.path);
+		if (state->pending_unix_bind_path == NULL) {
+			struct AndockResponse cancelled = {
+				.fd = -1,
+				.backing_fd = -1,
+			};
+			broker_call(ANDOCK_SOCKET_CANCEL, 0, 0,
+				response.path, NULL, &response.token,
+				sizeof(response.token), &cancelled);
+			free_response(&cancelled, true);
+			remove_unix_socket_mapping(state->unix_sockets, entry);
+			free_response(&response, true);
+			return -ENOMEM;
+		}
+		state->pending_unix_bind_token = response.token;
+		state->pending_unix_bind_mapping = entry;
 	}
 	free_response(&response, true);
 
@@ -1181,10 +1655,10 @@ int andock_image_detranslate_unix_socket(Tracee *tracee,
 		state->unix_sockets, address->sun_path + 1, host_name_size);
 	if (entry == NULL)
 		return 0;
-	guest_size = strlen(entry->guest_path);
+	guest_size = strlen(entry->reported_path);
 	if (guest_size >= PATH_MAX)
 		return -ENAMETOOLONG;
-	memcpy(result, entry->guest_path, guest_size + 1);
+	memcpy(result, entry->reported_path, guest_size + 1);
 	return 1;
 }
 
@@ -1289,13 +1763,8 @@ int andock_image_translate_executable_path(Tracee *tracee,
 		char result[PATH_MAX], int dir_fd, const char *user_path,
 		bool deref_final)
 {
-	int status = translate_path_with_policy(tracee, result, dir_fd, user_path,
+	return translate_path_with_policy(tracee, result, dir_fd, user_path,
 		deref_final, true);
-	if (status < 0)
-		dprintf(STDERR_FILENO,
-			"andock: executable translation %s failed: %s (%d)\n",
-			user_path, strerror(-status), status);
-	return status;
 }
 
 static int resolve_executable(Tracee *tracee, char result[PATH_MAX],
@@ -1397,11 +1866,17 @@ static int set_pending_open_file(Tracee *tracee, const char *path,
 static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		const char *path, int flags, int mode, int *brokered_fd)
 {
+	struct AndockBrokerState *state = broker_state(tracee);
 	struct AndockResponse resolved = { .fd = -1, .backing_fd = -1 };
 	struct AndockResponse opened = { .fd = -1, .backing_fd = -1 };
 	char guest[PATH_MAX];
 	int status;
 	*brokered_fd = -1;
+	if ((flags & O_CREAT) != 0) {
+		if (state == NULL || state->fs_context == NULL)
+			return -ENOTCONN;
+		mode &= ~state->fs_context->mask;
+	}
 
 	status = resolve(tracee, &resolved, dir_fd, path,
 			(flags & O_NOFOLLOW) == 0, (flags & O_CREAT) != 0);
@@ -1432,7 +1907,6 @@ static int broker_open_path(Tracee *tracee, Reg reg, int dir_fd,
 		free_response(&opened, true);
 		return status;
 	}
-	struct AndockBrokerState *state = broker_state(tracee);
 	if (state == NULL) {
 		free_response(&opened, true);
 		return -ENOTCONN;
@@ -1729,6 +2203,538 @@ static int void_result(Tracee *tracee, int64_t result)
 	return 1;
 }
 
+static int network_result(Tracee *tracee, int64_t result)
+{
+	return void_result(tracee, result);
+}
+
+static int copy_network_address(Tracee *tracee, word_t pointer, word_t size,
+		struct sockaddr_storage *address, socklen_t *address_size)
+{
+	if (pointer == 0)
+		return -EFAULT;
+	if (size < sizeof(sa_family_t) || size > sizeof(*address))
+		return -EINVAL;
+	memset(address, 0, sizeof(*address));
+	if (read_data(tracee, address, pointer, size) < 0)
+		return -EFAULT;
+	if (address->ss_family == AF_INET && size < sizeof(struct sockaddr_in))
+		return -EINVAL;
+	if (address->ss_family == AF_INET6 && size < sizeof(struct sockaddr_in6))
+		return -EINVAL;
+	*address_size = (socklen_t) size;
+	return 0;
+}
+
+static int authorize_network_address(
+		const struct AndockNetworkDescription *description,
+		const struct sockaddr_storage *address, socklen_t address_size)
+{
+	if (address->ss_family != description->family)
+		return -EAFNOSUPPORT;
+	return andock_network_authorize((const struct sockaddr *) address,
+		address_size, description->type);
+}
+
+static int handle_network_socket(Tracee *tracee)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockNetworkDescription *description;
+	int family = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+	int type = (int) peek_reg(tracee, CURRENT, SYSARG_2);
+	int protocol = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+	int base_type = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
+	int transfer_fd;
+	int status;
+
+	if (family == AF_NETLINK || family == AF_PACKET)
+		return network_result(tracee, -EACCES);
+	if (family != AF_INET && family != AF_INET6)
+		return 0;
+	if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)
+		return network_result(tracee, -EACCES);
+	if (!andock_network_enabled())
+		return 0;
+	if (state == NULL || state->pending_network != NULL)
+		return network_result(tracee, -EBUSY);
+	description = calloc(1, sizeof(*description));
+	if (description == NULL)
+		return network_result(tracee, -ENOMEM);
+	description->host_fd = -1;
+	description->family = family;
+	description->type = base_type;
+	description->protocol = protocol;
+	description->references = 1;
+	status = andock_network_create_socket(
+		family, type, protocol, &description->host_fd);
+	if (status < 0) {
+		release_network_description(description);
+		return network_result(tracee, status);
+	}
+	transfer_fd = fcntl(description->host_fd, F_DUPFD_CLOEXEC, 0);
+	if (transfer_fd < 0) {
+		status = -errno;
+		release_network_description(description);
+		return network_result(tracee, status);
+	}
+	state->pending_network = description;
+	status = begin_fd_transfer(
+		tracee, state, transfer_fd, (type & SOCK_CLOEXEC) != 0);
+	if (status < 0) {
+		release_network_description(state->pending_network);
+		state->pending_network = NULL;
+		return network_result(tracee, status);
+	}
+	return status;
+}
+
+static int handle_network_connect(Tracee *tracee,
+		struct AndockNetworkFile *file)
+{
+	struct sockaddr_storage address;
+	socklen_t address_size;
+	int result;
+	int status = copy_network_address(tracee,
+		peek_reg(tracee, CURRENT, SYSARG_2),
+		peek_reg(tracee, CURRENT, SYSARG_3), &address, &address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	if (address.ss_family == AF_UNSPEC) {
+		file->description->authorized_connected = false;
+	}
+	else {
+		status = authorize_network_address(
+			file->description, &address, address_size);
+		if (status < 0)
+			return network_result(tracee, status);
+		file->description->authorized_connected = false;
+	}
+	result = TEMP_FAILURE_RETRY(connect(file->description->host_fd,
+		(struct sockaddr *) &address, address_size));
+	if (result < 0)
+		result = -errno;
+	if (address.ss_family != AF_UNSPEC
+	    && (result == 0 || result == -EINPROGRESS || result == -EALREADY
+		|| result == -EISCONN))
+		file->description->authorized_connected = true;
+	return network_result(tracee, result);
+}
+
+static int message_has_ancillary_data(const struct msghdr *message)
+{
+	/* The stopped thread's control buffer remains writable by sibling
+	 * threads. Allowing the tracee to execute after inspecting it would make
+	 * SCM_RIGHTS a descriptor-export race, so ancillary sends are denied while
+	 * the command owns a network capability. */
+	return message->msg_control != NULL || message->msg_controllen != 0;
+}
+
+static int copy_network_iovecs(Tracee *tracee, const struct msghdr *guest,
+		struct iovec **host_iovecs, void **payload, size_t maximum,
+		size_t *payload_size)
+{
+	struct iovec *guest_iovecs;
+	struct iovec *local_iovecs;
+	uint8_t *local_payload;
+	size_t total = 0;
+	if (guest->msg_iovlen > ANDOCK_MAX_NETWORK_IOVECS)
+		return -EMSGSIZE;
+	if (guest->msg_iovlen == 0) {
+		*host_iovecs = NULL;
+		*payload = NULL;
+		if (payload_size != NULL)
+			*payload_size = 0;
+		return 0;
+	}
+	if (guest->msg_iov == NULL)
+		return -EFAULT;
+	guest_iovecs = calloc(guest->msg_iovlen, sizeof(*guest_iovecs));
+	local_iovecs = calloc(guest->msg_iovlen, sizeof(*local_iovecs));
+	if (guest_iovecs == NULL || local_iovecs == NULL) {
+		free(guest_iovecs);
+		free(local_iovecs);
+		return -ENOMEM;
+	}
+	if (read_data(tracee, guest_iovecs, (word_t) guest->msg_iov,
+		guest->msg_iovlen * sizeof(*guest_iovecs)) < 0) {
+		free(guest_iovecs);
+		free(local_iovecs);
+		return -EFAULT;
+	}
+	for (size_t index = 0; index < guest->msg_iovlen; index++) {
+		if (guest_iovecs[index].iov_len > maximum - total) {
+			free(guest_iovecs);
+			free(local_iovecs);
+			return -EMSGSIZE;
+		}
+		total += guest_iovecs[index].iov_len;
+	}
+	local_payload = malloc(total == 0 ? 1 : total);
+	if (local_payload == NULL) {
+		free(guest_iovecs);
+		free(local_iovecs);
+		return -ENOMEM;
+	}
+	total = 0;
+	for (size_t index = 0; index < guest->msg_iovlen; index++) {
+		local_iovecs[index].iov_base = local_payload + total;
+		local_iovecs[index].iov_len = guest_iovecs[index].iov_len;
+		if (guest_iovecs[index].iov_len > 0
+		    && read_data(tracee, local_iovecs[index].iov_base,
+			(word_t) guest_iovecs[index].iov_base,
+			guest_iovecs[index].iov_len) < 0) {
+			free(local_payload);
+			free(local_iovecs);
+			free(guest_iovecs);
+			return -EFAULT;
+		}
+		total += guest_iovecs[index].iov_len;
+	}
+	free(guest_iovecs);
+	*host_iovecs = local_iovecs;
+	*payload = local_payload;
+	if (payload_size != NULL)
+		*payload_size = total;
+	return 0;
+}
+
+static int handle_network_sendto(Tracee *tracee,
+		struct AndockNetworkFile *file)
+{
+	struct sockaddr_storage address;
+	socklen_t address_size;
+	word_t address_pointer = peek_reg(tracee, CURRENT, SYSARG_5);
+	word_t size = peek_reg(tracee, CURRENT, SYSARG_3);
+	void *payload;
+	int result;
+	int status;
+	if (address_pointer == 0)
+		return file->description->authorized_connected
+			? 0 : network_result(tracee, -ENOTCONN);
+	status = copy_network_address(tracee, address_pointer,
+		peek_reg(tracee, CURRENT, SYSARG_6), &address, &address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	status = authorize_network_address(
+		file->description, &address, address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	if (size > ANDOCK_MAX_NETWORK_IO)
+		return network_result(tracee, -EMSGSIZE);
+	payload = malloc(size == 0 ? 1 : size);
+	if (payload == NULL)
+		return network_result(tracee, -ENOMEM);
+	if (size > 0 && read_data(tracee, payload,
+		peek_reg(tracee, CURRENT, SYSARG_2), size) < 0) {
+		free(payload);
+		return network_result(tracee, -EFAULT);
+	}
+	result = TEMP_FAILURE_RETRY(sendto(file->description->host_fd,
+		payload, size, (int) peek_reg(tracee, CURRENT, SYSARG_4),
+		(struct sockaddr *) &address, address_size));
+	if (result < 0)
+		result = -errno;
+	free(payload);
+	return network_result(tracee, result);
+}
+
+static int handle_network_sendmsg(Tracee *tracee,
+		struct AndockNetworkFile *file)
+{
+	struct sockaddr_storage address;
+	struct msghdr guest;
+	struct msghdr host = {};
+	struct iovec *iovecs = NULL;
+	void *payload = NULL;
+	socklen_t address_size;
+	word_t header = peek_reg(tracee, CURRENT, SYSARG_2);
+	int result;
+	int status;
+#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
+	if (is_32on64_mode(tracee))
+		return network_result(tracee, -ENOSYS);
+#endif
+	if (header == 0 || read_data(tracee, &guest, header, sizeof(guest)) < 0)
+		return network_result(tracee, -EFAULT);
+	if (guest.msg_control != NULL || guest.msg_controllen != 0)
+		return network_result(tracee, -EOPNOTSUPP);
+	if (guest.msg_name == NULL)
+		return file->description->authorized_connected
+			? 0 : network_result(tracee, -ENOTCONN);
+	status = copy_network_address(tracee, (word_t) guest.msg_name,
+		guest.msg_namelen, &address, &address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	status = authorize_network_address(
+		file->description, &address, address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	status = copy_network_iovecs(tracee, &guest, &iovecs, &payload,
+		ANDOCK_MAX_NETWORK_IO, NULL);
+	if (status < 0)
+		return network_result(tracee, status);
+	host.msg_name = &address;
+	host.msg_namelen = address_size;
+	host.msg_iov = iovecs;
+	host.msg_iovlen = guest.msg_iovlen;
+	result = TEMP_FAILURE_RETRY(sendmsg(file->description->host_fd, &host,
+		(int) peek_reg(tracee, CURRENT, SYSARG_3)));
+	if (result < 0)
+		result = -errno;
+	free(payload);
+	free(iovecs);
+	return network_result(tracee, result);
+}
+
+static int read_guest_mmessages(Tracee *tracee, word_t pointer,
+		unsigned int count, struct mmsghdr **messages)
+{
+#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
+	if (is_32on64_mode(tracee))
+		return -ENOSYS;
+#endif
+	if (count > ANDOCK_MAX_NETWORK_IOVECS)
+		return -EMSGSIZE;
+	if (count == 0) {
+		*messages = NULL;
+		return 0;
+	}
+	if (pointer == 0)
+		return -EFAULT;
+	*messages = calloc(count, sizeof(**messages));
+	if (*messages == NULL)
+		return -ENOMEM;
+	if (read_data(tracee, *messages, pointer,
+		count * sizeof(**messages)) < 0) {
+		free(*messages);
+		*messages = NULL;
+		return -EFAULT;
+	}
+	return 0;
+}
+
+static int sendmmsg_passes_network_fd(Tracee *tracee, word_t pointer,
+		unsigned int count)
+{
+	struct mmsghdr *messages;
+	int status = read_guest_mmessages(tracee, pointer, count, &messages);
+	if (status < 0)
+		return status;
+	for (unsigned int index = 0; index < count; index++) {
+		status = message_has_ancillary_data(&messages[index].msg_hdr);
+		if (status != 0)
+			break;
+	}
+	free(messages);
+	return status;
+}
+
+static int handle_network_sendmmsg(Tracee *tracee,
+		struct AndockNetworkFile *file)
+{
+	word_t pointer = peek_reg(tracee, CURRENT, SYSARG_2);
+	unsigned int count =
+		(unsigned int) peek_reg(tracee, CURRENT, SYSARG_3);
+	struct mmsghdr *guest = NULL;
+	struct mmsghdr *host = NULL;
+	struct sockaddr_storage *addresses = NULL;
+	struct iovec **iovecs = NULL;
+	void **payloads = NULL;
+	size_t payload_total = 0;
+	int result;
+	int status = read_guest_mmessages(tracee, pointer, count, &guest);
+	if (status < 0)
+		return network_result(tracee, status);
+	if (count == 0) {
+		free(guest);
+		return 0;
+	}
+	host = calloc(count, sizeof(*host));
+	addresses = calloc(count, sizeof(*addresses));
+	iovecs = calloc(count, sizeof(*iovecs));
+	payloads = calloc(count, sizeof(*payloads));
+	if (host == NULL || addresses == NULL || iovecs == NULL
+	    || payloads == NULL) {
+		status = -ENOMEM;
+		goto cleanup;
+	}
+	for (unsigned int index = 0; index < count; index++) {
+		struct msghdr *message = &guest[index].msg_hdr;
+		size_t payload_size;
+		if (message->msg_control != NULL || message->msg_controllen != 0) {
+			status = -EOPNOTSUPP;
+			goto cleanup;
+		}
+		if (message->msg_name == NULL) {
+			if (!file->description->authorized_connected) {
+				status = -ENOTCONN;
+				goto cleanup;
+			}
+		}
+		else {
+			socklen_t address_size;
+			status = copy_network_address(tracee,
+				(word_t) message->msg_name, message->msg_namelen,
+				&addresses[index], &address_size);
+			if (status < 0)
+				goto cleanup;
+			status = authorize_network_address(file->description,
+				&addresses[index], address_size);
+			if (status < 0)
+				goto cleanup;
+			host[index].msg_hdr.msg_name = &addresses[index];
+			host[index].msg_hdr.msg_namelen = address_size;
+		}
+		status = copy_network_iovecs(tracee, message, &iovecs[index],
+			&payloads[index], ANDOCK_MAX_NETWORK_IO - payload_total,
+			&payload_size);
+		if (status < 0)
+			goto cleanup;
+		payload_total += payload_size;
+		host[index].msg_hdr.msg_iov = iovecs[index];
+		host[index].msg_hdr.msg_iovlen = message->msg_iovlen;
+	}
+	result = TEMP_FAILURE_RETRY(sendmmsg(file->description->host_fd,
+		host, count, (int) peek_reg(tracee, CURRENT, SYSARG_4)));
+	if (result < 0) {
+		status = -errno;
+		goto cleanup;
+	}
+	for (int index = 0; index < result; index++) {
+		status = write_data(tracee,
+			pointer + (word_t) index * sizeof(*guest)
+				+ offsetof(struct mmsghdr, msg_len),
+			&host[index].msg_len, sizeof(host[index].msg_len));
+		if (status < 0) {
+			status = -EFAULT;
+			goto cleanup;
+		}
+	}
+	status = result;
+
+cleanup:
+	if (payloads != NULL) {
+		for (unsigned int index = 0; index < count; index++)
+			free(payloads[index]);
+	}
+	if (iovecs != NULL) {
+		for (unsigned int index = 0; index < count; index++)
+			free(iovecs[index]);
+	}
+	free(payloads);
+	free(iovecs);
+	free(addresses);
+	free(host);
+	free(guest);
+	return network_result(tracee, status);
+}
+
+static bool network_setsockopt_denied(int level, int option)
+{
+	if (level == IPPROTO_IP && option == IP_OPTIONS)
+		return true;
+#ifdef IPV6_RTHDR
+	if (level == IPPROTO_IPV6 && option == IPV6_RTHDR)
+		return true;
+#endif
+#ifdef IPV6_HOPOPTS
+	if (level == IPPROTO_IPV6 && option == IPV6_HOPOPTS)
+		return true;
+#endif
+#ifdef IPV6_DSTOPTS
+	if (level == IPPROTO_IPV6 && option == IPV6_DSTOPTS)
+		return true;
+#endif
+	return false;
+}
+
+static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
+{
+	struct AndockNetworkFile *file;
+	int fd;
+	int status;
+	if (sysnum == PR_socket)
+		return handle_network_socket(tracee);
+	if (sysnum == PR_unshare
+	    && ((word_t) peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_FS) != 0)
+		return network_result(tracee, -EPERM);
+	if (sysnum == PR_unshare
+	    && ((word_t) peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_FILES) != 0
+	    && (has_open_files(broker_state(tracee))
+		|| has_network_files(broker_state(tracee))))
+		return network_result(tracee, -EPERM);
+	if (sysnum == PR_close_range
+	    && ((unsigned int) peek_reg(tracee, CURRENT, SYSARG_3)
+		& CLOSE_RANGE_UNSHARE) != 0
+	    && (has_open_files(broker_state(tracee))
+		|| has_network_files(broker_state(tracee))))
+		return network_result(tracee, -EPERM);
+	if (sysnum == PR_io_uring_setup || sysnum == PR_pidfd_getfd)
+		return network_result(tracee, -EPERM);
+	if (!andock_network_enabled())
+		return 0;
+	if (sysnum == PR_sendmsg) {
+		struct msghdr message;
+		word_t header = peek_reg(tracee, CURRENT, SYSARG_2);
+		if (header != 0) {
+#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
+			if (is_32on64_mode(tracee))
+				return network_result(tracee, -ENOSYS);
+#endif
+			if (read_data(tracee, &message, header, sizeof(message)) < 0)
+				return network_result(tracee, -EFAULT);
+			status = message_has_ancillary_data(&message);
+			if (status != 0)
+				return network_result(tracee, status > 0 ? -EPERM : status);
+		}
+	}
+	if (sysnum == PR_sendmmsg) {
+		status = sendmmsg_passes_network_fd(tracee,
+			peek_reg(tracee, CURRENT, SYSARG_2),
+			(unsigned int) peek_reg(tracee, CURRENT, SYSARG_3));
+		if (status != 0)
+			return network_result(tracee, status > 0 ? -EPERM : status);
+	}
+	if (sysnum == PR_copy_file_range || sysnum == PR_splice) {
+		file = find_network_file(tracee,
+			(int) peek_reg(tracee, CURRENT, SYSARG_3));
+		if (file != NULL && !file->description->authorized_connected)
+			return network_result(tracee, -ENOTCONN);
+	}
+	fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+	file = find_network_file(tracee, fd);
+	if (file == NULL)
+		return 0;
+	switch (sysnum) {
+	case PR_connect:
+		return handle_network_connect(tracee, file);
+	case PR_bind:
+	case PR_listen:
+		return network_result(tracee, -EACCES);
+	case PR_sendto:
+		return handle_network_sendto(tracee, file);
+	case PR_sendmsg:
+		return handle_network_sendmsg(tracee, file);
+	case PR_sendmmsg:
+		return handle_network_sendmmsg(tracee, file);
+	case PR_write:
+	case PR_writev:
+		return file->description->authorized_connected
+			? 0 : network_result(tracee, -ENOTCONN);
+	case PR_sendfile:
+	case PR_sendfile64:
+		return file->description->authorized_connected
+			? 0 : network_result(tracee, -ENOTCONN);
+	case PR_setsockopt:
+		return network_setsockopt_denied(
+			(int) peek_reg(tracee, CURRENT, SYSARG_2),
+			(int) peek_reg(tracee, CURRENT, SYSARG_3))
+			? network_result(tracee, -EACCES) : 0;
+	default:
+		return 0;
+	}
+}
+
 static bool file_readable(const struct AndockOpenFile *file)
 {
 #ifdef O_PATH
@@ -1762,6 +2768,209 @@ static int settable_status_flags(void)
 	return flags;
 }
 
+static bool fcntl_get_lock_command(int operation)
+{
+	return operation == F_GETLK
+#ifdef F_GETLK64
+		|| operation == F_GETLK64
+#endif
+		;
+}
+
+static bool fcntl_set_lock_command(int operation)
+{
+	return operation == F_SETLK
+#ifdef F_SETLK64
+		|| operation == F_SETLK64
+#endif
+		;
+}
+
+static bool fcntl_set_lock_wait_command(int operation)
+{
+	return operation == F_SETLKW
+#ifdef F_SETLKW64
+		|| operation == F_SETLKW64
+#endif
+		;
+}
+
+static int checked_offset_add(off_t left, off_t right, off_t *result)
+{
+	if ((right > 0 && left > INT64_MAX - right)
+	    || (right < 0 && left < INT64_MIN - right))
+		return -EOVERFLOW;
+	*result = left + right;
+	return 0;
+}
+
+static int record_lock_range(const struct AndockOpenFile *file,
+		const struct flock *lock, uint64_t *start, uint64_t *end)
+{
+	off_t base;
+	off_t anchor;
+	off_t limit;
+	struct stat metadata;
+	if (lock->l_whence == SEEK_SET)
+		base = 0;
+	else if (lock->l_whence == SEEK_CUR)
+		base = file->description->offset;
+	else if (lock->l_whence == SEEK_END) {
+		if (file->host_fd < 0 || fstat(file->host_fd, &metadata) < 0)
+			return -errno;
+		base = metadata.st_size;
+	}
+	else
+		return -EINVAL;
+	if (checked_offset_add(base, lock->l_start, &anchor) < 0)
+		return -EOVERFLOW;
+	if (lock->l_len == 0) {
+		if (anchor < 0)
+			return -EINVAL;
+		*start = (uint64_t) anchor;
+		*end = UINT64_MAX;
+		return 0;
+	}
+	if (checked_offset_add(anchor, lock->l_len, &limit) < 0)
+		return -EOVERFLOW;
+	if (lock->l_len > 0) {
+		if (anchor < 0)
+			return -EINVAL;
+		*start = (uint64_t) anchor;
+		*end = (uint64_t) limit;
+	}
+	else {
+		if (limit < 0)
+			return -EINVAL;
+		*start = (uint64_t) limit;
+		*end = (uint64_t) anchor;
+	}
+	return *start < *end ? 0 : -EINVAL;
+}
+
+static bool record_ranges_overlap(uint64_t first_start, uint64_t first_end,
+		uint64_t second_start, uint64_t second_end)
+{
+	return first_start < second_end && second_start < first_end;
+}
+
+static struct AndockRecordLock *conflicting_record_lock(
+		const struct AndockOpenFile *file,
+		const struct AndockRecordLockOwner *owner, short type,
+		uint64_t start, uint64_t end)
+{
+	struct AndockRecordLock *lock;
+	for (lock = record_locks; lock != NULL; lock = lock->next) {
+		if (lock->inode == file->inode && lock->owner != owner
+		    && (type == F_WRLCK || lock->type == F_WRLCK)
+		    && record_ranges_overlap(start, end, lock->start, lock->end))
+			return lock;
+	}
+	return NULL;
+}
+
+static int unlock_record_range(struct AndockRecordLockOwner *owner,
+		uint64_t inode, uint64_t start, uint64_t end)
+{
+	struct AndockRecordLock **cursor = &record_locks;
+	while (*cursor != NULL) {
+		struct AndockRecordLock *lock = *cursor;
+		if (lock->owner != owner || lock->inode != inode
+		    || !record_ranges_overlap(start, end, lock->start, lock->end)) {
+			cursor = &lock->next;
+			continue;
+		}
+		if (start <= lock->start && end >= lock->end) {
+			*cursor = lock->next;
+			free(lock);
+			continue;
+		}
+		if (start > lock->start && end < lock->end) {
+			struct AndockRecordLock *right = malloc(sizeof(*right));
+			if (right == NULL)
+				return -ENOMEM;
+			*right = *lock;
+			right->start = end;
+			right->next = lock->next;
+			lock->end = start;
+			lock->next = right;
+			return 0;
+		}
+		if (start <= lock->start)
+			lock->start = end;
+		else
+			lock->end = start;
+		cursor = &lock->next;
+	}
+	return 0;
+}
+
+static int handle_record_lock(Tracee *tracee, struct AndockOpenFile *file,
+		int operation)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockRecordLock *conflict;
+	struct AndockRecordLock *record;
+	struct flock lock;
+	word_t address = peek_reg(tracee, CURRENT, SYSARG_3);
+	uint64_t start;
+	uint64_t end;
+	int status;
+	if (state == NULL || state->record_lock_owner == NULL)
+		return -ENOTCONN;
+	if (address == 0)
+		return -EFAULT;
+	status = read_data(tracee, &lock, address, sizeof(lock));
+	if (status < 0)
+		return status;
+	if (lock.l_type != F_RDLCK && lock.l_type != F_WRLCK
+	    && lock.l_type != F_UNLCK)
+		return -EINVAL;
+	if (fcntl_get_lock_command(operation) && lock.l_type == F_UNLCK)
+		return -EINVAL;
+	if (lock.l_type == F_RDLCK && !file_readable(file))
+		return -EBADF;
+	if (lock.l_type == F_WRLCK && !file_writable(file))
+		return -EBADF;
+	status = record_lock_range(file, &lock, &start, &end);
+	if (status < 0)
+		return status;
+	conflict = lock.l_type == F_UNLCK ? NULL : conflicting_record_lock(
+		file, state->record_lock_owner, lock.l_type, start, end);
+	if (fcntl_get_lock_command(operation)) {
+		if (conflict == NULL)
+			lock.l_type = F_UNLCK;
+		else {
+			lock.l_type = conflict->type;
+			lock.l_whence = SEEK_SET;
+			lock.l_start = (off_t) conflict->start;
+			lock.l_len = conflict->end == UINT64_MAX
+				? 0 : (off_t) (conflict->end - conflict->start);
+			lock.l_pid = conflict->owner->pid;
+		}
+		status = write_data(tracee, address, &lock, sizeof(lock));
+		return status < 0 ? status : void_result(tracee, 0);
+	}
+	if (conflict != NULL)
+		return fcntl_set_lock_wait_command(operation)
+			? -EOPNOTSUPP : -EAGAIN;
+	status = unlock_record_range(
+		state->record_lock_owner, file->inode, start, end);
+	if (status < 0 || lock.l_type == F_UNLCK)
+		return status < 0 ? status : void_result(tracee, 0);
+	record = calloc(1, sizeof(*record));
+	if (record == NULL)
+		return -ENOMEM;
+	record->inode = file->inode;
+	record->start = start;
+	record->end = end;
+	record->type = lock.l_type;
+	record->owner = state->record_lock_owner;
+	record->next = record_locks;
+	record_locks = record;
+	return void_result(tracee, 0);
+}
+
 static int handle_file_control(Tracee *tracee, Sysnum sysnum)
 {
 	struct AndockOpenFile *file;
@@ -1783,6 +2992,10 @@ static int handle_file_control(Tracee *tracee, Sysnum sysnum)
 			(file->description->flags & ~mutable) | (requested & mutable);
 		return void_result(tracee, 0);
 	}
+	if (fcntl_get_lock_command(operation)
+	    || fcntl_set_lock_command(operation)
+	    || fcntl_set_lock_wait_command(operation))
+		return handle_record_lock(tracee, file, operation);
 	return 0;
 }
 
@@ -2478,6 +3691,7 @@ static int handle_link(Tracee *tracee, Sysnum sysnum)
 {
 	struct AndockOpenFile *file;
 	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
+	struct AndockResponse resolved_source = { .fd = -1, .backing_fd = -1 };
 	char source[PATH_MAX];
 	char target[PATH_MAX];
 	char source_guest[PATH_MAX];
@@ -2532,10 +3746,29 @@ static int handle_link(Tracee *tracee, Sysnum sysnum)
 	status = guest_path(tracee, target_guest, target_dir_fd, target);
 	if (status < 0)
 		return status;
+	status = resolve(tracee, &resolved_source, AT_FDCWD,
+		source_guest, (flags & AT_SYMLINK_FOLLOW) != 0, false);
+	if (status < 0)
+		return status;
 	status = broker_call(ANDOCK_LINK, flags, 0, source_guest, target_guest,
 		NULL, 0, &response);
-	if (status >= 0)
+	if (status >= 0) {
 		update_open_file_links(tracee, source_guest, response_nlink(&response));
+		if (resolved_source.type == ANDOCK_SOCKET_TYPE)
+			status = add_unix_socket_alias(
+				broker_state(tracee)->unix_sockets,
+				resolved_source.path, response.path);
+		if (status < 0) {
+			struct AndockResponse removed = {
+				.fd = -1,
+				.backing_fd = -1,
+			};
+			broker_call(ANDOCK_UNLINK, 0, 0,
+				response.path, NULL, NULL, 0, &removed);
+			free_response(&removed, true);
+		}
+	}
+	free_response(&resolved_source, true);
 	free_response(&response, true);
 	return status < 0 ? status : void_result(tracee, 0);
 }
@@ -3007,6 +4240,7 @@ static int handle_file_lseek(Tracee *tracee, Sysnum sysnum)
 static int mutation_path(Tracee *tracee, int operation, int dir_fd, Reg path_reg,
 		int flags, int mode, const char *second)
 {
+	struct AndockBrokerState *state = broker_state(tracee);
 	char path[PATH_MAX];
 	char guest[PATH_MAX];
 	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
@@ -3016,6 +4250,11 @@ static int mutation_path(Tracee *tracee, int operation, int dir_fd, Reg path_reg
 	if (path[0] == '/' && andock_image_is_kernel_path(path)
 	    && !guest_owned_kernel_path(path))
 		return -EROFS;
+	if (operation == ANDOCK_MKDIR) {
+		if (state == NULL || state->fs_context == NULL)
+			return -ENOTCONN;
+		mode &= ~state->fs_context->mask;
+	}
 	status = guest_path(tracee, guest, dir_fd, path);
 	if (status < 0)
 		return status;
@@ -3117,6 +4356,7 @@ static uint8_t dirent_type(int type)
 	case ANDOCK_FILE: return DT_REG;
 	case ANDOCK_DIRECTORY: return DT_DIR;
 	case ANDOCK_SYMLINK_TYPE: return DT_LNK;
+	case ANDOCK_SOCKET_TYPE: return DT_SOCK;
 	default: return DT_UNKNOWN;
 	}
 }
@@ -3400,6 +4640,14 @@ static int handle_socket_chain(Tracee *tracee, struct AndockBrokerState *state)
 			release_pending_cache(state);
 			TALLOC_FREE(state->pending_path);
 		}
+		else if (state->pending_network != NULL) {
+			status = add_network_file(tracee, (int) received_fd,
+				state->socket_cloexec, state->pending_network, true);
+			if (status < 0)
+				return fail_received_fd_transfer(
+					tracee, state, (int) received_fd, status);
+			state->pending_network = NULL;
+		}
 		register_chained_syscall(tracee, PR_close,
 			state->tracee_channel_fd, 0, 0, 0, 0, 0);
 		force_chain_final_result(tracee, received_fd);
@@ -3497,7 +4745,17 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 	char first_guest[PATH_MAX];
 	char second_guest[PATH_MAX];
 	struct AndockResponse response = { .fd = -1, .backing_fd = -1 };
+	struct AndockResponse source_response = { .fd = -1, .backing_fd = -1 };
 
+	if (sysnum == PR_umask) {
+		if (state->fs_context == NULL)
+			return -ENOTCONN;
+		state->fs_context->mask =
+			(mode_t)peek_reg(tracee, CURRENT, SYSARG_1) & 0777;
+	}
+	status = handle_network_enter(tracee, sysnum);
+	if (status != 0)
+		return status;
 	status = handle_file_sync(tracee, sysnum);
 	if (status != 0)
 		return status;
@@ -3610,10 +4868,17 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 		if (status < 0) return status;
 		status = guest_path(tracee, second_guest, AT_FDCWD, second);
 		if (status < 0) return status;
+		status = resolve(tracee, &source_response, AT_FDCWD,
+			first_guest, false, false);
+		if (status < 0) return status;
 		status = broker_call(ANDOCK_RENAME, 0, 0, first_guest, second_guest,
 			NULL, 0, &response);
-		if (status >= 0)
+		if (status >= 0) {
 			update_open_file_paths(tracee, first_guest, response.path);
+			update_unix_socket_paths(broker_state(tracee)->unix_sockets,
+				source_response.path, response.path);
+		}
+		free_response(&source_response, true);
 		free_response(&response, true);
 		return status < 0 ? status : void_result(tracee, 0);
 	case PR_renameat:
@@ -3628,13 +4893,20 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 		status = guest_path(tracee, second_guest,
 			(int) peek_reg(tracee, CURRENT, SYSARG_3), second);
 		if (status < 0) return status;
+		status = resolve(tracee, &source_response, AT_FDCWD,
+			first_guest, false, false);
+		if (status < 0) return status;
 		status = broker_call(ANDOCK_RENAME,
 			sysnum == PR_renameat2
 				? (int) peek_reg(tracee, CURRENT, SYSARG_5) : 0,
 			0, first_guest, second_guest,
 			NULL, 0, &response);
-		if (status >= 0)
+		if (status >= 0) {
 			update_open_file_paths(tracee, first_guest, response.path);
+			update_unix_socket_paths(broker_state(tracee)->unix_sockets,
+				source_response.path, response.path);
+		}
+		free_response(&source_response, true);
 		free_response(&response, true);
 		return status < 0 ? status : void_result(tracee, 0);
 	case PR_symlink:
@@ -3724,8 +4996,10 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 		}
 		if (existing->host_fd >= 0)
 			close(existing->host_fd);
+		release_record_locks(state->record_lock_owner, existing->inode);
 		TALLOC_FREE(existing->path);
 		existing->host_fd = host_fd;
+		existing->close_on_exec = (flags & O_CLOEXEC) != 0;
 		existing->path = copy;
 		release_file_description(existing->description);
 		existing->description = description;
@@ -3750,6 +5024,7 @@ static void add_open_file_at_offset(Tracee *tracee, int fd, int host_fd,
 	}
 	file->fd = fd;
 	file->host_fd = host_fd;
+	file->close_on_exec = (flags & O_CLOEXEC) != 0;
 	file->description = description;
 	file->inode = inode;
 	file->cache_id = cache_id;
@@ -3787,10 +5062,66 @@ static void remove_open_file(Tracee *tracee, int fd)
 		if ((*cursor)->fd == fd) {
 			struct AndockOpenFile *removed = *cursor;
 			*cursor = removed->next;
+			release_record_locks(
+				state->record_lock_owner, removed->inode);
 			TALLOC_FREE(removed);
 			return;
 		}
 		cursor = &(*cursor)->next;
+	}
+}
+
+static void remove_open_file_range(Tracee *tracee, unsigned int first,
+		unsigned int last)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockOpenFile **cursor;
+	if (state == NULL || state->files == NULL)
+		return;
+	cursor = &state->files->open_files;
+	while (*cursor != NULL) {
+		struct AndockOpenFile *file = *cursor;
+		if ((unsigned int) file->fd < first
+		    || (unsigned int) file->fd > last) {
+			cursor = &file->next;
+			continue;
+		}
+		*cursor = file->next;
+		release_record_locks(state->record_lock_owner, file->inode);
+		TALLOC_FREE(file);
+	}
+}
+
+static void mark_open_file_range_close_on_exec(Tracee *tracee,
+		unsigned int first, unsigned int last)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockOpenFile *file = state == NULL || state->files == NULL
+		? NULL : state->files->open_files;
+	while (file != NULL) {
+		if ((unsigned int) file->fd >= first
+		    && (unsigned int) file->fd <= last)
+			file->close_on_exec = true;
+		file = file->next;
+	}
+}
+
+static void remove_close_on_exec_open_files(Tracee *tracee)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockOpenFile **cursor;
+	if (state == NULL || state->files == NULL)
+		return;
+	cursor = &state->files->open_files;
+	while (*cursor != NULL) {
+		struct AndockOpenFile *file = *cursor;
+		if (!file->close_on_exec) {
+			cursor = &file->next;
+			continue;
+		}
+		*cursor = file->next;
+		release_record_locks(state->record_lock_owner, file->inode);
+		TALLOC_FREE(file);
 	}
 }
 
@@ -3803,6 +5134,15 @@ static int handle_exit(Tracee *tracee)
 	int result = (int)syscall_result;
 	int status;
 	struct AndockOpenFile *source = NULL;
+	struct AndockNetworkFile *network_source = NULL;
+	bool file_close_on_exec = false;
+	bool network_close_on_exec = false;
+	if (state != NULL && state->pending_unix_bind_path != NULL) {
+		if (sysnum == PR_bind && result >= 0)
+			commit_pending_unix_bind(state);
+		else
+			cancel_pending_unix_bind(state);
+	}
 	if (state != NULL && state->pending_offset_update) {
 		if (syscall_result > 0) {
 			struct AndockOpenFile *file = find_open_file(
@@ -3883,21 +5223,53 @@ static int handle_exit(Tracee *tracee)
 		case PR_dup:
 			source = find_open_file(tracee,
 				(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+			network_source = find_network_file(tracee,
+				(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
 			break;
 		case PR_dup2:
 		case PR_dup3:
 			if (result != (int)peek_reg(tracee, ORIGINAL, SYSARG_1)) {
 				remove_open_file(tracee, result);
+				remove_network_file(tracee, result);
 				source = find_open_file(tracee,
 					(int)peek_reg(tracee, ORIGINAL, SYSARG_1));
+				network_source = find_network_file(tracee,
+					(int)peek_reg(tracee, ORIGINAL, SYSARG_1));
+				file_close_on_exec = sysnum == PR_dup3
+					&& ((int)peek_reg(tracee, ORIGINAL, SYSARG_3)
+						& O_CLOEXEC) != 0;
+				network_close_on_exec = sysnum == PR_dup3
+					&& ((int)peek_reg(tracee, ORIGINAL, SYSARG_3)
+						& O_CLOEXEC) != 0;
 			}
 			break;
 		case PR_fcntl:
 		case PR_fcntl64:
 			if ((int) peek_reg(tracee, ORIGINAL, SYSARG_2) == F_DUPFD
-			    || (int) peek_reg(tracee, ORIGINAL, SYSARG_2) == F_DUPFD_CLOEXEC)
+			    || (int) peek_reg(tracee, ORIGINAL, SYSARG_2) == F_DUPFD_CLOEXEC) {
 				source = find_open_file(tracee,
 					(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+				network_source = find_network_file(tracee,
+					(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+				network_close_on_exec =
+					(int) peek_reg(tracee, ORIGINAL, SYSARG_2)
+					== F_DUPFD_CLOEXEC;
+				file_close_on_exec = network_close_on_exec;
+			}
+			else if ((int) peek_reg(tracee, ORIGINAL, SYSARG_2) == F_SETFD) {
+				struct AndockOpenFile *open_file = find_open_file(tracee,
+					(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+				struct AndockNetworkFile *file = find_network_file(tracee,
+					(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+				if (open_file != NULL)
+					open_file->close_on_exec =
+						((int) peek_reg(tracee, ORIGINAL, SYSARG_3)
+							& FD_CLOEXEC) != 0;
+				if (file != NULL)
+					file->close_on_exec =
+						((int) peek_reg(tracee, ORIGINAL, SYSARG_3)
+							& FD_CLOEXEC) != 0;
+			}
 			break;
 		default:
 			break;
@@ -3907,11 +5279,32 @@ static int handle_exit(Tracee *tracee)
 				source->host_fd >= 0
 					? fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
 				source->path, source->inode, source->cache_id,
-				0, 0, source->nlink,
+				0, file_close_on_exec ? O_CLOEXEC : 0, source->nlink,
 				source->directory, source->description);
+		if (network_source != NULL)
+			add_network_file(tracee, result, network_close_on_exec,
+				network_source->description, false);
 	}
-	if (sysnum == PR_close && result == 0)
+	if (sysnum == PR_close && result == 0) {
 		remove_open_file(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+		remove_network_file(tracee,
+			(int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+	}
+	if (sysnum == PR_close_range && result == 0) {
+		unsigned int first =
+			(unsigned int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+		unsigned int last =
+			(unsigned int) peek_reg(tracee, ORIGINAL, SYSARG_2);
+		bool close_on_exec =
+			((unsigned int) peek_reg(tracee, ORIGINAL, SYSARG_3)
+				& CLOSE_RANGE_CLOEXEC) != 0;
+		update_network_close_range(tracee,
+			first, last, close_on_exec);
+		if (close_on_exec)
+			mark_open_file_range_close_on_exec(tracee, first, last);
+		else
+			remove_open_file_range(tracee, first, last);
+	}
 	close_pending_fds(tracee);
 	return 0;
 }
@@ -3926,10 +5319,59 @@ static void inherit_open_files(Tracee *child, const Tracee *parent)
 		add_open_file_at_offset(child, file->fd,
 			file->host_fd >= 0
 				? fcntl(file->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
-			file->path, file->inode, file->cache_id, 0, 0,
+			file->path, file->inode, file->cache_id, 0,
+			file->close_on_exec ? O_CLOEXEC : 0,
 			file->nlink, file->directory, file->description);
 		file = file->next;
 	}
+}
+
+static int unshare_open_files_for_exec(Tracee *tracee)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	struct AndockFileTable *shared;
+	struct AndockFileTable *replacement;
+	struct AndockOpenFile *file;
+	if (state == NULL || state->files == NULL)
+		return 0;
+	shared = state->files;
+	replacement = talloc_zero(state, struct AndockFileTable);
+	if (replacement == NULL)
+		return -ENOMEM;
+	state->files = replacement;
+	file = shared->open_files;
+	while (file != NULL) {
+		add_open_file_at_offset(tracee, file->fd,
+			file->host_fd >= 0
+				? fcntl(file->host_fd, F_DUPFD_CLOEXEC, 0) : -1,
+			file->path, file->inode, file->cache_id, 0,
+			file->close_on_exec ? O_CLOEXEC : 0,
+			file->nlink, file->directory, file->description);
+		if (find_open_file(tracee, file->fd) == NULL) {
+			TALLOC_FREE(replacement);
+			state->files = shared;
+			return -ENOMEM;
+		}
+		file = file->next;
+	}
+	talloc_unlink(state, shared);
+	return 0;
+}
+
+static int inherit_network_files(Tracee *child, const Tracee *parent)
+{
+	struct AndockBrokerState *parent_state = broker_state((Tracee *) parent);
+	struct AndockNetworkFile *file = parent_state == NULL
+		|| parent_state->network_files == NULL
+		? NULL : parent_state->network_files->files;
+	while (file != NULL) {
+		int status = add_network_file(child, file->fd, file->close_on_exec,
+			file->description, false);
+		if (status < 0)
+			return status;
+		file = file->next;
+	}
+	return 0;
 }
 
 int andock_image_callback(Extension *extension, ExtensionEvent event,
@@ -3940,8 +5382,10 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 	int status;
 	if (event == INITIALIZATION) {
 		const char *value = getenv("ANDOCK_IMAGE_FD");
+		const char *network_value = getenv("ANDOCK_NETWORK_FD");
 		char *end;
 		long image_fd;
+		long network_fd = -1;
 		if (!andock_image_enabled())
 			return -ENOTCONN;
 		errno = 0;
@@ -3968,8 +5412,27 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 				strerror(-status), status);
 			return status;
 		}
+		if (network_value != NULL) {
+			errno = 0;
+			network_fd = strtol(network_value, &end, 10);
+			if (errno != 0 || *network_value == '\0' || *end != '\0'
+			    || network_fd < 0 || network_fd > INT_MAX
+			    || fcntl((int) network_fd, F_GETFD) < 0) {
+				dprintf(STDERR_FILENO,
+					"andock: invalid ANDOCK_NETWORK_FD environment value\n");
+				andock_image_engine_stop();
+				return -EBADF;
+			}
+			status = andock_network_start((int) network_fd);
+			unsetenv("ANDOCK_NETWORK_FD");
+			if (status < 0) {
+				andock_image_engine_stop();
+				return status;
+			}
+		}
 		extension->config = talloc_zero(extension, struct AndockBrokerState);
 		if (extension->config == NULL) {
+			andock_network_stop();
 			andock_image_engine_stop();
 			return -ENOMEM;
 		}
@@ -3978,10 +5441,22 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		state->host_listener_fd = -1;
 		state->tracee_channel_fd = -1;
 		state->pending_host_fd = -1;
+		state->record_lock_owner = new_record_lock_owner(
+			(TRACEE(extension))->pid);
 		state->files = talloc_zero(state, struct AndockFileTable);
+		state->network_files =
+			talloc_zero(state, struct AndockNetworkTable);
 		state->unix_sockets =
 			talloc_zero(state, struct AndockUnixSocketTable);
-		if (state->files == NULL || state->unix_sockets == NULL) {
+		state->fs_context = talloc_zero(state, struct AndockFsContext);
+		if (state->fs_context != NULL)
+			state->fs_context->mask = 022;
+		if (state->record_lock_owner == NULL || state->files == NULL
+		    || state->network_files == NULL
+		    || state->unix_sockets == NULL || state->fs_context == NULL) {
+			release_record_lock_owner(state->record_lock_owner);
+			state->record_lock_owner = NULL;
+			andock_network_stop();
 			andock_image_engine_stop();
 			return -ENOMEM;
 		}
@@ -4006,18 +5481,51 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		state->host_listener_fd = -1;
 		state->tracee_channel_fd = -1;
 		state->pending_host_fd = -1;
+		if (((word_t) data2 & CLONE_THREAD) != 0) {
+			state->record_lock_owner = parent_state->record_lock_owner;
+			if (state->record_lock_owner != NULL)
+				state->record_lock_owner->references++;
+		}
+		else
+			state->record_lock_owner = new_record_lock_owner(
+				(TRACEE(extension))->pid);
 		state->unix_sockets =
 			talloc_reference(state, parent_state->unix_sockets);
+		if (((word_t) data2 & CLONE_FS) != 0)
+			state->fs_context =
+				talloc_reference(state, parent_state->fs_context);
+		else {
+			state->fs_context = talloc_zero(state, struct AndockFsContext);
+			if (state->fs_context != NULL)
+				state->fs_context->mask = parent_state->fs_context->mask;
+		}
 		if (((word_t) data2 & CLONE_FILES) != 0) {
 			state->files = talloc_reference(state, parent_state->files);
+			state->network_files =
+				talloc_reference(state, parent_state->network_files);
 		}
 		else {
 			state->files = talloc_zero(state, struct AndockFileTable);
-			if (state->files != NULL)
+			state->network_files =
+				talloc_zero(state, struct AndockNetworkTable);
+			if (state->files != NULL && state->network_files != NULL) {
 				inherit_open_files(TRACEE(extension), TRACEE(parent_extension));
+				status = inherit_network_files(
+					TRACEE(extension), TRACEE(parent_extension));
+				if (status < 0) {
+					release_record_lock_owner(state->record_lock_owner);
+					state->record_lock_owner = NULL;
+					return status;
+				}
+			}
 		}
-		if (state->files == NULL || state->unix_sockets == NULL)
+		if (state->record_lock_owner == NULL || state->files == NULL
+		    || state->network_files == NULL
+		    || state->unix_sockets == NULL || state->fs_context == NULL) {
+			release_record_lock_owner(state->record_lock_owner);
+			state->record_lock_owner = NULL;
 			return -ENOMEM;
+		}
 		extension->filtered_sysnums = filtered_sysnums;
 		image_extension_users++;
 		return 0;
@@ -4027,6 +5535,28 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 	if (state == NULL)
 		return event == REMOVED ? 0 : -ENOTCONN;
 	switch (event) {
+	case NEW_STATUS:
+		if (((unsigned int) data1 >> 16) == PTRACE_EVENT_EXEC) {
+			status = unshare_open_files_for_exec(tracee);
+			if (status < 0) {
+				dprintf(STDERR_FILENO,
+					"andock: file-table exec transition failed: %s (%d)\n",
+					strerror(-status), status);
+				kill(tracee->pid, SIGKILL);
+				return 0;
+			}
+			status = unshare_network_files_for_exec(tracee);
+			if (status < 0) {
+				dprintf(STDERR_FILENO,
+					"andock: network-table exec transition failed: %s (%d)\n",
+					strerror(-status), status);
+				kill(tracee->pid, SIGKILL);
+				return 0;
+			}
+			remove_close_on_exec_network_files(tracee);
+			remove_close_on_exec_open_files(tracee);
+		}
+		return 0;
 	case SYSCALL_ENTER_START:
 		return handle_enter(extension, tracee);
 	case SYSCALL_EXIT_START:
@@ -4046,16 +5576,25 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 	case INHERIT_PARENT:
 		return 1;
 	case REMOVED:
+		cancel_pending_unix_bind(state);
+		release_record_lock_owner(state->record_lock_owner);
+		state->record_lock_owner = NULL;
 		close_socket_state(state);
 		close_pending_fds(tracee);
 		if (state->pending_host_fd >= 0) {
 			close(state->pending_host_fd);
 			state->pending_host_fd = -1;
 		}
+		if (state->pending_network != NULL) {
+			release_network_description(state->pending_network);
+			state->pending_network = NULL;
+		}
 		release_pending_cache(state);
 		if (image_extension_users > 0 && --image_extension_users == 0) {
 			release_file_locks(NULL);
+			release_all_record_locks(NULL);
 			andock_image_engine_stop();
+			andock_network_stop();
 			image_active = false;
 		}
 		return 0;

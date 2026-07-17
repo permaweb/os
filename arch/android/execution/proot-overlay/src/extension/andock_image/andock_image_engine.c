@@ -68,9 +68,118 @@ struct cached_inode {
 	struct cached_inode *next;
 };
 
+struct socket_reservation {
+	uint64_t token;
+	uint64_t inode;
+	char *path;
+	struct socket_reservation *next;
+};
+
 static struct cached_inode *inode_cache;
+static struct socket_reservation *socket_reservations;
 static uint64_t materialization_count;
 static uint64_t next_cache_id;
+static uint64_t next_socket_token;
+
+static bool path_at_or_below(const char *path, const char *parent)
+{
+	size_t parent_length = strlen(parent);
+	return strcmp(path, parent) == 0
+		|| (strncmp(path, parent, parent_length) == 0
+		    && path[parent_length] == '/');
+}
+
+static void remove_socket_reservation(struct socket_reservation *reservation)
+{
+	struct socket_reservation **cursor = &socket_reservations;
+	while (*cursor != NULL) {
+		if (*cursor == reservation) {
+			*cursor = reservation->next;
+			free(reservation->path);
+			free(reservation);
+			return;
+		}
+		cursor = &(*cursor)->next;
+	}
+}
+
+static void invalidate_socket_reservations(const char *path)
+{
+	struct socket_reservation **cursor = &socket_reservations;
+	while (*cursor != NULL) {
+		struct socket_reservation *reservation = *cursor;
+		if (strcmp(reservation->path, path) != 0) {
+			cursor = &reservation->next;
+			continue;
+		}
+		*cursor = reservation->next;
+		free(reservation->path);
+		free(reservation);
+	}
+}
+
+static void invalidate_socket_reservations_below(const char *path)
+{
+	struct socket_reservation **cursor = &socket_reservations;
+	while (*cursor != NULL) {
+		struct socket_reservation *reservation = *cursor;
+		if (!path_at_or_below(reservation->path, path)) {
+			cursor = &reservation->next;
+			continue;
+		}
+		*cursor = reservation->next;
+		free(reservation->path);
+		free(reservation);
+	}
+}
+
+static struct socket_reservation *find_socket_reservation(uint64_t token)
+{
+	struct socket_reservation *reservation = socket_reservations;
+	while (reservation != NULL) {
+		if (reservation->token == token)
+			return reservation;
+		reservation = reservation->next;
+	}
+	return NULL;
+}
+
+static void rename_socket_reservations(const char *source, const char *target)
+{
+	struct socket_reservation **cursor;
+	size_t source_length = strlen(source);
+	if (strcmp(source, target) == 0)
+		return;
+	invalidate_socket_reservations_below(target);
+	cursor = &socket_reservations;
+	while (*cursor != NULL) {
+		struct socket_reservation *reservation = *cursor;
+		if (!path_at_or_below(reservation->path, source)) {
+			cursor = &reservation->next;
+			continue;
+		}
+		const char *suffix = reservation->path + source_length;
+		size_t length = strlen(target) + strlen(suffix) + 1;
+		char *renamed = malloc(length);
+		if (renamed == NULL) {
+			*cursor = reservation->next;
+			free(reservation->path);
+			free(reservation);
+			continue;
+		}
+		strcpy(renamed, target);
+		strcat(renamed, suffix);
+		free(reservation->path);
+		reservation->path = renamed;
+		cursor = &reservation->next;
+	}
+}
+
+static void clear_socket_reservations(void)
+{
+	while (socket_reservations != NULL)
+		remove_socket_reservation(socket_reservations);
+}
 
 static int create_memory_file(const char *name, unsigned int flags)
 {
@@ -274,8 +383,10 @@ int andock_image_engine_start(int image_fd)
 	if (member_image_fd >= 0)
 		return -EBUSY;
 	inode_cache = NULL;
+	socket_reservations = NULL;
 	materialization_count = 0;
 	next_cache_id = 0;
+	next_socket_token = 0;
 	member_image_fd = fcntl(image_fd, F_DUPFD_CLOEXEC, 0);
 	if (member_image_fd < 0)
 		return -errno;
@@ -322,6 +433,7 @@ int andock_image_engine_stop(void)
 	int unmount_result = ext4_umount(ANDOCK_IMAGE_MOUNT);
 	ext4_device_unregister_all();
 	clear_inode_cache();
+	clear_socket_reservations();
 	if (close(member_image_fd) != 0 && result == EOK)
 		result = EIO;
 	member_image_fd = -1;
@@ -379,7 +491,11 @@ static int raw_type(const char *guest, int *type)
 		struct ext4_inode inode;
 		if (ext4_raw_inode_fill(path, NULL, &inode) != EOK)
 			return -ENOENT;
-		*type = ANDOCK_IMAGE_OTHER;
+		uint32_t mode = 0;
+		if (ext4_mode_get(path, &mode) != EOK)
+			return -EIO;
+		*type = (mode & S_IFMT) == S_IFSOCK
+			? ANDOCK_IMAGE_SOCKET : ANDOCK_IMAGE_OTHER;
 	}
 	return 0;
 }
@@ -543,6 +659,9 @@ static int metadata(const char *guest, int type,
 	case ANDOCK_IMAGE_SYMLINK:
 		result->mode = (mode & 07777) | S_IFLNK;
 		break;
+	case ANDOCK_IMAGE_SOCKET:
+		result->mode = (mode & 07777) | S_IFSOCK;
+		break;
 	default:
 		result->mode = mode;
 		break;
@@ -659,17 +778,6 @@ static int load_cached_inode(const char *guest,
 		close(memory_fd);
 		return status;
 	}
-	fchmod(memory_fd, result->mode & 07777);
-	uint32_t access_time = 0;
-	uint32_t modify_time = 0;
-	if (ext4_atime_get(path, &access_time) == EOK &&
-		ext4_mtime_get(path, &modify_time) == EOK) {
-		struct timespec times[2] = {
-			{ .tv_sec = access_time },
-			{ .tv_sec = modify_time },
-		};
-		futimens(memory_fd, times);
-	}
 	cached = calloc(1, sizeof(*cached));
 	if (cached == NULL) {
 		close(memory_fd);
@@ -731,13 +839,8 @@ static int resolve_operation(int flags, const char *path,
 		resolved,
 		&type
 	);
-	if (status < 0) {
-		if ((flags & ANDOCK_IMAGE_EXECUTABLE) != 0)
-			dprintf(STDERR_FILENO,
-				"andock: resolve executable %s failed: %s (%d)\n",
-				path, strerror(-status), status);
+	if (status < 0)
 		return status;
-	}
 	if (type == ANDOCK_IMAGE_MISSING) {
 		result->type = type;
 		return result_path(result, resolved);
@@ -756,10 +859,6 @@ static int resolve_operation(int flags, const char *path,
 		if (status == 0)
 			status = result_data(result, link, strlen(link));
 	}
-	if (status < 0 && (flags & ANDOCK_IMAGE_EXECUTABLE) != 0)
-		dprintf(STDERR_FILENO,
-			"andock: resolve executable %s (%s) failed: %s (%d)\n",
-			path, resolved, strerror(-status), status);
 	return status;
 }
 
@@ -769,6 +868,7 @@ static int open_operation(int flags, mode_t mode, const char *path,
 	char resolved[PATH_MAX];
 	int type;
 	bool create = (flags & O_CREAT) != 0;
+	bool created;
 	int status = resolve_guest(path, (flags & O_NOFOLLOW) == 0,
 		create, resolved, &type);
 	if (status < 0)
@@ -781,6 +881,7 @@ static int open_operation(int flags, mode_t mode, const char *path,
 		return -EEXIST;
 	if (type == ANDOCK_IMAGE_OTHER)
 		return -ENXIO;
+	created = type == ANDOCK_IMAGE_MISSING;
 
 	char image_path_buffer[PATH_MAX];
 	status = mount_path(resolved, image_path_buffer);
@@ -801,6 +902,12 @@ static int open_operation(int flags, mode_t mode, const char *path,
 	if (status < 0)
 		return status;
 	struct cached_inode *cached = find_cached_inode(result->inode);
+	if (created && cached != NULL) {
+		cached->unlinked = true;
+		if (cached->references == 0)
+			remove_cached_inode(cached);
+		cached = NULL;
+	}
 	if (cached != NULL && (flags & O_TRUNC) != 0) {
 		if (ftruncate(cached->memory_fd, 0) != 0)
 			return -errno;
@@ -978,6 +1085,7 @@ static int append_directory_entry(uint8_t **data, size_t *used,
 	case EXT4_DE_REG_FILE: type = ANDOCK_IMAGE_FILE; break;
 	case EXT4_DE_DIR: type = ANDOCK_IMAGE_DIRECTORY; break;
 	case EXT4_DE_SYMLINK: type = ANDOCK_IMAGE_SYMLINK; break;
+	case EXT4_DE_SOCK: type = ANDOCK_IMAGE_SOCKET; break;
 	default: type = ANDOCK_IMAGE_OTHER; break;
 	}
 	(*data)[*used + 2] = (uint8_t)type;
@@ -1068,6 +1176,128 @@ static int mkdir_operation(mode_t mode, const char *path,
 	return metadata(resolved, ANDOCK_IMAGE_DIRECTORY, result);
 }
 
+static int directory_empty(const char *path)
+{
+	ext4_dir directory;
+	int ext4_result = ext4_dir_open(&directory, path);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	const ext4_direntry *entry;
+	int empty = 1;
+	while ((entry = ext4_dir_entry_next(&directory)) != NULL) {
+		if ((entry->name_length == 1 && entry->name[0] == '.')
+		    || (entry->name_length == 2 && entry->name[0] == '.'
+			&& entry->name[1] == '.'))
+			continue;
+		empty = 0;
+		break;
+	}
+	ext4_result = ext4_dir_close(&directory);
+	return ext4_result == EOK ? empty : -ext4_result;
+}
+
+static int socket_operation(mode_t mode, const char *path,
+		struct andock_image_result *result)
+{
+	struct socket_reservation *reservation;
+	char resolved[PATH_MAX];
+	char parent[PATH_MAX];
+	int status = resolve_parent(path, resolved, parent);
+	if (status < 0)
+		return status;
+	int type;
+	if (raw_type(resolved, &type) == 0)
+		return -EEXIST;
+	invalidate_socket_reservations(resolved);
+	char image_path_buffer[PATH_MAX];
+	status = mount_path(resolved, image_path_buffer);
+	if (status < 0)
+		return status;
+	int ext4_result = ext4_mknod(image_path_buffer, EXT4_DE_SOCK, 0);
+	if (ext4_result == EOK)
+		ext4_result = ext4_mode_set(image_path_buffer, mode & 07777);
+	if (ext4_result != EOK) {
+		ext4_fremove(image_path_buffer);
+		return -ext4_result;
+	}
+	status = metadata(resolved, ANDOCK_IMAGE_SOCKET, result);
+	if (status < 0) {
+		ext4_fremove(image_path_buffer);
+		return status;
+	}
+	if (next_socket_token == UINT64_MAX) {
+		ext4_fremove(image_path_buffer);
+		return -EOVERFLOW;
+	}
+	reservation = calloc(1, sizeof(*reservation));
+	if (reservation == NULL) {
+		ext4_fremove(image_path_buffer);
+		return -ENOMEM;
+	}
+	reservation->path = strdup(resolved);
+	if (reservation->path == NULL) {
+		free(reservation);
+		ext4_fremove(image_path_buffer);
+		return -ENOMEM;
+	}
+	reservation->token = ++next_socket_token;
+	reservation->inode = result->inode;
+	reservation->next = socket_reservations;
+	socket_reservations = reservation;
+	result->token = reservation->token;
+	return 0;
+}
+
+static int socket_finish_operation(bool cancel, const void *data,
+		size_t data_size, struct andock_image_result *result)
+{
+	if (data_size != sizeof(uint64_t))
+		return -EINVAL;
+	uint64_t token;
+	memcpy(&token, data, sizeof(token));
+	struct socket_reservation *reservation = find_socket_reservation(token);
+	if (reservation == NULL)
+		return 0;
+	if (!cancel) {
+		remove_socket_reservation(reservation);
+		return 0;
+	}
+	char resolved[PATH_MAX];
+	int type;
+	int status = resolve_guest(
+		reservation->path, false, false, resolved, &type);
+	if (status == -ENOENT) {
+		remove_socket_reservation(reservation);
+		return 0;
+	}
+	if (status < 0)
+		return status;
+	if (type != ANDOCK_IMAGE_SOCKET) {
+		remove_socket_reservation(reservation);
+		return 0;
+	}
+	struct andock_image_result existing;
+	result_init(&existing);
+	status = metadata(resolved, type, &existing);
+	if (status < 0)
+		return status;
+	if (existing.inode != reservation->inode) {
+		andock_image_result_release(&existing);
+		remove_socket_reservation(reservation);
+		return 0;
+	}
+	andock_image_result_release(&existing);
+	char image_path_buffer[PATH_MAX];
+	status = mount_path(resolved, image_path_buffer);
+	if (status < 0)
+		return status;
+	int ext4_result = ext4_fremove(image_path_buffer);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	remove_socket_reservation(reservation);
+	return result_path(result, resolved);
+}
+
 static int unlink_operation(int flags, const char *path,
 		struct andock_image_result *result)
 {
@@ -1098,12 +1328,20 @@ static int unlink_operation(int flags, const char *path,
 		andock_image_result_release(&existing);
 		return status;
 	}
+	if (remove_directory) {
+		status = directory_empty(image_path_buffer);
+		if (status <= 0) {
+			andock_image_result_release(&existing);
+			return status < 0 ? status : -ENOTEMPTY;
+		}
+	}
 	int ext4_result = remove_directory ? ext4_dir_rm(image_path_buffer) :
 		ext4_fremove(image_path_buffer);
 	if (ext4_result != EOK) {
 		andock_image_result_release(&existing);
 		return -ext4_result;
 	}
+	invalidate_socket_reservations(resolved);
 	if (cached != NULL && existing.links <= 1) {
 		cached->unlinked = true;
 		if (cached->references == 0)
@@ -1172,6 +1410,7 @@ static int rename_operation(int flags, const char *source,
 		andock_image_result_release(&target_metadata);
 		return -ext4_result;
 	}
+	rename_socket_reservations(resolved_source, resolved_target);
 	if (target_exists && source_metadata.inode != target_metadata.inode &&
 		target_metadata.links <= 1) {
 		struct cached_inode *target_cached =
@@ -1225,12 +1464,7 @@ static int chmod_operation(mode_t mode, const char *path,
 	int ext4_result = ext4_mode_set(image_path_buffer, mode & 07777);
 	if (ext4_result != EOK)
 		return -ext4_result;
-	status = metadata(resolved, type, result);
-	struct cached_inode *cached = status == 0 ?
-		find_cached_inode(result->inode) : NULL;
-	if (cached != NULL)
-		fchmod(cached->memory_fd, mode & 07777);
-	return status;
+	return metadata(resolved, type, result);
 }
 
 static int truncate_operation(const char *path, const void *data,
@@ -1338,20 +1572,7 @@ static int utimens_operation(int flags, const char *path, const void *data,
 	}
 	if (ext4_result != EOK)
 		return -ext4_result;
-	status = metadata(resolved, type, result);
-	struct cached_inode *cached = status == 0 ?
-		find_cached_inode(result->inode) : NULL;
-	if (cached != NULL) {
-		struct timespec times[2];
-		if (fstat(cached->memory_fd, &(struct stat){0}) == 0) {
-			times[0].tv_sec = (time_t)values[0];
-			times[0].tv_nsec = (long)values[1];
-			times[1].tv_sec = (time_t)values[2];
-			times[1].tv_nsec = (long)values[3];
-			futimens(cached->memory_fd, times);
-		}
-	}
-	return status;
+	return metadata(resolved, type, result);
 }
 
 static int link_operation(int flags, const char *source, const char *target,
@@ -1573,6 +1794,9 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 	case ANDOCK_IMAGE_TRUNCATE:
 		status = truncate_operation(path, data, data_size, result);
 		break;
+	case ANDOCK_IMAGE_SOCKET_CREATE:
+		status = socket_operation(mode, path, result);
+		break;
 	case ANDOCK_IMAGE_STATFS:
 		status = statfs_operation(path, result);
 		break;
@@ -1594,6 +1818,12 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 		break;
 	case ANDOCK_IMAGE_REMOVE_XATTR:
 		status = remove_xattr_operation(flags, path, second_path, result);
+		break;
+	case ANDOCK_IMAGE_SOCKET_CANCEL:
+		status = socket_finish_operation(true, data, data_size, result);
+		break;
+	case ANDOCK_IMAGE_SOCKET_COMMIT:
+		status = socket_finish_operation(false, data, data_size, result);
 		break;
 	default:
 		status = -ENOSYS;

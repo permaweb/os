@@ -155,6 +155,15 @@ class AndeeNetworkPolicyTest {
         }
     }
 
+    @Test
+    fun processStatusRequiresTheExactDirectParent() {
+        val status = sequenceOf("Name:\tproot", "PPid:\t1234", "Uid:\t99000")
+        assertTrue(isDirectChildProcess(status, 1234))
+        assertFalse(isDirectChildProcess(sequenceOf("PPid:\t1234"), 4321))
+        assertFalse(isDirectChildProcess(sequenceOf("PPid:\tinvalid"), 1234))
+        assertFalse(isDirectChildProcess(sequenceOf("Name:\tproot"), 1234))
+    }
+
     private fun policy(
         dnsServers: Set<AndeeIpAddress> = emptySet(),
         localAddresses: Set<AndeeIpAddress> = emptySet(),
