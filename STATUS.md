@@ -51,6 +51,31 @@ validation matrix are in `decisions/andock-filesystem-capability.md`.
 5. Implement locally resolved filesystem syscalls and delete the per-operation
    socket/Binder/Kotlin host broker.
 
+## Dedicated emulator baseline
+
+The owned test target is `emulator-5562`, AVD `codex-handee-4g`: ARM64, API 36,
+Android 16, enforcing SELinux, 4 GiB RAM. It is separate from the pre-existing
+`emulator-5554` and its active tunnel/node forwards.
+
+The clean prototype APK (`b3e4ed8a...`) passed the full direct extended suite
+on this emulator. Current timings are 1,551 ms cold, 363 ms warm, 18.25 s pip,
+25.63 s local pip, 40.06 s apt, 15.74 s toolchain, 65.54 s espeak, 220.81 s
+Transformers, 54.59 s Node/native addon, 8.10 s restart to first command, and
+52.33 s full package audit after restart. Evidence is under the parked
+prototype's ignored
+`arch/android/build/evidence/image-fd-baseline/` directory.
+
+A same-app-UID standard PRoot control traversed `/usr/lib/python3.12` with
+`du` in 0.485 s. The isolated per-path broker took 2.324 s over the same
+immutable tree, confirming that PRoot itself is not the dominant multiplier.
+A deterministic deep-overlay control populated 10,000 empty files across four
+directory levels directly under one member's writable state, then measured only
+guest traversal. `du -s /root/meta` took 135.177 s inside the guest and
+135.723 s through the command transport. The member was destroyed after the
+run. This is 27 times the 5 s acceptance ceiling and isolates the current
+per-path overlay broker as the pathological surface; no installation, download,
+or file creation is included in that timing.
+
 ## Non-negotiable acceptance
 
 - Android isolated UID and SELinux remain the security boundary.
