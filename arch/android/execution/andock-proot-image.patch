@@ -1,0 +1,243 @@
+diff --git a/src/GNUmakefile b/src/GNUmakefile
+index 0adb88b..7252801 100644
+--- a/src/GNUmakefile
++++ b/src/GNUmakefile
+@@ -16,10 +16,14 @@ OBJDUMP  ?= $(CROSS_COMPILE)objdump
+ 
+ CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
++CPPFLAGS += -I$(VPATH)extension/andock_image/lwext4/include
+ CFLAGS   += -Wall -Wextra -O2
+-LDFLAGS  += -ltalloc -Wl,-z,noexecstack
++LDFLAGS  += /data/data/org.permaweb.andee/files/usr/lib/libtalloc.a -Wl,-z,noexecstack
+ ifdef PROOT_WITH_LIBANDROID_SHMEM
+   CFLAGS += -DWITH_LIBANDROID_SHMEM
+-  LDFLAGS += -landroid-shmem
++  LDFLAGS += /data/data/org.permaweb.andee/files/usr/lib/libandroid-shmem.a -llog -landroid
+ endif
++
++LWEXT4_SOURCES := $(wildcard $(VPATH)extension/andock_image/lwext4/src/*.c)
++LWEXT4_OBJECTS := $(patsubst $(VPATH)%.c,%.o,$(LWEXT4_SOURCES))
+ 
+ OBJECTS += \
+@@ -60,6 +67,9 @@ OBJECTS += \
+ 	ptrace/user.o		\
+ 	ptrace/wait.o		\
+ 	extension/extension.o	\
++	extension/andock_image/andock_image.o \
++	extension/andock_image/andock_image_engine.o \
++	$(LWEXT4_OBJECTS) \
+ 	extension/ashmem_memfd/ashmem_memfd.o \
+ 	extension/kompat/kompat.o \
+ 	extension/fake_id0/chown.o \
+diff --git a/src/cli/cli.c b/src/cli/cli.c
+index bbc6400..2472202 100644
+--- a/src/cli/cli.c
++++ b/src/cli/cli.c
+@@ -46,6 +46,7 @@
+ #include "path/path.h"
+ #include <extension/extension.h>
+ #include <extension/sysvipc/sysvipc.h>
++#include "extension/andock_image/andock_image.h"
+ 
+ #include "build.h"
+ 
+@@ -467,6 +468,10 @@ int main(int argc, char *const argv[])
+ 		goto error;
+ 	tracee->pid = getpid();
+ 
++	if (andock_image_enabled()
++	    && initialize_extension(tracee, andock_image_callback, NULL) < 0)
++		goto error;
++
+ 	/* Set verboseness from env variable, may be overriden by option */
+ 	{
+ 		const char *verbose_env = getenv("PROOT_VERBOSE");
+diff --git a/src/path/path.c b/src/path/path.c
+index d5c9ec6..4263900 100644
+--- a/src/path/path.c
++++ b/src/path/path.c
+@@ -38,6 +38,7 @@
+ #include "path/canon.h"
+ #include "path/proc.h"
+ #include "extension/extension.h"
++#include "extension/andock_image/andock_image.h"
+ #include "cli/note.h"
+ #include "build.h"
+ 
+@@ -321,6 +322,11 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
+ 	char guest_path[PATH_MAX];
+ 	int status;
+ 
++	if (andock_image_enabled()
++	    && !andock_image_is_kernel_path(user_path))
++		return andock_image_translate_path(
++			tracee, result, dir_fd, user_path, deref_final);
++
+ 	/* Use "/" as the base if it is an absolute guest path. */
+ 	if (user_path[0] == '/') {
+ 		strcpy(result, "/");
+diff --git a/src/execve/enter.c b/src/execve/enter.c
+index 50f0078..cc62e28 100644
+--- a/src/execve/enter.c
++++ b/src/execve/enter.c
+@@ -43,6 +43,7 @@
+ #include "syscall/sysnum.h"
+ #include "arch.h"
+ #include "cli/note.h"
++#include "extension/andock_image/andock_image.h"
+ 
+ #define P(a) PROGRAM_FIELD(load_info->elf_header, *program_header, a)
+ 
+@@ -137,21 +138,26 @@ int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const cha
+ 	if (user_path[0] == '\0')
+ 		return -ENOEXEC;
+ 
+-	status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
++	status = andock_image_enabled()
++		? andock_image_translate_executable_path(
++			tracee, host_path, AT_FDCWD, user_path, true)
++		: translate_path(tracee, host_path, AT_FDCWD, user_path, true);
+ 	if (status < 0)
+ 		return status;
+ 
+-	status = access(host_path, F_OK);
+-	if (status < 0)
+-		return -ENOENT;
++	if (!andock_image_enabled()) {
++		status = access(host_path, F_OK);
++		if (status < 0)
++			return -ENOENT;
+ 
+-	status = access(host_path, X_OK);
+-	if (status < 0)
+-		return -EACCES;
++		status = access(host_path, X_OK);
++		if (status < 0)
++			return -EACCES;
+ 
+-	status = lstat(host_path, &statl);
+-	if (status < 0)
+-		return -EPERM;
++		status = lstat(host_path, &statl);
++		if (status < 0)
++			return -EPERM;
++	}
+ 
+ 	return 0;
+ }
+@@ -639,8 +645,12 @@ int translate_execve_enter(Tracee *tracee)
+ 	talloc_unlink(tracee, tracee->host_exe);
+ 	tracee->host_exe = talloc_strdup(tracee, host_path);
+ 
+-	strcpy(new_exe, host_path);
+-	status = detranslate_path(tracee, new_exe, NULL);
++	if (andock_image_enabled())
++		status = andock_image_take_executable_path(tracee, new_exe);
++	else {
++		strcpy(new_exe, host_path);
++		status = detranslate_path(tracee, new_exe, NULL);
++	}
+ 	if (status >= 0) {
+ 		talloc_unlink(tracee, tracee->new_exe);
+ 		tracee->new_exe = talloc_strdup(tracee, new_exe);
+diff --git a/src/execve/elf.c b/src/execve/elf.c
+index b1f78e6..6a045bc 100644
+--- a/src/execve/elf.c
++++ b/src/execve/elf.c
+@@ -31,6 +31,7 @@
+ #include <stdbool.h> /* bool, true, false,  */
+ 
+ #include "execve/elf.h"
++#include "extension/andock_image/andock_image.h"
+ #include "tracee/tracee.h"
+ #include "cli/note.h"
+ #include "arch.h"
+@@ -51,7 +52,7 @@ int open_elf(const char *t_path, ElfHeader *elf_header)
+ 	 * Read the ELF header.
+ 	 */
+ 
+-	fd = open(t_path, O_RDONLY);
++	fd = andock_image_open_host_path(t_path, O_RDONLY);
+ 	if (fd < 0)
+ 		return -errno;
+ 
+diff --git a/src/execve/shebang.c b/src/execve/shebang.c
+index 83ceeda..dcf20a9 100644
+--- a/src/execve/shebang.c
++++ b/src/execve/shebang.c
+@@ -32,6 +32,7 @@
+ #include <assert.h>        /* assert(3), */
+ 
+ #include "execve/shebang.h"
++#include "extension/andock_image/andock_image.h"
+ #include "execve/execve.h"
+ #include "execve/aoxp.h"
+ #include "tracee/tracee.h"
+@@ -66,6 +67,6 @@ static int extract_shebang(const Tracee *tracee UNUSED, const char *host_path,
+ 	argument[0] = '\0';
+ 
+ 	/* Inspect the executable.  */
+-	fd = open(host_path, O_RDONLY);
++	fd = andock_image_open_host_path(host_path, O_RDONLY);
+ 	if (fd < 0)
+ 		return -errno;
+diff --git a/src/syscall/socket.c b/src/syscall/socket.c
+index ec74950..a1090e1 100644
+--- a/src/syscall/socket.c
++++ b/src/syscall/socket.c
+@@ -35,6 +35,7 @@
+ #include "path/binding.h"
+ #include "path/temp.h"
+ #include "path/path.h"
++#include "extension/andock_image/andock_image.h"
+ #include "arch.h"
+ 
+ #include "compat.h"
+@@ -105,6 +106,13 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
+ 	if (status <= 0)
+ 		return status;
+ 
++	if (andock_image_enabled()) {
++		status = andock_image_translate_unix_socket(
++			tracee, &sockaddr, user_path);
++		if (status < 0)
++			return status;
++		goto translated;
++	}
+ 	status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
+ 	if (status < 0)
+ 		return status;
+@@ -143,6 +151,7 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
+ 		strcpy(host_path, shorter_host_path);
+ 	}
+ 	strncpy(sockaddr.sun_path, host_path, sizeof_path);
+ 
++translated:
+ 	/* Push the updated sockaddr to a newly allocated space.  */
+ 	*address = alloc_mem(tracee, sizeof(sockaddr));
+@@ -182,11 +192,19 @@ int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr
+ 	max_size = MIN(max_size, sizeof(sockaddr));
+ 	status = read_sockaddr_un(tracee, &sockaddr, max_size, path, sock_addr, size);
+-	if (status <= 0)
+-		return status;
+-
+-	status = detranslate_path(tracee, path, NULL);
+-	if (status < 0)
+-		return status;
++	if (andock_image_enabled()) {
++		status = andock_image_detranslate_unix_socket(
++			tracee, &sockaddr, size, path);
++		if (status <= 0)
++			return status;
++	}
++	else {
++		if (status <= 0)
++			return status;
++		status = detranslate_path(tracee, path, NULL);
++		if (status < 0)
++			return status;
++	}
+ 
+ 	/* Be careful: sun_path doesn't have to be null-terminated.  */
++	bzero(sockaddr.sun_path, sizeof(sockaddr.sun_path));
+ 	size = offsetof_path + strlen(path) + 1;

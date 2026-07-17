@@ -1,0 +1,24 @@
+#!/bin/sh
+extract=0
+for arg in "$@"; do
+    case "$arg" in
+        x|xf|xzf|xJf|-x|-xf|-xzf|-xJf|--extract) extract=1 ;;
+    esac
+done
+if [ "$extract" = 1 ]; then
+    if [ "${1:-}" = "-C" ]; then
+        destination="$2"
+        shift 2
+        exec python3 -c '
+import os, sys
+args = [arg for arg in sys.argv[1:] if arg != "--warning=no-timestamp"]
+os.execv("/usr/bin/bsdtar", ["bsdtar", *args])
+' "$@" -C "$destination"
+    fi
+    exec python3 -c '
+import os, sys
+args = [arg for arg in sys.argv[1:] if arg != "--warning=no-timestamp"]
+os.execv("/usr/bin/bsdtar", ["bsdtar", *args])
+' "$@"
+fi
+exec /usr/bin/gtar "$@"

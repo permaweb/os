@@ -1,0 +1,73 @@
+diff --git a/include/ext4.h b/include/ext4.h
+--- a/include/ext4.h
++++ b/include/ext4.h
+@@ -322,6 +322,20 @@ int ext4_fopen(ext4_file *file, const char *path, const char *flags);
+  * @return  Standard error code.*/
+ int ext4_fopen2(ext4_file *file, const char *path, int flags);
+ 
++/**@brief   Open an existing regular file by inode.
++ *
++ * This is useful for userspace filesystems which retain an open-file
++ * description across hard-link and rename operations.
++ *
++ * @param   file        File handle.
++ * @param   mount_point Mounted filesystem path.
++ * @param   inode       Existing regular-file inode.
++ * @param   flags       File open flags without O_CREAT.
++ *
++ * @return  Standard error code.*/
++int ext4_fopen_inode(ext4_file *file, const char *mount_point,
++		uint32_t inode, int flags);
++
+ /**@brief   File close function.
+  *
+  * @param   file File handle.
+diff --git a/src/ext4.c b/src/ext4.c
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -1589,6 +1589,45 @@ int ext4_fopen2(ext4_file *file, const char *path, int flags)
+ 	return r;
+ }
+ 
++int ext4_fopen_inode(ext4_file *file, const char *mount_point,
++		uint32_t inode, int flags)
++{
++	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
++	struct ext4_inode_ref ref;
++	int r;
++
++	if (!mp)
++		return ENOENT;
++	if ((flags & O_CREAT) != 0)
++		return EINVAL;
++
++	EXT4_MP_LOCK(mp);
++	r = ext4_fs_get_inode_ref(&mp->fs, inode, &ref);
++	if (r != EOK)
++		goto finish;
++	if (!ext4_inode_is_type(
++			&mp->fs.sb, ref.inode, EXT4_INODE_MODE_FILE)) {
++		r = EINVAL;
++		goto put_ref;
++	}
++
++	file->mp = mp;
++	file->inode = inode;
++	file->flags = flags;
++	file->fsize = ext4_inode_get_size(&mp->fs.sb, ref.inode);
++	file->fpos = (flags & O_APPEND) != 0 ? file->fsize : 0;
++
++put_ref:
++	{
++		int put_result = ext4_fs_put_inode_ref(&ref);
++		if (r == EOK)
++			r = put_result;
++	}
++finish:
++	EXT4_MP_UNLOCK(mp);
++	return r;
++}
++
+ int ext4_fclose(ext4_file *file)
+ {
+ 	ext4_assert(file && file->mp);

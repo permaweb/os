@@ -1,0 +1,31 @@
+diff --git a/scripts/properties.sh b/scripts/properties.sh
+index 0f5210bd..e192a922 100644
+--- a/scripts/properties.sh
++++ b/scripts/properties.sh
+@@ -464,7 +464,7 @@ TERMUX__INTERNAL_NAME="termux"
+ #
+ # Default value: `com.termux`
+ ##
+-TERMUX_APP__PACKAGE_NAME="com.termux"
++TERMUX_APP__PACKAGE_NAME="org.permaweb.andee"
+ TERMUX_APP_PACKAGE="$TERMUX_APP__PACKAGE_NAME" # Deprecated alternative variable for `TERMUX_APP__PACKAGE_NAME`
+
+ __termux_build_props__add_variables_validator_actions "TERMUX_APP__PACKAGE_NAME" "app_package_name"
+
+diff --git a/packages/proot/build.sh b/packages/proot/build.sh
+index 374facf1..9a5dc2b5 100644
+--- a/packages/proot/build.sh
++++ b/packages/proot/build.sh
+@@ -16,6 +16,12 @@ TERMUX_PKG_EXTRA_MAKE_ARGS="-C src PROOT_WITH_LIBANDROID_SHMEM=true"
+ # Install loader in libexec instead of extracting it every time
+ export PROOT_UNBUNDLE_LOADER=$TERMUX_PREFIX/libexec/proot
+
++termux_step_post_get_source() {
++	mkdir -p "$TERMUX_PKG_SRCDIR/src/extension"
++	cp -R "$TERMUX_PKG_BUILDER_DIR/andock-overlay/andock_image" \
++		"$TERMUX_PKG_SRCDIR/src/extension/"
++}
++
+ termux_step_pre_configure() {
+ 	CPPFLAGS+=" -DARG_MAX=131072"
+ }
