@@ -339,6 +339,14 @@ int main(int argc, char **argv)
 		ANDOCK_IMAGE_SET_XATTR, "/work/cache-eviction/mode",
 		"user.visible", "yes", 3);
 	andock_image_result_release(&xattr);
+	expect_status("privileged-xattr-set",
+		andock_image_engine_call(ANDOCK_IMAGE_SET_XATTR, 0, 0,
+			"/work/cache-eviction/mode", "security.andock",
+			"no", 2, &xattr), -EPERM);
+	expect_status("privileged-xattr-remove",
+		andock_image_engine_call(ANDOCK_IMAGE_REMOVE_XATTR, 0, 0,
+			"/work/cache-eviction/mode", "trusted.andock",
+			NULL, 0, &xattr), -EPERM);
 	if (ext4_setxattr("/andock/work/cache-eviction/mode",
 			"trusted.hidden", strlen("trusted.hidden"), "no", 2) != EOK)
 		fail("raw-hidden-xattr", -EIO);
@@ -347,6 +355,17 @@ int main(int argc, char **argv)
 	if (xattr.data_size != strlen("user.visible") + 1
 	    || memcmp(xattr.data, "user.visible", xattr.data_size) != 0) {
 		fprintf(stderr, "unsupported xattr namespace leaked through listxattr\n");
+		return 1;
+	}
+	andock_image_result_release(&xattr);
+	xattr = xattr_call(
+		ANDOCK_IMAGE_REMOVE_XATTR, "/work/cache-eviction/mode",
+		"user.visible", NULL, 0);
+	andock_image_result_release(&xattr);
+	xattr = call(ANDOCK_IMAGE_LIST_XATTR, 0, 0,
+		"/work/cache-eviction/mode", NULL);
+	if (xattr.data_size != 0) {
+		fprintf(stderr, "removed xattr remained visible\n");
 		return 1;
 	}
 	andock_image_result_release(&xattr);

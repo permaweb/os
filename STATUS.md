@@ -28,7 +28,8 @@ overlay or per-path Binder filesystem.
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
   `agent/andock-arm64-release`, current reviewed source checkpoint
-  `ebbae846` plus this status-ledger update.
+  `3e3a16af02629b1e8956c068175aa3bee4b6696f` plus this status-ledger
+  update.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
   `agent/ouroboros-andock-backend`, commit
@@ -112,7 +113,7 @@ set. Mutable member images are correctly outside measurement.
 The rejected `agent/andock-measurement` branch describes the obsolete app
 broker and must not be merged. See `decisions/andock-measurement.md`.
 
-## Frozen emulator-candidate artifact identities
+## Failed emulator-candidate artifact identities
 
 These hashes describe the replacement build from `ebbae846`, including the
 closed native-input manifest and `andock-image-4` toolchain revision. The
@@ -161,6 +162,36 @@ immutable write-permission bit to every shared mapping so `mprotect` cannot
 upgrade a read-only description. Linux hosts retain narrowed kernel-mode
 carriers. The replacement native revision is `andock-image-5`.
 
+## Rejected image-5 emulator-candidate artifact identities
+
+The rebuild from `3e3a16af` completed successfully and passed its clean-install
+smoke, but the complete clean-member workload rejected it during the expanded
+Linux syscall probe:
+
+- Debug APK:
+  `da1595a4aaf64a5609bff90e5d1774a1e79aa1e0fa4cacf4e2593ce6209c2616`
+- Runtime ZIP:
+  `0214bda8c3db865bae897df24881563c10c825e2c25a831dd86b3b29245d9eb7`
+- Native Andock/PRoot:
+  `3bb4c85c3fceaa405683c88f7f5135c94d67f8d946749eea2d5357b0305ae924`
+- Native Andock launcher:
+  `85f716390b1a9fb37e8b6a7830acb1272d1afc7c7af3a0eeed78ed2f2d5a6453`
+- Native PRoot loader:
+  `44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04`
+
+The raw template, sparse template, and inventory remain the byte-identical
+identities above. The runtime manifest records exact HyperBEAM `fcdf5867`,
+native revision `andock-image-5`, and all template/native digests. Direct
+manifest validation and the no-force image builder both pass.
+
+The exact APK was uninstalled/reinstalled from a clean app state on
+`emulator-5562`; `andock-emulator-smoke.py` completed with
+`ANDOCK_EMULATOR_SMOKE_OK`. This specifically closes the image-4 launch
+regression and proves the Android runtime denies read-only write, shared
+writable `mmap`, and later writable `mprotect` upgrades. It is not the final
+handoff APK because fake-root permission emulation subsequently masked an
+Andock xattr denial.
+
 ## Validated evidence
 
 Completed before the current continuation:
@@ -203,15 +234,82 @@ Owned target: `emulator-5562`, AVD `codex-handee-4g`, ARM64, Android 16/API
 belong to another agent and must not be touched.
 
 The owned emulator was cold-started after the laptop connection recovered.
-The frozen APK was uninstalled/reinstalled and passed
-`ANDOCK_EMULATOR_SMOKE_OK`. Host access to PyPI and the official PyTorch CPU
-index is healthy. The complete clean-member workload passed every filesystem,
-package-manager, compiler, Python, Node, ML, and Hugging Face stage. It stopped
-at the public-network probe after IPv4 DNS resolution when the first HTTPS
-request transiently returned exit 1. Immediate isolated reruns of both direct
-HTTPS and HTTP-to-HTTPS redirect requests against the same member passed. This
-is recorded as a real incomplete gate, not a product pass; the public-network
-probe will be repeated with stage-labelled output on the rebuilt candidate.
+Image 5 was uninstalled/reinstalled and passed `ANDOCK_EMULATOR_SMOKE_OK`.
+Its clean-member workload then passed through APT, toolchains, system/venv
+pip, native wheels, Node/node-gyp, 10,000 files, Git, SQLite/archives, IPC,
+mmap, and Unix sockets before `linux-file-syscalls` failed: the engine denied
+`security.andock` with `EPERM`, but PRoot's later `fake_id0` exit hook changed
+that permission failure to success for the emulated root user. The attribute
+was not stored, making the result a misleading success rather than a policy
+escape. The exact failed workload JSON and console log are retained as
+`image-5-workload` and `image-5-workload-log/console.log`.
+
+The image-6 repair converts every negative Andock syscall-enter result into a
+synthetic guest errno before a host syscall or `fake_id0` can observe it, and
+similarly makes exit-time Andock failures final. Direct engine tests now deny
+privileged set/remove operations, while the emulator workload covers both path
+and descriptor xattr calls. The host engine, mapping, network-client, and
+launcher suites pass after the repair. The image-6 native build, runtime
+assembly, and APK build completed successfully. Its no-force native builder
+recognized the pinned output as current and direct template validation passed.
+
+Image-6 candidate identities:
+
+- Debug APK:
+  `4b058ade64c47325fd29a71752d02799383b2f65e62652e4e4be7fa7466425d0`
+- Runtime ZIP:
+  `7ef68f4543b5615acc1fef514f314c8bd2d5fafc0ef46f110ef6b233cc176208`
+- Native Andock/PRoot:
+  `d041ec1959ff4850cee452592d420e5a5b91d9963d1ba4e7ef09e7dc5ee6667f`
+- Native Andock launcher:
+  `85f716390b1a9fb37e8b6a7830acb1272d1afc7c7af3a0eeed78ed2f2d5a6453`
+- Native PRoot loader:
+  `44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04`
+- Runtime manifest:
+  `21b999e8dd8a555ab4220fb8db487c7406367658274de865a9688b92418cfac2`
+- Native manifest:
+  `a534bdd40c1a3a5ac7f32985bb8668f48f4ab42badde3cca6be3ac08a962b62c`
+
+The runtime manifest records exact HyperBEAM `fcdf5867`, native revision
+`andock-image-6`, and the unchanged deterministic template identities. A clean
+install passed `ANDOCK_EMULATOR_SMOKE_OK`, and focused path and descriptor
+privileged-xattr probes returned exact `EPERM`. The complete clean-member
+workload passed through Unix sockets before rejecting the candidate at the
+expanded xattr removal assertion: `removexattr("user.andock")` reported success
+but the attribute remained visible. These hashes are therefore rejected
+candidate identities, not frozen release identities.
+
+The failure reduced to a one-syscall lwext4 defect. Its inline-xattr removal
+branch passed `block_finder.s` to `ext4_xattr_set_entry` even though that
+uninitialized finder is used only for external xattr blocks; the correct
+inline state is `ibody_finder.s`. The image-7 patch corrects that pointer,
+tests allowed removal in the direct engine, and asserts exact privileged
+denial in parent, child, and grandchild guest processes. The repaired host
+engine, mapping, network-client, and launcher suites all pass, including the
+allowed-removal regression and sparse Blockcount 144 gate.
+
+Image 7 rebuilt from the complete pinned source set and its no-force builder
+and template validator both pass. Candidate identities are:
+
+- Debug APK:
+  `310f1cd0adc38acaafa3431b61f7f5845c9c9631fb7d7e312d8e60862ee68cf0`
+- Runtime ZIP:
+  `f9dabaccb42ace5b530def52e669068dc7b05003fa832886a7fea83bf05466ea`
+- Native Andock/PRoot:
+  `51dcc670e50c30635dbcece938448ad1980ca67d3b9b17a409fd06ce96a65eeb`
+- Native Andock launcher:
+  `85f716390b1a9fb37e8b6a7830acb1272d1afc7c7af3a0eeed78ed2f2d5a6453`
+- Native PRoot loader:
+  `44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04`
+- Runtime manifest:
+  `cadbcfc0a625a5d2b1f97e7985769df70888fcd544bbf03d21b7fa390c882f59`
+- Native manifest:
+  `cd65a1eb0b3bc70acfb639f9c98b195bde845507bfdfb10144fc746a4a7b8b2d`
+
+The runtime records exact HyperBEAM `fcdf5867`, native revision
+`andock-image-7`, and the unchanged deterministic template identities. These
+remain candidate rather than frozen handoff hashes until the clean emulator
+and release-ladder gates pass.
 
 Current evidence root:
 `arch/android/build/evidence/final-unattended/`.
@@ -247,8 +345,9 @@ branch:
 
 - `b910b845`: extent/range-aware sparse materialization and writeback, a
   512 MiB Android-host free-space reserve, and filtered `user.*` xattr tests;
-- `9b5c3817`: kernel-enforced carrier access modes plus fail-closed legacy AIO
-  and ancillary descriptor transfer; and
+- `9b5c3817` plus `3e3a16af`: narrowed Linux carrier access modes, logically
+  enforced Android open modes and immutable mapping write permission, plus
+  fail-closed legacy AIO and ancillary descriptor transfer; and
 - `0a238e9a`: range/refcount tracking across mmap, munmap, mprotect, mremap,
   fork/CLONE_VM, exec, and exit.
 
@@ -260,13 +359,16 @@ The integrated ARM64 PRoot and APK build passed from clean pinned sources.
 Its deep-clean manifest audit found that the new sparse extent visitor patch
 was not enumerated in the reproducibility manifest. The manifest now hashes
 all `lwext4-*.patch` inputs by construction and bumps the native toolchain
-revision to `andock-image-4`. The replacement build passed, its manifest
-validated, and its no-force native-image build correctly recognized the
-artifacts as current.
+revision to `andock-image-4`. The first replacement exposed Android's intended
+SELinux denial of `/proc/self/fd` reopen; `3e3a16af` corrected that design and
+bumped the revision to `andock-image-5`. Its replacement build passed, its
+manifest validated, and its no-force native-image build correctly recognized
+the artifacts as current.
 
-The emulator Linux-syscall workload now also proves `user.*` xattr
-set/get/list/remove behavior, rejects privileged xattr writes, and records the
-documented fake-root ownership semantics.
+The emulator Linux-syscall workload specifies `user.*` xattr
+set/get/list/remove behavior, privileged-xattr rejection, and the documented
+fake-root ownership semantics. Image 5 exposed that its privileged rejection
+was masked; image 6 must pass this probe before those semantics are claimed.
 
 The decision record was reduced from the stale feasibility plan to the actual
 accepted architecture. It now states fake-root and `user.*` xattr limits, the
@@ -305,11 +407,18 @@ strictly necessary, `/Users/sam/src/hyperbeam-key.json` is authorized with a
 hard cumulative ceiling below 5 AR; spending and transaction IDs must be
 recorded here.
 
+The exact current Forge publication dry run (no upload and no spend) produced
+signer `1tAG04TLl8Wg2GXPm4gvqexkBqnem0_o44Q0OUtWdow` and deterministic
+specification/implementation IDs for all eight packages. The full output is
+`.run-data/final-publish-dry-run/publish-dry-run.log` in the Ouroboros
+worktree. Publication remains pending until the frozen runtime proves the
+stock trusted-signer/Arweave path actually needs those remote artifacts.
+
 ## Remaining acceptance gates
 
-1. Fix the clean-install carrier duplication regression, rebuild, and repeat
-   the complete workload on the new frozen build, including
-   the labelled public network stage, and record its JSON/log evidence.
+1. Build and clean-install image 7, repeat smoke and the complete workload
+   including xattr removal, inherited privileged denials, and labelled public
+   network stages, and record its JSON/log evidence.
 2. Run the complete AndEE release ladder on `emulator-5562`:
    config invariants, Android build, smoke, scenarios, Android zone storage,
    root Android smoke, and mixed smoke with real measurement peer preflight.
@@ -320,7 +429,7 @@ recorded here.
    when locally possible without public publication.
 5. Confirm both canonical worktrees are clean and commit coherent final
    checkpoints.
-7. Freeze the APK, config, evidence bundle, exact phone commands, and expected
+6. Freeze the APK, config, evidence bundle, exact phone commands, and expected
    URLs for real unrooted ARM64-phone acceptance in the morning.
 
 Do not declare release completion until the real phone passes. The unattended

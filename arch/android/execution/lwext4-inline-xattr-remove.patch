@@ -1,0 +1,7 @@
+diff --git a/src/ext4_xattr.c b/src/ext4_xattr.c
+index f4e7b74..37d4fa6 100644
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -1247 +1247 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
+-		ext4_xattr_set_entry(&i, &block_finder.s, false);
++		ext4_xattr_set_entry(&i, &ibody_finder.s, false);

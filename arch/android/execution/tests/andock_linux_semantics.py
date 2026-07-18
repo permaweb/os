@@ -56,12 +56,44 @@ with open(xattr_path, "wb") as output:
 os.setxattr(xattr_path, "user.andock", b"visible")
 assert os.getxattr(xattr_path, "user.andock") == b"visible"
 assert "user.andock" in os.listxattr(xattr_path)
-try:
-    os.setxattr(xattr_path, "security.andock", b"hidden")
-except OSError as failure:
-    assert failure.errno in (errno.EACCES, errno.EPERM), failure
-else:
-    raise AssertionError("privileged xattr namespace unexpectedly writable")
+
+
+def assert_privileged_xattrs_denied():
+    try:
+        os.setxattr(xattr_path, "security.andock", b"hidden")
+    except OSError as failure:
+        assert failure.errno == errno.EPERM, failure
+    else:
+        raise AssertionError("privileged xattr namespace unexpectedly writable")
+    descriptor = os.open(xattr_path, os.O_RDWR)
+    try:
+        try:
+            os.setxattr(descriptor, "trusted.andock", b"hidden")
+        except OSError as failure:
+            assert failure.errno == errno.EPERM, failure
+        else:
+            raise AssertionError(
+                "descriptor privileged xattr unexpectedly writable"
+            )
+    finally:
+        os.close(descriptor)
+    assert "security.andock" not in os.listxattr(xattr_path)
+    assert "trusted.andock" not in os.listxattr(xattr_path)
+
+
+def assert_inherited_xattr_denial():
+    assert_privileged_xattrs_denied()
+    grandchild = multiprocessing.Process(target=assert_privileged_xattrs_denied)
+    grandchild.start()
+    grandchild.join()
+    assert grandchild.exitcode == 0, grandchild.exitcode
+
+
+assert_privileged_xattrs_denied()
+child = multiprocessing.Process(target=assert_inherited_xattr_denial)
+child.start()
+child.join()
+assert child.exitcode == 0, child.exitcode
 os.removexattr(xattr_path, "user.andock")
 assert "user.andock" not in os.listxattr(xattr_path)
 

@@ -6052,11 +6052,22 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		return 0;
 	case SYSCALL_ENTER_START:
 		state->synthetic_result_valid = false;
-		return handle_enter(extension, tracee);
+		status = handle_enter(extension, tracee);
+		/*
+		 * PRoot voids a syscall when an extension returns an errno, but its
+		 * later fake_id0 exit hook may still turn a permission failure into
+		 * success for the emulated root user.  Record the Andock result as a
+		 * synthetic result so the exit callback reasserts the exact errno.
+		 */
+		return status < 0 ? void_result(tracee, status) : status;
 	case SYSCALL_EXIT_START:
 		if (state->socket_state != ANDOCK_SOCKET_IDLE)
 			return handle_socket_chain(tracee, state);
 		status = handle_exit(tracee);
+		if (status < 0) {
+			poke_reg(tracee, SYSARG_RESULT, (word_t)status);
+			return 1;
+		}
 		if (state->synthetic_result_valid) {
 			poke_reg(tracee, SYSARG_RESULT, state->synthetic_result);
 			state->synthetic_result_valid = false;
