@@ -21,7 +21,7 @@ export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
         apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
         next-boot-config-test android-zone-storage-smoke zone-storage-scenario \
         verify-config-invariants erl-compile andock-template \
-        andock-template-reproducibility clean
+        andock-template-reproducibility preloaded-store-reproducibility clean
 
 help:
 	@printf '%s\n' \
@@ -43,6 +43,7 @@ help:
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
 	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \
 	    '  make andock-template-reproducibility  Rebuild and compare the template twice.' \
+	    '  make preloaded-store-reproducibility  Rebuild and compare the preload twice.' \
 	    '  make verify-config-invariants   Check enforced HB config invariants.' \
 	    '  make erl-compile                Compile AndEE device package.'
 
@@ -112,6 +113,9 @@ andock-template:
 
 andock-template-reproducibility:
 	./scripts/test-andock-template-reproducibility.sh
+
+preloaded-store-reproducibility:
+	./scripts/test-andee-preloaded-store-reproducibility.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)" "$(ANDROID_DIR)/app/build" "$(ANDROID_DIR)/build" \

@@ -1,6 +1,6 @@
 # Andock ARM64 final-release ledger
 
-Updated: 2026-07-17 America/New_York
+Updated: 2026-07-18 America/New_York
 
 This file is the authoritative state reminder for unattended work. Re-read it
 after every compaction and update it after every material validation or design
@@ -27,9 +27,9 @@ overlay or per-path Binder filesystem.
 
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
-  `agent/andock-arm64-release`, current reviewed source checkpoint
-  `8b7dfad79ffe52f62affe133652eda5c14be8522` plus this status-ledger
-  update.
+  `agent/andock-arm64-release`, current committed source checkpoint
+  `d1eef33bf313159f7fd834ba624a3f73a8152cc6` plus the active runtime
+  reproducibility repair recorded below.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
   `agent/ouroboros-andock-backend`, commit
@@ -384,6 +384,50 @@ destroy checks. The ordinary AndEE release ladder is now in progress.
 Current evidence root:
 `arch/android/build/evidence/final-unattended/`.
 
+## Runtime reproducibility repair
+
+The first rebuild after committing image 8 produced different APK and runtime
+ZIP hashes even though every Andock native/template input was unchanged. A
+complete nested-entry comparison proved that the APK differed only in
+`assets/andee-runtime.zip`; inside the runtime, 983 entries differed only in
+ZIP timestamps and one entry differed in content:
+`_build/preloaded-store/data.mdb`. The preload index changed from
+`lFJng7...` to `jJmlTbl...`, while both stores were signed by the same
+committer `tcgmDOKu8j31GZyrAXnsFCUEz0R3tpLDs9WfZMmVT3U`.
+
+The semantic cause is Forge's RSA-PSS preload signature: PSS salts are random,
+so the same wallet and source correctly produce different commitment IDs.
+Using a deterministic Ed25519 build identity made every specification,
+implementation, and index ID stable. LMDB's asynchronous insertion schedule
+still produced different page layouts, although `mdb_dump` proved the key/value
+sets byte-identical. A sorted semantic dump/reload through the exact pinned
+`lmdb-sys 0.8.0` source made the database byte-identical as well.
+
+The active packaging repair therefore:
+
+- derives a documented public Ed25519 preload-only build key from a fixed seed;
+- asserts signer `cbfIwVIoLq4Q2F9dzmgh66z4ri_KT-Re2CGoqH0DKHk`;
+- canonicalizes the LMDB through pinned semantic dump/load tools;
+- records the signer, algorithm, canonical format, LMDB crate checksum, and
+  store digest in the runtime manifest; and
+- normalizes runtime file timestamps and ZIP entry order/metadata.
+
+The build identity is not an authorization root and is never packaged. Trust
+remains the measured APK/runtime. The new standalone regression built two
+preloads from identical inputs and passed with byte-identical SHA-256
+`33141c89a87b593ff9b620b7aad7847f1af0041012a71a2e00be37b428b6599c`.
+Two complete runtime/APK builds then passed byte-for-byte comparison:
+
+- APK: `a41742675818087db0c479c9142d40b403bd3c5ddd42d478bda752395547a681`;
+- runtime ZIP:
+  `cdc6db974c01927c3fb7006815aa0866d11734b7b072a0f58f8478ad221ca152`;
+- runtime manifest:
+  `bea677bfcb1f0b9fafafd2d5ca038c1f868949b25b7c12743f9db9685d2146a9`.
+
+The final cleanup made the timestamp conversion portable and made the
+standalone target always restage its inputs. Repeat the exact-artifact build
+after committing that cleanup, then clean-install it for emulator validation.
+
 Latest complete-run observations include APT 334.069 seconds, toolchains
 25.738, system pip 11.634, venv 14.874, native wheel 15.950, Node addon
 68.106, 10,000-file create 17.750, traversal 1.838, Git 43.915, SQLite and
@@ -488,19 +532,21 @@ composition does not require them.
 
 ## Remaining acceptance gates
 
-1. Build, clean-install, and run the complete image-8 workload, including raw
-   UDP DNS through the narrowly permitted client bind.
-2. Run the complete AndEE release ladder on `emulator-5562`:
+1. Prove two complete runtime/APK builds are byte-identical after the active
+   preload and ZIP reproducibility repair.
+2. Clean-install that exact final APK and rerun the complete image-8 workload,
+   including raw UDP DNS through the narrowly permitted client bind.
+3. Run the complete AndEE release ladder on `emulator-5562`:
    config invariants, Android build, smoke, scenarios, Android zone storage,
    root Android smoke, and mixed smoke with real measurement peer preflight.
-3. Run the recursive deep-clean/adversarial security review and repeat every
+4. Run the recursive deep-clean/adversarial security review and repeat every
    affected gate after any code change.
-4. Validate the portable Ouroboros packages and `~andock@1.0` on the frozen
+5. Validate the portable Ouroboros packages and `~andock@1.0` on the frozen
    AndEE runtime, including a real provider-backed agent flow and browser UI
    when locally possible without public publication.
-5. Confirm both canonical worktrees are clean and commit coherent final
+6. Confirm both canonical worktrees are clean and commit coherent final
    checkpoints.
-6. Freeze the APK, config, evidence bundle, exact phone commands, and expected
+7. Freeze the APK, config, evidence bundle, exact phone commands, and expected
    URLs for real unrooted ARM64-phone acceptance in the morning.
 
 Do not declare release completion until the real phone passes. The unattended

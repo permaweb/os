@@ -21,6 +21,7 @@ TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 require_tool zip
 require_tool python3
 require_tool cargo
+require_tool cc
 require_tool cmake
 require_tool erl
 require_tool git
@@ -570,10 +571,27 @@ for abi in arm64-v8a x86_64; do
         "$APP_LIB/elmdb/priv/libelmdb_nif.so"
 done
 
-(cd "$WORK" && zip -qr "$OUT" .)
+zip_timestamp="$(python3 - "$ANDEE_HYPERBEAM_SOURCE_EPOCH" <<'PY'
+import datetime, sys
+print(datetime.datetime.fromtimestamp(
+    int(sys.argv[1]), datetime.timezone.utc
+).strftime("%Y%m%d%H%M.%S"))
+PY
+)"
+TZ=UTC find "$WORK" -exec touch -h -t "$zip_timestamp" {} +
+(
+    cd "$WORK"
+    LC_ALL=C find . -mindepth 1 -print |
+        LC_ALL=C sort |
+        zip -qX "$OUT" -@
+)
 ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 ANDEE_HYPERBEAM_VERSION="$ANDEE_HYPERBEAM_VERSION" \
 ANDEE_HYPERBEAM_SOURCE_EPOCH="$ANDEE_HYPERBEAM_SOURCE_EPOCH" \
+ANDEE_LMDB_SYS_CHECKSUM="$ANDEE_LMDB_SYS_CHECKSUM" \
+ANDEE_LMDB_SYS_VERSION="$ANDEE_LMDB_SYS_VERSION" \
+ANDEE_PRELOADED_STORE_SHA256="$ANDEE_PRELOADED_STORE_SHA256" \
+ANDEE_PRELOADED_STORE_SIGNER="$ANDEE_PRELOADED_STORE_SIGNER" \
 python3 - <<'PY' "$OUT" "$BUILD_DIR/andee-runtime/manifest.json" "$JNI_DIR" "$WORK"
 import hashlib, json, os, pathlib, struct, sys
 zip_path = pathlib.Path(sys.argv[1])
@@ -638,6 +656,14 @@ manifest.write_text(json.dumps({
     "native-payload-count": len(native),
     "native-link-counts": links,
     "native-libraries": native,
+    "preloaded-store": {
+        "canonical-format": "lmdb-dump-load-v1",
+        "lmdb-sys-checksum": os.environ["ANDEE_LMDB_SYS_CHECKSUM"],
+        "lmdb-sys-version": os.environ["ANDEE_LMDB_SYS_VERSION"],
+        "sha256": os.environ["ANDEE_PRELOADED_STORE_SHA256"],
+        "signing-algorithm": "ed25519",
+        "signer": os.environ["ANDEE_PRELOADED_STORE_SIGNER"],
+    },
     "andock": {
         "architecture": andock_native["architecture"],
         "native-files": andock_native["files"],

@@ -56,5 +56,12 @@ cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
 normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
 no rootfs or member state is committed to git.
 
+The packaged HyperBEAM preload uses a public, deterministic Ed25519 build
+identity rather than the node wallet. That identity is not an authorization
+root: the measured APK/runtime remains the trust boundary. The build rewrites
+the preload through a sorted LMDB dump/load pass and packages the runtime with
+fixed timestamps and entry order, so unchanged inputs on the pinned build
+host/toolchain produce byte-identical runtime ZIP and APK artifacts.
+
 The complete design, compatibility limits, and release gates are recorded in
 `../../decisions/andock-filesystem-capability.md`.
