@@ -13,6 +13,9 @@ These are distribution devices, not kernel patches.
 - `android/` is the Android package overlay: app-private encrypted store
   support, AndEE metadata, and Android service/payment devices. It intentionally
   does not fork `measurement@1.0`, `andee@1.0`, or `zone@1.0`.
+- `andock/` is the standalone Android isolated-process Linux execution device.
+  It owns the private AndEE transport and imports the shared seven-tool contract
+  from a generic Ouroboros source checkout only when building its archive.
 
 Generated `_build/`, runtime caches, and local `rebar.lock` files are ignored.
 Do not vendor generated HyperBEAM checkouts here.
