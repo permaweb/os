@@ -19,15 +19,13 @@ def inputs(root):
         root / "execution/termux-proot-launcher.patch",
         root / "execution/termux-tar-wrapper",
         root / "execution/andock-proot-image.patch",
-        root / "execution/lwext4-open-inode.patch",
-        root / "execution/lwext4-inode-times.patch",
-        root / "execution/lwext4-atomic-replace.patch",
-        root / "execution/lwext4-nondirectory-replace.patch",
-        root / "execution/lwext4-sparse-read.patch",
         root / "execution/lwext4/include/generated/ext4_config.h",
-        root / "execution/lwext4/patches/xattr-list-size.patch",
         root / "runtime-src/andock_proot_launcher.c",
     ]
+    paths.extend(sorted((root / "execution").glob("lwext4-*.patch")))
+    paths.extend(sorted(
+        (root / "execution/lwext4/patches").glob("*.patch")
+    ))
     paths.extend(sorted(
         path for path in
         (root / "execution/proot-overlay/src/extension/andock_image").glob("*")
@@ -53,7 +51,7 @@ def manifest(out, root, termux_revision, builder_image, lwext4_revision):
         "termux-packages-revision": termux_revision,
         "termux-builder-image": builder_image,
         "lwext4-revision": lwext4_revision,
-        "toolchain-revision": f"termux-{termux_revision}+andock-image-3",
+        "toolchain-revision": f"termux-{termux_revision}+andock-image-4",
         "android-package-prefix": "/data/data/org.permaweb.andee/files/usr",
         "files": {
             str(path.relative_to(out)): digest(path)

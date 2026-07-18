@@ -27,8 +27,8 @@ overlay or per-path Binder filesystem.
 
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
-  `agent/andock-arm64-release`, current integrated code checkpoint
-  `0a238e9c65135d7524db6352c8bc60e927201495` plus the current documentation
+  `agent/andock-arm64-release`, current reviewed checkpoint
+  `25d20dfb76bff2cf103d35beeca91411a7805acf` plus the current manifest/test
   and status-ledger update.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
@@ -231,8 +231,16 @@ branch:
 The combined host image-engine, mapping-interval, network-client, launcher,
 and Android unit suites pass. The image regression proves a 512 MiB logical
 sparse file persists with ext4 Blockcount 144 (gate at most 192) after restart.
-The ARM64 PRoot cross-build passed independently for the mapping patch and will
-be repeated from the integrated canonical branch during the APK build.
+The combined mapping tracker also passes Linux ASan+UBSan with leak detection.
+The integrated ARM64 PRoot and APK build passed from clean pinned sources.
+Its deep-clean manifest audit found that the new sparse extent visitor patch
+was not enumerated in the reproducibility manifest. The manifest now hashes
+all `lwext4-*.patch` inputs by construction and bumps the native toolchain
+revision to `andock-image-4`; a replacement build is required before install.
+
+The emulator Linux-syscall workload now also proves `user.*` xattr
+set/get/list/remove behavior, rejects privileged xattr writes, and records the
+documented fake-root ownership semantics.
 
 The decision record was reduced from the stale feasibility plan to the actual
 accepted architecture. It now states fake-root and `user.*` xattr limits, the

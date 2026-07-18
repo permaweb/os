@@ -50,6 +50,27 @@ else:
     raise AssertionError("read-only fallocate succeeded")
 os.close(readonly)
 
+xattr_path = "/root/xattr-metadata"
+with open(xattr_path, "wb") as output:
+    output.write(b"metadata")
+os.setxattr(xattr_path, "user.andock", b"visible")
+assert os.getxattr(xattr_path, "user.andock") == b"visible"
+assert "user.andock" in os.listxattr(xattr_path)
+try:
+    os.setxattr(xattr_path, "security.andock", b"hidden")
+except OSError as failure:
+    assert failure.errno in (errno.EACCES, errno.EPERM), failure
+else:
+    raise AssertionError("privileged xattr namespace unexpectedly writable")
+os.removexattr(xattr_path, "user.andock")
+assert "user.andock" not in os.listxattr(xattr_path)
+
+os.chmod(xattr_path, 0o640)
+os.chown(xattr_path, 123, 456)
+metadata = os.stat(xattr_path)
+assert metadata.st_uid == 0 and metadata.st_gid == 0
+assert metadata.st_mode & 0o7777 == 0o640
+
 first = os.open("/root/flock", os.O_CREAT | os.O_RDWR, 0o644)
 second = os.open("/root/flock", os.O_RDWR)
 fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
