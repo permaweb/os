@@ -117,6 +117,64 @@ static void expect_sparse_allocation(int fd)
 	}
 }
 
+static void expect_carrier_access_modes(void)
+{
+	struct andock_image_result writable = open_file(
+		"/work/access-mode", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+	track(&writable);
+	if (ftruncate(writable.guest_fd, 4096) != 0)
+		fail("access-mode-truncate", -errno);
+	write_at(writable.guest_fd, 0, "carrier");
+	andock_image_engine_mark_dirty(writable.cache_id);
+	if (andock_image_engine_sync(writable.cache_id) < 0)
+		fail("access-mode-sync", -EIO);
+	close_tracked(&writable);
+
+	struct andock_image_result readonly = open_file(
+		"/work/access-mode", O_RDONLY | O_CLOEXEC, 0);
+	track(&readonly);
+	if ((fcntl(readonly.guest_fd, F_GETFL) & O_ACCMODE) != O_RDONLY) {
+		fprintf(stderr, "read-only carrier is writable\n");
+		exit(1);
+	}
+	errno = 0;
+	if (write(readonly.guest_fd, "x", 1) >= 0 || errno != EBADF)
+		fail("read-only-carrier-write", errno == 0 ? -EPROTO : -errno);
+	errno = 0;
+	void *mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+		MAP_SHARED, readonly.guest_fd, 0);
+	if (mapping != MAP_FAILED || errno != EACCES) {
+		if (mapping != MAP_FAILED)
+			munmap(mapping, 4096);
+		fail("read-only-shared-mmap", errno == 0 ? -EPROTO : -errno);
+	}
+	mapping = mmap(NULL, 4096, PROT_READ, MAP_SHARED,
+		readonly.guest_fd, 0);
+	if (mapping == MAP_FAILED)
+		fail("read-only-mmap", -errno);
+	errno = 0;
+	if (mprotect(mapping, 4096, PROT_READ | PROT_WRITE) >= 0
+	    || errno != EACCES) {
+		munmap(mapping, 4096);
+		fail("read-only-mprotect", errno == 0 ? -EPROTO : -errno);
+	}
+	munmap(mapping, 4096);
+	close_tracked(&readonly);
+
+	struct andock_image_result writeonly = open_file(
+		"/work/access-mode", O_WRONLY | O_CLOEXEC, 0);
+	track(&writeonly);
+	if ((fcntl(writeonly.guest_fd, F_GETFL) & O_ACCMODE) != O_WRONLY) {
+		fprintf(stderr, "write-only carrier is readable\n");
+		exit(1);
+	}
+	char byte;
+	errno = 0;
+	if (read(writeonly.guest_fd, &byte, 1) >= 0 || errno != EBADF)
+		fail("write-only-carrier-read", errno == 0 ? -EPROTO : -errno);
+	close_tracked(&writeonly);
+}
+
 static void expect_metadata_times(const char *path)
 {
 	struct andock_image_result metadata = call(
@@ -253,6 +311,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	andock_image_result_release(&metadata);
+	expect_carrier_access_modes();
 	expect_metadata_times("/sparse-full");
 	directory = call(
 		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work/cache-eviction", NULL);

@@ -387,6 +387,7 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_ftruncate, FILTER_SYSEXIT },
 	{ PR_ftruncate64, FILTER_SYSEXIT },
 	{ PR_getdents64, FILTER_SYSEXIT },
+	{ PR_io_submit, 0 },
 	{ PR_io_uring_setup, FILTER_SYSEXIT },
 	{ PR_listen, FILTER_SYSEXIT },
 	{ PR_lseek, FILTER_SYSEXIT },
@@ -404,6 +405,7 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_read, FILTER_SYSEXIT },
 	{ PR_readv, FILTER_SYSEXIT },
 	{ PR_recvfrom, FILTER_SYSEXIT },
+	{ PR_recvmmsg, 0 },
 	{ PR_recvmsg, FILTER_SYSEXIT },
 	{ PR_sendfile, FILTER_SYSEXIT },
 	{ PR_sendfile64, FILTER_SYSEXIT },
@@ -2071,9 +2073,9 @@ static int prepare_tracked_fd_reopen(Tracee *tracee, Reg path_reg,
 		return -ENOTDIR;
 	if (source->host_fd < 0)
 		return -EBADF;
-	guest_backing_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
+	guest_backing_fd = andock_image_engine_reopen(source->host_fd, flags);
 	if (guest_backing_fd < 0)
-		return -errno;
+		return guest_backing_fd;
 	host_backing_fd = fcntl(source->host_fd, F_DUPFD_CLOEXEC, 0);
 	if (host_backing_fd < 0) {
 		status = -errno;
@@ -2386,10 +2388,8 @@ static int handle_network_connect(Tracee *tracee,
 
 static int message_has_ancillary_data(const struct msghdr *message)
 {
-	/* The stopped thread's control buffer remains writable by sibling
-	 * threads. Allowing the tracee to execute after inspecting it would make
-	 * SCM_RIGHTS a descriptor-export race, so ancillary sends are denied while
-	 * the command owns a network capability. */
+	/* Descriptors received outside the broker cannot be added to its image and
+	 * network tables, so ancillary transfer is fail-closed for every socket. */
 	return message->msg_control != NULL || message->msg_controllen != 0;
 }
 
@@ -2577,7 +2577,7 @@ static int read_guest_mmessages(Tracee *tracee, word_t pointer,
 	return 0;
 }
 
-static int sendmmsg_passes_network_fd(Tracee *tracee, word_t pointer,
+static int messages_have_ancillary_data(Tracee *tracee, word_t pointer,
 		unsigned int count)
 {
 	struct mmsghdr *messages;
@@ -2591,6 +2591,55 @@ static int sendmmsg_passes_network_fd(Tracee *tracee, word_t pointer,
 	}
 	free(messages);
 	return status;
+}
+
+static int deny_unmediated_descriptor_io(Tracee *tracee, Sysnum sysnum)
+{
+	struct msghdr message;
+	struct mmsghdr *messages;
+	word_t header;
+	unsigned int count;
+	int status;
+
+	if (sysnum == PR_io_submit)
+		return void_result(tracee, -EOPNOTSUPP);
+	if (sysnum != PR_sendmsg && sysnum != PR_sendmmsg
+	    && sysnum != PR_recvmsg && sysnum != PR_recvmmsg)
+		return 0;
+#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
+	if (is_32on64_mode(tracee))
+		return void_result(tracee, -ENOSYS);
+#endif
+	if (sysnum == PR_sendmsg || sysnum == PR_recvmsg) {
+		header = peek_reg(tracee, CURRENT, SYSARG_2);
+		if (header == 0)
+			return 0;
+		if (read_data(tracee, &message, header, sizeof(message)) < 0)
+			return void_result(tracee, -EFAULT);
+		return message_has_ancillary_data(&message)
+			? void_result(tracee, -EPERM) : 0;
+	}
+	count = (unsigned int) peek_reg(tracee, CURRENT, SYSARG_3);
+	if (sysnum == PR_sendmmsg) {
+		status = messages_have_ancillary_data(tracee,
+			peek_reg(tracee, CURRENT, SYSARG_2), count);
+		if (status < 0)
+			return void_result(tracee, status);
+		return status > 0 ? void_result(tracee, -EPERM) : 0;
+	}
+	status = read_guest_mmessages(tracee,
+		peek_reg(tracee, CURRENT, SYSARG_2), count, &messages);
+	if (status < 0)
+		return void_result(tracee, status);
+	status = 0;
+	for (unsigned int index = 0; index < count; index++) {
+		if (message_has_ancillary_data(&messages[index].msg_hdr)) {
+			status = 1;
+			break;
+		}
+	}
+	free(messages);
+	return status > 0 ? void_result(tracee, -EPERM) : 0;
 }
 
 static int handle_network_sendmmsg(Tracee *tracee,
@@ -2716,7 +2765,6 @@ static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
 {
 	struct AndockNetworkFile *file;
 	int fd;
-	int status;
 	if (sysnum == PR_socket)
 		return handle_network_socket(tracee);
 	if (sysnum == PR_unshare
@@ -2737,28 +2785,6 @@ static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
 		return network_result(tracee, -EPERM);
 	if (!andock_network_enabled())
 		return 0;
-	if (sysnum == PR_sendmsg) {
-		struct msghdr message;
-		word_t header = peek_reg(tracee, CURRENT, SYSARG_2);
-		if (header != 0) {
-#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
-			if (is_32on64_mode(tracee))
-				return network_result(tracee, -ENOSYS);
-#endif
-			if (read_data(tracee, &message, header, sizeof(message)) < 0)
-				return network_result(tracee, -EFAULT);
-			status = message_has_ancillary_data(&message);
-			if (status != 0)
-				return network_result(tracee, status > 0 ? -EPERM : status);
-		}
-	}
-	if (sysnum == PR_sendmmsg) {
-		status = sendmmsg_passes_network_fd(tracee,
-			peek_reg(tracee, CURRENT, SYSARG_2),
-			(unsigned int) peek_reg(tracee, CURRENT, SYSARG_3));
-		if (status != 0)
-			return network_result(tracee, status > 0 ? -EPERM : status);
-	}
 	if (sysnum == PR_copy_file_range || sysnum == PR_splice) {
 		file = find_network_file(tracee,
 			(int) peek_reg(tracee, CURRENT, SYSARG_3));
@@ -5010,6 +5036,9 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 		state->fs_context->mask =
 			(mode_t)peek_reg(tracee, CURRENT, SYSARG_1) & 0777;
 	}
+	status = deny_unmediated_descriptor_io(tracee, sysnum);
+	if (status != 0)
+		return status;
 	status = handle_network_enter(tracee, sysnum);
 	if (status != 0)
 		return status;

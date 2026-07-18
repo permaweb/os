@@ -70,6 +70,7 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 int andock_image_engine_flush(void);
 int andock_image_engine_retain(uint64_t cache_id);
 int andock_image_engine_release(uint64_t cache_id);
+int andock_image_engine_reopen(int fd, int flags);
 int andock_image_engine_mark_dirty(uint64_t cache_id);
 int andock_image_engine_mark_dirty_range(uint64_t cache_id,
 		uint64_t offset, uint64_t length);

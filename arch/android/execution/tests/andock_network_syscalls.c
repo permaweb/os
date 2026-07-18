@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/aio_abi.h>
 #include <linux/netlink.h>
 #include <net/ethernet.h>
 #include <netpacket/packet.h>
@@ -18,6 +19,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -212,7 +214,7 @@ static void expect_dangerous_socket_denied(
 		operation);
 }
 
-static void expect_scm_rights_denied(int network_fd)
+static void expect_scm_rights_denied(int passed_fd)
 {
 	int channel[2];
 	char byte = 0;
@@ -229,13 +231,94 @@ static void expect_scm_rights_denied(int network_fd)
 	header->cmsg_level = SOL_SOCKET;
 	header->cmsg_type = SCM_RIGHTS;
 	header->cmsg_len = CMSG_LEN(sizeof(int));
-	memcpy(CMSG_DATA(header), &network_fd, sizeof(network_fd));
+	memcpy(CMSG_DATA(header), &passed_fd, sizeof(passed_fd));
 	errno = 0;
 	require(sendmsg(channel[0], &message, 0) < 0,
-		"SCM_RIGHTS network escape unexpectedly succeeded");
+		"SCM_RIGHTS descriptor pass unexpectedly succeeded");
 	require(errno == EPERM || errno == EACCES, "SCM_RIGHTS wrong errno");
 	close(channel[0]);
 	close(channel[1]);
+}
+
+static void exercise_plain_unix_sendmsg(void)
+{
+	int channel[2];
+	char sent[] = "plain";
+	char received[sizeof(sent)] = {};
+	struct iovec output = { .iov_base = sent, .iov_len = sizeof(sent) };
+	struct iovec input = { .iov_base = received, .iov_len = sizeof(received) };
+	struct msghdr message = { .msg_iov = &output, .msg_iovlen = 1 };
+	require(socketpair(AF_UNIX, SOCK_DGRAM, 0, channel) == 0,
+		"plain sendmsg socketpair");
+	require(sendmsg(channel[0], &message, 0) == sizeof(sent),
+		"plain Unix sendmsg");
+	message.msg_iov = &input;
+	require(recvmsg(channel[1], &message, 0) == sizeof(sent),
+		"plain Unix recvmsg");
+	require(memcmp(sent, received, sizeof(sent)) == 0,
+		"plain Unix sendmsg content");
+	close(channel[0]);
+	close(channel[1]);
+}
+
+static void expect_image_fd_policies(void)
+{
+	char payload[] = "aio";
+	aio_context_t context = 0;
+	int fd = open("/root/andock-fd-policy", O_CREAT | O_TRUNC | O_RDWR, 0600);
+	require(fd >= 0, "open image fd policy fixture");
+	require(ftruncate(fd, 4096) == 0, "size image fd policy fixture");
+	require(pwrite(fd, payload, sizeof(payload), 0) == sizeof(payload),
+		"write image fd policy fixture");
+	close(fd);
+	fd = open("/root/andock-fd-policy", O_RDONLY);
+	require(fd >= 0, "reopen image fd policy fixture read-only");
+	errno = 0;
+	require(write(fd, payload, sizeof(payload)) < 0 && errno == EBADF,
+		"read-only image write unexpectedly succeeded");
+	errno = 0;
+	void *mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+		MAP_SHARED, fd, 0);
+	require(mapping == MAP_FAILED && errno == EACCES,
+		"read-only image writable mmap unexpectedly succeeded");
+	mapping = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+	require(mapping != MAP_FAILED, "read-only image mmap");
+	errno = 0;
+	require(mprotect(mapping, 4096, PROT_READ | PROT_WRITE) < 0
+		&& errno == EACCES,
+		"read-only image mprotect unexpectedly succeeded");
+	munmap(mapping, 4096);
+	close(fd);
+	fd = open("/root/andock-fd-policy", O_RDWR);
+	require(fd >= 0, "reopen image fd policy fixture read-write");
+	expect_scm_rights_denied(fd);
+	exercise_plain_unix_sendmsg();
+	errno = 0;
+	long setup = syscall(SYS_io_setup, 1, &context);
+	if (setup == 0) {
+		struct iocb request = {
+			.aio_lio_opcode = IOCB_CMD_PWRITE,
+			.aio_fildes = (uint32_t)fd,
+			.aio_buf = (uint64_t)(uintptr_t)payload,
+			.aio_nbytes = sizeof(payload),
+		};
+		struct iocb *requests[] = { &request };
+		errno = 0;
+		require(syscall(SYS_io_submit, context, 1, requests) < 0,
+			"legacy AIO image write unexpectedly succeeded");
+		require(errno == EOPNOTSUPP || errno == EPERM || errno == ENOSYS,
+			"legacy AIO denial wrong errno");
+		require(syscall(SYS_io_destroy, context) == 0,
+			"legacy AIO context destroy");
+	}
+	else
+		require(errno == EPERM || errno == ENOSYS,
+			"legacy AIO setup wrong errno");
+	struct stat metadata;
+	require(fstat(fd, &metadata) == 0 && metadata.st_size == 4096,
+		"legacy AIO changed image file");
+	close(fd);
+	unlink("/root/andock-fd-policy");
 }
 
 static void wait_success(pid_t child, const char *operation)
@@ -942,6 +1025,11 @@ int main(int argc, char **argv)
 	int race_port = 443;
 	pid_t child;
 	program_path = argv[0];
+	if (argc == 2 && strcmp(argv[1], "--local-fd-policy") == 0) {
+		expect_image_fd_policies();
+		puts("ANDOCK_LOCAL_FD_POLICY_OK");
+		return 0;
+	}
 	if (argc == 3 && strcmp(argv[1], "--expect-closed") == 0) {
 		int fd = descriptor_argument(argv[2]);
 		errno = 0;
@@ -990,6 +1078,7 @@ int main(int argc, char **argv)
 		require(argc == 1, "usage");
 
 	exercise_regular_file_unshare_denial();
+	expect_image_fd_policies();
 	exercise_umask_semantics();
 	exercise_unix_socket_lifecycle();
 	exercise_unix_bind_race();

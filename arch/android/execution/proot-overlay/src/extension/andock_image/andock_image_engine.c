@@ -834,11 +834,32 @@ static int metadata(const char *guest, int type,
 	return result_path(result, guest);
 }
 
-static int reopen_memfd(int fd, int flags)
+int andock_image_engine_reopen(int fd, int flags)
 {
-	(void)flags;
-	int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-	return duplicate < 0 ? -errno : duplicate;
+	char path[64];
+	int reopened_flags = flags & (O_ACCMODE | O_APPEND | O_CLOEXEC
+		| O_NONBLOCK | O_TRUNC);
+#ifdef O_DIRECT
+	reopened_flags |= flags & O_DIRECT;
+#endif
+#ifdef O_DSYNC
+	reopened_flags |= flags & O_DSYNC;
+#endif
+#ifdef O_NOATIME
+	reopened_flags |= flags & O_NOATIME;
+#endif
+#ifdef O_PATH
+	if ((flags & O_PATH) != 0)
+		reopened_flags = O_PATH | (flags & O_CLOEXEC);
+#endif
+#ifdef O_SYNC
+	reopened_flags |= flags & O_SYNC;
+#endif
+	int length = snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+	if (length < 0 || (size_t)length >= sizeof(path))
+		return -EOVERFLOW;
+	int reopened = open(path, reopened_flags);
+	return reopened < 0 ? -errno : reopened;
 }
 
 static bool buffer_has_nonzero_byte(const uint8_t *buffer, size_t size)
@@ -1061,7 +1082,7 @@ static int materialize(const char *guest, int flags, bool tracked,
 	int status = load_cached_inode(guest, result, &cached);
 	if (status < 0)
 		return status;
-	int guest_fd = reopen_memfd(cached->memory_fd, flags);
+	int guest_fd = andock_image_engine_reopen(cached->memory_fd, flags);
 	if (guest_fd < 0) {
 		dprintf(STDERR_FILENO,
 			"andock: materialize %s: memfd duplicate failed: %s (%d)\n",
