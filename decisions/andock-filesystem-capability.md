@@ -1,492 +1,211 @@
 # Andock isolated filesystem capability
 
-Status: implementation plan; supersedes the per-path Binder filesystem design
-in `agent/andock-1.0`.
+Status: accepted and implemented for ARM64 AndEE v1. This supersedes the
+per-path Binder filesystem prototype retained on `agent/andock-1.0`.
 
-## Objective
+## Decision
 
-Provide a persistent Ubuntu-compatible execution environment to each Andock
-member on an ordinary unrooted ARM64 Android device while preserving the real
-Android security boundary and removing the synchronous host round trip from
-guest filesystem operations.
+Give each member one complete writable sparse ext4 image. Pass only that
+image's read-write descriptor to a dedicated Android isolated service. Parse
+and mutate the image inside the isolated process with lwext4, and use PRoot
+only to translate the Ubuntu/glibc process's Linux path and syscall surface to
+the local image engine.
 
-The result must feel close to the Ouroboros Docker environment for package
-managers, language runtimes, compilers, Git, and ordinary shell tools. Passing
-functional smoke tests is not sufficient: metadata-heavy work must remain
-usable after the member has installed a realistically large toolchain.
+Do not use an overlay in v1. A full member image costs more storage, but it
+keeps `/usr`, `/etc`, `/var`, `/tmp`, and `/root` uniformly writable and
+removes the synchronous host round trip which made metadata-heavy package
+installation unusable. Member creation preserves sparse extents, so the 8 GiB
+logical capacity does not consume 8 GiB of Android storage.
 
-## Evidence forcing the redesign
+The observable target is the Ouroboros `~docker@1.0` Linux environment: normal
+APT, Python/pip/venv, Node/npm/node-gyp, compilers, Git, links, mmap, Unix
+sockets, persistence, stop, destroy, timeouts, and host-controlled network
+policy. Andock does not fork the seven-tool AO contract.
 
-The current prototype stores the immutable base and writable overlay as
-app-private host directories. An isolated worker cannot traverse those paths,
-so PRoot forwards guest path operations through a local socket, an isolated
-service bridge, Binder, and the main-app Kotlin broker.
+## Evidence behind the decision
 
-On the Pixel 10 Pro Fold, a cold ARM64 CPU PyTorch install took roughly twelve
-minutes. The identical command completed in 12.014 seconds in a fresh native
-ARM64 Ouroboros Docker container on the development laptop. After installation,
-this command took roughly three minutes on the phone and 0.899 seconds in the
-container:
+The discarded prototype kept the immutable base and writable overlay in
+app-private host directories. An isolated UID could not traverse those paths,
+so each path operation crossed PRoot, a local socket, Binder, and a Kotlin
+broker. On a Pixel 10 Pro Fold, CPU-only PyTorch installation took about
+twelve minutes and a subsequent import/show/`du` workload took about three
+minutes. More than two minutes were spent traversing roughly 13,000 files.
 
-```sh
-python3 -c 'import torch; print(torch.__version__)' 2>&1
-pip3 show torch 2>&1 | head -5
-du -sh /root/.local 2>/dev/null
-```
+The implemented image-local engine reduced warm shell operations on the ARM64
+emulator to about 0.23 seconds. Clean-member workload observations include:
 
-The phone spent more than two minutes in `du` over about 13,000 files. The
-Android log buffer also contained 5,448 audited `TCGETS` denials against
-brokered regular files. The denial storm is a concrete bug to remove, but the
-per-path synchronous boundary is itself unacceptable.
+- 10,000-file creation: 17.750 seconds; traversal: 1.838 seconds;
+- CPU-only PyTorch installation: 86.497--87.189 seconds;
+- Transformers installation: 64.988--69.629 seconds;
+- warm PyTorch/Transformers composite: 16.6--16.9 seconds; and
+- member clone plus first `true`: 0.636--0.757 seconds.
+
+These are emulator release gates, not claims about physical-phone latency.
+Real-phone performance remains an acceptance gate.
 
 ## Security boundary
 
-PRoot is not and must not be treated as the sandbox. The sandbox is the
-kernel-enforced Android isolated UID plus its SELinux `isolated_app` domain.
-Each active member receives a separate isolated process. That process has no
-Android permissions and cannot traverse the AndEE app data directory.
+PRoot is not the sandbox. The boundary is Android's kernel-enforced isolated
+UID, SELinux `isolated_app` domain, and the descriptors explicitly delivered
+over Binder. Each operation receives only:
 
-PRoot, or a smaller replacement, supplies Linux ABI and pathname semantics:
-
-- a conventional Ubuntu root;
-- fake root identity where userland expects it;
-- glibc executable and loader resolution;
-- guest `/root`, `/usr`, `/etc`, `/var`, and `/tmp` behavior; and
-- translation of guest pathname and metadata syscalls.
-
-An Android application cannot rely on `chroot`, mount namespaces, unprivileged
-user namespaces, or a FUSE mount on ordinary retail devices. Removing PRoot
-without replacing those semantics would produce an Android/Bionic tool
-environment, not the Docker-compatible Linux contract.
-
-## Target capability model
-
-The main app owns immutable assets and opaque mutable member files. At worker
-creation it opens only the selected member's complete writable filesystem
-image and passes that descriptor once to the isolated service:
-
-1. one read-write member filesystem-image capability;
+1. the selected member image descriptor;
 2. the bounded command transport; and
-3. network capability state, with Internet sockets brokered separately only
-   when policy permits them.
+3. an Internet socket-creation capability only when `allow-network` is true.
 
-The immutable measured template is used only when the main app creates a new
-member image; it is never on the worker's hot path. Filesystem parsing,
-pathname resolution, and mutation then occur inside the isolated worker. No
-guest filesystem operation sends a host path to HyperBEAM or the main Android
-app. The main app does not parse mutable guest filesystem structures.
+The worker receives no descriptor for the app root, runtime directory,
+immutable template, another member image, effective node configuration, node
+wallet, provider credentials, crypto-agent socket, Android Keystore, or other
+application data. Image and broker descriptors are close-on-exec and hidden
+from the synthetic guest `/proc`; the tracee operates through the syscall
+adapter rather than receiving the raw capabilities.
+
+PRoot remains necessary even with the isolated UID. Android isolation does
+not provide `chroot`, mount namespaces, a conventional Ubuntu root, glibc
+loader resolution, or Linux pathname translation to an ext4 image. Removing
+PRoot without replacing those compatibility semantics would produce a
+Bionic/Android tool environment rather than the promised Linux environment.
+
+The network-enabled path necessarily trusts the syscall adapter to mediate
+destination-bearing calls before the brokered kernel socket is used. A
+compromise of that adapter remains confined to the isolated UID and SELinux
+domain, but a brokered public socket is an explicit capability. The
+network-disabled path receives no Internet socket capability at all.
+
+## Filesystem and descriptor model
+
+Paths resolve by ext4 inode, never by concatenating guest text with an Android
+host path. `/` is a virtual root; `..` cannot cross it. Absolute symlinks
+restart at that root and relative symlinks at the containing directory.
+Component, link-depth, and total-length bounds fail closed. Rename, link,
+unlink, and directory operations resolve and revalidate their parent inodes.
+
+Regular inodes are materialized into kernel memfds so native loaders, mmap,
+locking, and descriptor APIs see ordinary file descriptions. Requested
+read/write access is enforced by independently reopening the carrier with the
+requested kernel mode. Read-only carriers cannot write or gain shared-write
+access through `mmap` or `mprotect`. Legacy asynchronous I/O and guest
+ancillary descriptor transfer are denied because they would bypass mutation
+accounting or capability confinement.
+
+Writable mappings and open descriptions hold explicit references. Dirty
+ranges are coalesced and persisted on `fsync`, `fdatasync`, `msync`, last
+close, teardown, and relevant truncation/size transitions. Mapping teardown
+releases its carrier reference; cache eviction cannot invalidate a live
+description or mapping.
+
+Sparse files stay sparse end to end. The engine visits initialized ext4
+extents rather than scanning logical holes, materializes only those extents,
+tracks changed ranges, and writes back only data extents for a full sparse
+rewrite. A regression creates a 512 MiB logical file with separated extents,
+proves its ext4 block count remains bounded, reopens it, and verifies every
+data and hole region.
+
+## Linux compatibility limits
+
+Andock presents effective UID/GID 0 to guest userland. It preserves the
+template's real numeric ownership metadata, modes, timestamps, links, and
+capabilities, while runtime ownership-changing calls use PRoot fake-root
+semantics. This is sufficient for package managers and build tools but is not
+a multi-user discretionary-access-control environment.
+
+Runtime xattr access is deliberately limited to `user.*`. Template
+construction preserves the Linux metadata needed by provisioned executables,
+including `security.capability`, but untrusted commands cannot read, list,
+add, or replace privileged xattr namespaces. `listxattr` filters unsupported
+names rather than exposing entries which subsequent calls deny.
+
+Device nodes, raw block access, and arbitrary host descriptors are not
+representable. Synthetic `/dev` and `/proc` expose only the bounded interfaces
+needed by normal userland. Direct audio devices, inbound Internet listeners,
+kernel namespaces, cgroups, and Docker-equivalent privilege boundaries are
+not part of v1.
+
+## Member lifecycle and capacity
+
+The deterministic Ubuntu template is packaged inside `andee-runtime.zip` as
+an Android sparse image. Extraction expands it into an app-private sparse raw
+image while hashing the complete logical byte stream. Startup verifies its
+manifest, architecture, size, and digest before enabling Andock.
+
+New members are created by a same-directory temporary sparse copy, fsynced,
+atomically renamed, and followed by a directory fsync. Startup deletes
+abandoned temporary images. Destroy stops and unbinds the worker before
+deleting only the selected member image. Stop and app restart preserve the
+image.
+
+Creation requires the template's allocated size plus 512 MiB of host free
+space. The native engine independently preserves the same 512 MiB host reserve
+before metadata allocation and during writeback. This protects the Android app
+from a guest consuming the final host blocks; the ext4 image's own capacity is
+reported through guest `statfs`.
 
 ## Network capability
 
-Android denies `AF_INET` and `AF_INET6` socket creation to an isolated UID.
-An API 36 ARM64 probe established the narrow alternative: a TCP or UDP socket
-created by the normal application UID and transferred through Binder remains a
-native kernel socket in the isolated worker. IPv4 and IPv6 connect, TCP I/O,
-UDP DNS, polling, and ordinary socket options work without proxying payload
-bytes. Direct isolated creation and listening remain denied.
-
-Network-enabled commands therefore receive a per-command socket-creation
-capability. The syscall layer requests only IPv4/IPv6 TCP or UDP descriptors
-from the main app and injects them through its existing `SCM_RIGHTS` chain.
-Network-disabled commands receive no such capability, and every Internet
-socket request fails with `EACCES`. Raw, packet, netlink, SCTP, and ICMP sockets
-are not brokered.
-
-Transferred sockets can reach the phone itself—the probe connected to the
-live AndEE listener on `127.0.0.1:8734`—so creation alone is not a sufficient
-boundary. The syscall layer must authorize every numeric destination at
-`connect`, `sendto`, destination-bearing `sendmsg`, and each `sendmmsg` element.
-The v1 policy is public outbound networking:
-
-- deny loopback, unspecified, private, carrier-grade NAT, link-local,
-  multicast, broadcast, documentation, benchmark, and reserved destinations;
-- canonicalize IPv4-mapped IPv6 before applying the IPv4 policy;
-- deny every current Android interface address and directly attached prefix,
-  including globally routed IPv6 prefixes;
-- recheck redirects, reconnects, and every unconnected UDP datagram so DNS
-  rebinding cannot cross the boundary; and
-- permit private or link-local DNS only to the exact active-network resolver
-  addresses on TCP or UDP port 53.
-
-The guest resolver file is generated from the active Android network at
-command start. A copied binary, subprocess, static executable, Python socket,
-or alternate HTTP client encounters the same syscall policy; command-string
-inspection and environment interposition are not enforcement. Listening and
-inbound networking are explicitly unsupported in v1 because direct loopback
-would expose the AndEE node and other phone services. A later virtual loopback
-design may add it without weakening this boundary.
-
-Each member therefore sees one ordinary writable Linux filesystem. `/usr`,
-`/etc`, `/var`, `/tmp`, and `/root` require no overlay semantics and may be
-modified freely. The storage cost of duplicating the provisioned template is
-accepted for v1 because execution latency and conventional Linux behavior are
-more important than deduplication. Sparse copying is required to avoid
-materializing unused filesystem capacity; reflink may be an optional creation
-fast path, but no runtime behavior may depend on it.
-
-The guest tracee must not inherit the raw filesystem descriptors. They remain
-owned by the isolated supervisor, marked close-on-exec, and explicitly closed
-in the tracee before its first guest instruction. The tracee interacts with
-the filesystem only through the local syscall layer. Even if it escapes that
-translation layer, the kernel still confines it to the isolated UID and
-SELinux domain.
-
-## Device and package boundary
-
-The seven-tool AO contract remains in Ouroboros's single
-`lib_ouroboros_execution` implementation. The trusted `~andock@1.0` Ouroboros
-device package supplies only its backend adapter and selects the Android local
-execution transport, just as the Docker and QEMU packages select their backend
-modules. It is loaded through the normal trusted-device/package path; it is not
-reimplemented in LapEE.
-
-AndEE packages the immutable image engine, PRoot syscall layer, isolated-service
-lifecycle, member-image store, and a private local transport. Those components
-are generic Linux execution infrastructure and contain no Ouroboros router,
-member, provider, UI, Python development server, or authorization logic. This
-keeps node configuration in the ordinary AO node message and permits the same
-Ouroboros packages and UI manifest to run on stock HyperBEAM nodes with a
-different execution backend.
-
-## Path safety invariants
-
-The filesystem engine resolves guest paths by filesystem inode, never by
-concatenating guest strings with an Android host path.
-
-- `/` is a virtual root inode. `..` at that inode cannot move above it.
-- Relative paths begin at an engine-owned directory handle representing the
-  guest working directory.
-- Absolute symlink targets restart at the virtual root, not the Android root.
-- Relative symlink targets restart at the containing virtual directory.
-- Symlink depth, component count, component length, and total path length are
-  bounded before allocation or traversal.
-- Embedded NUL, malformed encoding at protocol boundaries, invalid member
-  identifiers, and unsupported inode types fail closed.
-- Rename, link, and unlink operate on parent inode handles. A path is
-  revalidated at the mutation point rather than trusted from an earlier
-  string-based check.
-- Device nodes, host sockets, raw block access, and arbitrary descriptor import
-  are not representable in the guest filesystem. The syscall layer supplies
-  only the conventional safe synthetic devices required by userland, including
-  `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/fd`.
-- `/proc` is synthetic and exposes no supervisor, image, command-transport,
-  crypto-agent, or main-app descriptor.
-- The worker receives no descriptor for the app data directory, another
-  member, the effective node config, the node wallet, provider keys, the
-  crypto-agent socket, APK-private state, or Android credential storage.
-
-These invariants make a guest path traversal a lookup inside an opaque member
-filesystem. There is no corresponding HyperBEAM-host path for `../` to reach.
-
-## Feasibility sequence
-
-Implementation begins with small evidence-producing spikes. None may weaken
-the isolated UID or make app-private directories broadly accessible.
-
-### 1. Directory-descriptor probe
-
-Pass an `O_PATH` member-root directory descriptor to a minimal isolated native
-helper and test `openat2`, create, rename, hard link, xattr, and unlink beneath
-it. This determines exactly which operations Android SELinux and DAC permit on
-a received app-data directory FD.
-
-Accept this route only if all required mutations work without world-writable
-host paths, policy changes, privileged grants, or access to a sibling
-descriptor. Use `RESOLVE_IN_ROOT`, `RESOLVE_BENEATH`, `RESOLVE_NO_MAGICLINKS`,
-and `RESOLVE_NO_XDEV` where the Android kernel supports them. A directory FD
-fast path would be substantially smaller than a filesystem-image engine, so it
-must be disproved before adding that machinery.
-
-### 2. Local image-descriptor probe
-
-If the directory-descriptor route fails, create a small filesystem image under
-app-private storage, open it in the main UID, and pass only its FD to an
-isolated helper. Cross-build candidate userspace filesystem libraries for
-ARM64 Android and prove, inside the isolated process:
-
-- superblock open and validation;
-- directory lookup and enumeration;
-- file create/read/write/truncate;
-- rename, link, symlink, timestamps, modes, and `user.*` xattrs;
-- crash, reopen, and consistency checking; and
-- rejection of malformed or adversarial image metadata.
-
-Compare `libext2fs`, `lwext4`, and any smaller maintained alternative on API
-coverage, crash behavior, licensing, source maintenance, code size, and
-measured performance. Do not select a library merely because it can read a
-happy-path image.
-
-### 3. Per-member image creation probe
-
-Create each member as a complete writable filesystem image copied from the
-measured immutable template. Evaluate creation methods in this order:
-
-1. filesystem-level clone/reflink of the raw immutable template, if `FICLONE`
-   is available and reliable on both the emulator and representative retail
-   storage;
-2. a sparse extent-preserving copy with bounded temporary storage; and
-3. a fully allocated copy only on storage where neither optimization exists.
-
-A reflink-only implementation cannot be the general retail baseline. The
-sparse-copy fallback must preserve holes, fail atomically when space is
-insufficient, and never expose a partially initialized image as a member.
-Userspace overlay, whiteout, copy-up, and custom block-COW formats are excluded
-from v1. They may return only as optional optimizations after they outperform
-the full-image baseline without changing guest semantics or the trusted
-runtime.
-
-The spike ends with a short decision record containing cold creation time,
-10,000-file traversal time, random and sequential I/O, image growth, restart
-behavior, corruption handling, and exact device/kernel/filesystem facts.
-
-## Packaging and member creation
-
-The build produces one deterministic raw ext4 template with a fixed logical
-capacity and an explicitly lwext4-compatible feature set. It is generated from
-the pinned Ubuntu provisioner, package manifest, Node.js archive, and permagit
-archive; its raw bytes and input manifest are hashed before APK assembly. Image
-population runs as root inside the pinned Linux builder and consumes the
-numeric-owner OCI export directly. A host-extracted tree on macOS is not an
-acceptable input because it collapses service-account ownership and Linux
-xattrs/capabilities to host-user metadata.
-
-The raw template is a compressed entry in `andee-runtime.zip`. Extraction must
-not materialize its zero ranges: `RuntimeExtractor` hashes the full logical
-byte stream while seeking over all-zero blocks in the destination and sets the
-final logical length explicitly. Startup verifies the extracted raw digest
-before enabling Andock. The existing runtime-ZIP and APK-set digests therefore
-continue to commit to the same bytes.
-
-Member creation occurs only in the main app UID:
-
-1. open the verified template read-only;
-2. create a same-directory, owner-only temporary image;
-3. copy data extents with `SEEK_DATA`/`SEEK_HOLE`, falling back to bounded
-   zero scanning;
-4. set the exact logical length, `fsync` the destination, and close it;
-5. atomically rename it to the opaque member filename and `fsync` the
-   containing directory; and
-6. open only that completed member image and transfer its descriptor to the
-   selected isolated worker.
-
-An interrupted temporary image is never addressable as a member and is
-removed during startup recovery. The immutable template descriptor is not
-passed to a worker. Member deletion first stops and unbinds the worker, waits
-for all descriptors to close, and then removes only that member image.
-
-## Implementation phases
-
-### Phase 0: freeze and profile the prototype
-
-- Keep `agent/andock-1.0` as evidence; do not build the redesign on its large
-  broker commit.
-- Add a reproducible performance workload containing 10,000-file `stat`,
-  `find`, `du`, Python import, Node resolution, Git status, local wheel unpack,
-  and sequential I/O.
-- Add counters and latency histograms for PRoot stops, resolve/open/list,
-  Binder transactions, FD transfers, xattrs, and audited denials.
-- Remove the repeated regular-file `TCGETS` attempt and remeasure so the design
-  is not based on an avoidable logging pathology.
-
-### Phase 1: isolated capability bootstrap
-
-- Define a minimal versioned Binder bootstrap used once per worker.
-- Pass the selected member-image descriptor directly to the exact isolated
-  worker rather than passing a path or caller-controlled descriptor number.
-- Close every unrelated inherited descriptor before guest execution.
-- Kill the complete process tree when the service, binder peer, app process,
-  timeout, or command transport dies.
-
-### Phase 2: local filesystem engine
-
-- Implement inode-based lookup inside the selected member image.
-- Implement complete regular file, directory, symlink, hard-link, rename,
-  truncate, mode, timestamp, `statfs`, and `user.*` xattr semantics.
-- Preserve sparse files and bounded filesystem capacity.
-- Serialize operations for one member while allowing independent member
-  workers to overlap.
-- Keep the mutable-image parser and all guest-controlled metadata inside the
-  isolated process.
-
-### Phase 3: PRoot integration and deletion of the host broker
-
-- Retain only the PRoot syscall translation needed for Ubuntu compatibility.
-- Dispatch filesystem operations directly to the local engine.
-- Preserve executable loading, dynamic loader behavior, shebangs, `/proc`,
-  pathname UNIX sockets, signals, process trees, and real timeouts.
-- Retain PRoot's own-tracee `/proc` virtualization without making the image FD,
-  PRoot supervisor, HyperBEAM process, or unrelated Android processes visible.
-- Materialize a regular inode into a kernel-backed descriptor at most once per
-  worker cache generation. Repeated opens duplicate the coherent descriptor;
-  they must not recopy the complete file from ext4. Writable descriptors and
-  shared mappings become dirty at mutation time and write back on `fsync`,
-  `msync`, last close, and worker teardown. Open descriptors and mappings must
-  observe ordinary shared-file semantics.
-- Delete the per-operation AIDL transaction, Kotlin path resolver, isolated
-  socket-to-Binder bridge, host overlay-path translation, and corresponding
-  frame protocol once parity is proven.
-- Keep lifecycle and optional Internet socket brokerage as small, separate
-  Android capabilities.
-
-### Phase 4: package-manager parity
-
-- Build the immutable filesystem from the same pinned declarative provisioner
-  as the Ouroboros Docker base.
-- Ensure `/usr`, `/etc`, `/var`, `/tmp`, and `/root` are ordinarily writable in
-  the member filesystem so `apt`, `pip`, npm, compilers, and source builds
-  behave as root-oriented agents expect.
-- Preserve standard Python behavior: system install policy, venvs, `--user`,
-  local wheels, atomic rename, bytecode caches, native extensions, and normal
-  `sys.path` discovery.
-- Preserve Node package installation, executable shims, native addons, and
-  module resolution without Andock-specific environment hacks.
-- Do not preinstall PyTorch or add package-specific shortcuts to pass tests.
-
-### Phase 5: lifecycle, capacity, and recovery
-
-- Give each member a separately bounded mutable allocation and report that
-  capacity through guest `statfs`.
-- Reserve host free-space headroom so one guest cannot exhaust AndEE storage.
-- Make stop preserve state, restart reopen the same member capability, and
-  destroy remove only that member after all worker references are gone.
-- Exercise app kill, service kill, low-memory kill, power-loss fault points,
-  incomplete rename, and full-storage behavior.
-- Run consistency checking and deterministic recovery without parsing the
-  mutable filesystem in the HyperBEAM process.
-
-### Phase 6: measurement audit after the design stabilizes
-
-Do not merge the current `agent/andock-measurement` projection: it names the
-old `android-app-broker@1` design.
-
-After the storage format and runtime are frozen, audit the existing aggregate
-commitments before adding another projection. For v1, the runtime-ZIP,
-native-library-set, APK-set, and effective-node-message facts already commit to
-the immutable execution implementation and selected policy, so no measurement
-or system-device change is required. Individual artifact and source revisions
-remain available in the packaged manifests for verifier policy. Mutable member
-images, allocation state, and workspace contents remain outside the boot
-measurement. See `decisions/andock-measurement.md`.
-
-## Validation matrix
-
-### Native and path correctness
-
-- Table-driven and property tests for absolute/relative paths, repeated `/`,
-  `.`, `..`, maximum lengths, Unicode, invalid byte sequences, and NUL.
-- Symlink chains, cycles, dangling targets, absolute targets, relative targets,
-  and rename races.
-- Hard links, rename-over-existing, cross-directory rename, unlink-open files,
-  sparse files, xattrs, timestamps, modes, and atomic replace.
-- Repeated opens of large ELF and data files, visibility between simultaneous
-  descriptors, writable `MAP_SHARED`, `msync`, close-before-`munmap`, and dirty
-  teardown recovery.
-- Mutation fault injection at every persistent write and recovery after
-  process death.
-- Fuzz filesystem images and syscall frames under ASan/UBSan on the host and
-  the Android HWASan environment where available.
-
-### Isolation and adversarial escape
-
-From a real guest process, attempt to read or modify:
-
-- the raw member-image descriptor through `/proc/self/fd` and inherited FDs;
-- the parent or sibling Android app-data paths;
-- another member's filesystem;
-- the effective node configuration and imported private options;
-- the node wallet and Android Keystore material;
-- the crypto-agent socket;
-- APK/runtime internals not intentionally present in the guest;
-- `/proc/<hyperbeam-pid>`, `/proc/<other-worker-pid>`, and process memory; and
-- arbitrary Android application data.
-
-Repeat with `openat`, `openat2`, symlinks, hard links, rename, copied static
-binaries, direct syscalls, subprocesses, SCM_RIGHTS, UNIX sockets, and malformed
-filesystem metadata. Assertions must prove kernel denial, not merely absence
-from a friendly path resolver.
-
-### Network policy
-
-With networking disabled, test IPv4, IPv6, TCP, UDP, DNS, redirects, Python
-sockets, Node sockets, copied binaries, subprocesses, raw sockets, and descriptor
-passing. With networking enabled, prove the same standard clients work. A
-member cannot change its worker capability or receive another member's socket.
-
-### Linux workload parity
-
-Run from clean member filesystems and again after stop/restart:
-
-- all seven execution operations and representative errors;
-- `apt update` and pinned package installation;
-- system pip, `--user`, venv, local wheel, native extension, and atomic install;
-- pinned CPU PyTorch install, import, `pip show`, and filesystem traversal;
-- Transformers/tokenizers installation and import;
-- Node/npm, a large dependency tree, and a native addon;
-- C/C++, Rust, and Go compile-and-run workloads where present in the shared
-  Docker provisioner;
-- Git clone/status/diff over a repository with thousands of files;
-- SQLite, archives, audio file generation, binary and multi-megabyte files;
-- concurrent different members and serialized operations for one member; and
-- file browsing, attachments, archive creation, and download through normal AO
-  and Ouroboros routes.
-
-### Performance gates
-
-Benchmark three clean runs and three warm runs on both the ARM64 emulator and a
-real unrooted ARM64 phone. Record wall time, CPU time, RSS/PSS, bytes written,
-filesystem growth, process state, syscall counts, and broker/capability counts.
-Run native ARM64 Docker controls on the development laptop and keep package
-downloads separate from local installation measurements.
-
-Initial hard gates, subject only to tightening after the feasibility spike:
-
-- ordinary warm command median no worse than 500 ms;
-- 10,000-file metadata traversal no worse than 5 seconds;
-- the post-install PyTorch import/show/`du` workload no worse than 10 seconds;
-- local cached PyTorch wheel installation no worse than 60 seconds;
-- no filesystem workload more than 5x its same-device local-engine control;
-- no repeated SELinux denial/audit stream during a successful workload; and
-- performance must not degrade materially after restart or as unrelated
-  members accumulate state.
-
-A test that merely raises the timeout is a failure. Package-specific
-preinstallation, command detection, hidden host execution, or weakened
-isolation cannot satisfy these gates.
-
-### Android and AO integration
-
-- Clean APK install and first boot on emulator and physical phone.
-- Existing AndEE config invariants, Android build, smoke, scenarios, zone
-  storage, Android smoke, and mixed smoke.
-- `~andock@1.0` package closure and Forge verification.
-- Prove the Andock backend package loads through the same trusted remote-device
-  path as the other portable Ouroboros packages; do not preload a forked copy
-  of `lib_ouroboros_execution` in the APK.
-- Normal AO resolution with configurable execution device; no AndEE-specific
-  Ouroboros server or source staging.
-- Full browser flow: load the immutable UI manifest, create a workspace and two
-  members, execute tools, browse/download files, restart AndEE, reload the
-  workspace, and prove persistence.
-- Capture exact HTTP/device responses, measurements, logcat, process/UID/SELinux
-  evidence, screenshots, and benchmark JSON under `arch/android/build/`.
-
-## Merge strategy
-
-This work starts from `agent/hb-edge-e445`. The old Andock prototype remains a
-separate evidence branch. Transplant only independently useful public device
-contract tests and provisioning inputs; do not carry the per-path broker
-forward and then preserve it as accidental compatibility.
-
-The implementation should land as reviewable commits in this order:
-
-1. reproducible performance and isolation baselines;
-2. isolated capability feasibility evidence;
-3. local filesystem engine plus native tests;
-4. PRoot integration and removal of the host filesystem broker;
-5. Android lifecycle/network integration;
-6. seven-operation and package-manager parity;
-7. measurement facts and verifier policy; and
-8. full portable Ouroboros end-to-end evidence.
-
-No branch is complete until the real-phone performance, isolation, persistence,
-and browser gates pass together.
+An isolated UID cannot create `AF_INET` or `AF_INET6` sockets. When networking
+is enabled, the normal app UID creates only supported TCP/UDP sockets and
+passes them as kernel descriptors. The syscall layer authorizes each numeric
+destination at `connect`, `sendto`, `sendmsg`, and `sendmmsg`:
+
+- loopback, unspecified, private, carrier-grade NAT, link-local, multicast,
+  broadcast, documentation, benchmark, reserved, current-interface, and
+  directly attached prefixes are denied;
+- IPv4-mapped IPv6 is canonicalized before policy;
+- private/link-local DNS is allowed only to the active Android resolvers on
+  TCP or UDP port 53; and
+- redirects, reconnects, and every unconnected UDP datagram are rechecked.
+
+Raw, packet, netlink, SCTP, ICMP, inbound, and listening Internet sockets are
+not brokered. Network-disabled commands receive no broker and fail Internet
+socket creation with `EACCES`. Python, Node, copied binaries, subprocesses,
+and static probes all encounter the same syscall boundary; no command-string
+or environment-variable policy is involved.
+
+Public IPv6/NAT64 behavior must be repeated on the physical phone because the
+emulator does not prove every carrier network topology.
+
+## Device, package, and measurement boundary
+
+AndEE packages only the generic image engine, isolated-service lifecycle,
+PRoot syscall layer, template, and private local transport. It contains no
+Ouroboros router, provider, UI, member model, Python development server, or
+authorization fork.
+
+Ouroboros `~andock@1.0` is a standalone backend package. It selects the local
+transport and delegates tools, validation, member lookup, serialization,
+clipping, errors, files, attachments, and archives to
+`lib_ouroboros_execution`, exactly as the Docker and QEMU backends do.
+
+No Andock-specific measurement projection is added. The existing APK-set,
+signing-certificate, runtime-ZIP, native-library-set, and effective node
+message facts commit to the immutable implementation, template, manifests,
+and selected execution configuration. Mutable member images remain outside
+the measurement. See `andock-measurement.md`.
+
+## Release acceptance
+
+The host suites cover the image engine, path traversal, inode/descriptor and
+mapping lifetime, sparse persistence, xattr filtering, network protocol, and
+launcher. The emulator ladder must additionally prove:
+
+- clean install and first boot;
+- all seven operations and representative failures;
+- APT, pip/venv/native wheels, Node/npm/node-gyp, compilers, Git, SQLite,
+  archives, mmap/IPC, Unix sockets, PyTorch, Transformers, and offline model
+  loading;
+- persistence over stop, restart, and force-stop; deletion on destroy;
+- serialized same-member operations and independent members;
+- filesystem, config, wallet, crypto socket, sibling, and Android-data denial;
+- disabled and enabled IPv4/IPv6/TCP/UDP/DNS/redirect network policy; and
+- the ordinary AndEE config, build, smoke, scenario, zone-storage, Android,
+  and mixed gates with measurement preflight.
+
+Current emulator thresholds are 500 ms for an ordinary warm command, 95
+seconds for the pinned CPU-only PyTorch installation, and 20 seconds for the
+warm ML composite. Threshold changes cannot substitute for fixing a product
+regression. Package preinstallation, command detection, hidden host execution,
+or weakened isolation cannot satisfy a gate.
+
+The release remains pending until the same performance, isolation,
+persistence, network, provider-backed agent, and browser flow pass on a real
+unrooted ARM64 phone.

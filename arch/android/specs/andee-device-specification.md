@@ -177,6 +177,35 @@ credentials retain normal HyperBEAM semantics in the app-private effective
 configuration. Stock HyperBEAM private-key filtering, rather than Android-side
 name matching, keeps them out of `~meta@1.0` and the public boot measurement.
 
+### 3.1 Local Andock execution capability
+
+An AndEE build MAY package the generic local capability consumed by a trusted
+`~andock@1.0` execution device. This does not add an AndEE-specific public AO
+protocol or an Ouroboros server to the Android app.
+
+Each member MUST have a separate writable filesystem image. The main app MUST
+pass an isolated worker only that member image, a bounded command channel, and
+an outbound network capability when the request enables networking. It MUST
+NOT pass the runtime root, immutable template, another member image, effective
+node configuration, wallet, provider credentials, crypto-agent socket, or
+Android credential storage. Guest path resolution MUST remain inside the
+filesystem image and MUST NOT concatenate guest paths with Android host paths.
+
+PRoot or an equivalent compatibility layer MAY supply Ubuntu/glibc pathname
+and syscall behavior, but MUST NOT be represented as the security boundary.
+The boundary is the Android isolated UID, SELinux domain, and explicitly
+delivered descriptors. A network-disabled worker MUST receive no Internet
+socket-creation capability. A network-enabled worker MUST enforce numeric
+destination policy for each destination-bearing syscall; command inspection
+is non-conformant.
+
+The immutable template, native engine, compatibility layer, manifests, and
+selected node configuration are committed through the existing APK-set,
+native-library-set, runtime-ZIP, and effective-node-message measurement facts.
+Mutable member images MUST NOT enter the boot measurement. No additional
+Andock-specific `~measurement@1.0`, `~system@1.0`, or `~andee@1.0` projection
+is required.
+
 ## 4. Stock `~meta@1.0`
 
 AndEE uses the stock HyperBEAM `~meta@1.0` device. `GET /~meta@1.0/info`

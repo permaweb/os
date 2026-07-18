@@ -30,6 +30,21 @@ security boundary is Android's separate isolated UID and SELinux domain, not
 PRoot. The worker cannot open the app-private runtime, config, wallet, crypto
 socket, cached template, or another member image.
 
+The member image is intentionally not an overlay: `/usr`, `/etc`, `/var`,
+`/tmp`, and `/root` are all writable, so APT, pip, venv, npm, native compilers,
+and ordinary root-oriented build tools can modify the system normally. Sparse
+copy and sparse writeback avoid charging holes to Android storage, while both
+member creation and runtime writeback preserve 512 MiB of host free space.
+Guest ownership is fake-root rather than a multi-user DAC boundary, and
+runtime xattrs are limited to `user.*`; Android UID/SELinux isolation remains
+the authority boundary.
+
+When networking is disabled, the isolated worker receives no Internet socket
+capability. When enabled, the app brokers only TCP/UDP descriptors and the
+native syscall layer rejects local/private/reserved destinations on every
+destination-bearing operation. Inbound/listening Internet sockets are not
+supported. Physical-phone IPv6/NAT64 behavior is a release acceptance gate.
+
 The release build is ARM64-only. Build the pinned template independently with:
 
 ```sh
@@ -40,3 +55,6 @@ make -C arch/android andock-template
 cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
 normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
 no rootfs or member state is committed to git.
+
+The complete design, compatibility limits, and release gates are recorded in
+`../../decisions/andock-filesystem-capability.md`.

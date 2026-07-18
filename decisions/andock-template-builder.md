@@ -6,11 +6,15 @@ Build the Andock Ubuntu filesystem entirely as root inside a pinned ARM64
 Linux builder. Publish two local build artifacts under `arch/android/build/`:
 
 - an 8 GiB sparse raw ext4 image for verification and operator caches; and
-- an Android sparse-image v1 (`.simg`) representation for eventual APK
-  packaging.
+- an Android sparse-image v1 (`.simg`) representation packaged in the AndEE
+  runtime ZIP.
 
-The APK/runtime extraction path is deliberately outside this branch. Images
-and inventories remain ignored build outputs.
+Images and inventories remain ignored build outputs. APK assembly validates
+the pinned manifest and sparse-image digest. `RuntimeExtractor` expands the
+packaged `.simg` into an app-private sparse raw image, verifies the full raw
+digest and logical size, and fsyncs it before Andock can start. The runtime-ZIP
+measurement therefore commits to the immutable template; mutable per-member
+copies are stored separately and are not measured.
 
 ## Pinned inputs
 
