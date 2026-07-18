@@ -75,13 +75,21 @@ def is_runtime_store(value: Any) -> bool:
         "name": "andee-volatile-store",
         "ao-types": 'store-module="atom"',
     }
+    preloaded = {
+        "store-module": "hb_store_lmdb",
+        "name": "_build/preloaded-store",
+        "capacity": 1073741824,
+        "read-only": True,
+        "ao-types": 'store-module="atom"',
+    }
     return value == [
         volatile,
         {
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": [volatile],
+            "local-store": False,
+            "preloaded-store": preloaded,
         },
     ]
 
@@ -131,7 +139,10 @@ def main() -> int:
         if key in config:
             fail(f"base config should inherit common HyperBEAM default for {key}")
     if not is_runtime_store(config.get("store")):
-        fail("base config must use volatile Android runtime store plus gateway reads")
+        fail(
+            "base config must use volatile Android runtime storage plus "
+            "non-caching gateway reads decoded by the measured preloaded store"
+        )
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
     if not is_volatile_arweave_index_store(config.get("arweave-index-store")):

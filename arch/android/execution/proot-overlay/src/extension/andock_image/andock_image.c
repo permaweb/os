@@ -189,6 +189,8 @@ struct AndockNetworkDescription {
 	int protocol;
 	unsigned int references;
 	bool authorized_connected;
+	bool udp_reply_peer_locked;
+	struct sockaddr_storage udp_reply_peer;
 };
 
 struct AndockNetworkFile {
@@ -406,6 +408,7 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_ftruncate, FILTER_SYSEXIT },
 	{ PR_ftruncate64, FILTER_SYSEXIT },
 	{ PR_getdents64, FILTER_SYSEXIT },
+	{ PR_getpeername, FILTER_SYSEXIT },
 	{ PR_io_submit, 0 },
 	{ PR_io_uring_setup, FILTER_SYSEXIT },
 	{ PR_listen, FILTER_SYSEXIT },
@@ -2323,6 +2326,57 @@ static int authorize_network_address(
 		address_size, description->type);
 }
 
+static bool network_addresses_equal(const struct sockaddr_storage *first,
+		const struct sockaddr_storage *second)
+{
+	if (first->ss_family != second->ss_family)
+		return false;
+	if (first->ss_family == AF_INET) {
+		const struct sockaddr_in *first_ipv4 =
+			(const struct sockaddr_in *) first;
+		const struct sockaddr_in *second_ipv4 =
+			(const struct sockaddr_in *) second;
+		return first_ipv4->sin_port == second_ipv4->sin_port
+			&& first_ipv4->sin_addr.s_addr == second_ipv4->sin_addr.s_addr;
+	}
+	if (first->ss_family == AF_INET6) {
+		const struct sockaddr_in6 *first_ipv6 =
+			(const struct sockaddr_in6 *) first;
+		const struct sockaddr_in6 *second_ipv6 =
+			(const struct sockaddr_in6 *) second;
+		return first_ipv6->sin6_port == second_ipv6->sin6_port
+			&& first_ipv6->sin6_scope_id == second_ipv6->sin6_scope_id
+			&& memcmp(&first_ipv6->sin6_addr, &second_ipv6->sin6_addr,
+				sizeof(first_ipv6->sin6_addr)) == 0;
+	}
+	return false;
+}
+
+static int pin_udp_reply_peer(struct AndockNetworkDescription *description,
+		const struct sockaddr_storage *address, socklen_t address_size)
+{
+	int result;
+	/* An ephemeral wildcard bind is needed by ordinary UDP clients such as
+	 * dig.  Connect the underlying socket to each authorized destination so
+	 * the kernel admits future replies from that peer only, then discard any
+	 * datagrams queued before the filter changed.  authorized_connected
+	 * continues to describe the guest-visible connect state. */
+	if (description->type != SOCK_DGRAM
+	    || description->authorized_connected)
+		return 0;
+	if (description->udp_reply_peer_locked
+	    && network_addresses_equal(&description->udp_reply_peer, address))
+		return 0;
+	description->udp_reply_peer_locked = false;
+	result = andock_network_lock_udp_peer(description->host_fd,
+		(const struct sockaddr *) address, address_size);
+	if (result == 0) {
+		description->udp_reply_peer = *address;
+		description->udp_reply_peer_locked = true;
+	}
+	return result;
+}
+
 static int handle_network_socket(Tracee *tracee)
 {
 	struct AndockBrokerState *state = broker_state(tracee);
@@ -2387,7 +2441,10 @@ static int handle_network_connect(Tracee *tracee,
 	if (status < 0)
 		return network_result(tracee, status);
 	if (address.ss_family == AF_UNSPEC) {
+		if (file->description->type == SOCK_DGRAM)
+			return network_result(tracee, -EACCES);
 		file->description->authorized_connected = false;
+		file->description->udp_reply_peer_locked = false;
 	}
 	else {
 		status = authorize_network_address(
@@ -2395,6 +2452,14 @@ static int handle_network_connect(Tracee *tracee,
 		if (status < 0)
 			return network_result(tracee, status);
 		file->description->authorized_connected = false;
+		if (file->description->type == SOCK_DGRAM) {
+			status = pin_udp_reply_peer(
+				file->description, &address, address_size);
+			if (status < 0)
+				return network_result(tracee, status);
+			file->description->authorized_connected = true;
+			return network_result(tracee, 0);
+		}
 	}
 	result = TEMP_FAILURE_RETRY(connect(file->description->host_fd,
 		(struct sockaddr *) &address, address_size));
@@ -2553,9 +2618,19 @@ static int handle_network_sendto(Tracee *tracee,
 		free(payload);
 		return network_result(tracee, -EFAULT);
 	}
-	result = TEMP_FAILURE_RETRY(sendto(file->description->host_fd,
-		payload, size, (int) peek_reg(tracee, CURRENT, SYSARG_4),
-		(struct sockaddr *) &address, address_size));
+	status = pin_udp_reply_peer(file->description, &address, address_size);
+	if (status < 0) {
+		free(payload);
+		return network_result(tracee, status);
+	}
+	if (file->description->type == SOCK_DGRAM
+	    && !file->description->authorized_connected)
+		result = TEMP_FAILURE_RETRY(send(file->description->host_fd,
+			payload, size, (int) peek_reg(tracee, CURRENT, SYSARG_4)));
+	else
+		result = TEMP_FAILURE_RETRY(sendto(file->description->host_fd,
+			payload, size, (int) peek_reg(tracee, CURRENT, SYSARG_4),
+			(struct sockaddr *) &address, address_size));
 	if (result < 0)
 		result = -errno;
 	free(payload);
@@ -2597,8 +2672,17 @@ static int handle_network_sendmsg(Tracee *tracee,
 		ANDOCK_MAX_NETWORK_IO, NULL);
 	if (status < 0)
 		return network_result(tracee, status);
-	host.msg_name = &address;
-	host.msg_namelen = address_size;
+	status = pin_udp_reply_peer(file->description, &address, address_size);
+	if (status < 0) {
+		free(payload);
+		free(iovecs);
+		return network_result(tracee, status);
+	}
+	if (file->description->type != SOCK_DGRAM
+	    || file->description->authorized_connected) {
+		host.msg_name = &address;
+		host.msg_namelen = address_size;
+	}
 	host.msg_iov = iovecs;
 	host.msg_iovlen = guest.msg_iovlen;
 	result = TEMP_FAILURE_RETRY(sendmsg(file->description->host_fd, &host,
@@ -2767,6 +2851,23 @@ static int handle_network_sendmmsg(Tracee *tracee,
 		host[index].msg_hdr.msg_iov = iovecs[index];
 		host[index].msg_hdr.msg_iovlen = message->msg_iovlen;
 	}
+	if (file->description->type == SOCK_DGRAM
+	    && !file->description->authorized_connected) {
+		for (unsigned int index = 1; index < count; index++) {
+			if (!network_addresses_equal(&addresses[0], &addresses[index])) {
+				status = -EOPNOTSUPP;
+				goto cleanup;
+			}
+		}
+		status = pin_udp_reply_peer(file->description, &addresses[0],
+			host[0].msg_hdr.msg_namelen);
+		if (status < 0)
+			goto cleanup;
+		for (unsigned int index = 0; index < count; index++) {
+			host[index].msg_hdr.msg_name = NULL;
+			host[index].msg_hdr.msg_namelen = 0;
+		}
+	}
 	result = TEMP_FAILURE_RETRY(sendmmsg(file->description->host_fd,
 		host, count, (int) peek_reg(tracee, CURRENT, SYSARG_4)));
 	if (result < 0) {
@@ -2847,8 +2948,20 @@ static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
 		return 0;
 	if (sysnum == PR_copy_file_range || sysnum == PR_splice) {
 		file = find_network_file(tracee,
+			(int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (file != NULL && file->description->type == SOCK_DGRAM
+		    && !file->description->udp_reply_peer_locked)
+			return network_result(tracee, -ENOTCONN);
+		file = find_network_file(tracee,
 			(int) peek_reg(tracee, CURRENT, SYSARG_3));
 		if (file != NULL && !file->description->authorized_connected)
+			return network_result(tracee, -ENOTCONN);
+	}
+	if (sysnum == PR_sendfile || sysnum == PR_sendfile64) {
+		file = find_network_file(tracee,
+			(int) peek_reg(tracee, CURRENT, SYSARG_2));
+		if (file != NULL && file->description->type == SOCK_DGRAM
+		    && !file->description->udp_reply_peer_locked)
 			return network_result(tracee, -ENOTCONN);
 	}
 	fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
@@ -2860,6 +2973,20 @@ static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
 		return handle_network_connect(tracee, file);
 	case PR_bind:
 		return handle_network_bind(tracee, file);
+	case PR_getpeername:
+		return file->description->authorized_connected
+			? 0 : network_result(tracee, -ENOTCONN);
+	case PR_read:
+	case PR_readv:
+	case PR_pread64:
+	case PR_preadv:
+	case PR_preadv2:
+	case PR_recvfrom:
+	case PR_recvmsg:
+	case PR_recvmmsg:
+		return file->description->type == SOCK_DGRAM
+			&& !file->description->udp_reply_peer_locked
+			? network_result(tracee, -ENOTCONN) : 0;
 	case PR_listen:
 		return network_result(tracee, -EACCES);
 	case PR_sendto:

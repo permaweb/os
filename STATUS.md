@@ -28,8 +28,7 @@ overlay or per-path Binder filesystem.
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
   `agent/andock-arm64-release`, current committed source checkpoint
-  `d1eef33bf313159f7fd834ba624a3f73a8152cc6` plus the active runtime
-  reproducibility repair recorded below.
+  `d519601cdcca7100c65632bd4fdb6d049598a488`.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
   `agent/ouroboros-andock-backend`, commit
@@ -425,8 +424,24 @@ Two complete runtime/APK builds then passed byte-for-byte comparison:
   `bea677bfcb1f0b9fafafd2d5ca038c1f868949b25b7c12743f9db9685d2146a9`.
 
 The final cleanup made the timestamp conversion portable and made the
-standalone target always restage its inputs. Repeat the exact-artifact build
-after committing that cleanup, then clean-install it for emulator validation.
+standalone target always restage its inputs. It is committed as `d519601c`.
+An exact rebuild from that clean commit reproduced all three identities above
+byte-for-byte. That frozen APK was then uninstalled and clean-installed on
+`emulator-5562`; its SHA-256 was rechecked as
+`a41742675818087db0c479c9142d40b403bd3c5ddd42d478bda752395547a681`,
+and `andock-emulator-smoke.py` passed with `ANDOCK_EMULATOR_SMOKE_OK` in
+22.36 seconds. Evidence is under
+`arch/android/build/evidence/final-unattended/final-committed-candidate/`.
+
+The first complete workload attempt against that APK reached the native
+network boundary after passing the base environment, APT, all toolchains,
+Python, Node, 10,000-file, Git, archive, IPC, Unix-socket, and Linux-file gates.
+It is not valid final evidence: while the old APK was running, the live source
+probe was strengthened for the image-9 UDP policy below, so the newly compiled
+probe correctly rejected the still-installed image-8 behavior. The mismatched
+run and its member are retained only as diagnostic evidence under
+`final-committed-candidate/full-workload/`; the final workload restarts from a
+clean member after image 9 is built and installed.
 
 Latest complete-run observations include APT 334.069 seconds, toolchains
 25.738, system pip 11.634, venv 14.874, native wheel 15.950, Node addon
@@ -453,6 +468,19 @@ inside the guest compatibility layer:
 - `listxattr` filtering and fake-root ownership limitations need exact tests
   and documentation; and
 - public IPv6/NAT64 behavior remains a real-phone acceptance item.
+
+A final outbound-network audit found one additional release blocker in image
+8. Allowing wildcard port-zero UDP client binds made `dig` work, but the real
+socket remained unconnected, so a reachable LAN/global-IPv6 peer could send an
+unsolicited datagram to the discovered ephemeral port. Image 9 retains normal
+UDP clients while kernel-pinning each unconnected send to its authorized reply
+peer, draining pre-selection datagrams, and rejecting receive-bearing calls
+until that peer is locked. Same-peer sends preserve outstanding replies;
+different-peer sends safely repin, guest `getpeername` remains `ENOTCONN`, and
+unconnected `sendmmsg` batches are accepted only for one destination. UDP
+disconnect is denied so another thread cannot remove the kernel filter under
+an in-flight receive. This preserves the outbound-only contract without
+userspace receive filtering.
 
 All known code-level hardening blockers are now integrated on the canonical
 branch:
@@ -489,6 +517,128 @@ accepted architecture. It now states fake-root and `user.*` xattr limits, the
 network-enabled adapter trust, host reserve, sparse writeback, current emulator
 thresholds, and the real-phone IPv6/NAT64 gate. README/specification text now
 matches that contract.
+
+The exact image-9 ARM64 native build completed from the final reviewed source
+snapshot. Its PRoot/Andock binary is
+`d79f6f33a47fea2031d608c8b95086f09648eb202e20ba8c73819f4755cba74c` and
+its native manifest is
+`74814bdfcfb0c08769798d311fc47fab15ed9f6fda45a3fdf1e0cfe832a92da4`.
+The no-force builder accepted those outputs as current. The direct template
+validator passed against the unchanged runtime image
+`e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c`.
+The host image-engine/mapping, network-client, and launcher suites all pass;
+the final network-client test passes at SHA-256
+`c82ae5f953c76236bf62ef4849ffe14d95c6a24424bb94f67100f360060061da`.
+The exact native build transcript is
+`build/evidence/final-unattended/image-9-native-build-final/console.log`.
+
+Two complete image-9 runtime/APK assemblies are byte-identical. The frozen
+candidate identities are APK
+`4b116f00e1f6c0e425be13b4d0dd0f47c069badec574f57f139e858cabfd6860`,
+runtime ZIP
+`9cbb5b8f33dc60571a7d42120c56f804f1c719cc58b3bfd7a7f034a8466c56b5`,
+runtime manifest
+`a74ce764b0f7eeb7acfd6958a5894fc5da07c55eeadaffb910fbae293a9ff091`,
+and canonical preloaded LMDB
+`d2f0765b94e84f77ef90b24030453aedcd91a0130df21acbfdc5802c51421182`.
+Android unit tests and lint pass. A clean install of that exact APK on the
+owned ARM64 API-36 emulator passed `ANDOCK_EMULATOR_SMOKE_OK`. The focused
+network gate then passed every expanded native syscall assertion, real raw
+UDP DNS through `dig`, a zero-byte loopback-race check, and a separate
+network-disabled socket denial with `ANDOCK_IMAGE9_FOCUSED_NETWORK_OK`.
+
+The complete image-9 clean-member workload passed all 36 stages in 926.494
+seconds with `ANDOCK_EMULATOR_WORKLOADS_OK`. Exact observations were APT
+346.096 seconds, PyTorch 87.589, Transformers 65.850, warm ML
+17.121/16.733/17.035, and raw UDP DNS 0.531. It covered the full documented
+filesystem, toolchain, Python, Node, ML, network, force-stop, and persistence
+surface from a fresh 8 GiB member image. Evidence hashes are result JSON
+`d8d5d2cb930ce1be4cef602d6e6af7b5813f53341154baef9812616b40c733f9`
+and console log
+`c1b036c1fe2afd6ec0f3d854e987107702773a86d498e5b860f4b5d9316610a5`.
+
+Writing a new file into that mutable member left every unsigned boot-
+measurement field byte-identical, including body link
+`aGfrzFZDKSx0esJB4oIqfXdgnvgtx2xPQRk03DJq0Ro`; only the expected randomized
+RSA-PSS response commitment changed. The canonical commitment-free response
+hash before and after is
+`7720a84ac22bf1b72257a5882970ac2a57d546c6c02d8094b6ce3bebef722303`.
+Finally, destroy removed the exact 8 GiB member image from app-private storage
+and passed `ANDOCK_DESTROY_DELETION_OK`.
+
+## Image-9 release ladder
+
+The ordinary Android release ladder now passes on the owned ARM64 emulator:
+
+- `make -C arch/android verify-config-invariants`;
+- `make -C arch/android preloaded-store-reproducibility`, reproducing canonical
+  LMDB `d2f0765b94e84f77ef90b24030453aedcd91a0130df21acbfdc5802c51421182`;
+- `make -C arch/android android-build`, preserving the frozen APK/runtime
+  identities above;
+- `ANDROID_SERIAL=emulator-5562 make -C arch/android smoke`;
+- `ANDROID_SERIAL=emulator-5562 make -C arch/android scenarios`;
+- `ANDROID_SERIAL=emulator-5562 make -C arch/android android-zone-storage-smoke`;
+  and
+- `ANDROID_SERIAL=emulator-5562 ./scripts/smoke.sh android`.
+
+The first scenario run found a test-harness error rather than a runtime
+propagation failure. The effective config, raw stock metadata, and raw
+attested node all contained the expected linked `name-resolvers`, but the
+generic AO materializer correctly represented the recursively re-fetched
+message as a cycle sentinel. The next-boot test now verifies the linked
+singleton directly through its exact content link, including the absence of
+a second value. The standalone next-boot test and the full scenario suite pass
+with that protocol-accurate assertion.
+
+The first mixed smoke stopped before boot because this isolated worktree had
+no local Secure Boot key. `make signing-keys` created a private, gitignored
+operator test key only inside this worktree. The subsequent run exposed that
+the default Docker volume `lapee-buildroot` is concurrently owned by a separate
+LMDB experiment: its extracted HyperBEAM source was intentionally rewritten
+to a local C-NIF `elmdb-override`, so the stock fcdf LapEE recipe correctly
+failed when that foreign dependency no longer contained the pinned Rust
+`Cargo.toml`. No source change was made for this external contamination and
+the shared volume was not cleaned or altered. The authoritative mixed rerun
+must use the dedicated volume `lapee-andock-arm64-release-buildroot` and a
+matching unique container name.
+
+That dedicated-volume rerun performed the intended clean Buildroot bootstrap,
+but the mixed harness's 1,200-second zone-ready deadline expired while the
+first kernel was still compiling. The independently named Docker build
+container continued populating only the dedicated volume after the harness
+reaped its QEMU wrapper. Once it exits, rerun with a larger first-bootstrap
+timeout; this is a harness deadline, not a build or runtime failure.
+
+The authoritative retry used the same dedicated volume and container name
+with `TIMEOUT=3600`. It passed the real `~measurement@1.0/verify-peer`
+preflight, initialized both x86_64 QEMU nodes, joined the AndEE emulator
+through QEMU node 1, and produced ring-signed membership proofs from all three
+nodes. `./scripts/smoke.sh mixed` exited 0 with
+`=== mixed AndEE + QEMU ring PASSED ===`. The exact transcript is
+`arch/android/build/evidence/final-unattended/image-9-release-ladder/11-root-mixed-smoke-isolated-buildroot-retry.log`,
+SHA-256
+`0d01a5755860a8691be13cbaa8a4e41377268edf12dccf49709fdefbbb462431`.
+
+The portable-device audit then reproduced the earlier runaway CPU/memory
+symptom below the application layer. `hb_store_gateway` passes its store-local
+options, rather than the outer node options, to ANS-104 decoding. The shipped
+AndEE gateway store therefore omitted the measured preloaded codec store and
+also asked `hb_cache` to materialize every fetched archive into a volatile
+message store. A 100 KiB signed Andock archive drove hundreds of millions of
+reductions and hundreds of MiB of transient memory. Direct decoding with the
+same measured preloaded store verified and loaded the archive in about one
+second.
+
+The generic AndEE node configuration now makes that dependency explicit in
+the gateway store and sets `local-store` to false. Remote messages are decoded
+through `_build/preloaded-store`; loaded modules still use HyperBEAM's shared
+loaded-device cache, while redundant archive writeback is skipped. No
+HyperBEAM or Ouroboros-specific runtime code changed. The config invariant
+gate passes, JSON type coercion produced `hb_store_gateway`,
+`hb_store_lmdb`, and literal `false` as intended, and a stock fcdf desktop
+runtime remotely verified and loaded all five published portable device roots
+in 6.28 seconds. The exact log SHA-256 is
+`209dc8fa0c9d1a8d649c210b4827812638e5f54834fe1c22a694c52460817cd3`.
 
 ## Portable Ouroboros state
 
@@ -532,21 +682,16 @@ composition does not require them.
 
 ## Remaining acceptance gates
 
-1. Prove two complete runtime/APK builds are byte-identical after the active
-   preload and ZIP reproducibility repair.
-2. Clean-install that exact final APK and rerun the complete image-8 workload,
-   including raw UDP DNS through the narrowly permitted client bind.
-3. Run the complete AndEE release ladder on `emulator-5562`:
-   config invariants, Android build, smoke, scenarios, Android zone storage,
-   root Android smoke, and mixed smoke with real measurement peer preflight.
-4. Run the recursive deep-clean/adversarial security review and repeat every
+1. Rebuild the runtime/APK for the generic gateway-store correction, prove
+   reproducibility, and rerun the affected Android gates.
+2. Run the recursive deep-clean/adversarial security review and repeat every
    affected gate after any code change.
-5. Validate the portable Ouroboros packages and `~andock@1.0` on the frozen
+3. Validate the portable Ouroboros packages and `~andock@1.0` on the frozen
    AndEE runtime, including a real provider-backed agent flow and browser UI
    when locally possible without public publication.
-6. Confirm both canonical worktrees are clean and commit coherent final
+4. Confirm both canonical worktrees are clean and commit coherent final
    checkpoints.
-7. Freeze the APK, config, evidence bundle, exact phone commands, and expected
+5. Freeze the APK, config, evidence bundle, exact phone commands, and expected
    URLs for real unrooted ARM64-phone acceptance in the morning.
 
 Do not declare release completion until the real phone passes. The unattended

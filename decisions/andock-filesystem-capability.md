@@ -157,6 +157,15 @@ destination at `connect`, `sendto`, `sendmsg`, and `sendmmsg`:
   TCP or UDP port 53; and
 - redirects, reconnects, and every unconnected UDP datagram are rechecked.
 
+UDP clients may bind only a wildcard port zero. After an authorized
+unconnected send, the underlying socket is kernel-connected to that reply peer
+without changing the guest-visible unconnected state. This rejects unsolicited
+datagrams from other sources; datagrams queued before selection are drained,
+and receive calls fail until the peer is locked. An unconnected `sendmmsg`
+batch is accepted only when every message has the same destination. Repeated
+sends to that same peer do not reconnect or drain, while UDP `AF_UNSPEC`
+disconnect is denied so a concurrent receive cannot outlive the filter.
+
 Raw, packet, netlink, SCTP, ICMP, inbound, and listening Internet sockets are
 not brokered. Network-disabled commands receive no broker and fail Internet
 socket creation with `EACCES`. Python, Node, copied binaries, subprocesses,

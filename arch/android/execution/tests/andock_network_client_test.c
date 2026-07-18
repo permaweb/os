@@ -143,6 +143,90 @@ static void run_server(bool malformed, pthread_t *thread, int *client)
 	}
 }
 
+static int udp_loopback_socket(struct sockaddr_in *address)
+{
+	socklen_t size = sizeof(*address);
+	int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	memset(address, 0, sizeof(*address));
+	address->sin_family = AF_INET;
+	address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (fd < 0 || bind(fd, (struct sockaddr *) address, sizeof(*address)) < 0
+	    || getsockname(fd, (struct sockaddr *) address, &size) < 0) {
+		perror("UDP loopback socket");
+		exit(1);
+	}
+	return fd;
+}
+
+static void send_udp_byte(int fd, const struct sockaddr_in *destination,
+		char value)
+{
+	if (sendto(fd, &value, sizeof(value), 0,
+		(struct sockaddr *) destination, sizeof(*destination)) != sizeof(value)) {
+		perror("send UDP byte");
+		exit(1);
+	}
+}
+
+static void check_udp_peer_lock(void)
+{
+	struct sockaddr_in receiver_address;
+	struct sockaddr_in attacker_address;
+	struct sockaddr_in first_peer_address;
+	struct sockaddr_in second_peer_address;
+	struct sockaddr_in actual_peer = {};
+	socklen_t actual_peer_size = sizeof(actual_peer);
+	char value;
+	int receiver = udp_loopback_socket(&receiver_address);
+	int attacker = udp_loopback_socket(&attacker_address);
+	int first_peer = udp_loopback_socket(&first_peer_address);
+	int second_peer = udp_loopback_socket(&second_peer_address);
+
+	if (sendto(attacker, NULL, 0, 0, (struct sockaddr *) &receiver_address,
+		sizeof(receiver_address)) != 0)
+		goto fail;
+	send_udp_byte(attacker, &receiver_address, 'q');
+	if (andock_network_lock_udp_peer(receiver,
+		(struct sockaddr *) &first_peer_address,
+		sizeof(first_peer_address)) != 0)
+		goto fail;
+	if (getpeername(receiver, (struct sockaddr *) &actual_peer,
+		&actual_peer_size) < 0
+	    || actual_peer.sin_port != first_peer_address.sin_port)
+		goto fail;
+	send_udp_byte(attacker, &receiver_address, 'x');
+	send_udp_byte(first_peer, &receiver_address, 'a');
+	if (recv(receiver, &value, 1, MSG_DONTWAIT) != 1 || value != 'a')
+		goto fail;
+	errno = 0;
+	if (recv(receiver, &value, 1, MSG_DONTWAIT) >= 0
+	    || (errno != EAGAIN && errno != EWOULDBLOCK))
+		goto fail;
+
+	send_udp_byte(first_peer, &receiver_address, 'o');
+	if (andock_network_lock_udp_peer(receiver,
+		(struct sockaddr *) &second_peer_address,
+		sizeof(second_peer_address)) != 0)
+		goto fail;
+	send_udp_byte(first_peer, &receiver_address, 'y');
+	send_udp_byte(second_peer, &receiver_address, 'b');
+	if (recv(receiver, &value, 1, MSG_DONTWAIT) != 1 || value != 'b')
+		goto fail;
+	errno = 0;
+	if (recv(receiver, &value, 1, MSG_DONTWAIT) >= 0
+	    || (errno != EAGAIN && errno != EWOULDBLOCK))
+		goto fail;
+	close(second_peer);
+	close(first_peer);
+	close(attacker);
+	close(receiver);
+	return;
+
+fail:
+	fprintf(stderr, "UDP peer lock did not drain or filter datagrams\n");
+	exit(1);
+}
+
 int main(void)
 {
 	struct sockaddr_in destination = {
@@ -152,6 +236,7 @@ int main(void)
 	pthread_t thread;
 	int client;
 	int socket_fd;
+	check_udp_peer_lock();
 
 	inet_pton(AF_INET, "1.1.1.1", &destination.sin_addr);
 	if (andock_network_create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP,

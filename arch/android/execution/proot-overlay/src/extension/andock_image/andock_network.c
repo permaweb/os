@@ -23,6 +23,7 @@
 #define ANDOCK_NETWORK_HEADER_SIZE 16
 #define ANDOCK_NETWORK_MAX_PACKET_SIZE 64
 #define ANDOCK_NETWORK_MAX_CAPABILITY_FDS 8
+#define ANDOCK_NETWORK_MAX_UDP_DRAIN 4096
 
 static int capability_fd = -1;
 static uint32_t request_id;
@@ -267,4 +268,37 @@ int andock_network_authorize(const struct sockaddr *address,
 	memcpy(payload + 12, raw_address, raw_size);
 	return call(ANDOCK_NETWORK_AUTHORIZE_DESTINATION,
 		payload, 12 + raw_size, NULL);
+}
+
+int andock_network_drain_udp(int fd)
+{
+	char discarded;
+	ssize_t result;
+
+	if (fd < 0)
+		return -EBADF;
+	for (size_t count = 0; count < ANDOCK_NETWORK_MAX_UDP_DRAIN; count++) {
+		result = recv(fd, &discarded, sizeof(discarded),
+			MSG_DONTWAIT | MSG_TRUNC);
+		if (result >= 0)
+			continue;
+		if (errno == EINTR)
+			continue;
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return 0;
+		return -errno;
+	}
+	return -EBUSY;
+}
+
+int andock_network_lock_udp_peer(int fd, const struct sockaddr *address,
+		socklen_t address_size)
+{
+	int result;
+	if (fd < 0)
+		return -EBADF;
+	if (address == NULL)
+		return -EFAULT;
+	result = TEMP_FAILURE_RETRY(connect(fd, address, address_size));
+	return result < 0 ? -errno : andock_network_drain_udp(fd);
 }

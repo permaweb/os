@@ -164,6 +164,13 @@ the `on.start` boot measurement hook, persist the v1 node key, inject an
 unmeasured `trusted-devices` map, or override HyperBEAM's stock store/cache
 configuration.
 
+The shipped read-only gateway store MUST decode fetched AO messages through
+the measured `_build/preloaded-store`. It MUST NOT write remote device
+archives back into the volatile primary store: loaded device modules already
+use HyperBEAM's shared loaded-device cache, while archive materialization in a
+non-persistent message store adds archive-sized transient work without
+preserving state across an app restart.
+
 Private node options such as `priv-ouroboros-keys` follow normal HyperBEAM
 configuration semantics. AndEE preserves them in the app-private effective
 configuration and relies on stock HyperBEAM private-key filtering to keep them
@@ -197,7 +204,11 @@ The boundary is the Android isolated UID, SELinux domain, and explicitly
 delivered descriptors. A network-disabled worker MUST receive no Internet
 socket-creation capability. A network-enabled worker MUST enforce numeric
 destination policy for each destination-bearing syscall; command inspection
-is non-conformant.
+is non-conformant. A wildcard ephemeral UDP client bind MUST NOT create an
+inbound capability: receive filtering MUST be pinned to an authorized reply
+peer and pre-selection datagrams MUST NOT be delivered, while fixed-port,
+non-wildcard, and listening binds remain denied. The worker MUST NOT permit a
+UDP disconnect to remove that peer filter while another receive is in flight.
 
 The immutable template, native engine, compatibility layer, manifests, and
 selected node configuration are committed through the existing APK-set,

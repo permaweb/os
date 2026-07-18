@@ -43,7 +43,13 @@ When networking is disabled, the isolated worker receives no Internet socket
 capability. When enabled, the app brokers only TCP/UDP descriptors and the
 native syscall layer rejects local/private/reserved destinations on every
 destination-bearing operation. Inbound/listening Internet sockets are not
-supported. Physical-phone IPv6/NAT64 behavior is a release acceptance gate.
+supported. UDP clients may bind only a wildcard ephemeral port; each
+unconnected send pins kernel receive filtering to that authorized reply peer
+and drains datagrams queued before the peer was selected. Multi-message sends
+on an unconnected socket must use one peer, and receive calls fail until a peer
+is selected. Repeated sends to the same peer preserve queued replies; UDP
+disconnect is denied so another thread cannot remove the receive filter.
+Physical-phone IPv6/NAT64 behavior is a release acceptance gate.
 
 The release build is ARM64-only. Build the pinned template independently with:
 

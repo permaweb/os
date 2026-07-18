@@ -23,6 +23,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -125,7 +126,7 @@ static void send_public_messages(int fd)
 	};
 	struct sockaddr_in targets[] = {
 		ipv4("1.1.1.1", 443),
-		ipv4("8.8.8.8", 443),
+		ipv4("1.1.1.1", 443),
 	};
 	struct mmsghdr messages[2] = {};
 	for (size_t index = 0; index < 2; index++) {
@@ -138,6 +139,127 @@ static void send_public_messages(int fd)
 		fail("sendmmsg public");
 	require(messages[0].msg_len == 1 && messages[1].msg_len == 1,
 		"sendmmsg lengths");
+}
+
+static void expect_sendmmsg_multi_peer_denied(int fd)
+{
+	char bytes[] = { 'a', 'b' };
+	struct iovec vectors[] = {
+		{ .iov_base = &bytes[0], .iov_len = 1 },
+		{ .iov_base = &bytes[1], .iov_len = 1 },
+	};
+	struct sockaddr_in targets[] = {
+		ipv4("1.1.1.1", 443),
+		ipv4("8.8.8.8", 443),
+	};
+	struct mmsghdr messages[2] = {};
+	for (size_t index = 0; index < 2; index++) {
+		messages[index].msg_hdr.msg_name = &targets[index];
+		messages[index].msg_hdr.msg_namelen = sizeof(targets[index]);
+		messages[index].msg_hdr.msg_iov = &vectors[index];
+		messages[index].msg_hdr.msg_iovlen = 1;
+	}
+	errno = 0;
+	require(sendmmsg(fd, messages, 2, 0) < 0,
+		"multi-peer sendmmsg unexpectedly succeeded");
+	require(errno == EOPNOTSUPP, "multi-peer sendmmsg wrong errno");
+	require(messages[0].msg_len == 0 && messages[1].msg_len == 0,
+		"multi-peer sendmmsg partially executed");
+}
+
+static void exercise_unconnected_udp_reply_peer(void)
+{
+	struct sockaddr_storage peer = {};
+	socklen_t peer_size = sizeof(peer);
+	struct sockaddr_in second = ipv4("8.8.8.8", 443);
+	char byte = 'x';
+	int fd = udp_socket();
+
+	send_public(fd);
+	errno = 0;
+	require(getpeername(fd, (struct sockaddr *) &peer, &peer_size) < 0,
+		"unconnected UDP exposed pinned reply peer");
+	require(errno == ENOTCONN, "unconnected UDP getpeername wrong errno");
+	require(sendto(fd, &byte, 1, 0,
+		(struct sockaddr *) &second, sizeof(second)) == 1,
+		"unconnected UDP reply-peer repin");
+	peer_size = sizeof(peer);
+	errno = 0;
+	require(getpeername(fd, (struct sockaddr *) &peer, &peer_size) < 0,
+		"repinned unconnected UDP exposed peer");
+	require(errno == ENOTCONN, "repinned UDP getpeername wrong errno");
+	close(fd);
+}
+
+static void expect_udp_disconnect_denied(void)
+{
+	struct sockaddr_in peer = ipv4("1.1.1.1", 443);
+	struct sockaddr disconnect = { .sa_family = AF_UNSPEC };
+	int fd = udp_socket();
+
+	require(connect(fd, (struct sockaddr *) &peer, sizeof(peer)) == 0,
+		"UDP connect before disconnect denial");
+	errno = 0;
+	require(connect(fd, &disconnect, sizeof(disconnect)) < 0,
+		"UDP disconnect unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"UDP disconnect wrong errno");
+	close(fd);
+}
+
+static void expect_udp_receive_without_peer_denied(void)
+{
+	struct sockaddr_in any = ipv4("0.0.0.0", 0);
+	struct sockaddr_storage source = {};
+	socklen_t source_size = sizeof(source);
+	char byte;
+	struct iovec vector = { .iov_base = &byte, .iov_len = 1 };
+	struct msghdr message = {
+		.msg_name = &source,
+		.msg_namelen = sizeof(source),
+		.msg_iov = &vector,
+		.msg_iovlen = 1,
+	};
+	struct mmsghdr messages[1] = {};
+	int channel[2];
+	int fd = udp_socket();
+
+	require(bind(fd, (struct sockaddr *) &any, sizeof(any)) == 0,
+		"pre-peer UDP bind");
+	messages[0].msg_hdr = message;
+	errno = 0;
+	require(recvfrom(fd, &byte, 1, MSG_DONTWAIT,
+		(struct sockaddr *) &source, &source_size) < 0,
+		"pre-peer recvfrom unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer recvfrom wrong errno");
+	errno = 0;
+	require(recvmsg(fd, &message, MSG_DONTWAIT | MSG_PEEK) < 0,
+		"pre-peer recvmsg unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer recvmsg wrong errno");
+	errno = 0;
+	require(recvmmsg(fd, messages, 1, MSG_DONTWAIT, NULL) < 0,
+		"pre-peer recvmmsg unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer recvmmsg wrong errno");
+	errno = 0;
+	require(read(fd, &byte, 1) < 0,
+		"pre-peer read unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer read wrong errno");
+	errno = 0;
+	require(readv(fd, &vector, 1) < 0,
+		"pre-peer readv unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer readv wrong errno");
+	errno = 0;
+	require(preadv2(fd, &vector, 1, -1, 0) < 0,
+		"pre-peer preadv2 unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer preadv2 wrong errno");
+	require(pipe(channel) == 0, "pre-peer splice pipe");
+	errno = 0;
+	require(splice(fd, NULL, channel[1], NULL, 1, SPLICE_F_NONBLOCK) < 0,
+		"pre-peer splice unexpectedly succeeded");
+	require(errno == ENOTCONN, "pre-peer splice wrong errno");
+	close(channel[0]);
+	close(channel[1]);
+	close(fd);
 }
 
 static void expect_sendmmsg_atomic_denial(int fd)
@@ -1175,12 +1297,16 @@ int main(int argc, char **argv)
 	send_public(primary);
 	send_public_message(primary);
 	send_public_messages(primary);
+	expect_sendmmsg_multi_peer_denied(primary);
 	expect_sendmmsg_atomic_denial(primary);
 	expect_denied_private(primary);
 	expect_scm_rights_denied(primary);
 	exercise_address_race(primary, (uint16_t) race_port);
 	exercise_ipv6();
 	exercise_ephemeral_udp_bind();
+	expect_udp_receive_without_peer_denied();
+	exercise_unconnected_udp_reply_peer();
+	expect_udp_disconnect_denied();
 	expect_dangerous_socket_denied(
 		AF_NETLINK, SOCK_RAW, NETLINK_ROUTE, "AF_NETLINK");
 	expect_dangerous_socket_denied(
@@ -1266,12 +1392,13 @@ int main(int argc, char **argv)
 		sizeof(connected)) == 0, "UDP connect");
 	require(write(replacement, "c", 1) == 1, "connected write");
 	struct sockaddr unspec = { .sa_family = AF_UNSPEC };
-	require(connect(replacement, &unspec, sizeof(unspec)) == 0,
-		"UDP disconnect");
 	errno = 0;
-	require(write(replacement, "d", 1) < 0, "disconnected write succeeded");
-	require(errno == ENOTCONN || errno == EDESTADDRREQ,
-		"disconnected write wrong errno");
+	require(connect(replacement, &unspec, sizeof(unspec)) < 0,
+		"UDP disconnect unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"UDP disconnect wrong errno");
+	require(write(replacement, "d", 1) == 1,
+		"denied disconnect altered connected socket");
 	close(replacement);
 
 	puts("ANDOCK_NETWORK_SYSCALLS_OK");

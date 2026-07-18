@@ -12,13 +12,14 @@
       "store-module": "hb_store_gateway",
       "access": ["read"],
       "ao-types": "store-module=\"atom\"",
-      "local-store": [
-        {
-          "store-module": "hb_store_volatile",
-          "name": "andee-volatile-store",
-          "ao-types": "store-module=\"atom\""
-        }
-      ]
+      "local-store": false,
+      "preloaded-store": {
+        "store-module": "hb_store_lmdb",
+        "name": "_build/preloaded-store",
+        "capacity": 1073741824,
+        "read-only": true,
+        "ao-types": "store-module=\"atom\""
+      }
     }
   ],
   "match-index": [

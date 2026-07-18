@@ -181,6 +181,7 @@ def fetch_body(path):
 
 effective = read_json("effective.json")
 boot_raw = read_json("boot.body")
+meta_raw = read_json("meta.body")
 meta = read_json("meta.materialized.json")
 boot = read_json("boot.materialized.json")
 meta_node = meta.get("body", meta)
@@ -266,6 +267,16 @@ def linked_value(message, key):
         return fetch_json(link)
     return message.get(key)
 
+def assert_linked_singleton(message, key, expected, label):
+    link = message.get(f"{key}+link")
+    if not isinstance(link, str):
+        fail(f"{label} did not include a content link")
+    value = fetch_json(link)
+    if fetch_body(f"{link}/1") != expected:
+        fail(f"{label} did not preserve the expected singleton value")
+    if value.get("2") is not None or value.get("2+link") is not None:
+        fail(f"{label} included more than one value")
+
 def assert_attested_public_volatile_store(node_link, key, name):
     value = fetch_json(f"{node_link}/{key}")
     if value.get("status") != 200:
@@ -342,8 +353,12 @@ if not (
     fail("effective config did not preserve measurement boot hook over hook-body first")
 if meta_node.get("andee-test-marker") != marker:
     fail("stock meta info did not include selected marker")
-if meta_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
-    fail("stock meta info did not include measured remote name resolvers")
+assert_linked_singleton(
+    meta_raw,
+    "name-resolvers",
+    "https://andee-next-boot.example/resolver",
+    "stock meta info measured remote name resolvers",
+)
 if "priv-ouroboros-keys" in meta_node:
     fail("stock meta info exposed private node options")
 if attested_node.get("andee-test-marker") != marker:
@@ -356,22 +371,31 @@ if attested_node.get("access-remote-cache-for-client") not in (None, False, "fal
     fail("attested node message preserved operator access-remote-cache-for-client override")
 if attested_node.get("load-remote-devices") not in (None, False, "false"):
     fail("attested node message preserved operator load-remote-devices override")
-if attested_node.get("trusted-device-signers") != ["operator-requested-signer"]:
-    fail("attested node message did not commit to trusted remote device signers")
-if attested_node.get("name-resolvers") != ["https://andee-next-boot.example/resolver"]:
-    fail("attested node message did not commit to measured remote name resolvers")
-if "priv-ouroboros-keys" in attested_node:
-    fail("attested public node exposed private node options")
-if "cache-control" in attested_node:
-    fail("attested node message preserved operator top-level cache-control override")
-if "store-defaults" in attested_node:
-    fail("attested node message preserved operator store-defaults override")
 attested_body = linked_value(boot_raw, "body")
 if not isinstance(attested_body, dict):
     fail("boot measurement body did not resolve")
 attested_node_link = attested_body.get("node+link")
 if not isinstance(attested_node_link, str):
     fail("boot measurement body did not include an attested node link")
+attested_node_raw = fetch_json(attested_node_link)
+assert_linked_singleton(
+    attested_node_raw,
+    "trusted-device-signers",
+    "operator-requested-signer",
+    "attested node trusted remote device signers",
+)
+assert_linked_singleton(
+    attested_node_raw,
+    "name-resolvers",
+    "https://andee-next-boot.example/resolver",
+    "attested node measured remote name resolvers",
+)
+if "priv-ouroboros-keys" in attested_node:
+    fail("attested public node exposed private node options")
+if "cache-control" in attested_node:
+    fail("attested node message preserved operator top-level cache-control override")
+if "store-defaults" in attested_node:
+    fail("attested node message preserved operator store-defaults override")
 assert_attested_public_runtime_store(attested_node_link)
 assert_attested_public_volatile_store(
     attested_node_link,
