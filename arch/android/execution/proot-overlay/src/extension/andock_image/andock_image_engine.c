@@ -77,12 +77,13 @@ struct cached_inode {
 	int memory_fd;
 	unsigned int references;
 	uint64_t persisted_size;
+	unsigned int mappings;
+	unsigned int writable_mappings;
 	int64_t atime;
 	int64_t mtime;
 	int64_t ctime;
 	bool dirty;
 	bool full_dirty;
-	bool shared_mapped;
 	bool timestamps_explicit;
 	bool unlinked;
 	struct dirty_range *dirty_ranges;
@@ -1133,7 +1134,7 @@ static int resolve_operation(int flags, const char *path,
 		if (status == 0) {
 			struct cached_inode *cached = find_cached_id(result->cache_id);
 			if (cached != NULL && cached->references == 0
-			    && !cached->dirty && !cached->shared_mapped) {
+			    && !cached->dirty) {
 				remove_cached_inode(cached);
 				result->cache_id = 0;
 			}
@@ -1385,19 +1386,44 @@ int andock_image_engine_mark_dirty_range(uint64_t cache_id,
 	return status;
 }
 
-int andock_image_engine_mark_mapped(uint64_t cache_id)
+int andock_image_engine_mapping_retain(uint64_t cache_id, bool writable)
 {
 	struct cached_inode *cached = find_cached_id(cache_id);
 	if (cached == NULL)
 		return -ENOENT;
-	int status = refresh_cached_timestamps(cached);
+	if (cached->mappings == UINT_MAX
+	    || (writable && cached->writable_mappings == UINT_MAX))
+		return -EOVERFLOW;
+	int status = andock_image_engine_retain(cache_id);
 	if (status < 0)
 		return status;
-	cached->dirty = true;
-	cached->full_dirty = true;
-	clear_dirty_ranges(cached);
-	cached->shared_mapped = true;
+	cached->mappings++;
+	if (writable) {
+		status = andock_image_engine_mark_dirty(cache_id);
+		if (status < 0) {
+			cached->mappings--;
+			andock_image_engine_release(cache_id);
+			return status;
+		}
+		cached->writable_mappings++;
+	}
 	return 0;
+}
+
+int andock_image_engine_mapping_release(uint64_t cache_id, bool writable)
+{
+	struct cached_inode *cached = find_cached_id(cache_id);
+	if (cached == NULL)
+		return -ENOENT;
+	if (cached->mappings == 0
+	    || (writable && cached->writable_mappings == 0))
+		return -EINVAL;
+	int status = writable ? andock_image_engine_mark_dirty(cache_id) : 0;
+	cached->mappings--;
+	if (writable)
+		cached->writable_mappings--;
+	int release_status = andock_image_engine_release(cache_id);
+	return status < 0 ? status : release_status;
 }
 
 int andock_image_engine_timestamps(uint64_t cache_id,
@@ -1453,11 +1479,11 @@ int andock_image_engine_release(uint64_t cache_id)
 	/*
 	 * The cache owns one memfd per materialized inode.  Keeping every clean,
 	 * closed file resident eventually exhausts the isolated process fd limit
-	 * during normal package and archive workloads.  A writable shared mapping
-	 * is the only object that can still change the memfd after the last open
-	 * description has gone away, so only those entries must remain resident.
+	 * during normal package and archive workloads.  Every tracked mapping owns
+	 * its own reference, so reaching zero means no descriptor or mapping
+	 * can still change the memfd.
 	 */
-	if (status == 0 && (cached->unlinked || !cached->shared_mapped))
+	if (status == 0)
 		remove_cached_inode(cached);
 	return status;
 }
@@ -1467,7 +1493,7 @@ int andock_image_engine_sync_all(void)
 	int first_error = 0;
 	struct cached_inode *cached = inode_cache;
 	while (cached != NULL) {
-		if (cached->shared_mapped) {
+		if (cached->writable_mappings != 0) {
 			if (!cached->timestamps_explicit) {
 				int status = refresh_cached_timestamps(cached);
 				if (status < 0 && first_error == 0)

@@ -50,6 +50,13 @@ docker run --rm --platform linux/amd64 \
             execution/proot-overlay/src/extension/andock_image/andock_image_engine.c \
             "$source"/src/*.c \
             -o "$out/andock-image-engine-test"
+        cc -std=c11 -O2 -g \
+            -I execution/proot-overlay/src \
+            -Wall -Wextra -Werror \
+            execution/tests/andock_mapping_test.c \
+            execution/proot-overlay/src/extension/andock_image/andock_mapping.c \
+            -o "$out/andock-mapping-test"
+        "$out/andock-mapping-test" | tee "$out/mapping-result.txt"
         "$out/andock-image-engine-test" "$out/member.ext4" \
             | tee "$out/result.txt"
         debugfs -R "stat /work/large-sparse" "$out/member.ext4" \
@@ -61,5 +68,7 @@ docker run --rm --platform linux/amd64 \
         test "$block_count" -le 192
     '
 
+grep -qx ANDOCK_MAPPING_TEST_OK "$OUT/mapping-result.txt"
 grep -qx ANDOCK_IMAGE_ENGINE_TEST_OK "$OUT/result.txt"
-shasum -a 256 "$OUT/andock-image-engine-test" "$OUT/member.ext4"
+shasum -a 256 "$OUT/andock-image-engine-test" \
+    "$OUT/andock-mapping-test" "$OUT/member.ext4"

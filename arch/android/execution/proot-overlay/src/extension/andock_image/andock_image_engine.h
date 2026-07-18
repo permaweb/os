@@ -1,6 +1,7 @@
 #ifndef ANDOCK_IMAGE_ENGINE_H
 #define ANDOCK_IMAGE_ENGINE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -74,7 +75,8 @@ int andock_image_engine_reopen(int fd, int flags);
 int andock_image_engine_mark_dirty(uint64_t cache_id);
 int andock_image_engine_mark_dirty_range(uint64_t cache_id,
 		uint64_t offset, uint64_t length);
-int andock_image_engine_mark_mapped(uint64_t cache_id);
+int andock_image_engine_mapping_retain(uint64_t cache_id, bool writable);
+int andock_image_engine_mapping_release(uint64_t cache_id, bool writable);
 int andock_image_engine_timestamps(uint64_t cache_id,
 	int64_t *atime, int64_t *mtime, int64_t *ctime);
 int andock_image_engine_writeback(uint64_t cache_id);

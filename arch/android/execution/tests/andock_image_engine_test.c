@@ -234,6 +234,17 @@ static int open_fd_count(void)
 	return count;
 }
 
+static long resident_pages(void)
+{
+	FILE *status = fopen("/proc/self/statm", "r");
+	long total = 0;
+	long resident = 0;
+	if (status == NULL || fscanf(status, "%ld %ld", &total, &resident) != 2)
+		fail("resident-pages", -errno);
+	fclose(status);
+	return resident;
+}
+
 static void verify_sparse_fixtures(void)
 {
 	struct andock_image_result full = open_file(
@@ -395,6 +406,39 @@ int main(int argc, char **argv)
 	}
 	if (open_fd_count() != baseline_fds) {
 		fprintf(stderr, "closed inode cache retained file descriptors\n");
+		return 1;
+	}
+	directory = call(
+		ANDOCK_IMAGE_MKDIR, 0, 0755, "/work/mapping-lifetime", NULL);
+	andock_image_result_release(&directory);
+	long baseline_rss = resident_pages();
+	for (int index = 0; index < 256; index++) {
+		char path[64];
+		snprintf(path, sizeof(path), "/work/mapping-lifetime/%03d", index);
+		struct andock_image_result mapped = open_file(
+			path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+		track(&mapped);
+		if (ftruncate(mapped.guest_fd, 4096) != 0)
+			fail("mapping-lifetime-truncate", -errno);
+		char *address = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+			MAP_SHARED, mapped.guest_fd, 0);
+		if (address == MAP_FAILED)
+			fail("mapping-lifetime-mmap", -errno);
+		uint64_t cache_id = mapped.cache_id;
+		if (andock_image_engine_mapping_retain(cache_id, true) < 0)
+			fail("mapping-lifetime-retain", -EIO);
+		close_tracked(&mapped);
+		address[0] = (char)index;
+		munmap(address, 4096);
+		if (andock_image_engine_mapping_release(cache_id, true) < 0)
+			fail("mapping-lifetime-release", -EIO);
+	}
+	if (open_fd_count() != baseline_fds) {
+		fprintf(stderr, "unmapped inode cache retained file descriptors\n");
+		return 1;
+	}
+	if (resident_pages() > baseline_rss + 1024) {
+		fprintf(stderr, "unmapped inode cache retained resident memory\n");
 		return 1;
 	}
 	directory = call(
@@ -660,7 +704,7 @@ int main(int argc, char **argv)
 	if (mapping == MAP_FAILED)
 		fail("mapped-after-close-mmap", -errno);
 	uint64_t mapped_cache_id = mapped.cache_id;
-	if (andock_image_engine_mark_mapped(mapped_cache_id) < 0)
+	if (andock_image_engine_mapping_retain(mapped_cache_id, true) < 0)
 		fail("mapped-after-close-track", -EIO);
 	close_tracked(&mapped);
 	memcpy(mapping, "MAPPED42", 8);
@@ -678,6 +722,41 @@ int main(int argc, char **argv)
 	    || andock_image_engine_sync_all() < 0)
 		fail("mapped-after-executable-sync", -EIO);
 	munmap(mapping, 4096);
+	if (andock_image_engine_mapping_release(mapped_cache_id, true) < 0)
+		fail("mapped-after-close-release", -EIO);
+
+	struct andock_image_result protected = open_file(
+		"/work/protected-after-close",
+		O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+	track(&protected);
+	if (ftruncate(protected.guest_fd, 4096) != 0)
+		fail("protected-truncate", -errno);
+	write_at(protected.guest_fd, 0, "readonly");
+	if (andock_image_engine_mark_dirty(protected.cache_id) < 0
+	    || andock_image_engine_sync(protected.cache_id) < 0)
+		fail("protected-initial-sync", -EIO);
+	mapping = mmap(NULL, 4096, PROT_READ, MAP_SHARED,
+		protected.guest_fd, 0);
+	if (mapping == MAP_FAILED)
+		fail("protected-mmap", -errno);
+	uint64_t protected_cache_id = protected.cache_id;
+	if (andock_image_engine_mapping_retain(
+		protected_cache_id, false) < 0)
+		fail("protected-track", -EIO);
+	close_tracked(&protected);
+	if (mprotect(mapping, 4096, PROT_READ | PROT_WRITE) != 0)
+		fail("protected-mprotect", -errno);
+	if (andock_image_engine_mapping_retain(protected_cache_id, true) < 0
+	    || andock_image_engine_mapping_release(
+		protected_cache_id, false) < 0)
+		fail("protected-transition", -EIO);
+	memcpy(mapping, "writable", 8);
+	if (andock_image_engine_sync_all() < 0)
+		fail("protected-sync", -EIO);
+	munmap(mapping, 4096);
+	if (andock_image_engine_mapping_release(protected_cache_id, true) < 0)
+		fail("protected-release", -EIO);
+
 	struct andock_image_result sparse = open_file(
 		"/work/large-sparse",
 		O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
@@ -709,6 +788,10 @@ int main(int argc, char **argv)
 		"/work/mapped-after-close", O_RDONLY | O_CLOEXEC, 0);
 	expect_bytes(mapped_persisted.guest_fd, 0, "RETAIN42");
 	andock_image_result_release(&mapped_persisted);
+	struct andock_image_result protected_persisted = open_file(
+		"/work/protected-after-close", O_RDONLY | O_CLOEXEC, 0);
+	expect_bytes(protected_persisted.guest_fd, 0, "writable");
+	andock_image_result_release(&protected_persisted);
 	struct andock_image_result sparse_persisted = open_file(
 		"/work/large-sparse", O_RDONLY | O_CLOEXEC, 0);
 	expect_sparse_allocation(sparse_persisted.guest_fd);

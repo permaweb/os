@@ -19,12 +19,13 @@ index 0adb88b..7252801 100644
 +LWEXT4_OBJECTS := $(patsubst $(VPATH)%.c,%.o,$(LWEXT4_SOURCES))
  
  OBJECTS += \
-@@ -60,6 +67,10 @@ OBJECTS += \
+@@ -60,6 +67,11 @@ OBJECTS += \
  	ptrace/user.o		\
  	ptrace/wait.o		\
  	extension/extension.o	\
 +	extension/andock_image/andock_image.o \
 +	extension/andock_image/andock_image_engine.o \
++	extension/andock_image/andock_mapping.o \
 +	extension/andock_image/andock_network.o \
 +	$(LWEXT4_OBJECTS) \
  	extension/ashmem_memfd/ashmem_memfd.o \

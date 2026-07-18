@@ -27,6 +27,7 @@
 #include "compat.h"
 #include "extension/andock_image/andock_image.h"
 #include "extension/andock_image/andock_image_engine.h"
+#include "extension/andock_image/andock_mapping.h"
 #include "extension/andock_image/andock_network.h"
 #include "path/path.h"
 #include "syscall/chain.h"
@@ -49,6 +50,10 @@
 
 #ifndef CLOSE_RANGE_CLOEXEC
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+
+#ifndef MREMAP_DONTUNMAP
+#define MREMAP_DONTUNMAP 4
 #endif
 
 enum {
@@ -313,6 +318,7 @@ struct AndockBrokerState {
 	struct AndockUnixSocketTable *unix_sockets;
 	struct AndockFsContext *fs_context;
 	struct AndockNetworkTable *network_files;
+	struct AndockMappingTable *mappings;
 	struct AndockNetworkDescription *pending_network;
 	char *pending_unix_bind_path;
 	uint64_t pending_unix_bind_token;
@@ -328,6 +334,8 @@ struct AndockBrokerState {
 	int pending_flags;
 	bool pending_dirty;
 	bool pending_cache_retained;
+	uint64_t pending_mapping_cache_id;
+	bool pending_mapping_retained;
 	bool transfer_pending;
 	bool transfer_update_input;
 	bool transfer_update_output;
@@ -356,6 +364,15 @@ static void release_pending_cache(struct AndockBrokerState *state)
 	if (state->pending_cache_retained) {
 		andock_image_engine_release(state->pending_cache_id);
 		state->pending_cache_retained = false;
+	}
+}
+
+static void release_pending_mapping(struct AndockBrokerState *state)
+{
+	if (state->pending_mapping_retained) {
+		andock_image_engine_release(state->pending_mapping_cache_id);
+		state->pending_mapping_retained = false;
+		state->pending_mapping_cache_id = 0;
 	}
 }
 
@@ -393,6 +410,8 @@ static const FilteredSysnum filtered_sysnums[] = {
 	{ PR_lseek, FILTER_SYSEXIT },
 	{ PR_mmap, FILTER_SYSEXIT },
 	{ PR_mmap2, FILTER_SYSEXIT },
+	{ PR_mprotect, FILTER_SYSEXIT },
+	{ PR_mremap, FILTER_SYSEXIT },
 	{ PR_msync, FILTER_SYSEXIT },
 	{ PR_munmap, FILTER_SYSEXIT },
 	{ PR_pread64, FILTER_SYSEXIT },
@@ -3118,12 +3137,14 @@ static int handle_file_access(Tracee *tracee, Sysnum sysnum)
 		break;
 	case PR_mmap:
 	case PR_mmap2: {
+		int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
+		if ((flags & MAP_ANONYMOUS) != 0)
+			return 0;
 		fd = (int)peek_reg(tracee, CURRENT, SYSARG_5);
 		file = find_open_file(tracee, fd);
 		if (file == NULL || file->directory)
 			return 0;
 		int protection = (int)peek_reg(tracee, CURRENT, SYSARG_3);
-		int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
 		if (!file_readable(file) ||
 			((protection & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 &&
 			 !file_writable(file)))
@@ -3516,6 +3537,129 @@ static int sync_open_file(struct AndockOpenFile *file, bool durable)
 		: andock_image_engine_writeback(file->cache_id);
 }
 
+static int mapping_retain(uint64_t cache_id, bool writable)
+{
+	return andock_image_engine_mapping_retain(cache_id, writable);
+}
+
+static int mapping_release(uint64_t cache_id, bool writable)
+{
+	return andock_image_engine_mapping_release(cache_id, writable);
+}
+
+static const struct AndockMappingOps mapping_ops = {
+	.retain = mapping_retain,
+	.release = mapping_release,
+};
+
+static int reset_mappings_for_exec(struct AndockBrokerState *state)
+{
+	/* Detach instead of clearing: a vfork parent still owns the shared mm. */
+	struct AndockMappingTable *replacement =
+		andock_mapping_table_new(&mapping_ops);
+	if (replacement == NULL)
+		return -ENOMEM;
+	struct AndockMappingTable *previous = state->mappings;
+	state->mappings = replacement;
+	return andock_mapping_table_release(previous);
+}
+
+static size_t page_aligned_length(word_t value)
+{
+	static size_t page_size;
+	if (value == 0)
+		return 0;
+	if (page_size == 0) {
+		long configured = sysconf(_SC_PAGESIZE);
+		page_size = configured > 0 ? (size_t)configured : 4096;
+	}
+	size_t length = (size_t)value;
+	if (length > SIZE_MAX - (page_size - 1))
+		return 0;
+	return (length + page_size - 1) & ~(page_size - 1);
+}
+
+static int prepare_file_mapping(Tracee *tracee, Sysnum sysnum)
+{
+	if (sysnum != PR_mmap && sysnum != PR_mmap2)
+		return 0;
+	struct AndockBrokerState *state = broker_state(tracee);
+	if (state == NULL)
+		return -ENOTCONN;
+	release_pending_mapping(state);
+	int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
+	if ((flags & MAP_SHARED) == 0 || (flags & MAP_ANONYMOUS) != 0)
+		return 0;
+	struct AndockOpenFile *file = find_open_file(
+		tracee, (int)peek_reg(tracee, CURRENT, SYSARG_5));
+	if (file == NULL || file->directory || file->cache_id == 0)
+		return 0;
+	int status = andock_image_engine_retain(file->cache_id);
+	if (status < 0)
+		return status;
+	state->pending_mapping_cache_id = file->cache_id;
+	state->pending_mapping_retained = true;
+	return 0;
+}
+
+static int handle_mapping_exit(Tracee *tracee, Sysnum sysnum,
+		int64_t result)
+{
+	struct AndockBrokerState *state = broker_state(tracee);
+	if (state == NULL || state->mappings == NULL)
+		return -ENOTCONN;
+	int status = 0;
+	if (sysnum == PR_mmap || sysnum == PR_mmap2) {
+		if (result >= 0) {
+			size_t length = page_aligned_length(
+				peek_reg(tracee, ORIGINAL, SYSARG_2));
+			int protection = (int)peek_reg(
+				tracee, ORIGINAL, SYSARG_3);
+			status = length == 0 ? -EINVAL : andock_mapping_replace(
+				state->mappings, (uintptr_t)result, length,
+				state->pending_mapping_retained
+					? state->pending_mapping_cache_id : 0,
+				(protection & PROT_WRITE) != 0);
+			if (status < 0 && state->pending_mapping_retained) {
+				/* Keep the cache conservatively live if range allocation failed. */
+				andock_image_engine_mapping_retain(
+					state->pending_mapping_cache_id,
+					(protection & PROT_WRITE) != 0);
+			}
+		}
+		release_pending_mapping(state);
+		return status;
+	}
+	if (sysnum == PR_munmap && result == 0) {
+		size_t length = page_aligned_length(
+			peek_reg(tracee, ORIGINAL, SYSARG_2));
+		return length == 0 ? -EINVAL : andock_mapping_unmap(
+			state->mappings,
+			(uintptr_t)peek_reg(tracee, ORIGINAL, SYSARG_1), length);
+	}
+	if (sysnum == PR_mprotect && result == 0) {
+		size_t length = page_aligned_length(
+			peek_reg(tracee, ORIGINAL, SYSARG_2));
+		return length == 0 ? -EINVAL : andock_mapping_protect(
+			state->mappings,
+			(uintptr_t)peek_reg(tracee, ORIGINAL, SYSARG_1), length,
+			((int)peek_reg(tracee, ORIGINAL, SYSARG_3) & PROT_WRITE) != 0);
+	}
+	if (sysnum == PR_mremap && result >= 0) {
+		size_t old_length = page_aligned_length(
+			peek_reg(tracee, ORIGINAL, SYSARG_2));
+		size_t new_length = page_aligned_length(
+			peek_reg(tracee, ORIGINAL, SYSARG_3));
+		int flags = (int)peek_reg(tracee, ORIGINAL, SYSARG_4);
+		return old_length == 0 || new_length == 0 ? -EINVAL
+			: andock_mapping_remap(state->mappings,
+				(uintptr_t)peek_reg(tracee, ORIGINAL, SYSARG_1),
+				old_length, (uintptr_t)result, new_length,
+				(flags & MREMAP_DONTUNMAP) != 0);
+	}
+	return 0;
+}
+
 static int handle_file_sync(Tracee *tracee, Sysnum sysnum)
 {
 	if (sysnum != PR_fsync && sysnum != PR_fdatasync && sysnum != PR_close)
@@ -3566,17 +3710,6 @@ static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 	case PR_copy_file_range:
 		fd = (int)peek_reg(tracee, CURRENT, SYSARG_3);
 		break;
-	case PR_mmap:
-	case PR_mmap2: {
-		fd = (int)peek_reg(tracee, CURRENT, SYSARG_5);
-		struct AndockOpenFile *file = find_open_file(tracee, fd);
-		int protection = (int)peek_reg(tracee, CURRENT, SYSARG_3);
-		int flags = (int)peek_reg(tracee, CURRENT, SYSARG_4);
-		if (file != NULL && file->host_fd >= 0 &&
-			(protection & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0)
-			andock_image_engine_mark_mapped(file->cache_id);
-		return 0;
-	}
 	case PR_msync:
 	{
 		int status = andock_image_engine_sync_all();
@@ -3585,8 +3718,6 @@ static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 			status = andock_image_engine_flush();
 		return status;
 	}
-	case PR_munmap:
-		return andock_image_engine_sync_all();
 	default:
 		return 0;
 	}
@@ -5051,6 +5182,9 @@ static int handle_enter(Extension *extension, Tracee *tracee)
 	status = handle_file_access(tracee, sysnum);
 	if (status != 0)
 		return status;
+	status = prepare_file_mapping(tracee, sysnum);
+	if (status != 0)
+		return status;
 	status = handle_file_transfer(tracee, sysnum);
 	if (status != 0)
 		return status;
@@ -5460,6 +5594,9 @@ static int handle_exit(Tracee *tracee)
 	struct AndockNetworkFile *network_source = NULL;
 	bool file_close_on_exec = false;
 	bool network_close_on_exec = false;
+	status = handle_mapping_exit(tracee, sysnum, syscall_result);
+	if (status < 0)
+		return status;
 	if (state != NULL && state->pending_unix_bind_path != NULL) {
 		if (sysnum == PR_bind && result >= 0)
 			commit_pending_unix_bind(state);
@@ -5760,6 +5897,7 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		state->files = talloc_zero(state, struct AndockFileTable);
 		state->network_files =
 			talloc_zero(state, struct AndockNetworkTable);
+		state->mappings = andock_mapping_table_new(&mapping_ops);
 		state->unix_sockets =
 			talloc_zero(state, struct AndockUnixSocketTable);
 		state->fs_context = talloc_zero(state, struct AndockFsContext);
@@ -5767,9 +5905,14 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 			state->fs_context->mask = 022;
 		if (state->record_lock_owner == NULL || state->files == NULL
 		    || state->network_files == NULL
+		    || state->mappings == NULL
 		    || state->unix_sockets == NULL || state->fs_context == NULL) {
 			release_record_lock_owner(state->record_lock_owner);
 			state->record_lock_owner = NULL;
+			if (state->mappings != NULL) {
+				andock_mapping_table_release(state->mappings);
+				state->mappings = NULL;
+			}
 			andock_network_stop();
 			andock_image_engine_stop();
 			return -ENOMEM;
@@ -5795,6 +5938,10 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 		state->host_listener_fd = -1;
 		state->tracee_channel_fd = -1;
 		state->pending_host_fd = -1;
+		/* CLONE_VM shares one mm; fork gets independent inherited VMAs. */
+		state->mappings = ((word_t)data2 & CLONE_VM) != 0
+			? andock_mapping_table_reference(parent_state->mappings)
+			: andock_mapping_table_clone(parent_state->mappings);
 		if (((word_t) data2 & CLONE_THREAD) != 0) {
 			state->record_lock_owner = parent_state->record_lock_owner;
 			if (state->record_lock_owner != NULL)
@@ -5829,15 +5976,22 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 				if (status < 0) {
 					release_record_lock_owner(state->record_lock_owner);
 					state->record_lock_owner = NULL;
+					andock_mapping_table_release(state->mappings);
+					state->mappings = NULL;
 					return status;
 				}
 			}
 		}
 		if (state->record_lock_owner == NULL || state->files == NULL
 		    || state->network_files == NULL
+		    || state->mappings == NULL
 		    || state->unix_sockets == NULL || state->fs_context == NULL) {
 			release_record_lock_owner(state->record_lock_owner);
 			state->record_lock_owner = NULL;
+			if (state->mappings != NULL) {
+				andock_mapping_table_release(state->mappings);
+				state->mappings = NULL;
+			}
 			return -ENOMEM;
 		}
 		extension->filtered_sysnums = filtered_sysnums;
@@ -5851,6 +6005,14 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 	switch (event) {
 	case NEW_STATUS:
 		if (((unsigned int) data1 >> 16) == PTRACE_EVENT_EXEC) {
+			status = reset_mappings_for_exec(state);
+			if (status < 0) {
+				dprintf(STDERR_FILENO,
+					"andock: mapping-table exec transition failed: %s (%d)\n",
+					strerror(-status), status);
+				kill(tracee->pid, SIGKILL);
+				return 0;
+			}
 			status = unshare_open_files_for_exec(tracee);
 			if (status < 0) {
 				dprintf(STDERR_FILENO,
@@ -5905,6 +6067,9 @@ int andock_image_callback(Extension *extension, ExtensionEvent event,
 			state->pending_network = NULL;
 		}
 		release_pending_cache(state);
+		release_pending_mapping(state);
+		andock_mapping_table_release(state->mappings);
+		state->mappings = NULL;
 		if (image_extension_users > 0 && --image_extension_users == 0) {
 			release_file_locks(NULL);
 			release_all_record_locks(NULL);
