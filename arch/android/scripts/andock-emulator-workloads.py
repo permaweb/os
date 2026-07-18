@@ -421,17 +421,48 @@ def main():
         )
 
         workloads.run(
-            "network-public-outbound",
+            "post-ml-capacity",
+            "set -eu; df -B1 / /tmp; df -i /; command -v dig; "
+            "test -x /usr/bin/dig",
+        )
+        workloads.run(
+            "network-public-https",
             "set -eu; getent ahostsv4 example.com | head -1; "
-            "curl -fsSL --max-time 30 https://example.com >/root/example.html; "
-            "grep -qi example /root/example.html; "
-            "curl -fsSL --max-time 30 -L http://example.com >/dev/null; "
+            "curl -fsSL --retry 2 --retry-all-errors --retry-delay 1 "
+            "--max-time 30 https://example.com >/root/example.html; "
+            "grep -qi example /root/example.html",
+            timeout=180_000,
+            allow_network=True,
+        )
+        workloads.run(
+            "network-public-redirect",
+            "curl -fsSL --retry 2 --retry-all-errors --retry-delay 1 "
+            "--max-time 30 -L http://example.com >/dev/null",
+            timeout=180_000,
+            allow_network=True,
+        )
+        workloads.run(
+            "network-public-copied-binary",
             "cp /usr/bin/curl /root/copied-curl; /root/copied-curl -fsSL "
-            "--max-time 30 https://example.com >/dev/null; "
+            "--retry 2 --retry-all-errors --retry-delay 1 --max-time 30 "
+            "https://example.com >/dev/null",
+            timeout=180_000,
+            allow_network=True,
+        )
+        workloads.run(
+            "network-public-subprocess",
             "python3 -c \"import subprocess; subprocess.run(["
-            "'/root/copied-curl','-fsSL','--max-time','30',"
-            "'https://example.com'], check=True, stdout=subprocess.DEVNULL)\"; "
-            "dig +time=5 +tries=1 example.com A | grep -q 'status: NOERROR'",
+            "'/root/copied-curl','-fsSL','--retry','2',"
+            "'--retry-all-errors','--retry-delay','1','--max-time','30',"
+            "'https://example.com'], check=True, stdout=subprocess.DEVNULL)\"",
+            timeout=180_000,
+            allow_network=True,
+        )
+        workloads.run(
+            "network-public-dns",
+            "set -o pipefail; "
+            "dig +time=5 +tries=1 example.com A "
+            "| grep -q 'status: NOERROR'",
             timeout=180_000,
             allow_network=True,
         )

@@ -200,6 +200,89 @@ static void exercise_ipv6(void)
 	close(fd);
 }
 
+static void exercise_ephemeral_udp_bind(void)
+{
+	struct sockaddr_in any = ipv4("0.0.0.0", 0);
+	struct sockaddr_in loopback = ipv4("127.0.0.1", 0);
+	struct sockaddr_in fixed = ipv4("0.0.0.0", 5353);
+	struct sockaddr_in bound = {};
+	struct sockaddr_in6 any6 = {
+		.sin6_family = AF_INET6,
+	};
+	struct sockaddr_in6 loopback6 = {
+		.sin6_family = AF_INET6,
+		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+	};
+	struct sockaddr_in6 fixed6 = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(5353),
+	};
+	struct sockaddr_in6 bound6 = {};
+	socklen_t bound_size = sizeof(bound);
+	socklen_t bound6_size = sizeof(bound6);
+	int fd = udp_socket();
+	require(bind(fd, (struct sockaddr *) &any, sizeof(any)) == 0,
+		"IPv4 ephemeral UDP bind");
+	require(getsockname(fd, (struct sockaddr *) &bound, &bound_size) == 0,
+		"IPv4 ephemeral getsockname");
+	require(bound.sin_family == AF_INET && ntohs(bound.sin_port) != 0,
+		"IPv4 ephemeral bind result");
+	errno = 0;
+	require(listen(fd, 1) < 0, "UDP listen unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM || errno == EOPNOTSUPP,
+		"UDP listen wrong errno");
+	close(fd);
+
+	fd = udp_socket();
+	errno = 0;
+	require(bind(fd, (struct sockaddr *) &loopback, sizeof(loopback)) < 0,
+		"loopback UDP bind unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"loopback UDP bind wrong errno");
+	errno = 0;
+	require(bind(fd, (struct sockaddr *) &fixed, sizeof(fixed)) < 0,
+		"fixed UDP bind unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM, "fixed UDP bind wrong errno");
+	close(fd);
+
+	fd = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (fd < 0)
+		fail("IPv6 bind socket");
+	require(bind(fd, (struct sockaddr *) &any6, sizeof(any6)) == 0,
+		"IPv6 ephemeral UDP bind");
+	require(getsockname(fd, (struct sockaddr *) &bound6, &bound6_size) == 0,
+		"IPv6 ephemeral getsockname");
+	require(bound6.sin6_family == AF_INET6
+		&& ntohs(bound6.sin6_port) != 0,
+		"IPv6 ephemeral bind result");
+	close(fd);
+
+	fd = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (fd < 0)
+		fail("IPv6 denial socket");
+	errno = 0;
+	require(bind(fd, (struct sockaddr *) &loopback6, sizeof(loopback6)) < 0,
+		"IPv6 loopback UDP bind unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"IPv6 loopback UDP bind wrong errno");
+	errno = 0;
+	require(bind(fd, (struct sockaddr *) &fixed6, sizeof(fixed6)) < 0,
+		"IPv6 fixed UDP bind unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"IPv6 fixed UDP bind wrong errno");
+	close(fd);
+
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		fail("TCP bind socket");
+	errno = 0;
+	require(bind(fd, (struct sockaddr *) &any, sizeof(any)) < 0,
+		"TCP ephemeral bind unexpectedly succeeded");
+	require(errno == EACCES || errno == EPERM,
+		"TCP ephemeral bind wrong errno");
+	close(fd);
+}
+
 static void expect_dangerous_socket_denied(
 		int family, int type, int protocol, const char *operation)
 {
@@ -1097,6 +1180,7 @@ int main(int argc, char **argv)
 	expect_scm_rights_denied(primary);
 	exercise_address_race(primary, (uint16_t) race_port);
 	exercise_ipv6();
+	exercise_ephemeral_udp_bind();
 	expect_dangerous_socket_denied(
 		AF_NETLINK, SOCK_RAW, NETLINK_ROUTE, "AF_NETLINK");
 	expect_dangerous_socket_denied(

@@ -28,19 +28,22 @@ overlay or per-path Binder filesystem.
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
   `agent/andock-arm64-release`, current reviewed source checkpoint
-  `3e3a16af02629b1e8956c068175aa3bee4b6696f` plus this status-ledger
+  `8b7dfad79ffe52f62affe133652eda5c14be8522` plus this status-ledger
   update.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
   `agent/ouroboros-andock-backend`, commit
-  `a4c3b874178e30e0c1df028f069913c579bb22f4`.
+  `58e2312c442b9a8056c4d298994179d106713c86`.
 - HyperBEAM is a pinned substrate at exact edge
   `fcdf5867686c64a8abe79e04e10f3590fbd62b7f`; no upstream HyperBEAM worktree
   is edited by this task.
 - The shared dirty `/Users/sam/src/lapee` and `/Users/sam/src/ouroboros`
   checkouts are never edited or reset.
-- No push, merge to `main`, Arweave publication, production change, or wallet
-  spend has occurred.
+- No push, merge to `main`, production change, or wallet spend has occurred.
+  The five portable Ouroboros roots required by the Andock composition were
+  published through the subsidized `up.arweave.net` bundler; the signer wallet
+  balance remained zero before and after, so the authorized 5 AR budget is
+  untouched. Exact ids are recorded in the Ouroboros `STATUS.md`.
 
 Read-only ancestry reconciliation proved the two canonical branches already
 contain the desired component work. Do not merge the parked measurement,
@@ -307,9 +310,76 @@ and template validator both pass. Candidate identities are:
   `cd65a1eb0b3bc70acfb639f9c98b195bde845507bfdfb10144fc746a4a7b8b2d`
 
 The runtime records exact HyperBEAM `fcdf5867`, native revision
-`andock-image-7`, and the unchanged deterministic template identities. These
-remain candidate rather than frozen handoff hashes until the clean emulator
-and release-ladder gates pass.
+`andock-image-7`, and the unchanged deterministic template identities. Its
+clean install, focused Linux-semantics probe, and two complete filesystem and
+ML workload passes succeeded through xattr removal, inherited privileged
+denials, package managers, toolchains, PyTorch, Transformers, and Hugging Face.
+Both runs then failed the final combined public-network assertion after about
+seven seconds. Splitting that assertion into independently reported probes
+identified the deterministic cause: `dig` explicitly binds a UDP socket to a
+wildcard ephemeral address before sending, while image 7 denied every Internet
+socket `bind(2)`. HTTPS, redirects, copied curl, subprocess curl, and 20/20
+fresh HTTPS plus direct-IPv4 repetitions all pass. Image 7 is therefore a
+rejected candidate despite its otherwise green workload.
+
+Image 8 permits only UDP wildcard port-zero client binds on brokered Internet
+sockets. Concrete local addresses, fixed ports, TCP binds, and all listeners
+remain denied; network-disabled workers still cannot create Internet sockets.
+The direct syscall regression covers IPv4 and IPv6 ephemeral UDP binds and
+assigned ports, IPv4 and IPv6 non-wildcard/fixed-port rejection, TCP bind
+rejection, and listener rejection. Public-network workload probes are split so
+HTTPS, redirects, copied binaries, subprocesses, and raw UDP DNS each produce
+independent evidence.
+
+The pinned image-8 ARM64 native rebuild, no-force manifest check, runtime
+assembly, and APK build pass. Candidate identities are:
+
+- Debug APK:
+  `c9a548f8acf4b643c464f1623d8d251bdd99baeb414d1ed9cc039f3fe2f8a3fc`;
+- Runtime ZIP:
+  `86164ea3ab017248c9b88a9de57282d2540a2954cbb4d374cef5e43e07ec551c`;
+- Native Andock/PRoot:
+  `6e1b9dbbd6753cacd1b48c3eb9647b2210cdc130b1544cc9a4cdc9b5b4d8964b`;
+- Native Andock launcher:
+  `85f716390b1a9fb37e8b6a7830acb1272d1afc7c7af3a0eeed78ed2f2d5a6453`;
+- Native PRoot loader:
+  `44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04`;
+- Runtime manifest:
+  `74e2c19631c2d5db83eb1ac9bba16d4c9b39ec9fc47d784160076d77b6d26fcb`;
+- Native manifest:
+  `6e38f39dc4ff136d966d44597afcb87019b989c6e9116526c8b7fd19be60294d`.
+
+The runtime records exact HyperBEAM `fcdf5867`, native revision
+`andock-image-8`, and deterministic template image
+`e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c`.
+A clean install on the owned ARM64 API-36 emulator passed
+`ANDOCK_EMULATOR_SMOKE_OK`. The focused network gate then installed BIND,
+completed real `dig` UDP DNS, allowed only a UDP wildcard port-zero bind,
+denied TCP bind, and proved a network-disabled process could not create the
+UDP socket. The first complete clean-member run passed through APT, all
+toolchains, Python installs, Node/node-gyp, 10,000 files, Git, SQLite/archives,
+IPC/mmap, Unix sockets, and file syscall semantics before stopping on a test-
+only compile error in the newly expanded TCP-bind assertion. The helper name
+was corrected to a direct `socket(AF_INET, SOCK_STREAM, 0)` call. The retained
+member then compiled and passed the exact expanded native boundary with
+`ANDOCK_NETWORK_SYSCALLS_OK`, including the loopback race check. A complete
+from-zero rerun then passed all 36 stages in 930.395 seconds with
+`ANDOCK_EMULATOR_WORKLOADS_OK`. It included APT, C/C++/CMake/Go/Rust/Java,
+system/venv/native-wheel Python, npm/node-gyp, 10,000 files, Git,
+SQLite/archives, IPC/mmap, Unix sockets, Linux file semantics, the expanded
+network syscall boundary, CPU-only PyTorch, Transformers, a downloaded
+Hugging Face model, five independent public-network probes, local/disabled
+denial, Android force-stop, and complete member persistence. Exact final-run
+observations were APT 344.173 seconds, PyTorch install 88.999, Transformers
+66.225, warm ML 16.944/16.649/16.145, and raw UDP DNS 0.533. Evidence hashes:
+
+- result JSON:
+  `ad60f00e9c83d4abb5ec3b96e4342eaae004f01f8afafd6c7921970537c4cbbd`;
+- console log:
+  `d887a5406d844b182c8c8c428ff74661e0f0c5b3ebed8aa6907cb3ef740ad73b`.
+
+The retained member remains available only for the following measurement and
+destroy checks. The ordinary AndEE release ladder is now in progress.
 
 Current evidence root:
 `arch/android/build/evidence/final-unattended/`.
@@ -378,7 +448,7 @@ matches that contract.
 
 ## Portable Ouroboros state
 
-`agent/ouroboros-andock-backend@a4c3b87` directly contains the clean pre-auth
+`agent/ouroboros-andock-backend@58e2312` directly contains the clean pre-auth
 portable branch `agent/ouroboros-portable-scoped@20b2930` plus one standalone
 `~andock@1.0` commit. The device delegates the seven tools, file browsing,
 validation, clipping, serialization, and errors to the existing shared
@@ -407,18 +477,19 @@ strictly necessary, `/Users/sam/src/hyperbeam-key.json` is authorized with a
 hard cumulative ceiling below 5 AR; spending and transaction IDs must be
 recorded here.
 
-The exact current Forge publication dry run (no upload and no spend) produced
-signer `1tAG04TLl8Wg2GXPm4gvqexkBqnem0_o44Q0OUtWdow` and deterministic
-specification/implementation IDs for all eight packages. The full output is
-`.run-data/final-publish-dry-run/publish-dry-run.log` in the Ouroboros
-worktree. Publication remains pending until the frozen runtime proves the
-stock trusted-signer/Arweave path actually needs those remote artifacts.
+The five transitively required roots were published from the exact scoped
+branch through `up.arweave.net` with signer
+`1tAG04TLl8Wg2GXPm4gvqexkBqnem0_o44Q0OUtWdow`. All ten specification and
+implementation ids returned HTTP 200 from `arweave.net`; publication logs and
+the authoritative resolver ids are in the Ouroboros worktree under
+`.run-data/final-publication-5/` and in its `STATUS.md`. Docker, QEMU, and
+standalone WeaveMail were deliberately not published because the selected
+composition does not require them.
 
 ## Remaining acceptance gates
 
-1. Build and clean-install image 7, repeat smoke and the complete workload
-   including xattr removal, inherited privileged denials, and labelled public
-   network stages, and record its JSON/log evidence.
+1. Build, clean-install, and run the complete image-8 workload, including raw
+   UDP DNS through the narrowly permitted client bind.
 2. Run the complete AndEE release ladder on `emulator-5562`:
    config invariants, Android build, smoke, scenarios, Android zone storage,
    root Android smoke, and mixed smoke with real measurement peer preflight.

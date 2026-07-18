@@ -2407,6 +2407,45 @@ static int handle_network_connect(Tracee *tracee,
 	return network_result(tracee, result);
 }
 
+static int handle_network_bind(Tracee *tracee,
+		struct AndockNetworkFile *file)
+{
+	struct sockaddr_storage address;
+	socklen_t address_size;
+	bool wildcard;
+	uint16_t port;
+	int result;
+	int status = copy_network_address(tracee,
+		peek_reg(tracee, CURRENT, SYSARG_2),
+		peek_reg(tracee, CURRENT, SYSARG_3), &address, &address_size);
+	if (status < 0)
+		return network_result(tracee, status);
+	if (address.ss_family != file->description->family
+	    || file->description->type != SOCK_DGRAM)
+		return network_result(tracee, -EACCES);
+	if (address.ss_family == AF_INET) {
+		const struct sockaddr_in *ipv4 =
+			(const struct sockaddr_in *) &address;
+		port = ntohs(ipv4->sin_port);
+		wildcard = ipv4->sin_addr.s_addr == htonl(INADDR_ANY);
+	}
+	else if (address.ss_family == AF_INET6) {
+		const struct sockaddr_in6 *ipv6 =
+			(const struct sockaddr_in6 *) &address;
+		port = ntohs(ipv6->sin6_port);
+		wildcard = ipv6->sin6_scope_id == 0
+			&& IN6_IS_ADDR_UNSPECIFIED(&ipv6->sin6_addr);
+	}
+	else {
+		return network_result(tracee, -EAFNOSUPPORT);
+	}
+	if (port != 0 || !wildcard)
+		return network_result(tracee, -EACCES);
+	result = TEMP_FAILURE_RETRY(bind(file->description->host_fd,
+		(struct sockaddr *) &address, address_size));
+	return network_result(tracee, result < 0 ? -errno : result);
+}
+
 static int message_has_ancillary_data(const struct msghdr *message)
 {
 	/* Descriptors received outside the broker cannot be added to its image and
@@ -2820,6 +2859,7 @@ static int handle_network_enter(Tracee *tracee, Sysnum sysnum)
 	case PR_connect:
 		return handle_network_connect(tracee, file);
 	case PR_bind:
+		return handle_network_bind(tracee, file);
 	case PR_listen:
 		return network_result(tracee, -EACCES);
 	case PR_sendto:
