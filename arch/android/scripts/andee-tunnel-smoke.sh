@@ -10,9 +10,9 @@ PACKAGE="org.permaweb.andee"
 REMOTE_CONFIG="/data/local/tmp/andee-tunnel-smoke.json"
 RESET_APP_DATA="${RESET_APP_DATA:-1}"
 TUNNEL_DEVICE="${TUNNEL_DEVICE:-tunnel@1.0}"
-TUNNEL_IMPL="${TUNNEL_IMPL:-mfpw6oZe4NDaMMbkhulgQ63GcNHlwhOCRDTAQU5wjww}"
+TUNNEL_IMPL="${TUNNEL_IMPL:-w1nxNAXJy0i-5ZZixUlzj0R2a99y_r8O8z3bFuGBxe8}"
 TUNNEL_PEER="${TUNNEL_PEER:-https://smoke.solutions}"
-REMOTE_TRUSTED_TUNNEL_IMPL="${REMOTE_TRUSTED_TUNNEL_IMPL:-tF8WoGCazRaFsysvkvnYsa09nzxA42pQDCsoBFQTJII}"
+REMOTE_TRUSTED_TUNNEL_IMPL="${REMOTE_TRUSTED_TUNNEL_IMPL:-w1nxNAXJy0i-5ZZixUlzj0R2a99y_r8O8z3bFuGBxe8}"
 TUNNEL_WORKERS="${TUNNEL_WORKERS:-3}"
 PUBLIC_RETRIES="${PUBLIC_RETRIES:-20}"
 PUBLIC_RETRY_SLEEP="${PUBLIC_RETRY_SLEEP:-1}"
@@ -297,18 +297,27 @@ def is_volatile_store(value, name):
     ]
 
 def is_runtime_store(value):
-    volatile = {
-        "store-module": "hb_store_volatile",
-        "name": "andee-volatile-store",
-        "ao-types": 'store-module="atom"',
+    persistent = {
+        "store-module": "hb_store_lmdb",
+        "name": "../node-store",
+        "capacity": 8589934592,
+        "batch-size": 100,
+        "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
     }
     return value == [
-        volatile,
+        persistent,
         {
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": [volatile],
+            "local-store": False,
+            "preloaded-store": {
+                "store-module": "hb_store_lmdb",
+                "name": "_build/preloaded-store",
+                "capacity": 1073741824,
+                "read-only": True,
+                "ao-types": 'store-module="atom"',
+            },
         },
     ]
 
@@ -338,7 +347,7 @@ if not hooks or not any(
 ):
     fail("effective config did not include tunnel connect hook")
 if not is_runtime_store(effective.get("store")):
-    fail("effective config did not keep volatile store plus gateway reads")
+    fail("effective config did not keep persistent store plus gateway reads")
 if not is_volatile_store(effective.get("match-index"), "andee-volatile-match-index"):
     fail("effective config did not keep volatile match index")
 arweave_index_store = effective.get("arweave-index-store")

@@ -60,7 +60,7 @@ cat > "$OUT/next-boot-config.json" <<JSON
     "scope": "operator-requested"
   },
   "trusted-device-signers": ["operator-requested-signer"],
-  "priv-wallet": "operator-requested-wallet",
+  "priv-key-location": "/data/user/0/org.permaweb.andee/no_backup/node-identity/hyperbeam-key.json",
   "priv-ouroboros-keys": {
     "test-provider": {
       "api-key": "andee-private-test-key",
@@ -196,7 +196,6 @@ reserved_runtime_keys = (
     "cache-control",
     "http-extra-opts",
     "load-remote-devices",
-    "priv-wallet",
 )
 operator_only_needles = (
     "operator-requested-persistent-store",
@@ -223,18 +222,27 @@ def is_volatile_store(value, name):
     ]
 
 def is_runtime_store(value):
-    volatile = {
-        "store-module": "hb_store_volatile",
-        "name": "andee-volatile-store",
-        "ao-types": 'store-module="atom"',
+    persistent = {
+        "store-module": "hb_store_lmdb",
+        "name": "../node-store",
+        "capacity": 8589934592,
+        "batch-size": 100,
+        "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
     }
     return value == [
-        volatile,
+        persistent,
         {
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": [volatile],
+            "local-store": False,
+            "preloaded-store": {
+                "store-module": "hb_store_lmdb",
+                "name": "_build/preloaded-store",
+                "capacity": 1073741824,
+                "read-only": True,
+                "ao-types": 'store-module="atom"',
+            },
         },
     ]
 
@@ -251,9 +259,9 @@ def is_volatile_arweave_index_store(value):
         ],
     }
 
-def assert_base_volatile_stores(node, label):
+def assert_base_stores(node, label):
     if not is_runtime_store(node.get("store")):
-        fail(f"{label} did not enforce volatile runtime store plus gateway reads")
+        fail(f"{label} did not enforce persistent runtime store plus gateway reads")
     if not is_volatile_store(node.get("match-index"), "andee-volatile-match-index"):
         fail(f"{label} did not enforce volatile match index")
     if not is_volatile_arweave_index_store(node.get("arweave-index-store")):
@@ -292,24 +300,20 @@ def assert_attested_public_volatile_store(node_link, key, name):
         fail(f"attested node {key} did not enforce volatile store name")
 
 def assert_attested_public_runtime_store(node_link):
-    if fetch_body(f"{node_link}/store/1/store-module") != "hb_store_volatile":
-        fail("attested node store first entry was not volatile")
-    if fetch_body(f"{node_link}/store/1/name") != "andee-volatile-store":
-        fail("attested node store first entry did not enforce volatile store name")
+    if fetch_body(f"{node_link}/store/1/store-module") != "hb_store_lmdb":
+        fail("attested node store first entry was not persistent LMDB storage")
+    if fetch_body(f"{node_link}/store/1/name") != "../node-store":
+        fail("attested node store first entry did not enforce app-private store name")
+    if fetch_body(f"{node_link}/store/1/capacity") != 8589934592:
+        fail("attested node store first entry did not enforce LMDB capacity")
+    if fetch_body(f"{node_link}/store/1/batch-size") != 100:
+        fail("attested node store first entry did not enforce LMDB batch size")
     if fetch_body(f"{node_link}/store/2/store-module") != "hb_store_gateway":
         fail("attested node store second entry was not gateway")
     if fetch_body(f"{node_link}/store/2/access/1") != "read":
         fail("attested node gateway store was not read-only")
-    if (
-        fetch_body(f"{node_link}/store/2/local-store/1/store-module")
-        != "hb_store_volatile"
-    ):
-        fail("attested node gateway local store was not volatile")
-    if (
-        fetch_body(f"{node_link}/store/2/local-store/1/name")
-        != "andee-volatile-store"
-    ):
-        fail("attested node gateway store did not cache into volatile store")
+    if fetch_body(f"{node_link}/store/2/local-store") not in (False, "false"):
+        fail("attested node gateway unexpectedly materialized a local store")
 
 if not started:
     fail("HyperBEAM did not report startup")
@@ -321,6 +325,10 @@ if effective.get("andee-test-marker") != marker:
     fail("effective config did not include selected next-boot marker")
 if effective.get("measurement-device") != "andee@1.0":
     fail("effective config did not enforce andee measurement device")
+if effective.get("priv-key-location") != (
+    "/data/user/0/org.permaweb.andee/no_backup/node-identity/hyperbeam-key.json"
+):
+    fail("effective config did not preserve normal priv-key-location")
 if effective.get("priv-ouroboros-keys") != {
     "test-provider": {
         "api-key": "andee-private-test-key",
@@ -333,7 +341,7 @@ if effective.get("priv-ouroboros-keys") != {
 for key in reserved_runtime_keys:
     if key in effective:
         fail(f"effective config preserved reserved runtime key: {key}")
-assert_base_volatile_stores(effective, "effective config")
+assert_base_stores(effective, "effective config")
 for needle in operator_only_needles:
     if contains_value(effective, needle):
         fail(f"effective config preserved operator-only runtime value: {needle}")
@@ -361,12 +369,16 @@ assert_linked_singleton(
 )
 if "priv-ouroboros-keys" in meta_node:
     fail("stock meta info exposed private node options")
+if "priv-key-location" in meta_node:
+    fail("stock meta info exposed private node wallet location")
 if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
     fail("attested node message did not enforce andee measurement device")
 if "priv-ouroboros-keys" in attested_node:
     fail("attested public node exposed private node options")
+if "priv-key-location" in attested_node:
+    fail("attested public node exposed private node wallet location")
 if attested_node.get("access-remote-cache-for-client") not in (None, False, "false"):
     fail("attested node message preserved operator access-remote-cache-for-client override")
 if attested_node.get("load-remote-devices") not in (None, False, "false"):

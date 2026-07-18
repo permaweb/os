@@ -4,9 +4,11 @@
   "measurement-device": "andee@1.0",
   "store": [
     {
-      "store-module": "hb_store_volatile",
-      "name": "andee-volatile-store",
-      "ao-types": "store-module=\"atom\""
+      "store-module": "hb_store_lmdb",
+      "name": "../node-store",
+      "capacity": 8589934592,
+      "batch-size": 100,
+      "ao-types": "store-module=\"atom\", capacity=\"integer\", batch-size=\"integer\""
     },
     {
       "store-module": "hb_store_gateway",

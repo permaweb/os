@@ -69,5 +69,22 @@ the preload through a sorted LMDB dump/load pass and packages the runtime with
 fixed timestamps and entry order, so unchanged inputs on the pinned build
 host/toolchain produce byte-identical runtime ZIP and APK artifacts.
 
+The running node follows stock HyperBEAM `priv-key-location` semantics. When
+the operator does not select a location, Android supplies an app-private file
+under `noBackupFilesDir/node-identity/`; it survives service and app-process
+restarts but is removed with app data. Its path and key material are not
+runtime facts and are never passed to an Andock worker.
+
+The normal HyperBEAM primary store is likewise an app-private LMDB sibling of
+the replaceable runtime directory. LMDB provides atomic link replacement under
+concurrent cache writes, while a bounded write batch limits the uncommitted
+overlay used by the pinned stock backend. Release acceptance force-stops the
+app immediately after acknowledged application operations and proves recovery
+of their process graph; an arbitrary write-only LMDB call is not claimed to be
+synchronously durable merely because it returned. Stateful devices retain
+process graphs and bootstrap links without an Android-specific state protocol.
+Gateway-fetched archives are verified through the measured preloaded store but
+are not redundantly materialized into the primary store.
+
 The complete design, compatibility limits, and release gates are recorded in
 `../../decisions/andock-filesystem-capability.md`.

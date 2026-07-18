@@ -19,6 +19,13 @@ DEFAULT_IMG="$LAPEE_BUILD_DIR/images/lapee-runtime-no-tme-mixed-signed.img"
 IMG=${IMG:-$DEFAULT_IMG}
 REBUILD_QEMU_IMAGE=${REBUILD_QEMU_IMAGE:-1}
 REBUILD_ANDROID=${REBUILD_ANDROID:-1}
+ALLOW_REJECTED_PEER_ATTESTATION=${ALLOW_REJECTED_PEER_ATTESTATION:-1}
+
+case "$ALLOW_REJECTED_PEER_ATTESTATION" in
+    0) ALLOW_REJECTED_JSON=false ;;
+    1) ALLOW_REJECTED_JSON=true ;;
+    *) echo "ALLOW_REJECTED_PEER_ATTESTATION must be 0 or 1" >&2; exit 2 ;;
+esac
 
 ANDROID_ROOT="$ROOT/arch/android"
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}"
@@ -170,7 +177,7 @@ TIMEOUT="$TIMEOUT" \
 GUEST_HOST="$GUEST_HOST" \
 QEMU_ZONE_PHASE=boot-only \
 QEMU_ZONE_NODE_COUNT=2 \
-ALLOW_REJECTED_PEER_ATTESTATION=1 \
+ALLOW_REJECTED_PEER_ATTESTATION="$ALLOW_REJECTED_PEER_ATTESTATION" \
     ./scripts/qemu-zone-cluster.sh > "$OUT/qemu-zone-boot.log" 2>&1 &
 QEMU_PID=$!
 wait_for_file "$QEMU_OUT/ready" "QEMU zone boot"
@@ -183,14 +190,17 @@ QEMU1_GUEST_URL="http://$GUEST_HOST:$((BASE_PORT + 1))"
 QEMU2_GUEST_URL="http://$GUEST_HOST:$((BASE_PORT + 2))"
 QEMU1_ANDROID_URL="http://$ANDROID_HOST_ALIAS:$((BASE_PORT + 1))"
 
-python3 - <<'PY' "$OUT/andee-next-boot-config.json" "$MARKER"
+python3 - <<'PY' \
+    "$OUT/andee-next-boot-config.json" \
+    "$MARKER" \
+    "$ALLOW_REJECTED_PEER_ATTESTATION"
 import json, pathlib, sys
 
-path, marker = sys.argv[1:]
+path, marker, allow_rejected = sys.argv[1:]
 pathlib.Path(path).write_text(json.dumps({
     "andee-test-marker": marker,
     "zone-init-allow": True,
-    "allow-rejected-peer-attestation": True,
+    "allow-rejected-peer-attestation": allow_rejected == "1",
 }, indent=2) + "\n")
 PY
 
@@ -231,13 +241,14 @@ python3 - <<'PY' \
     "$QEMU2_GUEST_URL" \
     "$QEMU1_ANDROID_URL" \
     "$ANDEE_GUEST_URL" \
-    "$ZONE_NAME"
+    "$ZONE_NAME" \
+    "$ALLOW_REJECTED_PEER_ATTESTATION"
 import json, pathlib, sys
 
 qemu_out = pathlib.Path(sys.argv[1])
 andee_boot_path = pathlib.Path(sys.argv[2])
 requests = pathlib.Path(sys.argv[3])
-qemu1_guest, qemu2_guest, qemu1_android, andee_guest, zone = sys.argv[4:]
+qemu1_guest, qemu2_guest, qemu1_android, andee_guest, zone, allow_rejected = sys.argv[4:]
 
 def load(path):
     return json.loads(pathlib.Path(path).read_text())
@@ -322,7 +333,7 @@ init = {
     "name": zone,
     "peer-url": qemu1_android,
     "self-url": andee_guest,
-    "allow-rejected-peer-attestation": True,
+    "allow-rejected-peer-attestation": allow_rejected == "1",
 }))
 PY
 
@@ -348,17 +359,32 @@ done
 jq -n \
     --arg url "$ANDEE_GUEST_URL" \
     --argjson scope "$RING_REFERENCE" \
+    --argjson allow_rejected "$ALLOW_REJECTED_JSON" \
     '{
         "url": $url,
         "peer-attestation-scope": $scope,
-        "allow-rejected-peer-attestation": true
+        "allow-rejected-peer-attestation": $allow_rejected
     }' > "$OUT/requests/verify-andee.json"
 post_json "$QEMU1_HOST_URL" "/~measurement@1.0/verify-peer" \
     "$OUT/requests/verify-andee.json" \
     "$OUT/responses/qemu1-verify-andee.json"
-jq -e '.status == 200 and .body.type == "zone-peer-attestation"' \
-    "$OUT/responses/qemu1-verify-andee.json" >/dev/null
-echo ">> QEMU node 1 verified AndEE peer attestation"
+if [[ "$ALLOW_REJECTED_PEER_ATTESTATION" = "1" ]]; then
+    jq -e '.status == 200 and
+           .body.type == "zone-peer-attestation" and
+           .body."allow-rejected-peer-attestation" == "true"' \
+        "$OUT/responses/qemu1-verify-andee.json" >/dev/null
+    echo ">> QEMU node 1 evaluated emulator-limited AndEE peer attestation"
+else
+    jq -e '.status == 200 and
+           .body.type == "zone-peer-attestation" and
+           .body."allow-rejected-peer-attestation" == "false" and
+           .body."boot-verified" == "true" and
+           .body."credential-activation-verified" == "true" and
+           .body."fresh-verified" == "true" and
+           .body."freshness-verified" == "true"' \
+        "$OUT/responses/qemu1-verify-andee.json" >/dev/null
+    echo ">> QEMU node 1 strictly verified AndEE peer attestation"
+fi
 
 post_json "$QEMU2_HOST_URL" "/~zone@1.0/join" \
     "$OUT/requests/join-qemu2.json" \

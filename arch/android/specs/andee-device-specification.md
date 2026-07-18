@@ -160,16 +160,28 @@ remote device resolution with a nonempty `trusted-device-signers` allowlist
 and measured `name-resolvers`. The exact allowlist and resolver bindings are
 part of the effective node message and therefore the boot measurement.
 Operator configuration MUST NOT disable the AndEE measurement device, bypass
-the `on.start` boot measurement hook, persist the v1 node key, inject an
-unmeasured `trusted-devices` map, or override HyperBEAM's stock store/cache
-configuration.
+the `on.start` boot measurement hook, inject an unmeasured `trusted-devices`
+map, or override HyperBEAM's stock store/cache configuration. Node identity
+MUST follow normal HyperBEAM `priv-key-location` semantics. When the operator
+does not select a location, the Android runtime MUST supply an app-private
+default that persists across service and app-process restarts and is removed
+with app data. The path and key material MUST NOT be projected into public
+runtime facts or passed to an isolated execution worker.
 
 The shipped read-only gateway store MUST decode fetched AO messages through
 the measured `_build/preloaded-store`. It MUST NOT write remote device
-archives back into the volatile primary store: loaded device modules already
-use HyperBEAM's shared loaded-device cache, while archive materialization in a
-non-persistent message store adds archive-sized transient work without
-preserving state across an app restart.
+archives back into the primary store: loaded device modules already use
+HyperBEAM's shared loaded-device cache, while archive materialization adds
+archive-sized work unrelated to application state. The primary store MUST use
+stock transactional LMDB semantics in app-private storage outside the
+replaceable runtime directory so concurrent cache writers cannot expose
+partially replaced links and ordinary stateful devices retain process graphs
+and bootstrap links across service and app-process restarts. Its write batch
+MUST be bounded. Release acceptance MUST force-stop the app immediately after
+an acknowledged application mutation and prove that mutation, its process
+graph, and its execution workspace recover. Because the pinned stock backend
+acknowledges writes in its in-memory overlay before transaction commit, AndEE
+MUST NOT claim that an arbitrary write-only store call is synchronously durable.
 
 Private node options such as `priv-ouroboros-keys` follow normal HyperBEAM
 configuration semantics. AndEE preserves them in the app-private effective

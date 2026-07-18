@@ -70,10 +70,12 @@ def is_volatile_store(value: Any, name: str) -> bool:
 
 
 def is_runtime_store(value: Any) -> bool:
-    volatile = {
-        "store-module": "hb_store_volatile",
-        "name": "andee-volatile-store",
-        "ao-types": 'store-module="atom"',
+    persistent = {
+        "store-module": "hb_store_lmdb",
+        "name": "../node-store",
+        "capacity": 8589934592,
+        "batch-size": 100,
+        "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
     }
     preloaded = {
         "store-module": "hb_store_lmdb",
@@ -83,7 +85,7 @@ def is_runtime_store(value: Any) -> bool:
         "ao-types": 'store-module="atom"',
     }
     return value == [
-        volatile,
+        persistent,
         {
             "store-module": "hb_store_gateway",
             "access": ["read"],
@@ -140,7 +142,7 @@ def main() -> int:
             fail(f"base config should inherit common HyperBEAM default for {key}")
     if not is_runtime_store(config.get("store")):
         fail(
-            "base config must use volatile Android runtime storage plus "
+            "base config must use persistent transactional app-private storage plus "
             "non-caching gateway reads decoded by the measured preloaded store"
         )
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
@@ -175,15 +177,15 @@ def main() -> int:
         "measurement-body-source",
         "preloaded-devices-index",
         "preloaded-store",
-        "priv-key-location",
         "priv-store",
-        "priv-wallet",
-        "private-key",
         "store",
         "store-defaults",
     ):
         if f'"{key}"' not in store_text:
             fail(f"operator config must reserve top-level {key}")
+    for key in ("priv-key-location", "priv-wallet", "private-key"):
+        if f'"{key}"' in store_text:
+            fail(f"operator config must preserve normal private option {key}")
     return 0
 
 

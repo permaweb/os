@@ -50,6 +50,8 @@ class HyperbeamRuntime(
                 builder.environment()["ANDEE_NATIVE_LIB_DIR"] = context.applicationInfo.nativeLibraryDir
                 builder.environment()["ANDEE_ANDROID_ABI"] = android.os.Build.SUPPORTED_ABIS.first()
                 builder.environment()["ANDEE_BOOT_CONFIG"] = config.absolutePath
+                builder.environment()["ANDEE_NODE_WALLET"] =
+                    AndeePaths.nodeWalletFile(context).absolutePath
                 builder.environment()["ANDEE_RUNTIME_ZIP_SHA256"] = runtimeZipSha256()
                 builder.environment()["ANDEE_BASE_APK_SHA256"] = sha256(baseApk)
                 builder.environment()["ANDEE_APK_SET_SHA256"] = digestFileSet(apks.map(::File))

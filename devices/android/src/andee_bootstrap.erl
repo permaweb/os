@@ -1,10 +1,11 @@
 %%% @doc Android entrypoint for AndEE's bundled HyperBEAM node.
 %%%
-%%% The stock HB application entrypoint loads or creates a disk wallet. AndEE's
-%%% node key is deliberately session-local, so the Android native launcher calls
-%%% this module instead: it loads the enforced config, creates an in-memory
-%%% wallet, binds the node/config identity into the measurement context, and
-%%% starts the HTTP node in the foreground VM.
+%%% The Android native launcher calls this module to load the enforced config,
+%%% bind the node/config identity into the measurement context, and start the
+%%% HTTP node in the foreground VM. The node wallet follows stock HyperBEAM
+%%% `priv-key-location' semantics. Android supplies an app-private default path
+%%% that persists across service restarts but is never projected into runtime
+%%% facts or passed to an isolated execution worker.
 -module(andee_bootstrap).
 
 -export([start/0, start/1]).
@@ -36,8 +37,8 @@ start(ConfigPath) ->
     ok = hb_http_client:init_prometheus(),
     io:format("andee-bootstrap=start-store~n"),
     Store = start_store(Merged),
-    io:format("andee-bootstrap=generate-wallet~n"),
-    Wallet = ephemeral_wallet(),
+    io:format("andee-bootstrap=load-wallet~n"),
+    Wallet = node_wallet(Configured),
     io:format("andee-bootstrap=derive-address~n"),
     Address = hb_util:human_id(ar_wallet:to_address(Wallet)),
     NodeMsg =
@@ -199,8 +200,20 @@ configure_public_key_cacerts() ->
             erlang:error({failed_to_load_andee_cacerts, Cacerts, LoadReason})
     end.
 
-ephemeral_wallet() ->
-    ar_wallet:new({rsa, 65537}).
+node_wallet(Configured) ->
+    hb:wallet(wallet_location(Configured)).
+
+wallet_location(Configured) ->
+    Default =
+        case env_binary("ANDEE_NODE_WALLET") of
+            {ok, Location} -> Location;
+            false -> <<"hyperbeam-key.json">>
+        end,
+    hb_opts:get(
+        <<"priv-key-location">>,
+        Default,
+        Configured#{<<"only">> => local}
+    ).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -235,6 +248,42 @@ runtime_environment_keys_are_reserved_test() ->
             <<"andee-base-apk-sha256">> => <<"forged">>
         })
     ).
+
+wallet_location_uses_private_default_and_normal_override_test() ->
+    setenv("ANDEE_NODE_WALLET", "/tmp/andee-default-wallet.json"),
+    try
+        ?assertEqual(
+            <<"/tmp/andee-default-wallet.json">>,
+            wallet_location(#{})
+        ),
+        ?assertEqual(
+            <<"operator-wallet.json">>,
+            wallet_location(#{
+                <<"priv-key-location">> => <<"operator-wallet.json">>
+            })
+        )
+    after
+        os:unsetenv("ANDEE_NODE_WALLET")
+    end.
+
+node_wallet_reloads_stable_identity_test() ->
+    Path =
+        filename:join(
+            <<"/tmp">>,
+            <<"andee_wallet_",
+                (integer_to_binary(erlang:unique_integer([positive])))/binary,
+                ".json">>
+        ),
+    Original = ar_wallet:new({eddsa, ed25519}),
+    ok = file:write_file(Path, ar_wallet:to_json(Original)),
+    try
+        First = node_wallet(#{<<"priv-key-location">> => Path}),
+        Second = node_wallet(#{<<"priv-key-location">> => Path}),
+        ?assertEqual(ar_wallet:to_address(Original), ar_wallet:to_address(First)),
+        ?assertEqual(ar_wallet:to_address(First), ar_wallet:to_address(Second))
+    after
+        file:delete(Path)
+    end.
 
 configured_hooks_preserve_default_request_chain_test() ->
     DefaultRequest = [#{ <<"device">> => <<"manifest@1.0">> }],

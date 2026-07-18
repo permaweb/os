@@ -199,10 +199,7 @@ object AndeeBootConfigStore {
         "measurement-body-source",
         "preloaded-devices-index",
         "preloaded-store",
-        "priv-key-location",
         "priv-store",
-        "priv-wallet",
-        "private-key",
         "store",
         "store-defaults",
     )

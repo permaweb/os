@@ -7,6 +7,8 @@ object AndeePaths {
     fun runtimeRoot(context: Context): File = File(context.noBackupFilesDir, "andee-runtime")
     fun runtimeZipMarker(context: Context): File = File(runtimeRoot(context), ".andee-runtime.sha256")
     fun runDir(context: Context): File = File(context.noBackupFilesDir, "run")
+    fun nodeWalletFile(context: Context): File =
+        File(context.noBackupFilesDir, "node-identity/hyperbeam-key.json")
     fun executionStateRoot(context: Context): File =
         File(context.noBackupFilesDir, "execution-state")
     fun executionSocketFile(context: Context): File =
