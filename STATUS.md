@@ -11,18 +11,21 @@ Deliver a least-surprising Linux execution environment for ordinary unrooted
 ARM64 Android phones, with the same seven Ouroboros tools as `~docker@1.0`,
 native-speed workloads, writable per-member filesystems, ordinary package
 managers, persistence, stop/destroy, bounded resources, and real network
-denial. Finish on one clean LapEE branch and one clean Ouroboros branch,
-emulator-validated and ready for a real-phone gate. Do not claim full release
-completion until that real ARM64-phone gate passes.
+denial. Finish on one clean LapEE branch and one clean generic Ouroboros
+branch, emulator-validated and proven on an ordinary unrooted ARM64 phone.
 
 ## Canonical repositories
 
 - LapEE worktree: `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`
 - LapEE branch: `agent/andock-arm64-release`
-- Final source parent: `27652312980bfb96e4c6ce890fe0fffbf49fb788`;
-  the final release commit is the commit containing this ledger.
-- Ouroboros worktree: `/Users/sam/.codex/worktrees/ouroboros-andock-backend`
-- Ouroboros branch: `agent/ouroboros-andock-backend`
+- Final implementation source parent:
+  `10004856bbca8380d58a2f58baaf0bbf104fb74c`; the final ledger commit follows
+  it.
+- Ouroboros worktree:
+  `/Users/sam/.codex/worktrees/ouroboros-generic-release`
+- Ouroboros branch: `agent/ouroboros-generic-release`
+- Ouroboros canonical base:
+  `cba9c4830ea3668f08c19a7e2b0549e7a92c3633` (`origin/main`)
 - HyperBEAM pin: `fcdf5867686c64a8abe79e04e10f3590fbd62b7f`
 
 The shared dirty `/Users/sam/src/lapee` and `/Users/sam/src/ouroboros`
@@ -115,6 +118,26 @@ byte. The private emulator configuration is mode 0600 under
 `arch/android/build/evidence/final-unattended/image-13-final-acceptance/private/`.
 It contains the user-supplied provider keys and must never be printed or
 committed.
+
+## Standalone Andock device package
+
+Commit `10004856` moved the public `andock@1.0` Erlang device and its private
+Android socket transport into `devices/andock/`. It imports the shared
+`lib_ouroboros_execution` contract only while building the standalone package;
+the package boundary rejects Ouroboros routing, provider/member logic, foreign
+execution backends, and any Ouroboros checkout that embeds an Andock backend.
+The reciprocal generic Ouroboros package boundary rejects `lib_andock` and the
+private Android socket protocol.
+
+`OUROBOROS_SRC=/Users/sam/.codex/worktrees/ouroboros-generic-release make test`
+passed three consecutive times after correcting a linked test-helper teardown
+race. Each run passed the package boundary and all 7 packaged-device tests.
+The final local archive is
+`_hb_device_andock_1_0_6a6p37h5y3i6vzrf32xy72xnfk3ujr25lqiwvskujefxqxa7uehq.beam-archive.zip`.
+
+The trusted published device is spec
+`Zi9e9KreDY3o2E4j2jZ8l2MaCq6pi9H1vNWvTJBJv1k`, implementation
+`bEIh5SpEZGgL7QRjV7lxktIjVB8KejkRvtEBu0Fox2Y`.
 
 ## Linux workload acceptance
 
@@ -213,6 +236,32 @@ live trusted id, without importing unrelated tunnel source. The diagnostic
 attempts and passing output are frozen under
 `arch/android/build/evidence/final-unattended/image-13-final-gates/`.
 
+## Real ARM64 phone release gate
+
+Device `58281FDCG0028W` is a Pixel 10 Pro Fold (`rango`) running Android 15,
+without root or privileged ADB grants. The already installed frozen APK was
+not rebuilt: the new generic Erlang devices are trusted remote packages. Its
+private node message was updated mechanically only for the five trusted name
+resolver bindings; ordinary provider credentials remained untouched. The
+active private config SHA-256 is
+`e2c5f6e3b850492751b61f6cc73732b597390cd2d769d4410c98014e3e6668d3`.
+
+After a cold service restart, the stock node was ready on its first probe and
+resolved all five exact new specs. Observed live checks:
+
+- `GET /~ouroboros@1.0/health` — HTTP 200 in 2.094421 s;
+- `GET /~inference@1.0/health` — HTTP 200 in 0.803491 s;
+- `GET /~andock@1.0/index` — HTTP 200 in 0.971784 s, reporting device
+  `andock@1.0` and isolation `android-isolated-uid`;
+- `GET /rK9A-JjPNfn7lIRWsnFY35rUJxX1qU3WZHxB3mzA7Hk` — HTTP 200 in
+  3.549397 s, with exact published HTML SHA-256
+  `c39f71118a584f7bef398d2707751be739654d16af7b5983320498eab6aa6891`.
+
+The application rendered the Ouroboros sign-in page in the browser with no
+console errors. The phone node address is
+`JkP5xLVNBggKe42a6RcaJ9b_on0zIfb2--05NerH804`. Evidence is ignored under
+`arch/android/build/evidence/generic-ob-release-20260718/phone/`.
+
 ## Scope and remaining work
 
 The recursive deep-clean/security audit removed an insecure temporary browser
@@ -221,13 +270,11 @@ trigger a node-wallet-signed destructive action. Authentication redesign and
 the pre-existing invite wallet-hint authorization behavior are explicitly
 deferred to the separate auth effort.
 
-Every emulator and mixed-platform gate is green. The final diff, secret,
-branch, exact-artifact, and status audits are green, and the release commit is
-the commit containing this ledger. Exact install/config/forward, Andock
-workload, browser-acceptance, force-stop, and recovery commands for the real
-phone are frozen in
+Every emulator, mixed-platform, and real-phone gate is green. The final diff,
+secret, branch, exact-artifact, and status audits are green. Exact
+install/config/forward, Andock workload, browser-acceptance, force-stop, and
+recovery commands for the real phone are frozen in
 `arch/android/build/evidence/final-unattended/REAL-PHONE-HANDOFF.md`.
-The only external release gate is that real unrooted ARM64-phone run.
 
 No publication consumed AR. All required portable-device/UI uploads used the
 subsidized `up.arweave.net` bundler; the authorized wallet balance remained
