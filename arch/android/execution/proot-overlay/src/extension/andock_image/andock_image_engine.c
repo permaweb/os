@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
@@ -25,7 +26,9 @@
 #include <ext4_blockdev.h>
 #include <ext4_errno.h>
 #include <ext4_fs.h>
+#include <ext4_extent.h>
 #include <ext4_inode.h>
+#include <ext4_super.h>
 #include <ext4_types.h>
 
 #include "extension/andock_image/andock_image_engine.h"
@@ -37,6 +40,8 @@
 #define ANDOCK_IMAGE_IO_BYTES (1024U * 1024U)
 #define ANDOCK_IMAGE_MAX_XATTR_BYTES (1024U * 1024U)
 #define ANDOCK_IMAGE_DIRECTORY_CACHE_SIZE 256U
+#define ANDOCK_IMAGE_SPARSE_BLOCK_BYTES 4096U
+#define ANDOCK_IMAGE_HOST_FREE_RESERVE_BYTES (UINT64_C(512) * 1024 * 1024)
 
 #ifndef MFD_EXEC
 #define MFD_EXEC 0x0010U
@@ -60,18 +65,27 @@
 
 static int member_image_fd = -1;
 
+struct dirty_range {
+	uint64_t start;
+	uint64_t end;
+	struct dirty_range *next;
+};
+
 struct cached_inode {
 	uint64_t inode;
 	uint64_t cache_id;
 	int memory_fd;
 	unsigned int references;
+	uint64_t persisted_size;
 	int64_t atime;
 	int64_t mtime;
 	int64_t ctime;
 	bool dirty;
+	bool full_dirty;
 	bool shared_mapped;
 	bool timestamps_explicit;
 	bool unlinked;
+	struct dirty_range *dirty_ranges;
 	struct cached_inode *next;
 };
 
@@ -412,6 +426,45 @@ static struct cached_inode *find_cached_id(uint64_t cache_id)
 	return NULL;
 }
 
+static void clear_dirty_ranges(struct cached_inode *cached)
+{
+	while (cached->dirty_ranges != NULL) {
+		struct dirty_range *range = cached->dirty_ranges;
+		cached->dirty_ranges = range->next;
+		free(range);
+	}
+}
+
+static int add_dirty_range(struct cached_inode *cached, uint64_t start,
+		uint64_t length)
+{
+	if (length == 0)
+		return 0;
+	if (start > UINT64_MAX - length)
+		return -EOVERFLOW;
+	struct dirty_range *range = malloc(sizeof(*range));
+	if (range == NULL)
+		return -ENOMEM;
+	uint64_t end = start + length;
+	struct dirty_range **cursor = &cached->dirty_ranges;
+	while (*cursor != NULL && (*cursor)->end < start)
+		cursor = &(*cursor)->next;
+	while (*cursor != NULL && (*cursor)->start <= end) {
+		struct dirty_range *overlap = *cursor;
+		if (overlap->start < start)
+			start = overlap->start;
+		if (overlap->end > end)
+			end = overlap->end;
+		*cursor = overlap->next;
+		free(overlap);
+	}
+	range->start = start;
+	range->end = end;
+	range->next = *cursor;
+	*cursor = range;
+	return 0;
+}
+
 static void remove_cached_inode(struct cached_inode *cached)
 {
 	struct cached_inode **cursor = &inode_cache;
@@ -419,6 +472,7 @@ static void remove_cached_inode(struct cached_inode *cached)
 		if (*cursor == cached) {
 			*cursor = cached->next;
 			close(cached->memory_fd);
+			clear_dirty_ranges(cached);
 			free(cached);
 			return;
 		}
@@ -432,6 +486,7 @@ static void clear_inode_cache(void)
 		struct cached_inode *entry = inode_cache;
 		inode_cache = entry->next;
 		close(entry->memory_fd);
+		clear_dirty_ranges(entry);
 		free(entry);
 	}
 }
@@ -786,6 +841,73 @@ static int reopen_memfd(int fd, int flags)
 	return duplicate < 0 ? -errno : duplicate;
 }
 
+static bool buffer_has_nonzero_byte(const uint8_t *buffer, size_t size)
+{
+	for (size_t index = 0; index < size; index++) {
+		if (buffer[index] != 0)
+			return true;
+	}
+	return false;
+}
+
+static int ensure_host_storage(size_t upcoming)
+{
+	struct statvfs status;
+	if (fstatvfs(member_image_fd, &status) != 0)
+		return -errno;
+	uint64_t fragment_size = status.f_frsize == 0
+		? status.f_bsize : status.f_frsize;
+	if (fragment_size != 0
+	    && status.f_bavail > UINT64_MAX / fragment_size)
+		return 0;
+	uint64_t available = status.f_bavail * fragment_size;
+	return available >= ANDOCK_IMAGE_HOST_FREE_RESERVE_BYTES
+		&& upcoming <= available - ANDOCK_IMAGE_HOST_FREE_RESERVE_BYTES
+		? 0 : -ENOSPC;
+}
+
+struct materialize_context {
+	ext4_file *file;
+	int memory_fd;
+	uint8_t *buffer;
+	uint64_t size;
+	uint32_t block_size;
+};
+
+static int materialize_extent(ext4_lblk_t logical_block,
+		uint32_t block_count, void *argument)
+{
+	struct materialize_context *context = argument;
+	uint64_t offset = (uint64_t)logical_block * context->block_size;
+	uint64_t end = offset + (uint64_t)block_count * context->block_size;
+	if (offset >= context->size)
+		return EOK;
+	if (end > context->size)
+		end = context->size;
+	int result = ext4_fseek(context->file, (int64_t)offset, SEEK_SET);
+	if (result != EOK)
+		return result;
+	while (offset < end) {
+		size_t wanted = end - offset > ANDOCK_IMAGE_IO_BYTES
+			? ANDOCK_IMAGE_IO_BYTES : (size_t)(end - offset);
+		size_t read = 0;
+		result = ext4_fread(context->file, context->buffer, wanted, &read);
+		if (result != EOK || read != wanted)
+			return result == EOK ? EIO : result;
+		for (size_t block = 0; block < read;
+			block += ANDOCK_IMAGE_SPARSE_BLOCK_BYTES) {
+			size_t block_bytes = read - block > ANDOCK_IMAGE_SPARSE_BLOCK_BYTES
+				? ANDOCK_IMAGE_SPARSE_BLOCK_BYTES : read - block;
+			if (buffer_has_nonzero_byte(context->buffer + block, block_bytes)
+			    && exact_pwrite(context->memory_fd, context->buffer + block,
+				block_bytes, (off_t)(offset + block)) != EOK)
+				return EIO;
+		}
+		offset += read;
+	}
+	return EOK;
+}
+
 static int load_cached_inode(const char *guest,
 		struct andock_image_result *result, struct cached_inode **output)
 {
@@ -837,28 +959,64 @@ static int load_cached_inode(const char *guest,
 		ext4_fclose(&file);
 		return -ENOMEM;
 	}
-	off_t offset = 0;
-	while ((uint64_t)offset < size) {
-		size_t wanted = size - (uint64_t)offset > ANDOCK_IMAGE_IO_BYTES ?
-			ANDOCK_IMAGE_IO_BYTES : (size_t)(size - (uint64_t)offset);
-		size_t read = 0;
-		ext4_result = ext4_fread(&file, buffer, wanted, &read);
-		if (ext4_result != EOK || read != wanted) {
-			status = ext4_result == EOK ? -EIO : -ext4_result;
-			dprintf(STDERR_FILENO,
-				"andock: materialize %s: ext4 read failed: %s (%d)\n",
-				guest, strerror(-status), status);
-			break;
+	struct ext4_inode_ref inode_ref;
+	ext4_result = ext4_fs_get_inode_ref(
+		member_image.fs, (uint32_t)result->inode, &inode_ref);
+	if (ext4_result != EOK)
+		status = -ext4_result;
+	if (status == 0) {
+		bool extent_backed = ext4_sb_feature_incom(
+			&member_image.fs->sb, EXT4_FINCOM_EXTENTS)
+			&& ext4_inode_has_flag(inode_ref.inode, EXT4_INODE_FLAG_EXTENTS);
+		if (extent_backed) {
+			struct materialize_context context = {
+				.file = &file,
+				.memory_fd = memory_fd,
+				.buffer = buffer,
+				.size = size,
+				.block_size = ext4_sb_get_block_size(&member_image.fs->sb),
+			};
+			ext4_result = ext4_extent_visit_data(
+				&inode_ref, materialize_extent, &context);
+			if (ext4_result != EOK)
+				status = -ext4_result;
+		} else {
+			off_t offset = 0;
+			while ((uint64_t)offset < size) {
+				size_t wanted = size - (uint64_t)offset > ANDOCK_IMAGE_IO_BYTES
+					? ANDOCK_IMAGE_IO_BYTES
+					: (size_t)(size - (uint64_t)offset);
+				size_t read = 0;
+				ext4_result = ext4_fread(&file, buffer, wanted, &read);
+				if (ext4_result != EOK || read != wanted) {
+					status = ext4_result == EOK ? -EIO : -ext4_result;
+					break;
+				}
+				for (size_t block = 0; block < read;
+					block += ANDOCK_IMAGE_SPARSE_BLOCK_BYTES) {
+					size_t block_bytes = read - block
+						> ANDOCK_IMAGE_SPARSE_BLOCK_BYTES
+						? ANDOCK_IMAGE_SPARSE_BLOCK_BYTES : read - block;
+					if (buffer_has_nonzero_byte(buffer + block, block_bytes)
+					    && exact_pwrite(memory_fd, buffer + block, block_bytes,
+						offset + (off_t)block) != EOK) {
+						status = -EIO;
+						break;
+					}
+				}
+				if (status < 0)
+					break;
+				offset += (off_t)read;
+			}
 		}
-		if (exact_pwrite(memory_fd, buffer, read, offset) != EOK) {
-			status = -EIO;
-			dprintf(STDERR_FILENO,
-				"andock: materialize %s: memfd write failed: %s (%d)\n",
-				guest, strerror(-status), status);
-			break;
-		}
-		offset += (off_t)read;
+		ext4_result = ext4_fs_put_inode_ref(&inode_ref);
+		if (status == 0 && ext4_result != EOK)
+			status = -ext4_result;
 	}
+	if (status < 0)
+		dprintf(STDERR_FILENO,
+			"andock: materialize %s failed: %s (%d)\n",
+			guest, strerror(-status), status);
 	free(buffer);
 	ext4_fclose(&file);
 	/*
@@ -884,6 +1042,7 @@ static int load_cached_inode(const char *guest,
 	}
 	cached->cache_id = ++next_cache_id;
 	cached->memory_fd = memory_fd;
+	cached->persisted_size = size;
 	cached->atime = result->atime;
 	cached->mtime = result->mtime;
 	cached->ctime = result->ctime;
@@ -994,7 +1153,7 @@ static int open_operation(int flags, mode_t mode, const char *path,
 	if (status < 0)
 		return status;
 	int image_flags = flags & (O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND);
-	ext4_file file;
+	ext4_file file = {0};
 	int ext4_result = ext4_fopen2(&file, image_path_buffer, image_flags);
 	if (ext4_result != EOK)
 		return -ext4_result;
@@ -1034,6 +1193,82 @@ static int refresh_cached_timestamps(struct cached_inode *cached)
 	return 0;
 }
 
+static int write_ext4_range(ext4_file *file, int memory_fd, uint8_t *buffer,
+		uint64_t start, uint64_t end)
+{
+	if (start >= end)
+		return 0;
+	int ext4_result = ext4_fseek(file, (int64_t)start, SEEK_SET);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	uint64_t offset = start;
+	while (offset < end) {
+		size_t wanted = end - offset > ANDOCK_IMAGE_IO_BYTES
+			? ANDOCK_IMAGE_IO_BYTES : (size_t)(end - offset);
+		int capacity = ensure_host_storage(wanted);
+		if (capacity < 0)
+			return capacity;
+		if (exact_pread(memory_fd, buffer, wanted, (off_t)offset) != EOK)
+			return -EIO;
+		size_t written = 0;
+		ext4_result = ext4_fwrite(file, buffer, wanted, &written);
+		if (ext4_result != EOK || written != wanted)
+			return ext4_result == EOK ? -EIO : -ext4_result;
+		offset += written;
+	}
+	return 0;
+}
+
+static int reset_sparse_inode(ext4_file *file, struct cached_inode *cached,
+		uint64_t size)
+{
+	int ext4_result = ext4_ftruncate(file, 0);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	ext4_result = ext4_fclose(file);
+	if (ext4_result != EOK)
+		return -ext4_result;
+	if (size != 0) {
+		ext4_result = ext4_inode_sparse_size_set(
+			ANDOCK_IMAGE_MOUNT, (uint32_t)cached->inode, size);
+		if (ext4_result != EOK)
+			return -ext4_result;
+	}
+	ext4_result = ext4_fopen_inode(
+		file, ANDOCK_IMAGE_MOUNT, (uint32_t)cached->inode, O_RDWR);
+	return ext4_result == EOK ? 0 : -ext4_result;
+}
+
+static int write_sparse_memfd(ext4_file *file, struct cached_inode *cached,
+		uint8_t *buffer, uint64_t size)
+{
+	uint64_t offset = 0;
+	while (offset < size) {
+		errno = 0;
+		off_t data = lseek(cached->memory_fd, (off_t)offset, SEEK_DATA);
+		if (data < 0) {
+			if (errno == ENXIO)
+				return 0;
+			if (errno == EINVAL || errno == ENOTSUP)
+				return write_ext4_range(
+					file, cached->memory_fd, buffer, 0, size);
+			return -errno;
+		}
+		if ((uint64_t)data >= size)
+			return 0;
+		off_t hole = lseek(cached->memory_fd, data, SEEK_HOLE);
+		if (hole < 0)
+			return -errno;
+		uint64_t end = (uint64_t)hole > size ? size : (uint64_t)hole;
+		int status = write_ext4_range(
+			file, cached->memory_fd, buffer, (uint64_t)data, end);
+		if (status < 0)
+			return status;
+		offset = end;
+	}
+	return 0;
+}
+
 static int writeback_cached_inode(struct cached_inode *cached)
 {
 	if (member_image_fd < 0 || cached == NULL)
@@ -1047,35 +1282,29 @@ static int writeback_cached_inode(struct cached_inode *cached)
 		&file, ANDOCK_IMAGE_MOUNT, (uint32_t)cached->inode, O_RDWR);
 	if (ext4_result != EOK)
 		return cached->unlinked ? 0 : -ext4_result;
-	ext4_result = ext4_ftruncate(&file, (uint64_t)status.st_size);
-	if (ext4_result != EOK) {
-		ext4_fclose(&file);
-		return -ext4_result;
-	}
-	ext4_fseek(&file, 0, SEEK_SET);
 	uint8_t *buffer = malloc(ANDOCK_IMAGE_IO_BYTES);
 	if (buffer == NULL) {
 		ext4_fclose(&file);
 		return -ENOMEM;
 	}
-	off_t offset = 0;
-	while (offset < status.st_size) {
-		size_t wanted = status.st_size - offset > ANDOCK_IMAGE_IO_BYTES ?
-			ANDOCK_IMAGE_IO_BYTES : (size_t)(status.st_size - offset);
-		if (exact_pread(cached->memory_fd, buffer, wanted, offset) != EOK) {
-			result = -EIO;
-			break;
+	uint64_t size = (uint64_t)status.st_size;
+	if (cached->full_dirty || size != cached->persisted_size) {
+		result = reset_sparse_inode(&file, cached, size);
+		if (result == 0)
+			result = write_sparse_memfd(&file, cached, buffer, size);
+	} else {
+		struct dirty_range *range = cached->dirty_ranges;
+		while (range != NULL && result == 0) {
+			uint64_t end = range->end > size ? size : range->end;
+			result = write_ext4_range(
+				&file, cached->memory_fd, buffer, range->start, end);
+			range = range->next;
 		}
-		size_t written = 0;
-		ext4_result = ext4_fwrite(&file, buffer, wanted, &written);
-		if (ext4_result != EOK || written != wanted) {
-			result = ext4_result == EOK ? -EIO : -ext4_result;
-			break;
-		}
-		offset += (off_t)written;
 	}
 	free(buffer);
-	ext4_fclose(&file);
+	ext4_result = file.mp == NULL ? EOK : ext4_fclose(&file);
+	if (result == 0 && ext4_result != EOK)
+		result = -ext4_result;
 	if (result == 0) {
 		ext4_result = ext4_inode_times_set(
 			ANDOCK_IMAGE_MOUNT, (uint32_t)cached->inode,
@@ -1084,6 +1313,11 @@ static int writeback_cached_inode(struct cached_inode *cached)
 			(uint32_t)cached->ctime);
 		if (ext4_result != EOK)
 			result = -ext4_result;
+	}
+	if (result == 0) {
+		cached->persisted_size = size;
+		cached->full_dirty = false;
+		clear_dirty_ranges(cached);
 	}
 	return result;
 }
@@ -1110,7 +1344,24 @@ int andock_image_engine_mark_dirty(uint64_t cache_id)
 	if (status < 0)
 		return status;
 	cached->dirty = true;
+	cached->full_dirty = true;
+	clear_dirty_ranges(cached);
 	return 0;
+}
+
+int andock_image_engine_mark_dirty_range(uint64_t cache_id,
+		uint64_t offset, uint64_t length)
+{
+	struct cached_inode *cached = find_cached_id(cache_id);
+	if (cached == NULL)
+		return -ENOENT;
+	int status = refresh_cached_timestamps(cached);
+	if (status < 0)
+		return status;
+	status = cached->full_dirty ? 0 : add_dirty_range(cached, offset, length);
+	if (status == 0 && length != 0)
+		cached->dirty = true;
+	return status;
 }
 
 int andock_image_engine_mark_mapped(uint64_t cache_id)
@@ -1122,6 +1373,8 @@ int andock_image_engine_mark_mapped(uint64_t cache_id)
 	if (status < 0)
 		return status;
 	cached->dirty = true;
+	cached->full_dirty = true;
+	clear_dirty_ranges(cached);
 	cached->shared_mapped = true;
 	return 0;
 }
@@ -1200,6 +1453,8 @@ int andock_image_engine_sync_all(void)
 					first_error = status;
 			}
 			cached->dirty = true;
+			cached->full_dirty = true;
+			clear_dirty_ranges(cached);
 		}
 		int status = sync_cached_inode(cached);
 		if (status < 0 && first_error == 0)
@@ -1859,6 +2114,23 @@ static int list_xattr_operation(int flags, const char *path,
 			free(data);
 			return -ext4_result;
 		}
+		size_t input = 0;
+		size_t output = 0;
+		while (input < size) {
+			size_t remaining = size - input;
+			size_t name_size = strnlen((char *)data + input, remaining);
+			if (name_size == remaining) {
+				free(data);
+				return -EIO;
+			}
+			name_size++;
+			if (allowed_xattr((char *)data + input)) {
+				memmove(data + output, data + input, name_size);
+				output += name_size;
+			}
+			input += name_size;
+		}
+		size = output;
 	}
 	result->type = type;
 	result->data = data;
@@ -1953,6 +2225,22 @@ static int remove_xattr_operation(int flags, const char *path,
 	return metadata(resolved, type, result);
 }
 
+static bool operation_may_allocate(int operation, int flags)
+{
+	switch (operation) {
+	case ANDOCK_IMAGE_OPEN:
+		return (flags & (O_CREAT | O_TRUNC)) != 0;
+	case ANDOCK_IMAGE_MKDIR:
+	case ANDOCK_IMAGE_SYMLINK_CREATE:
+	case ANDOCK_IMAGE_SOCKET_CREATE:
+	case ANDOCK_IMAGE_LINK:
+	case ANDOCK_IMAGE_SET_XATTR:
+		return true;
+	default:
+		return false;
+	}
+}
+
 int andock_image_engine_call(int operation, int flags, mode_t mode,
 		const char *path, const char *second_path,
 		const void *data, size_t data_size,
@@ -1961,6 +2249,11 @@ int andock_image_engine_call(int operation, int flags, mode_t mode,
 	if (member_image_fd < 0 || result == NULL)
 		return -ENODEV;
 	result_init(result);
+	if (operation_may_allocate(operation, flags)) {
+		int capacity = ensure_host_storage(ANDOCK_IMAGE_IO_BYTES);
+		if (capacity < 0)
+			return capacity;
+	}
 	latest_lookup.valid = false;
 	reuse_latest_lookup = operation == ANDOCK_IMAGE_RESOLVE;
 	if (operation != ANDOCK_IMAGE_RESOLVE)

@@ -43,4 +43,6 @@ prepare_andock_lwext4() {
         "$ROOT/execution/lwext4-nondirectory-replace.patch"
     apply_andock_lwext4_patch \
         "$ROOT/execution/lwext4-sparse-read.patch"
+    apply_andock_lwext4_patch \
+        "$ROOT/execution/lwext4-data-extents.patch"
 }

@@ -3184,6 +3184,7 @@ static int handle_sequential_io(Tracee *tracee, Sysnum sysnum)
 	size_t transferred = 0;
 	bool write;
 	int count;
+	off_t start;
 
 	if (sysnum != PR_read && sysnum != PR_write &&
 		sysnum != PR_readv && sysnum != PR_writev)
@@ -3196,6 +3197,7 @@ static int handle_sequential_io(Tracee *tracee, Sysnum sysnum)
 	if ((write && !file_writable(file)) || (!write && !file_readable(file)))
 		return -EBADF;
 
+	start = file->description->offset;
 	if (sysnum == PR_read || sysnum == PR_write) {
 		size_t size = (size_t)peek_reg(tracee, CURRENT, SYSARG_3);
 		if (size > ANDOCK_MAX_FILE_IO)
@@ -3250,8 +3252,12 @@ static int handle_sequential_io(Tracee *tracee, Sysnum sysnum)
 	}
 	if (transferred > 0) {
 		file->description->offset += (off_t)transferred;
-		if (write)
-			andock_image_engine_mark_dirty(file->cache_id);
+		if (write) {
+			int status = andock_image_engine_mark_dirty_range(
+				file->cache_id, (uint64_t)start, transferred);
+			if (status < 0)
+				return status;
+		}
 	}
 	return void_result(tracee, (int64_t)transferred);
 }
@@ -3267,7 +3273,10 @@ static int append_loaded_buffer(Tracee *tracee,
 		return -errno;
 	if (written > 0) {
 		file->description->offset = metadata.st_size + written;
-		andock_image_engine_mark_dirty(file->cache_id);
+		int status = andock_image_engine_mark_dirty_range(
+			file->cache_id, (uint64_t)metadata.st_size, (uint64_t)written);
+		if (status < 0)
+			return status;
 	}
 	return void_result(tracee, written);
 }
@@ -3430,6 +3439,11 @@ static int handle_file_transfer(Tracee *tracee, Sysnum sysnum)
 		status = transfer_offset(output, true, &state->transfer_output_offset);
 		if (status < 0)
 			return status;
+	} else if (output != NULL && output_pointer != 0) {
+		status = read_data(tracee, &state->transfer_output_offset,
+			output_pointer, sizeof(state->transfer_output_offset));
+		if (status < 0)
+			return status;
 	}
 
 	scratch = (peek_reg(tracee, CURRENT, STACK_POINTER) -
@@ -3495,16 +3509,26 @@ static int handle_file_sync(Tracee *tracee, Sysnum sysnum)
 static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 {
 	int fd = -1;
+	uint64_t offset = 0;
+	uint64_t length = 0;
+	bool ranged = false;
 	switch (sysnum) {
 	case PR_write:
 	case PR_writev:
-	case PR_pwrite64:
 	case PR_pwritev:
 	case PR_pwritev2:
 	case PR_ftruncate:
 	case PR_ftruncate64:
 	case PR_fallocate:
 		fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+		break;
+	case PR_pwrite64:
+		fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+		if ((int64_t)peek_reg(tracee, CURRENT, SYSARG_4) < 0)
+			return 0;
+		offset = (uint64_t)peek_reg(tracee, CURRENT, SYSARG_4);
+		length = (uint64_t)peek_reg(tracee, CURRENT, SYSARG_3);
+		ranged = true;
 		break;
 	case PR_sendfile:
 	case PR_sendfile64:
@@ -3542,7 +3566,10 @@ static int track_file_mutation(Tracee *tracee, Sysnum sysnum)
 	}
 	struct AndockOpenFile *file = find_open_file(tracee, fd);
 	if (file != NULL && file->host_fd >= 0)
-		andock_image_engine_mark_dirty(file->cache_id);
+		return ranged
+			? andock_image_engine_mark_dirty_range(
+				file->cache_id, offset, length)
+			: andock_image_engine_mark_dirty(file->cache_id);
 	return 0;
 }
 
@@ -5422,9 +5449,14 @@ static int handle_exit(Tracee *tracee)
 			if (state->transfer_update_output && output != NULL)
 				output->description->offset = state->transfer_output_offset +
 					(off_t)syscall_result;
-			if (state->transfer_output_cache_id != 0)
-				andock_image_engine_mark_dirty(
-					state->transfer_output_cache_id);
+			if (state->transfer_output_cache_id != 0) {
+				status = andock_image_engine_mark_dirty_range(
+					state->transfer_output_cache_id,
+					(uint64_t)state->transfer_output_offset,
+					(uint64_t)syscall_result);
+				if (status < 0)
+					return status;
+			}
 		}
 		state->transfer_pending = false;
 		state->transfer_output_cache_id = 0;

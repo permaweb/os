@@ -11,6 +11,8 @@ import java.io.File
 import java.security.MessageDigest
 import java.security.SecureRandom
 
+private const val ANDOCK_HOST_FREE_RESERVE_BYTES = 512L * 1024 * 1024
+
 /** Owns immutable-template cloning and one complete writable image per member. */
 internal class AndeeExecutionStorage(
     context: Context,
@@ -21,6 +23,7 @@ internal class AndeeExecutionStorage(
     private val template = File(runtimeRoot, TEMPLATE_PATH)
     private val templateManifest = File(runtimeRoot, TEMPLATE_MANIFEST_PATH)
     private var templateBytes = 0L
+    private var templateAllocatedBytes = 0L
 
     fun start() {
         require(template.isFile) {
@@ -37,6 +40,13 @@ internal class AndeeExecutionStorage(
         }
         require(template.length() == templateBytes) {
             "unexpected Andock filesystem template size: ${template.length()}"
+        }
+        templateAllocatedBytes = Math.multiplyExact(
+            Os.stat(template.absolutePath).st_blocks,
+            POSIX_BLOCK_BYTES,
+        )
+        require(templateAllocatedBytes in 1..templateBytes) {
+            "invalid Andock filesystem template allocation: $templateAllocatedBytes"
         }
         require(members.mkdirs() || members.isDirectory) {
             "failed to create Andock member image directory"
@@ -66,6 +76,9 @@ internal class AndeeExecutionStorage(
     }
 
     private fun create(image: File) {
+        require(hasAndockCreationCapacity(members.usableSpace, templateAllocatedBytes)) {
+            "insufficient app-private storage for a new Andock member image"
+        }
         val temporary = File(
             members,
             ".${image.name}.${randomToken()}.tmp",
@@ -228,5 +241,10 @@ internal class AndeeExecutionStorage(
         const val FALLBACK_BLOCK_BYTES = 4096
         const val SEEK_DATA = 3
         const val SEEK_HOLE = 4
+        const val POSIX_BLOCK_BYTES = 512L
     }
 }
+
+internal fun hasAndockCreationCapacity(available: Long, allocated: Long): Boolean =
+    available >= ANDOCK_HOST_FREE_RESERVE_BYTES &&
+        allocated <= available - ANDOCK_HOST_FREE_RESERVE_BYTES

@@ -17,6 +17,8 @@
 
 #include "extension/andock_image/andock_image_engine.h"
 
+#define LARGE_SPARSE_BYTES (UINT64_C(512) * 1024 * 1024)
+
 static void fail(const char *step, int status)
 {
 	fprintf(stderr, "%s failed: %d (%s)\n", step, status,
@@ -97,6 +99,20 @@ static void expect_size(int fd, off_t expected)
 	if (status.st_size != expected) {
 		fprintf(stderr, "size mismatch: expected %lld, got %lld\n",
 			(long long) expected, (long long) status.st_size);
+		exit(1);
+	}
+}
+
+static void expect_sparse_allocation(int fd)
+{
+	struct stat status;
+	if (fstat(fd, &status) != 0)
+		fail("sparse-fstat", -errno);
+	if ((uint64_t)status.st_size != LARGE_SPARSE_BYTES
+	    || status.st_blocks > 192) {
+		fprintf(stderr,
+			"sparse allocation mismatch: size=%lld blocks=%lld\n",
+			(long long)status.st_size, (long long)status.st_blocks);
 		exit(1);
 	}
 }
@@ -198,6 +214,17 @@ static int raw_data_call(int operation, const char *path,
 	return status;
 }
 
+static struct andock_image_result xattr_call(int operation, const char *path,
+		const char *name, const void *data, size_t size)
+{
+	struct andock_image_result result;
+	int status = andock_image_engine_call(operation, 0, 0,
+		path, name, data, size, &result);
+	if (status < 0)
+		fail("xattr", status);
+	return result;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -238,6 +265,25 @@ int main(int argc, char **argv)
 		fprintf(stderr, "created file mode mismatch\n");
 		return 1;
 	}
+	struct andock_image_result xattr = xattr_call(
+		ANDOCK_IMAGE_SET_XATTR, "/work/cache-eviction/mode",
+		"user.visible", "yes", 3);
+	andock_image_result_release(&xattr);
+	if (ext4_setxattr("/andock/work/cache-eviction/mode",
+			"trusted.hidden", strlen("trusted.hidden"), "no", 2) != EOK)
+		fail("raw-hidden-xattr", -EIO);
+	xattr = call(ANDOCK_IMAGE_LIST_XATTR, 0, 0,
+		"/work/cache-eviction/mode", NULL);
+	if (xattr.data_size != strlen("user.visible") + 1
+	    || memcmp(xattr.data, "user.visible", xattr.data_size) != 0) {
+		fprintf(stderr, "unsupported xattr namespace leaked through listxattr\n");
+		return 1;
+	}
+	andock_image_result_release(&xattr);
+	expect_status("hidden-xattr-get",
+		andock_image_engine_call(ANDOCK_IMAGE_GET_XATTR, 0, 0,
+			"/work/cache-eviction/mode", "trusted.hidden",
+			NULL, 0, &xattr), -ENODATA);
 	int64_t cached_atime;
 	int64_t cached_mtime;
 	int64_t cached_ctime;
@@ -573,6 +619,23 @@ int main(int argc, char **argv)
 	    || andock_image_engine_sync_all() < 0)
 		fail("mapped-after-executable-sync", -EIO);
 	munmap(mapping, 4096);
+	struct andock_image_result sparse = open_file(
+		"/work/large-sparse",
+		O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
+	track(&sparse);
+	if (ftruncate(sparse.guest_fd, (off_t)LARGE_SPARSE_BYTES) != 0)
+		fail("large-sparse-truncate", -errno);
+	write_at(sparse.guest_fd, 0, "SPARSE-BEGIN");
+	for (int index = 1; index < 16; index++)
+		write_at(sparse.guest_fd,
+			(off_t)index * (off_t)(32 * 1024 * 1024), "SPARSE-DATA");
+	write_at(sparse.guest_fd,
+		(off_t)LARGE_SPARSE_BYTES - 10, "SPARSE-END");
+	if (andock_image_engine_mark_dirty(sparse.cache_id) < 0
+	    || andock_image_engine_sync(sparse.cache_id) < 0)
+		fail("large-sparse-sync", -EIO);
+	expect_sparse_allocation(sparse.guest_fd);
+	close_tracked(&sparse);
 	if (andock_image_engine_stop() < 0)
 		fail("stop", -EIO);
 
@@ -587,6 +650,18 @@ int main(int argc, char **argv)
 		"/work/mapped-after-close", O_RDONLY | O_CLOEXEC, 0);
 	expect_bytes(mapped_persisted.guest_fd, 0, "RETAIN42");
 	andock_image_result_release(&mapped_persisted);
+	struct andock_image_result sparse_persisted = open_file(
+		"/work/large-sparse", O_RDONLY | O_CLOEXEC, 0);
+	expect_sparse_allocation(sparse_persisted.guest_fd);
+	expect_bytes(sparse_persisted.guest_fd, 0, "SPARSE-BEGIN");
+	for (int index = 1; index < 16; index++)
+		expect_bytes(sparse_persisted.guest_fd,
+			(off_t)index * (off_t)(32 * 1024 * 1024), "SPARSE-DATA");
+	expect_bytes(sparse_persisted.guest_fd,
+		(off_t)LARGE_SPARSE_BYTES - 10, "SPARSE-END");
+	expect_fill(sparse_persisted.guest_fd,
+		(off_t)LARGE_SPARSE_BYTES / 2 + 1024 * 1024, 4096, 0);
+	andock_image_result_release(&sparse_persisted);
 	expect_status("old-link-missing",
 		raw_call(ANDOCK_IMAGE_RESOLVE, ANDOCK_IMAGE_DEREFERENCE_FINAL,
 			"/work/alpha.link", NULL), -ENOENT);

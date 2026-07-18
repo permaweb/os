@@ -52,6 +52,13 @@ docker run --rm --platform linux/amd64 \
             -o "$out/andock-image-engine-test"
         "$out/andock-image-engine-test" "$out/member.ext4" \
             | tee "$out/result.txt"
+        debugfs -R "stat /work/large-sparse" "$out/member.ext4" \
+            >"$out/large-sparse.stat"
+        block_count=$(awk "/Blockcount:/ { for (i = 1; i <= NF; i++) \
+            if (\$i == \"Blockcount:\") print \$(i + 1) }" \
+            "$out/large-sparse.stat")
+        test -n "$block_count"
+        test "$block_count" -le 192
     '
 
 grep -qx ANDOCK_IMAGE_ENGINE_TEST_OK "$OUT/result.txt"

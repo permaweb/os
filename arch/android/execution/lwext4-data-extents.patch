@@ -1,0 +1,74 @@
+--- a/include/ext4_extent.h
++++ b/include/ext4_extent.h
+@@ -48,0 +49,2 @@
++struct ext4_inode_ref;
++
+@@ -53,0 +56,12 @@
++/**@brief Visit every initialized data extent in logical-block order. */
++typedef int (*ext4_extent_data_visitor)(ext4_lblk_t logical_block,
++		uint32_t block_count, void *argument);
++
++/**@brief Visit initialized data extents without scanning sparse holes.
++ * @param inode_ref I-node whose extent tree is visited.
++ * @param visitor   Called once for each initialized extent.
++ * @param argument  Opaque visitor argument.
++ * @return Error code. */
++int ext4_extent_visit_data(struct ext4_inode_ref *inode_ref,
++		ext4_extent_data_visitor visitor, void *argument);
++
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -798,0 +799,53 @@
++static int ext4_extent_visit_node(struct ext4_inode_ref *inode_ref,
++		struct ext4_extent_header *header, uint16_t depth,
++		ext4_extent_data_visitor visitor, void *argument)
++{
++	uint16_t entries = ext4_extent_header_get_entries_count(header);
++	if (ext4_extent_header_get_magic(header) != EXT4_EXTENT_MAGIC
++	    || entries > ext4_extent_header_get_max_entries_count(header))
++		return EIO;
++	if (depth == 0) {
++		struct ext4_extent *extent = EXT_FIRST_EXTENT(header);
++		for (uint16_t index = 0; index < entries; index++, extent++) {
++			if (ext4_ext_is_unwritten(extent))
++				continue;
++			uint32_t count = ext4_ext_get_actual_len(extent);
++			if (count == 0)
++				return EIO;
++			int result = visitor(
++				to_le32(extent->first_block), count, argument);
++			if (result != EOK)
++				return result;
++		}
++		return EOK;
++	}
++	struct ext4_extent_index *extent_index = EXT_FIRST_INDEX(header);
++	for (uint16_t index = 0; index < entries; index++, extent_index++) {
++		struct ext4_block child = EXT4_BLOCK_ZERO();
++		int result = read_extent_tree_block(
++			inode_ref, ext4_idx_pblock(extent_index), depth - 1,
++			&child, 0);
++		if (result != EOK)
++			return result;
++		result = ext4_extent_visit_node(inode_ref, ext_block_hdr(&child),
++			depth - 1, visitor, argument);
++		int release = ext4_block_set(inode_ref->fs->bdev, &child);
++		if (result == EOK)
++			result = release;
++		if (result != EOK)
++			return result;
++	}
++	return EOK;
++}
++
++int ext4_extent_visit_data(struct ext4_inode_ref *inode_ref,
++		ext4_extent_data_visitor visitor, void *argument)
++{
++	if (inode_ref == NULL || visitor == NULL)
++		return EINVAL;
++	struct ext4_extent_header *header = ext_inode_hdr(inode_ref->inode);
++	return ext4_extent_visit_node(
++		inode_ref, header, ext4_extent_header_get_depth(header),
++		visitor, argument);
++}
++

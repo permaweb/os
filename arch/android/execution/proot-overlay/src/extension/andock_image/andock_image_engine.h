@@ -71,6 +71,8 @@ int andock_image_engine_flush(void);
 int andock_image_engine_retain(uint64_t cache_id);
 int andock_image_engine_release(uint64_t cache_id);
 int andock_image_engine_mark_dirty(uint64_t cache_id);
+int andock_image_engine_mark_dirty_range(uint64_t cache_id,
+		uint64_t offset, uint64_t length);
 int andock_image_engine_mark_mapped(uint64_t cache_id);
 int andock_image_engine_timestamps(uint64_t cache_id,
 	int64_t *atime, int64_t *mtime, int64_t *ctime);

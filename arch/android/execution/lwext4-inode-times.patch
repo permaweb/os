@@ -1,7 +1,7 @@
 diff --git a/include/ext4.h b/include/ext4.h
 --- a/include/ext4.h
 +++ b/include/ext4.h
-@@ -336,5 +336,17 @@ int ext4_fopen_inode(ext4_file *file, const char *mount_point,
+@@ -336,5 +336,31 @@ int ext4_fopen_inode(ext4_file *file, const char *mount_point,
  		uint32_t inode, int flags);
  
 +/**@brief   Set timestamps on an existing inode.
@@ -16,13 +16,27 @@ diff --git a/include/ext4.h b/include/ext4.h
 +int ext4_inode_times_set(const char *mount_point, uint32_t inode,
 +		uint32_t atime, uint32_t mtime, uint32_t ctime);
 +
++/**@brief   Set the logical size of a block-free inode.
++ *
++ * The caller must truncate the inode to zero first.  This helper extends the
++ * logical size without allocating blocks so sparse contents can be restored
++ * by writing only their data extents.
++ *
++ * @param   mount_point Mounted filesystem path.
++ * @param   inode       Existing block-free inode.
++ * @param   size        New logical size.
++ *
++ * @return  Standard error code.*/
++int ext4_inode_sparse_size_set(const char *mount_point, uint32_t inode,
++		uint64_t size);
++
  /**@brief   File close function.
   *
   * @param   file File handle.
 diff --git a/src/ext4.c b/src/ext4.c
 --- a/src/ext4.c
 +++ b/src/ext4.c
-@@ -1628,6 +1628,31 @@ finish:
+@@ -1628,6 +1628,62 @@ finish:
  	return r;
  }
  
@@ -43,6 +57,37 @@ diff --git a/src/ext4.c b/src/ext4.c
 +	ext4_inode_set_access_time(ref.inode, atime);
 +	ext4_inode_set_modif_time(ref.inode, mtime);
 +	ext4_inode_set_change_inode_time(ref.inode, ctime);
++	ref.dirty = true;
++	r = ext4_fs_put_inode_ref(&ref);
++
++finish:
++	EXT4_MP_UNLOCK(mp);
++	return r;
++}
++
++int ext4_inode_sparse_size_set(const char *mount_point, uint32_t inode,
++		uint64_t size)
++{
++	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
++	struct ext4_inode_ref ref;
++	int r;
++
++	if (!mp)
++		return ENOENT;
++	if (mp->fs.read_only)
++		return EROFS;
++
++	EXT4_MP_LOCK(mp);
++	r = ext4_fs_get_inode_ref(&mp->fs, inode, &ref);
++	if (r != EOK)
++		goto finish;
++	if (ext4_inode_get_size(&mp->fs.sb, ref.inode) != 0
++	    || ext4_inode_get_blocks_count(&mp->fs.sb, ref.inode) != 0) {
++		r = EBUSY;
++		ext4_fs_put_inode_ref(&ref);
++		goto finish;
++	}
++	ext4_inode_set_size(ref.inode, size);
 +	ref.dirty = true;
 +	r = ext4_fs_put_inode_ref(&ref);
 +
