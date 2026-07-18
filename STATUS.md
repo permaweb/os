@@ -27,9 +27,8 @@ overlay or per-path Binder filesystem.
 
 - LapEE/AndEE:
   `/Users/sam/.codex/worktrees/lapee-andock-arm64-release`, branch
-  `agent/andock-arm64-release`, current reviewed checkpoint
-  `25d20dfb76bff2cf103d35beeca91411a7805acf` plus the current manifest/test
-  and status-ledger update.
+  `agent/andock-arm64-release`, current reviewed source checkpoint
+  `ebbae846` plus this status-ledger update.
 - Ouroboros:
   `/Users/sam/.codex/worktrees/ouroboros-andock-backend`, branch
   `agent/ouroboros-andock-backend`, commit
@@ -113,18 +112,24 @@ set. Mutable member images are correctly outside measurement.
 The rejected `agent/andock-measurement` branch describes the obsolete app
 broker and must not be merged. See `decisions/andock-measurement.md`.
 
-## Previous candidate artifact identities
+## Frozen emulator-candidate artifact identities
 
-These hashes describe the last emulator-tested APK before the final sparse,
-descriptor, and mapping hardening. They must be replaced after the current
-source is rebuilt; do not present them as final-branch artifacts.
+These hashes describe the replacement build from `ebbae846`, including the
+closed native-input manifest and `andock-image-4` toolchain revision. The
+clean-install smoke rejected this candidate before `/usr/bin/env` could start:
+carrier memfd duplication returned `EACCES`. Keep the identities as failed
+candidate evidence; they are not the real-phone handoff artifacts.
 
 - Debug APK:
-  `6239db5448fcb6484c8cc1989472d5f4668da98e07446726c36d5d96bd4476b8`
+  `b80c740ba436f040a52d729a24d20edcb2d9605da8b0ec022a3bf9d3bf166c51`
 - Runtime ZIP:
-  `b279b1b3c9621df09441f75dbd1b25be3897df28f1f3aebbf789f3dd94ec9aa3`
+  `7bdf69571db48d9771911d9a665003726ec0abd47961d56f9c2e45ed96dab15f`
 - Native Andock/PRoot:
-  `d99d1b17e331a9f7e16896700c83aa74bc968d02c771d46775f9969acc03c66a`
+  `60dbfc507e6846630120b493248ae1426739292c4289cfe9dc8804e622648b3a`
+- Native Andock launcher:
+  `85f716390b1a9fb37e8b6a7830acb1272d1afc7c7af3a0eeed78ed2f2d5a6453`
+- Native PRoot loader:
+  `44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04`
 - Raw template:
   `e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c`
 - Android sparse template:
@@ -136,6 +141,25 @@ source is rebuilt; do not present them as final-branch artifacts.
 
 Independent template builds produced byte-identical raw images, sparse
 images, manifests, and inventories.
+
+The runtime manifest records exact HyperBEAM
+`fcdf5867686c64a8abe79e04e10f3590fbd62b7f`, toolchain revision
+`termux-98046d2726d50e29e721e3535da85640bc4b804b+andock-image-4`, and the
+template identities above. The source manifest contains
+`execution/lwext4-data-extents.patch`; direct validation and the no-force
+image builder both return success without rebuilding.
+
+Clean-install result on `emulator-5562`: `andock-emulator-smoke.py` failed at
+its first environment probe with
+`materialize /usr/bin/env: memfd duplicate failed: Permission denied (-13)`.
+This is a newly exposed carrier-access hardening regression and invalidates
+the replacement candidate until fixed, rebuilt, and rerun.
+
+The repair keeps per-open access in the tracked Linux description on Android,
+where SELinux intentionally denies `/proc/self/fd` reopening, and adds an
+immutable write-permission bit to every shared mapping so `mprotect` cannot
+upgrade a read-only description. Linux hosts retain narrowed kernel-mode
+carriers. The replacement native revision is `andock-image-5`.
 
 ## Validated evidence
 
@@ -236,7 +260,9 @@ The integrated ARM64 PRoot and APK build passed from clean pinned sources.
 Its deep-clean manifest audit found that the new sparse extent visitor patch
 was not enumerated in the reproducibility manifest. The manifest now hashes
 all `lwext4-*.patch` inputs by construction and bumps the native toolchain
-revision to `andock-image-4`; a replacement build is required before install.
+revision to `andock-image-4`. The replacement build passed, its manifest
+validated, and its no-force native-image build correctly recognized the
+artifacts as current.
 
 The emulator Linux-syscall workload now also proves `user.*` xattr
 set/get/list/remove behavior, rejects privileged xattr writes, and records the
@@ -281,8 +307,9 @@ recorded here.
 
 ## Remaining acceptance gates
 
-1. Rebuild and repeat the complete workload, including the labelled public
-   network stage, and record its JSON/log evidence.
+1. Fix the clean-install carrier duplication regression, rebuild, and repeat
+   the complete workload on the new frozen build, including
+   the labelled public network stage, and record its JSON/log evidence.
 2. Run the complete AndEE release ladder on `emulator-5562`:
    config invariants, Android build, smoke, scenarios, Android zone storage,
    root Android smoke, and mixed smoke with real measurement peer preflight.

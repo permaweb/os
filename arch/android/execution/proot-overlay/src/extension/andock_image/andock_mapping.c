@@ -11,6 +11,7 @@ struct AndockMapping {
 	uintptr_t end;
 	uint64_t cache_id;
 	bool writable;
+	bool write_permitted;
 	struct AndockMapping *next;
 };
 
@@ -51,7 +52,8 @@ static int merge_mappings(struct AndockMappingTable *table)
 		struct AndockMapping *next = mapping->next;
 		if (mapping->end != next->start
 		    || mapping->cache_id != next->cache_id
-		    || mapping->writable != next->writable) {
+		    || mapping->writable != next->writable
+		    || mapping->write_permitted != next->write_permitted) {
 			mapping = next;
 			continue;
 		}
@@ -65,7 +67,8 @@ static int merge_mappings(struct AndockMappingTable *table)
 }
 
 static int insert_mapping(struct AndockMappingTable *table,
-		uintptr_t start, uintptr_t end, uint64_t cache_id, bool writable)
+		uintptr_t start, uintptr_t end, uint64_t cache_id, bool writable,
+		bool write_permitted)
 {
 	struct AndockMapping *mapping = calloc(1, sizeof(*mapping));
 	if (mapping == NULL)
@@ -74,6 +77,7 @@ static int insert_mapping(struct AndockMappingTable *table,
 	mapping->end = end;
 	mapping->cache_id = cache_id;
 	mapping->writable = writable;
+	mapping->write_permitted = write_permitted;
 	int status = retain_mapping(table, mapping);
 	if (status < 0) {
 		free(mapping);
@@ -171,7 +175,8 @@ struct AndockMappingTable *andock_mapping_table_clone(
 	const struct AndockMapping *mapping = source->mappings;
 	while (mapping != NULL) {
 		int status = insert_mapping(table, mapping->start, mapping->end,
-			mapping->cache_id, mapping->writable);
+			mapping->cache_id, mapping->writable,
+			mapping->write_permitted);
 		if (status < 0) {
 			andock_mapping_table_release(table);
 			return NULL;
@@ -208,14 +213,16 @@ int andock_mapping_table_release(struct AndockMappingTable *table)
 }
 
 int andock_mapping_replace(struct AndockMappingTable *table,
-		uintptr_t start, size_t length, uint64_t cache_id, bool writable)
+		uintptr_t start, size_t length, uint64_t cache_id, bool writable,
+		bool write_permitted)
 {
 	uintptr_t end;
 	if (table == NULL || !mapping_end(start, length, &end))
 		return -EINVAL;
 	int first_error = remove_range(table, start, end);
 	if (cache_id != 0) {
-		int status = insert_mapping(table, start, end, cache_id, writable);
+		int status = insert_mapping(
+			table, start, end, cache_id, writable, write_permitted);
 		if (status < 0 && first_error == 0)
 			first_error = status;
 	}
@@ -229,6 +236,27 @@ int andock_mapping_unmap(struct AndockMappingTable *table,
 	if (table == NULL || !mapping_end(start, length, &end))
 		return -EINVAL;
 	return remove_range(table, start, end);
+}
+
+int andock_mapping_write_allowed(const struct AndockMappingTable *table,
+		uintptr_t start, size_t length)
+{
+	uintptr_t end;
+	if (table == NULL || !mapping_end(start, length, &end))
+		return -EINVAL;
+	const struct AndockMapping *mapping = table->mappings;
+	while (mapping != NULL) {
+		if (mapping->end <= start) {
+			mapping = mapping->next;
+			continue;
+		}
+		if (mapping->start >= end)
+			break;
+		if (!mapping->write_permitted)
+			return 0;
+		mapping = mapping->next;
+	}
+	return 1;
 }
 
 static int change_writable(struct AndockMappingTable *table,
@@ -250,6 +278,11 @@ int andock_mapping_protect(struct AndockMappingTable *table,
 	uintptr_t end;
 	if (table == NULL || !mapping_end(start, length, &end))
 		return -EINVAL;
+	if (writable) {
+		int allowed = andock_mapping_write_allowed(table, start, length);
+		if (allowed <= 0)
+			return allowed < 0 ? allowed : -EACCES;
+	}
 	struct AndockMapping *mapping = table->mappings;
 	while (mapping != NULL) {
 		if (mapping->end <= start) {
@@ -323,6 +356,7 @@ struct RemappedRange {
 	size_t length;
 	uint64_t cache_id;
 	bool writable;
+	bool write_permitted;
 	struct RemappedRange *next;
 };
 
@@ -372,6 +406,7 @@ int andock_mapping_remap(struct AndockMappingTable *table,
 					range->length = new_length - range->offset;
 				range->cache_id = mapping->cache_id;
 				range->writable = mapping->writable;
+				range->write_permitted = mapping->write_permitted;
 				int status = table->ops.retain(
 					range->cache_id, range->writable);
 				if (status < 0) {
@@ -401,6 +436,7 @@ int andock_mapping_remap(struct AndockMappingTable *table,
 			range->length = new_length - old_length;
 			range->cache_id = last->cache_id;
 			range->writable = last->writable;
+			range->write_permitted = last->write_permitted;
 			int status = table->ops.retain(
 				range->cache_id, range->writable);
 			if (status < 0) {
@@ -426,7 +462,7 @@ int andock_mapping_remap(struct AndockMappingTable *table,
 	while (range != NULL) {
 		int status = insert_mapping(table, new_start + range->offset,
 			new_start + range->offset + range->length,
-			range->cache_id, range->writable);
+			range->cache_id, range->writable, range->write_permitted);
 		if (status < 0) {
 			if (first_error == 0)
 				first_error = status;

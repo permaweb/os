@@ -21,8 +21,11 @@ struct AndockMappingTable *andock_mapping_table_clone(
 int andock_mapping_table_clear(struct AndockMappingTable *table);
 int andock_mapping_table_release(struct AndockMappingTable *table);
 int andock_mapping_replace(struct AndockMappingTable *table,
-	uintptr_t start, size_t length, uint64_t cache_id, bool writable);
+	uintptr_t start, size_t length, uint64_t cache_id, bool writable,
+	bool write_permitted);
 int andock_mapping_unmap(struct AndockMappingTable *table,
+	uintptr_t start, size_t length);
+int andock_mapping_write_allowed(const struct AndockMappingTable *table,
 	uintptr_t start, size_t length);
 int andock_mapping_protect(struct AndockMappingTable *table,
 	uintptr_t start, size_t length, bool writable);

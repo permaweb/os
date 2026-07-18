@@ -51,7 +51,7 @@ def manifest(out, root, termux_revision, builder_image, lwext4_revision):
         "termux-packages-revision": termux_revision,
         "termux-builder-image": builder_image,
         "lwext4-revision": lwext4_revision,
-        "toolchain-revision": f"termux-{termux_revision}+andock-image-4",
+        "toolchain-revision": f"termux-{termux_revision}+andock-image-5",
         "android-package-prefix": "/data/data/org.permaweb.andee/files/usr",
         "files": {
             str(path.relative_to(out)): digest(path)

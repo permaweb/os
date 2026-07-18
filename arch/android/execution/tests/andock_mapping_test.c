@@ -88,7 +88,7 @@ int main(void)
 	int initial_fds = descriptor_count();
 	long initial_rss = resident_pages();
 	for (unsigned int iteration = 0; iteration < 20000; iteration++) {
-		if (andock_mapping_replace(table, 0x100000, 4096, 1, true) < 0
+		if (andock_mapping_replace(table, 0x100000, 4096, 1, true, true) < 0
 		    || andock_mapping_unmap(table, 0x100000, 4096) < 0)
 			fail("repeated-map-unmap");
 	}
@@ -99,7 +99,7 @@ int main(void)
 	    && resident_pages() > initial_rss + 256)
 		fail("resident-bound");
 
-	if (andock_mapping_replace(table, 0x200000, 0x4000, 2, false) < 0
+	if (andock_mapping_replace(table, 0x200000, 0x4000, 2, false, true) < 0
 	    || andock_mapping_unmap(table, 0x201000, 0x1000) < 0)
 		fail("partial-unmap");
 	expect_state("partial-unmap-state", table, 2, 2, 0);
@@ -111,7 +111,7 @@ int main(void)
 		fail("partial-release");
 	expect_state("partial-release-state", table, 0, 0, 0);
 
-	if (andock_mapping_replace(table, 0x300000, 0x3000, 3, true) < 0
+	if (andock_mapping_replace(table, 0x300000, 0x3000, 3, true, true) < 0
 	    || andock_mapping_remap(table, 0x300000, 0x3000,
 		0x400000, 0x5000, false) < 0)
 		fail("move-expand");
@@ -126,7 +126,7 @@ int main(void)
 	if (andock_mapping_unmap(table, 0x400000, 0x2000) < 0)
 		fail("shrink-release");
 
-	if (andock_mapping_replace(table, 0x500000, 0x2000, 4, true) < 0
+	if (andock_mapping_replace(table, 0x500000, 0x2000, 4, true, true) < 0
 	    || andock_mapping_remap(table, 0x500000, 0x2000,
 		0x600000, 0x2000, true) < 0)
 		fail("dontunmap");
@@ -134,6 +134,14 @@ int main(void)
 	if (andock_mapping_unmap(table, 0x500000, 0x2000) < 0)
 		fail("dontunmap-old-release");
 	expect_state("dontunmap-old-release-state", table, 1, 1, 1);
+	if (andock_mapping_replace(table, 0x700000, 0x2000, 5,
+		false, false) < 0)
+		fail("read-only-map");
+	if (andock_mapping_write_allowed(table, 0x700000, 0x1000) != 0
+	    || andock_mapping_protect(table, 0x700000, 0x1000, true) != -EACCES)
+		fail("read-only-upgrade");
+	if (andock_mapping_unmap(table, 0x700000, 0x2000) < 0)
+		fail("read-only-unmap");
 
 	struct AndockMappingTable *forked = andock_mapping_table_clone(table);
 	if (forked == NULL)

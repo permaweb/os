@@ -336,6 +336,7 @@ struct AndockBrokerState {
 	bool pending_cache_retained;
 	uint64_t pending_mapping_cache_id;
 	bool pending_mapping_retained;
+	bool pending_mapping_write_permitted;
 	bool transfer_pending;
 	bool transfer_update_input;
 	bool transfer_update_output;
@@ -374,6 +375,7 @@ static void release_pending_mapping(struct AndockBrokerState *state)
 		state->pending_mapping_retained = false;
 		state->pending_mapping_cache_id = 0;
 	}
+	state->pending_mapping_write_permitted = false;
 }
 
 struct AndockRecvMsgPointers {
@@ -3581,6 +3583,19 @@ static size_t page_aligned_length(word_t value)
 
 static int prepare_file_mapping(Tracee *tracee, Sysnum sysnum)
 {
+	if (sysnum == PR_mprotect) {
+		if (((int)peek_reg(tracee, CURRENT, SYSARG_3) & PROT_WRITE) == 0)
+			return 0;
+		struct AndockBrokerState *state = broker_state(tracee);
+		if (state == NULL || state->mappings == NULL)
+			return -ENOTCONN;
+		size_t length = page_aligned_length(
+			peek_reg(tracee, CURRENT, SYSARG_2));
+		int allowed = length == 0 ? -EINVAL : andock_mapping_write_allowed(
+			state->mappings,
+			(uintptr_t)peek_reg(tracee, CURRENT, SYSARG_1), length);
+		return allowed > 0 ? 0 : allowed < 0 ? allowed : -EACCES;
+	}
 	if (sysnum != PR_mmap && sysnum != PR_mmap2)
 		return 0;
 	struct AndockBrokerState *state = broker_state(tracee);
@@ -3599,6 +3614,7 @@ static int prepare_file_mapping(Tracee *tracee, Sysnum sysnum)
 		return status;
 	state->pending_mapping_cache_id = file->cache_id;
 	state->pending_mapping_retained = true;
+	state->pending_mapping_write_permitted = file_writable(file);
 	return 0;
 }
 
@@ -3619,7 +3635,8 @@ static int handle_mapping_exit(Tracee *tracee, Sysnum sysnum,
 				state->mappings, (uintptr_t)result, length,
 				state->pending_mapping_retained
 					? state->pending_mapping_cache_id : 0,
-				(protection & PROT_WRITE) != 0);
+				(protection & PROT_WRITE) != 0,
+				state->pending_mapping_write_permitted);
 			if (status < 0 && state->pending_mapping_retained) {
 				/* Keep the cache conservatively live if range allocation failed. */
 				andock_image_engine_mapping_retain(

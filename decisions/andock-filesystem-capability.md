@@ -81,12 +81,14 @@ Component, link-depth, and total-length bounds fail closed. Rename, link,
 unlink, and directory operations resolve and revalidate their parent inodes.
 
 Regular inodes are materialized into kernel memfds so native loaders, mmap,
-locking, and descriptor APIs see ordinary file descriptions. Requested
-read/write access is enforced by independently reopening the carrier with the
-requested kernel mode. Read-only carriers cannot write or gain shared-write
-access through `mmap` or `mprotect`. Legacy asynchronous I/O and guest
-ancillary descriptor transfer are denied because they would bypass mutation
-accounting or capability confinement.
+locking, and descriptor APIs see ordinary file descriptions. Android denies
+isolated workers the `/proc/self/fd` reopen needed to narrow a memfd's kernel
+access mode, so requested access lives in the tracked Linux open description
+and is enforced before every carrier I/O, transfer, truncation, mapping, and
+mapping-protection operation. Read-only descriptions cannot write or gain
+shared-write access through `mmap` or `mprotect`. Legacy asynchronous I/O and
+guest ancillary descriptor transfer are denied because they would bypass
+mutation accounting or capability confinement.
 
 Writable mappings and open descriptions hold explicit references. Dirty
 ranges are coalesced and persisted on `fsync`, `fdatasync`, `msync`, last

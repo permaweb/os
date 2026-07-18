@@ -837,6 +837,14 @@ static int metadata(const char *guest, int type,
 
 int andock_image_engine_reopen(int fd, int flags)
 {
+#ifdef __ANDROID__
+	/* Android's isolated_app domain denies reopening /proc/self/fd.  The
+	 * extension mediates every carrier operation and keeps the requested
+	 * access mode in the logical open description. */
+	(void)flags;
+	int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	return duplicate < 0 ? -errno : duplicate;
+#else
 	char path[64];
 	int reopened_flags = flags & (O_ACCMODE | O_APPEND | O_CLOEXEC
 		| O_NONBLOCK | O_TRUNC);
@@ -861,6 +869,7 @@ int andock_image_engine_reopen(int fd, int flags)
 		return -EOVERFLOW;
 	int reopened = open(path, reopened_flags);
 	return reopened < 0 ? -errno : reopened;
+#endif
 }
 
 static bool buffer_has_nonzero_byte(const uint8_t *buffer, size_t size)
