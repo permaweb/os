@@ -30,6 +30,11 @@ require_tool rustc
 
 "$ROOT/scripts/stage-android-devices.sh"
 
+HB_REF_MARKER="$ANDEE_DEVICE_ROOT/_build/default/.andee-hyperbeam-ref"
+if [ "$(cat "$HB_REF_MARKER" 2>/dev/null || true)" != "$EXPECTED_HYPERBEAM_VERSION" ]; then
+    rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+fi
+
 for clang in aarch64-linux-android29-clang x86_64-linux-android29-clang llvm-strip; do
     if [ ! -x "$TOOLCHAIN/$clang" ]; then
         echo "missing Android NDK tool: $TOOLCHAIN/$clang" >&2
@@ -389,6 +394,7 @@ build_andee_preloaded_store "$WORK/_build/preloaded-store"
 # refreshes hb_buildinfo with wall-clock time. Normalize it after the final
 # rebar3 invocation and before copying application priv files into the runtime.
 write_reproducible_hb_buildinfo
+printf '%s\n' "$ANDEE_HYPERBEAM_VERSION" > "$HB_REF_MARKER"
 cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
 for abi in arm64-v8a x86_64; do
     build_android_elmdb_nif "$abi"
