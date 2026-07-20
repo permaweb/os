@@ -11,7 +11,7 @@ NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
 REBAR3="$ROOT/scripts/verified-rebar3.sh"
 PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
-EXPECTED_HYPERBEAM_VERSION="fcdf5867686c64a8abe79e04e10f3590fbd62b7f"
+EXPECTED_HYPERBEAM_VERSION="8b9105d7c1a8b2bd93fc050dfd093fa49b80b0be"
 
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
@@ -29,6 +29,11 @@ require_tool make
 require_tool rustc
 
 "$ROOT/scripts/stage-android-devices.sh"
+
+HB_REF_MARKER="$ANDEE_DEVICE_ROOT/_build/default/.andee-hyperbeam-ref"
+if [ "$(cat "$HB_REF_MARKER" 2>/dev/null || true)" != "$EXPECTED_HYPERBEAM_VERSION" ]; then
+    rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+fi
 
 for clang in aarch64-linux-android29-clang x86_64-linux-android29-clang llvm-strip; do
     if [ ! -x "$TOOLCHAIN/$clang" ]; then
@@ -389,6 +394,7 @@ build_andee_preloaded_store "$WORK/_build/preloaded-store"
 # refreshes hb_buildinfo with wall-clock time. Normalize it after the final
 # rebar3 invocation and before copying application priv files into the runtime.
 write_reproducible_hb_buildinfo
+printf '%s\n' "$ANDEE_HYPERBEAM_VERSION" > "$HB_REF_MARKER"
 cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
 for abi in arm64-v8a x86_64; do
     build_android_elmdb_nif "$abi"
