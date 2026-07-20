@@ -4,6 +4,7 @@ set -euo pipefail
 : "${ANDEE_OUTPUT_BASENAME:?missing output basename}"
 : "${ANDEE_SOURCE_DATE_EPOCH:?missing source date epoch}"
 : "${ANDEE_IMAGE_UUID:?missing image UUID}"
+: "${ANDEE_IMAGE_BYTES:?missing image size}"
 : "${ANDEE_UBUNTU_IMAGE:?missing Ubuntu image}"
 : "${ANDEE_UBUNTU_SNAPSHOT:?missing Ubuntu snapshot}"
 : "${ANDEE_NODE_VERSION:?missing Node.js version}"
@@ -18,7 +19,7 @@ set -euo pipefail
 : "${ANDEE_XATTR_REPLAYER_SHA256:?missing xattr-replayer digest}"
 : "${ANDEE_SPARSE_CONVERTER_SHA256:?missing sparse-converter digest}"
 
-IMAGE_BYTES=8589934592
+IMAGE_BYTES="$ANDEE_IMAGE_BYTES"
 IMAGE_INODES=524288
 FEATURES='has_journal,ext_attr,dir_index,filetype,extent,sparse_super,large_file,^64bit,^metadata_csum,^metadata_csum_seed,^orphan_file,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^resize_inode,^sparse_super2,^project,^quota,^encrypt,^casefold,^verity,^ea_inode,^inline_data,^bigalloc,^mmp,^uninit_bg'
 WORK=/build/andock-template

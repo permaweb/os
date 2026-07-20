@@ -9,9 +9,9 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXPECTED = {
     "architecture": "arm64",
-    "image-logical-bytes": 8 * 1024 * 1024 * 1024,
+    "image-logical-bytes": 32 * 1024 * 1024 * 1024,
     "image-sha256":
-        "e468693573fcf162ddbe6d0e8ffdf3ff2e07992a3e2f7387017b342f6df9423c",
+        "29a8d9f031e76a0c42cf5b6013e92309925368378d5e944019f1a2985464228b",
     "image-uuid": "4b7e4af2-25cd-4ae5-a14d-8f8628b88f5d",
     "metadata-inventory-sha256":
         "4bb273ba4f81618fd8bcf99819770d633e11bddd43df704bea6a015b43cb5049",
@@ -25,7 +25,7 @@ EXPECTED = {
     "source-date-epoch": 1735689600,
     "sparse-image-format": "android-sparse-v1",
     "sparse-image-sha256":
-        "6f45382bd8c1c383860c75e92c801864832c1be680fc6ab04c969f21c4dbddb6",
+        "063d3500242a9ab384ad2030c53bf254d0563862cabafd4a05815119a8276e94",
     "ubuntu-builder-image":
         "ubuntu@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b",
     "ubuntu-snapshot": "20260714T000000Z",

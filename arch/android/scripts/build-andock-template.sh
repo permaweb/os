@@ -14,6 +14,7 @@ PERMAGIT_PACKAGE_LOCK_SHA256=968ddaffdc52c3931d278a08a7ede83b3ef0566ef1ebf3b47ed
 PROVISION_REVISION=andock-ubuntu-ext4-1
 SOURCE_DATE_EPOCH=1735689600
 IMAGE_UUID=4b7e4af2-25cd-4ae5-a14d-8f8628b88f5d
+IMAGE_BYTES=34359738368
 
 OUTPUT="${1:-$BUILD_DIR/andock-template/andock-ubuntu-arm64.ext4}"
 OUTPUT_PARENT="$(dirname "$OUTPUT")"
@@ -96,6 +97,7 @@ docker exec \
     --env ANDEE_OUTPUT_BASENAME="$OUTPUT_BASENAME" \
     --env ANDEE_SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --env ANDEE_IMAGE_UUID="$IMAGE_UUID" \
+    --env ANDEE_IMAGE_BYTES="$IMAGE_BYTES" \
     --env ANDEE_UBUNTU_IMAGE="$UBUNTU_IMAGE" \
     --env ANDEE_UBUNTU_SNAPSHOT="$UBUNTU_SNAPSHOT" \
     --env ANDEE_NODE_VERSION="$NODE_VERSION" \
@@ -111,7 +113,7 @@ docker exec \
     --env ANDEE_SPARSE_CONVERTER_SHA256="$SPARSE_CONVERTER_SHA256" \
     "$CONTAINER" bash /tmp/andock-build-template-inner
 
-if [[ "$(stat -f %z "$OUTPUT")" != 8589934592 ]]; then
+if [[ "$(stat -f %z "$OUTPUT")" != "$IMAGE_BYTES" ]]; then
     printf 'unexpected output size: %s\n' "$(stat -f %z "$OUTPUT")" >&2
     exit 1
 fi
