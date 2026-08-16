@@ -6,24 +6,19 @@ PERMAWEBOS_ROOT="$(cd "$ROOT/../.." && pwd)"
 ACTION="${1:-}"
 REBAR3="${REBAR3:-rebar3}"
 DEVICE_KEY="${DEVICE_KEY:-$ROOT/_build/device-key.json}"
-ANDROID_DEVICE_SRC="$ROOT/src"
-SANDBOX_DEVICE_SRC="$PERMAWEBOS_ROOT/devices/common/src/sandbox"
-DEVICE_SRC="$ANDROID_DEVICE_SRC,$SANDBOX_DEVICE_SRC"
-ANDOCK_PRIV_DIR="$ANDROID_DEVICE_SRC/priv/dev_andock"
-mkdir -p "$ANDOCK_PRIV_DIR"
-trap 'rmdir "$ANDOCK_PRIV_DIR" "$ANDROID_DEVICE_SRC/priv" 2>/dev/null || true' EXIT
+DEVICE_SRC="$ROOT/src,$PERMAWEBOS_ROOT/devices/common/src/sandbox"
 cd "$ROOT"
 case "$ACTION" in
     package)
         "$REBAR3" device package \
             --device-src "$DEVICE_SRC" \
-            --devices dev_andock \
+            --devices dev_docker \
             --key "$DEVICE_KEY"
         ;;
     test)
         HB_PORT=0 "$REBAR3" device test \
             --device-src "$DEVICE_SRC" \
-            --devices dev_andock \
+            --devices dev_docker \
             --key "$DEVICE_KEY"
         ;;
     *)

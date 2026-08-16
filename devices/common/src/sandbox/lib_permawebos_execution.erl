@@ -3,6 +3,7 @@
 -export([handle/5, tool_keys/1, list_files/3, serve_file/3]).
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-export([prepare_member/3]).
 -endif.
 -define(DEFAULT_DEVICE, <<"execution@1.0">>).
 -define(DEFAULT_HOME, <<"/root">>).
@@ -204,7 +205,39 @@ with_authorized_member(AuthAction, ResponseAction, Req, Opts, Fun) ->
                 try
                     with_member_lock(
                         MemberId,
-                        fun() -> Fun(MemberId, Member) end
+                        fun() ->
+                            case prepare_member_environment(
+                                MemberId,
+                                Member,
+                                Opts
+                            ) of
+                                ok ->
+                                    Fun(MemberId, Member);
+                                {error, Status, Message, Details} ->
+                                    backend_error_response(
+                                        ResponseAction,
+                                        MemberId,
+                                        Status,
+                                        Message,
+                                        Details,
+                                        #{}
+                                    );
+                                {error, Status, Message} ->
+                                    error_response(
+                                        ResponseAction,
+                                        MemberId,
+                                        Status,
+                                        Message
+                                    );
+                                {error, Reason} ->
+                                    error_response(
+                                        ResponseAction,
+                                        MemberId,
+                                        500,
+                                        safe_bin(Reason)
+                                    )
+                            end
+                        end
                     )
                 catch
                     throw:{tool_error, Status, Message} ->
@@ -215,6 +248,27 @@ with_authorized_member(AuthAction, ResponseAction, Req, Opts, Fun) ->
                             Message
                         )
                 end}
+    end.
+
+%% @doc Let a backend bind immutable member policy before any auxiliary file
+%% operation creates the execution environment. Backends without per-member
+%% lifecycle policy need no preparation.
+prepare_member_environment(MemberId, Member, Opts) ->
+    Backend = maps:get(execution_backend, Opts),
+    case code:ensure_loaded(Backend) of
+        {module, Backend} ->
+            case erlang:function_exported(Backend, prepare_member, 3) of
+                true ->
+                    Backend:prepare_member(
+                        MemberId,
+                        not member_allows_network(Member, Opts),
+                        Opts
+                    );
+                false ->
+                    ok
+            end;
+        _ ->
+            ok
     end.
 
 with_member_lock(MemberId, Fun) ->
@@ -401,7 +455,7 @@ grep_command(Pattern) ->
 handle_bash(MemberId, Member, Req, Opts) ->
     with_required_cwd(Req, <<"command">>, <<"command is required.">>,
         fun(Command, CwdCanonical) ->
-            DisableNetwork = not member_allows_network(Member),
+            DisableNetwork = not member_allows_network(Member, Opts),
             case lib_permawebos_bash_session:start(
                 MemberId,
                 CwdCanonical,
@@ -687,10 +741,15 @@ delta(Op, Path, Extra) ->
         Extra
     ).
 
-member_allows_network(Member) ->
+member_allows_network(Member, Opts) ->
+    Default = maps:get(execution_default_allow_network, Opts, true),
     normalize_boolean(
-        maps:get(<<"allow-network">>, maps:get(<<"metadata">>, Member, #{}), true),
-        true
+        maps:get(
+            <<"allow-network">>,
+            maps:get(<<"metadata">>, Member, #{}),
+            Default
+        ),
+        Default
     ).
 
 clip_output(Output, _Limit) when Output =:= undefined; Output =:= null ->
@@ -933,6 +992,29 @@ safe_bin(Value) ->
     iolist_to_binary(io_lib:format("~p", [Value])).
 
 -ifdef(TEST).
+
+prepare_member(MemberId, DisableNetwork, _Opts) ->
+    put(prepare_member_probe, {MemberId, DisableNetwork}),
+    {error, 409, <<"prepared before action">>}.
+
+member_policy_is_prepared_before_file_action_test() ->
+    MemberId = <<"prepare-member-probe">>,
+    Req =
+        #{
+            <<"method">> => <<"POST">>,
+            <<"member-id">> => MemberId,
+            <<"path">> => <<"probe">>,
+            <<"member-context">> =>
+                #{
+                    <<"id">> => MemberId,
+                    <<"tools">> => [<<"Read">>],
+                    <<"metadata">> => #{ <<"allow-network">> => true }
+                }
+        },
+    {ok, Result} = handle(read, <<"probe@1.0">>, ?MODULE, Req, #{}),
+    ?assertEqual({MemberId, false}, erase(prepare_member_probe)),
+    ?assertEqual(409, maps:get(<<"status">>, Result)),
+    ?assertEqual(<<"prepared before action">>, maps:get(<<"error">>, Result)).
 
 clip_output_omits_absent_output_test() ->
     ?assertEqual({<<>>, false}, clip_output(undefined, 1024)),

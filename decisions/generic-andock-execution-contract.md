@@ -67,7 +67,8 @@ private Android socket framing is not public.
 
 The backend-neutral contract becomes `lib_permawebos_execution`, background
 session lifecycle becomes `lib_permawebos_bash_session`, and the tool schema
-becomes `lib_permawebos_execution_tools`, all under `devices/android/src/`.
+becomes `lib_permawebos_execution_tools`, all under
+`devices/common/src/sandbox/`.
 Only backend-neutral portions of the established Docker contract move.
 Docker process management, image names, application option keys,
 provider/member/router logic, and the general application utility module do

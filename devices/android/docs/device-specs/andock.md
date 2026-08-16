@@ -46,7 +46,7 @@ implemented by inspecting command strings.
 
 ## Package boundary
 
-The Andock source package owns the device, neutral execution contract, and its
-private local transport. It builds from PermawebOS source alone. Its emitted
-archive contains no application router, provider, UI, member model, node mode,
-or configuration.
+The Andock source package owns the device and its private local transport. It
+imports the neutral contract from `devices/common/src/sandbox/` at package time and
+builds from PermawebOS source alone. Its emitted archive contains no
+application router, provider, UI, member model, node mode, or configuration.

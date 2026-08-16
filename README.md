@@ -383,6 +383,79 @@ To write an existing image without rebuilding:
 make write-image DEV=/dev/diskN IMAGE=build/images/permawebos-no-tme-signed.img
 ```
 
+### Optional Docker execution
+
+Docker is an explicit measured Linux capability and is absent from ordinary
+LapEE builds. Build the no-image runtime with:
+
+```sh
+JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)" \
+  make runtime-image DOCKER=1
+```
+
+The profile adds Docker Engine, containerd, runc, the Docker CLI, tini, and the
+generic preloaded `docker@1.0` device. It does not include a development image,
+VM tooling, or an application package. Select an operator-supplied local image
+in public `config.json`:
+
+```json
+{
+  "permawebos-docker-image": "operator/image:version",
+  "permawebos-docker-volume": "ephemeral"
+}
+```
+
+The image is a tool filesystem, not an application: its entrypoint, user,
+working directory, and health check are overridden. It must provide Bash,
+Python 3, GNU `timeout`, ripgrep, find, and the ordinary core file utilities.
+
+`ephemeral` is the default: member workspaces survive container stop/start but
+not a LapEE reboot. `zone` is a reserved fail-closed value until Docker can use
+an executable, quota-enforced `zone@1.0` volume; selecting it returns an
+AO-Core failure and never falls back to ephemeral storage.
+
+To load an OCI/Docker archive from the boot ESP, build the disk with:
+
+```sh
+make runtime-image DOCKER=1 \
+  CAPABILITY_INPUT=/path/to/image.tar \
+  CAPABILITY_INPUT_NAME=docker-image.tar
+```
+
+LapEE copies the bounded archive before detaching the boot medium, loads it into
+the private engine, and deletes the copy. The engine listens only on its
+private `0600` Unix socket beneath `/run/lapee/docker-runtime`; it is never
+published over TCP or mounted into execution containers.
+
+Containers default to 512 MiB memory, one CPU, 256 PIDs, a 512 MiB persistent
+member workspace, and 64 MiB `/tmp`. The root filesystem is read-only, all
+capabilities are dropped, `no-new-privileges` is enabled, and networking is
+disabled unless the member explicitly allows it on its first operation. That
+choice is immutable for the member container; later execution calls cannot
+change it. Measured operator config may override the limits with
+`permawebos-docker-memory`, `-cpus`, `-pids`, `-storage`, and `-tmpfs`.
+Consumers select the public device with:
+
+```text
+ouroboros-execution-device = docker@1.0
+```
+
+Verify the mutually exclusive profiles, exact signed disk payload, activation
+marker, package/kernel closure, and the 300 MiB UKI ceiling with:
+
+```sh
+./scripts/verify-docker-profile.sh
+```
+
+The release acceptance fixture remains outside the production UKI. On an
+x86-64 Linux host with KVM, build it and exercise the public device route with:
+
+```sh
+./arch/common/linux/tests/build-docker-fixture.sh
+./arch/common/linux/tests/prepare-docker-kvm-image.sh
+./arch/common/linux/tests/run-docker-kvm-smoke.sh
+```
+
 ## Verification And Tests
 
 Useful live endpoints:
@@ -469,8 +542,10 @@ as "TEE capable."
 - `arch/` - architecture packaging for Linux, SNP, TME/no-TME, and AndEE.
 - `arch/common/linux/` - shared Buildroot Linux appliance.
 - `arch/android/` - AndEE Android app/runtime packaging and emulator harnesses.
-- `devices/common/` - shared HyperBEAM device package: measurement, system,
-  TPM, SNP, AndEE verification, zones, native helpers, and trust roots.
+- `devices/common/` - shared HyperBEAM device package. Security devices and
+  helpers live under `src/security`; backend-neutral sandbox execution lives
+  under `src/sandbox`; platform-wide modules remain at `src/`.
+- `devices/linux/` - optional Linux `docker@1.0` execution device.
 - `devices/android/` - Android-specific store, metadata, service, and payment
   devices.
 - `scripts/` - image assembly, QEMU/remote validation, WiFi, and Secure Boot

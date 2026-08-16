@@ -61,6 +61,21 @@ cmdline_flag_set() {
     [ "$_v" = "1" ]
 }
 
+# Optional measured capabilities install their boot logic as profile-only
+# hooks. The base init knows only the generic phases, so an ordinary rootfs
+# does not carry dormant capability code or capability-specific markers.
+run_capability_hooks() {
+    LAPEE_CAPABILITY_PHASE=$1
+    LAPEE_CAPABILITY_INPUT_ROOT=${2:-}
+    for _capability_hook in /etc/lapee/capabilities/*; do
+        [ -f "$_capability_hook" ] || continue
+        # Hooks are trusted measured rootfs input and deliberately share init's
+        # halt/status/trace helpers and environment.
+        . "$_capability_hook"
+    done
+    unset LAPEE_CAPABILITY_PHASE LAPEE_CAPABILITY_INPUT_ROOT
+}
+
 LAPEE_MODE=$(cmdline_value lapee.mode || echo prod)
 case "$LAPEE_MODE" in
     debug|prod|sb-provision) ;;
@@ -1608,6 +1623,7 @@ read_boot_media_config() {
                 else
                     trace "config: no /EFI/boot/config.json on ESP"
                 fi
+                run_capability_hooks boot-input /mnt/esp
                 umount /mnt/esp 2>/dev/null || true
                 ensure_unmounted /mnt/esp boot-media \
                     || halt_boot "boot ESP stayed mounted after read-only config scan"
@@ -1951,6 +1967,8 @@ if [ "$LAPEE_DEBUG" = "1" ] && ! cmdline_flag_set LAPEE_NO_NET; then
         debug_dump_wifi_state
     fi
 fi
+
+run_capability_hooks activate
 
 # Splash phase machine is internal to lapee_splash.erl: it polls
 # /run/lapee/primary-net for the IP and the dev_tpm2 /info endpoint

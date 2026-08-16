@@ -104,8 +104,11 @@ build_andee_preloaded_store() {
         cd "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
         # EUnit auto-export uses an unordered set, so production packages that
         # include *_test() functions otherwise get nondeterministic debug info.
+        device_src="src/preloaded,$ANDEE_DEVICE_ROOT/src"
+        device_src="$device_src,$ANDEE_DEVICE_ROOT/src/security"
+        device_src="$device_src,$ANDEE_DEVICE_ROOT/src/sandbox"
         ERL_COMPILER_OPTIONS="[{d,'NOTEST'}]" "$rebar3" device preload \
-            --device-src "src/preloaded,$ANDEE_DEVICE_ROOT/src" \
+            --device-src "$device_src" \
             --output-dir "$out" \
             --key "$key"
     )

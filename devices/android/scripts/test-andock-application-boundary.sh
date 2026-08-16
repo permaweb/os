@@ -10,6 +10,7 @@ SURFACES=(
     "$ROOT/docs/device-specs/andock.md"
     "$ROOT/scripts/andock-device.sh"
     "$ROOT/src"
+    "$PERMAWEBOS_ROOT/devices/common/src/sandbox"
     "$PERMAWEBOS_ROOT/arch/android/Makefile"
     "$PERMAWEBOS_ROOT/arch/android/scripts/android-common.sh"
     "$PERMAWEBOS_ROOT/arch/android/scripts/stage-android-devices.sh"

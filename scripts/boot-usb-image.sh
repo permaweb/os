@@ -16,6 +16,7 @@
 #   ./scripts/boot-usb-image.sh --timeout 600   (seconds)
 #   ./scripts/boot-usb-image.sh --host-port 28734
 #   QEMU_MEMORY=12288 ./scripts/boot-usb-image.sh
+#   QEMU_ACCEL=kvm QEMU_CPU=host ./scripts/boot-usb-image.sh
 #   ./scripts/boot-usb-image.sh --oracle-url https://example.com/
 
 set -euo pipefail
@@ -27,8 +28,15 @@ TIMEOUT=${TIMEOUT:-420}
 OUTDIR=${OUTDIR:-$BUILD_DIR/qemu-network-test}
 LOGFILE=${LOGFILE:-$OUTDIR/serial.log}
 ORACLE_URL=${ORACLE_URL:-}
+ACCEPTANCE_SCRIPT=${LAPEE_BOOT_ACCEPTANCE_SCRIPT:-}
 HOST_PORT=${HOST_PORT:-18734}
 QEMU_MEMORY=${QEMU_MEMORY:-12288}
+QEMU_ACCEL=${QEMU_ACCEL:-tcg}
+case "$QEMU_ACCEL" in
+    tcg) QEMU_CPU=${QEMU_CPU:-qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx} ;;
+    kvm) QEMU_CPU=${QEMU_CPU:-host} ;;
+    *) echo "unsupported QEMU_ACCEL=$QEMU_ACCEL (use tcg or kvm)" >&2; exit 2 ;;
+esac
 CURL_CONNECT_TIMEOUT=${CURL_CONNECT_TIMEOUT:-2}
 CURL_READY_MAX_TIME=${CURL_READY_MAX_TIME:-5}
 CURL_FETCH_MAX_TIME=${CURL_FETCH_MAX_TIME:-60}
@@ -44,6 +52,7 @@ while (($# > 0)); do
         --log)     LOGFILE=$2; shift 2;;
         --host-port) HOST_PORT=$2; shift 2;;
         --oracle-url) ORACLE_URL=$2; shift 2;;
+        --acceptance-script) ACCEPTANCE_SCRIPT=$2; shift 2;;
         --gui)     GUI=1; shift;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
@@ -121,8 +130,8 @@ echo "    log: $LOGFILE  (timeout: ${TIMEOUT}s)"
 # the boot log via $LOGFILE). VGA is `std' so the kernel binds
 # vesafb/efifb cleanly.
 COMMON_ARGS=(
-    -machine q35,accel=tcg
-    -cpu qemu64,+rdtscp,+ssse3,+sse4.1,+sse4.2,+avx
+    -machine "q35,accel=${QEMU_ACCEL}"
+    -cpu "$QEMU_CPU"
     -m "$QEMU_MEMORY" -smp 4
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
     -drive "if=pflash,format=raw,file=${SCRATCH_VARS}"
@@ -303,6 +312,15 @@ if not body:
     raise SystemExit("oracle response body was empty")
 print(">> oracle response signed by node key:", sorted(node_keyids & oracle_keyids)[0])
 PY
+fi
+
+if [[ -n "$ACCEPTANCE_SCRIPT" ]]; then
+    [[ -x "$ACCEPTANCE_SCRIPT" ]] || {
+        echo "!! boot acceptance script is not executable: $ACCEPTANCE_SCRIPT" >&2
+        exit 1
+    }
+    echo ">> running in-guest route acceptance through $BASE_URL"
+    "$ACCEPTANCE_SCRIPT" "$BASE_URL"
 fi
 
 kill $QEMUPID 2>/dev/null || true

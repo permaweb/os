@@ -28,6 +28,8 @@ LAPEE_LINUX_DIR="${LAPEE_LINUX_DIR:-$LAPEE_ROOT/arch/common/linux}"
 LAPEE_BUILDROOT_EXTERNAL="${LAPEE_BUILDROOT_EXTERNAL:-$LAPEE_LINUX_DIR/buildroot-external}"
 LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/common}"
 LAPEE_HB_DEVICE_INPUTS=(cargo-locks native src rebar.config rebar.lock)
+LAPEE_LINUX_DEVICE_DIR="${LAPEE_LINUX_DEVICE_DIR:-$LAPEE_ROOT/devices/linux}"
+LAPEE_DOCKER_PROFILE="${LAPEE_DOCKER_PROFILE:-0}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 CONTAINER="${BUILDROOT_CONTAINER:-${VOLUME}-build}"
@@ -35,6 +37,13 @@ DOCKER_PLATFORM="${DOCKER_PLATFORM:-}"
 DEFCONFIG=${DEFCONFIG:-lapee_defconfig}
 KERNEL_EXTRA_FRAGMENT="${KERNEL_EXTRA_FRAGMENT:-}"
 DEFCONFIG_EXTRA_SNIPPET="${DEFCONFIG_EXTRA_SNIPPET:-}"
+KERNEL_EXTRA_FRAGMENTS="${KERNEL_EXTRA_FRAGMENTS:-$KERNEL_EXTRA_FRAGMENT}"
+DEFCONFIG_EXTRA_SNIPPETS="${DEFCONFIG_EXTRA_SNIPPETS:-$DEFCONFIG_EXTRA_SNIPPET}"
+# Bash 3.2 treats expansion of an empty array as an unbound variable under
+# `set -u'. Keep one empty sentinel so ordinary builds remain portable to the
+# macOS system Bash; every consumer skips it.
+KERNEL_EXTRA_FRAGMENT_LIST=("")
+DEFCONFIG_EXTRA_SNIPPET_LIST=("")
 
 # Buildroot 2026.02 LTS sources. Pinned tarball URL + sha256 so
 # a corrupted/moved upstream is caught at fetch time.
@@ -55,20 +64,35 @@ ERLANG_SHA256=${ERLANG_SHA256:-2c7e8ca23e6864eb20eff5d44738bfa123aed8cd21ed6d98e
 LINUX_FIRMWARE_VERSION=${LINUX_FIRMWARE_VERSION:-20260410}
 LINUX_FIRMWARE_SHA256=${LINUX_FIRMWARE_SHA256:-b7812ed6d59f6b09ecceddaa0be842a7e82a79cc0e46ca60478a4ebf02f1e178}
 
-if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
-    [[ -f "$KERNEL_EXTRA_FRAGMENT" ]] || {
-        echo "missing KERNEL_EXTRA_FRAGMENT: $KERNEL_EXTRA_FRAGMENT" >&2
+case "$LAPEE_DOCKER_PROFILE" in
+    0|1) ;;
+    *) echo "LAPEE_DOCKER_PROFILE must be 0 or 1" >&2; exit 1 ;;
+esac
+
+if [[ -n "$KERNEL_EXTRA_FRAGMENTS" ]]; then
+    read -r -a KERNEL_EXTRA_FRAGMENT_LIST <<< "$KERNEL_EXTRA_FRAGMENTS"
+fi
+if [[ -n "$DEFCONFIG_EXTRA_SNIPPETS" ]]; then
+    read -r -a DEFCONFIG_EXTRA_SNIPPET_LIST <<< "$DEFCONFIG_EXTRA_SNIPPETS"
+fi
+for index in "${!KERNEL_EXTRA_FRAGMENT_LIST[@]}"; do
+    fragment="${KERNEL_EXTRA_FRAGMENT_LIST[$index]}"
+    [[ -n "$fragment" ]] || continue
+    [[ -f "$fragment" ]] || {
+        echo "missing kernel extra fragment: $fragment" >&2
         exit 1
     }
-    KERNEL_EXTRA_FRAGMENT="$(cd "$(dirname "$KERNEL_EXTRA_FRAGMENT")" && pwd)/$(basename "$KERNEL_EXTRA_FRAGMENT")"
-fi
-if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
-    [[ -f "$DEFCONFIG_EXTRA_SNIPPET" ]] || {
-        echo "missing DEFCONFIG_EXTRA_SNIPPET: $DEFCONFIG_EXTRA_SNIPPET" >&2
+    KERNEL_EXTRA_FRAGMENT_LIST[$index]="$(cd "$(dirname "$fragment")" && pwd)/$(basename "$fragment")"
+done
+for index in "${!DEFCONFIG_EXTRA_SNIPPET_LIST[@]}"; do
+    snippet="${DEFCONFIG_EXTRA_SNIPPET_LIST[$index]}"
+    [[ -n "$snippet" ]] || continue
+    [[ -f "$snippet" ]] || {
+        echo "missing defconfig extra snippet: $snippet" >&2
         exit 1
     }
-    DEFCONFIG_EXTRA_SNIPPET="$(cd "$(dirname "$DEFCONFIG_EXTRA_SNIPPET")" && pwd)/$(basename "$DEFCONFIG_EXTRA_SNIPPET")"
-fi
+    DEFCONFIG_EXTRA_SNIPPET_LIST[$index]="$(cd "$(dirname "$snippet")" && pwd)/$(basename "$snippet")"
+done
 
 [[ -d "$LAPEE_HB_DEVICE_DIR" ]] || {
     echo "missing LAPEE_HB_DEVICE_DIR: $LAPEE_HB_DEVICE_DIR" >&2
@@ -80,6 +104,16 @@ for path in "${LAPEE_HB_DEVICE_INPUTS[@]}"; do
         exit 1
     }
 done
+if [[ "$LAPEE_DOCKER_PROFILE" == "1" ]]; then
+    [[ -d "$LAPEE_LINUX_DEVICE_DIR/src" ]] || {
+        echo "missing Docker execution source directory: $LAPEE_LINUX_DEVICE_DIR/src" >&2
+        exit 1
+    }
+    [[ -d "$LAPEE_LINUX_DEVICE_DIR/docs/device-specs" ]] || {
+        echo "missing Docker device specifications" >&2
+        exit 1
+    }
+fi
 
 # Ensure the docker volume exists. Wipe its config marker if the
 # defconfig file's mtime is newer than what the volume saw last
@@ -120,12 +154,27 @@ docker run --rm $DOCKER_PLATFORM \
                         /src-hyperbeam-devices/rebar.lock \
                         /build/common-devices/"
 
-if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
-    EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT")"
+if [[ "$LAPEE_DOCKER_PROFILE" == "1" ]]; then
+    # Compose only the Linux adapter into the common source set Forge preloads.
+    # The shared sandbox contract already belongs to the common package.
+    docker run --rm $DOCKER_PLATFORM \
+        -v $VOLUME:/build \
+        -v "$LAPEE_LINUX_DEVICE_DIR":/src-linux-devices:ro \
+        $IMAGE bash -euo pipefail -c '
+            cp -a /src-linux-devices/src/*.erl /build/common-devices/src/
+            mkdir -p /build/common-devices/docs/device-specs
+            cp -a /src-linux-devices/docs/device-specs/*.md \
+                /build/common-devices/docs/device-specs/
+        '
+fi
+
+for KERNEL_EXTRA_FRAGMENT_PATH in "${KERNEL_EXTRA_FRAGMENT_LIST[@]}"; do
+    [[ -n "$KERNEL_EXTRA_FRAGMENT_PATH" ]] || continue
+    EXTRA_FRAGMENT_NAME="$(basename "$KERNEL_EXTRA_FRAGMENT_PATH")"
     echo "=== Applying extra kernel fragment: $EXTRA_FRAGMENT_NAME ==="
     docker run --rm $DOCKER_PLATFORM \
         -v $VOLUME:/build \
-        -v "$KERNEL_EXTRA_FRAGMENT":/extra-kernel-fragment:ro \
+        -v "$KERNEL_EXTRA_FRAGMENT_PATH":/extra-kernel-fragment:ro \
         $IMAGE bash -euo pipefail -c "
             cfg=/build/buildroot-external/configs/$DEFCONFIG
             dst=/build/buildroot-external/board/lapee/$EXTRA_FRAGMENT_NAME
@@ -139,19 +188,20 @@ if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
             ' \"\$cfg\" > \"\$cfg.tmp\"
             mv \"\$cfg.tmp\" \"\$cfg\"
         "
-fi
+done
 
-if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
-    echo "=== Applying extra defconfig snippet: $(basename "$DEFCONFIG_EXTRA_SNIPPET") ==="
+for DEFCONFIG_EXTRA_SNIPPET_PATH in "${DEFCONFIG_EXTRA_SNIPPET_LIST[@]}"; do
+    [[ -n "$DEFCONFIG_EXTRA_SNIPPET_PATH" ]] || continue
+    echo "=== Applying extra defconfig snippet: $(basename "$DEFCONFIG_EXTRA_SNIPPET_PATH") ==="
     docker run --rm $DOCKER_PLATFORM \
         -v $VOLUME:/build \
-        -v "$DEFCONFIG_EXTRA_SNIPPET":/extra-defconfig-snippet:ro \
+        -v "$DEFCONFIG_EXTRA_SNIPPET_PATH":/extra-defconfig-snippet:ro \
         $IMAGE bash -euo pipefail -c "
             cfg=/build/buildroot-external/configs/$DEFCONFIG
             printf '\n# Extra LapEE build variant options.\n' >> \"\$cfg\"
             cat /extra-defconfig-snippet >> \"\$cfg\"
         "
-fi
+done
 
 # If the buildroot source tree isn't in the volume yet, download it.
 if ! docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
@@ -198,12 +248,14 @@ docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build $IMAGE \
 DEFCONFIG_SHA=$(
     {
         shasum -a 256 "$LAPEE_BUILDROOT_EXTERNAL/configs/$DEFCONFIG"
-        if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
-            shasum -a 256 "$KERNEL_EXTRA_FRAGMENT"
-        fi
-        if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
-            shasum -a 256 "$DEFCONFIG_EXTRA_SNIPPET"
-        fi
+        for path in "${KERNEL_EXTRA_FRAGMENT_LIST[@]}"; do
+            [[ -n "$path" ]] || continue
+            shasum -a 256 "$path"
+        done
+        for path in "${DEFCONFIG_EXTRA_SNIPPET_LIST[@]}"; do
+            [[ -n "$path" ]] || continue
+            shasum -a 256 "$path"
+        done
     } | shasum -a 256 | awk '{print $1}'
 )
 KERNEL_FRAGMENT_SHA=$(
@@ -217,9 +269,10 @@ KERNEL_FRAGMENT_SHA=$(
                     | LC_ALL=C sort
             )
         fi
-        if [[ -n "$KERNEL_EXTRA_FRAGMENT" ]]; then
-            shasum -a 256 "$KERNEL_EXTRA_FRAGMENT"
-        fi
+        for path in "${KERNEL_EXTRA_FRAGMENT_LIST[@]}"; do
+            [[ -n "$path" ]] || continue
+            shasum -a 256 "$path"
+        done
     } | shasum -a 256 | awk '{print $1}'
 )
 HYPERBEAM_RECIPE_SHA=$(
@@ -232,6 +285,10 @@ HYPERBEAM_RECIPE_SHA=$(
                 printf '%s\n' "$LAPEE_HB_DEVICE_DIR/$path"
             fi
         done
+        if [[ "$LAPEE_DOCKER_PROFILE" == "1" ]]; then
+            find "$LAPEE_LINUX_DEVICE_DIR/src" \
+                 "$LAPEE_LINUX_DEVICE_DIR/docs" -type f
+        fi
     } \
         | LC_ALL=C sort \
         | xargs shasum -a 256 \
@@ -243,9 +300,10 @@ FIRMWARE_SELECTION_SHA=$(
         printf 'LINUX_FIRMWARE_VERSION=%s\n' "$LINUX_FIRMWARE_VERSION"
         printf 'LINUX_FIRMWARE_SHA256=%s\n' "$LINUX_FIRMWARE_SHA256"
         grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$LAPEE_BUILDROOT_EXTERNAL/configs/$DEFCONFIG"
-        if [[ -n "$DEFCONFIG_EXTRA_SNIPPET" ]]; then
-            grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$DEFCONFIG_EXTRA_SNIPPET" || true
-        fi
+        for path in "${DEFCONFIG_EXTRA_SNIPPET_LIST[@]}"; do
+            [[ -n "$path" ]] || continue
+            grep '^BR2_PACKAGE_LINUX_FIRMWARE_' "$path" || true
+        done
     } \
         | LC_ALL=C sort \
         | shasum -a 256 \
@@ -359,6 +417,7 @@ echo "=== Buildroot build (foreground; logs streamed; -j$JOBS) ==="
 docker run --rm --name "$CONTAINER" $DOCKER_PLATFORM \
     -v $VOLUME:/build \
     -e BR2_JLEVEL="$JOBS" \
+    -e LAPEE_DOCKER_PROFILE="$LAPEE_DOCKER_PROFILE" \
     $IMAGE bash -euo pipefail -c "cd /build/out && date && make ERLANG_VERSION='$ERLANG_VERSION' LINUX_FIRMWARE_VERSION='$LINUX_FIRMWARE_VERSION' -j$JOBS 2>&1 | tee /build/out/build.log"
 
 # Guard the final rootfs against stale host-architecture release

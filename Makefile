@@ -104,7 +104,9 @@ WIFI      ?= 1
 SPLASH    ?= blue
 DEBUG     ?= 0
 TME       ?= 1
-BUILDROOT_VOLUME ?= lapee-buildroot
+DOCKER    ?= 0
+RUNTIME_DOCKER_TAG = $(if $(filter 1,$(DOCKER)),-docker,)
+BUILDROOT_VOLUME ?= $(if $(filter 1,$(DOCKER)),lapee-buildroot-docker,lapee-buildroot)
 KERNEL_EXTRA_FRAGMENT ?=
 DEFCONFIG_EXTRA_SNIPPET ?=
 SB_PROVISION_BUILD_DIR ?= build/sb-provisioner
@@ -125,6 +127,16 @@ HYPERBEAM_VERSION ?= $(shell awk -F'\\?= ' '/^HYPERBEAM_VERSION/ {print $$2; exi
 HYPERBEAM_SRC ?= $(BUILD_DIR)/hyperbeam/src-edge
 HYPERBEAM_ALLOW_CLEAN ?= 0
 LAPEE_HB_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/common
+LAPEE_LINUX_DEVICE_DIR ?= $(LAPEE_ROOT)/devices/linux
+LAPEE_DOCKER_PROFILE := $(DOCKER)
+DOCKER_DEFCONFIG_SNIPPET := $(LINUX_BUILDROOT_EXTERNAL)/configs/lapee-docker.extra
+DOCKER_KERNEL_FRAGMENT := $(LINUX_BUILDROOT_EXTERNAL)/board/lapee/linux-docker-fragment.config
+KERNEL_EXTRA_FRAGMENTS = $(strip $(KERNEL_EXTRA_FRAGMENT) \
+    $(if $(filter 1,$(DOCKER)),$(DOCKER_KERNEL_FRAGMENT),))
+DEFCONFIG_EXTRA_SNIPPETS = $(strip $(DEFCONFIG_EXTRA_SNIPPET) \
+    $(if $(filter 1,$(DOCKER)),$(DOCKER_DEFCONFIG_SNIPPET),))
+CAPABILITY_INPUT ?=
+CAPABILITY_INPUT_NAME ?=
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -136,15 +148,17 @@ DEBUG_CMDLINE = console=ttyS0 console=tty0 earlyprintk=efi,keep keep_bootcon \
 CMDLINE   ?= $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))
 RUNTIME_TME_TAG = $(if $(filter 0,$(TME)),no-tme,tme)
 RUNTIME_DEBUG_TAG = $(if $(filter 1,$(DEBUG)),-debug,)
-RUNTIME_CMDLINE = $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))$(if $(filter 0,$(TME)), LAPEE_NO_TME=1)
-RUNTIME_UNSIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).img
-RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)-signed.img
-RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG).signed.efi
+RUNTIME_CMDLINE = $(if $(filter 1,$(DEBUG)),$(DEBUG_CMDLINE),$(PROD_CMDLINE))$(if $(filter 0,$(TME)), LAPEE_NO_TME=1)$(if $(filter 1,$(DOCKER)), lapee.docker=enabled)
+RUNTIME_UNSIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)$(RUNTIME_DOCKER_TAG).img
+RUNTIME_SIGNED_OUT ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)$(RUNTIME_DOCKER_TAG)-signed.img
+RUNTIME_SIGNED_UKI ?= $(BUILD_DIR)/images/lapee-runtime-$(RUNTIME_TME_TAG)$(RUNTIME_DEBUG_TAG)$(RUNTIME_DOCKER_TAG).signed.efi
 IMAGE ?= $(RUNTIME_SIGNED_OUT)
 WRITE_IMAGE = $(if $(filter file,$(origin OUT)),$(IMAGE),$(OUT))
 QEMU_DEFAULT_IMAGE ?= $(BUILD_DIR)/images/lapee-runtime-no-tme-signed.img
 QEMU_IMAGE = $(if $(filter command line environment environment override,$(origin IMAGE)),$(IMAGE),$(QEMU_DEFAULT_IMAGE))
-export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET LAPEE_HB_DEVICE_DIR
+export BUILDROOT_VOLUME KERNEL_EXTRA_FRAGMENT DEFCONFIG_EXTRA_SNIPPET \
+	       KERNEL_EXTRA_FRAGMENTS DEFCONFIG_EXTRA_SNIPPETS \
+	       LAPEE_HB_DEVICE_DIR LAPEE_LINUX_DEVICE_DIR LAPEE_DOCKER_PROFILE
 
 empty :=
 space := $(empty) $(empty)
@@ -296,6 +310,9 @@ _check-runtime-flags:
 	@case "$(DEBUG)" in 0|1) ;; \
 	    *) echo "DEBUG must be 0 or 1"; exit 1;; \
 	esac
+	@case "$(DOCKER)" in 0|1) ;; \
+	    *) echo "DOCKER must be 0 or 1"; exit 1;; \
+	esac
 
 _check-signing-keys:
 	@test -f secureboot/db.key || { \
@@ -321,6 +338,8 @@ _runtime-signed-image:
 	SIGNED_UKI="$(abspath $(RUNTIME_SIGNED_UKI))" \
 	USB_IMAGE="$(abspath $(RUNTIME_SIGNED_OUT))" \
 	WIFI="$(WIFI)" \
+	LAPEE_CAPABILITY_INPUT="$(CAPABILITY_INPUT)" \
+	LAPEE_CAPABILITY_INPUT_NAME="$(CAPABILITY_INPUT_NAME)" \
 	    ./scripts/sb-setup.sh sign
 
 # ------------------------------------------------------------
@@ -338,21 +357,21 @@ all: $(ALL_ARCH_TARGETS)
 
 tme:
 	$(MAKE) runtime-image TME=1 \
-	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme.img" \
-	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme-signed.img" \
-	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme.signed.efi"
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme$(RUNTIME_DOCKER_TAG).img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-tme$(RUNTIME_DOCKER_TAG)-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-tme$(RUNTIME_DOCKER_TAG).signed.efi"
 
 no-tme:
 	$(MAKE) runtime-image TME=0 \
-	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme.img" \
-	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme-signed.img" \
-	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-no-tme.signed.efi"
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme$(RUNTIME_DOCKER_TAG).img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-no-tme$(RUNTIME_DOCKER_TAG)-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-no-tme$(RUNTIME_DOCKER_TAG).signed.efi"
 
 snp:
 	$(MAKE) runtime-image TME=0 \
-	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp.img" \
-	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp-signed.img" \
-	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-snp.signed.efi"
+	    RUNTIME_UNSIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp$(RUNTIME_DOCKER_TAG).img" \
+	    RUNTIME_SIGNED_OUT="$(BUILD_DIR)/images/permawebos-snp$(RUNTIME_DOCKER_TAG)-signed.img" \
+	    RUNTIME_SIGNED_UKI="$(BUILD_DIR)/images/permawebos-snp$(RUNTIME_DOCKER_TAG).signed.efi"
 
 android:
 	$(MAKE) -C arch/android android-build
@@ -388,7 +407,10 @@ buildroot:
 # ------------------------------------------------------------
 
 _usb-image:
-	WIFI="$(WIFI)" ./scripts/build-usb-image.sh \
+	WIFI="$(WIFI)" \
+	LAPEE_CAPABILITY_INPUT="$(CAPABILITY_INPUT)" \
+	LAPEE_CAPABILITY_INPUT_NAME="$(CAPABILITY_INPUT_NAME)" \
+	    ./scripts/build-usb-image.sh \
 	    --kernel    "$(KERNEL)" \
 	    --initramfs "$(INITRAMFS)" \
 	    --cmdline   "$(CMDLINE)" \
@@ -443,6 +465,7 @@ _provisioner-image: toolchain
 	        $(BUILD_IMAGE) bash -c "rm -rf /build/out/build/lapee-sb-provisioner"; \
 	fi
 	$(MAKE) buildroot \
+	    DOCKER=0 \
 	    BUILDROOT_VOLUME=$(SB_PROVISION_BUILDROOT_VOLUME) \
 	    LAPEE_BUILD_DIR="$(abspath $(SB_PROVISION_BUILD_DIR))" \
 	    KERNEL_EXTRA_FRAGMENT="$(LINUX_BUILDROOT_EXTERNAL)/board/lapee/linux-sb-provisioner-fragment.config" \

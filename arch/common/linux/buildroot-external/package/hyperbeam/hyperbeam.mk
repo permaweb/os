@@ -302,36 +302,36 @@ define HYPERBEAM_BUILD_CMDS
 	rm -rf $(@D)/_build/preloaded-store
 	$(HYPERBEAM_CLEAN_CORE_NATIVE)
 	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 compile
-	rm -rf $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.beam \
-	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.so \
-	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/lapee_snp_nif.beam \
-	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif
-	mkdir -p $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2 \
-	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif
-	cd $(HYPERBEAM_DEVICE_DIR)/src && \
+	rm -rf $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_tpm2/lapee_tpm_nif.beam \
+	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_tpm2/lapee_tpm_nif.so \
+	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_lapee_snp/lapee_snp_nif.beam \
+	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_lapee_snp/crates/lapee_snp_nif
+	mkdir -p $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_tpm2 \
+	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_lapee_snp/crates/lapee_snp_nif
+	cd $(HYPERBEAM_DEVICE_DIR)/src/security && \
 	    $(HOST_DIR)/bin/erlc -o priv/dev_tpm2 lapee_tpm_nif.erl
 	$(TARGET_CC) $(TARGET_CFLAGS) $(HYPERBEAM_C_NATIVE_COMPAT_FLAGS) \
 	    -std=c11 -Wall -Wextra -Wno-unused-parameter -fPIC -O2 -shared \
 	    -I$(STAGING_DIR)/usr/lib/erlang/usr/include \
 	    -I$(STAGING_DIR)/usr/include/tss2 \
 	    -I$(STAGING_DIR)/usr/include \
-	    -o $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_tpm2/lapee_tpm_nif.so \
+	    -o $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_tpm2/lapee_tpm_nif.so \
 	    $(HYPERBEAM_DEVICE_DIR)/native/lapee_tpm_nif/lapee_tpm_nif.c \
 	    $(HYPERBEAM_DEVICE_DIR)/native/lapee_tpm_nif/tpm_helpers.c \
 	    $(TARGET_LDFLAGS) -L$(STAGING_DIR)/usr/lib \
 	    -ltss2-esys -ltss2-mu -ltss2-tctildr -ltss2-rc -lcrypto
-	cd $(HYPERBEAM_DEVICE_DIR)/src && \
+	cd $(HYPERBEAM_DEVICE_DIR)/src/security && \
 	    $(HOST_DIR)/bin/erlc -o priv/dev_lapee_snp lapee_snp_nif.erl
 	cd $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif && \
 	    $(HYPERBEAM_BUILD_ENV) cargo build --release --locked
 	cp -af $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
-	    $(HYPERBEAM_DEVICE_DIR)/src/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
+	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
 	rm -rf $(@D)/_build/lapee-preload-src $(@D)/_build/preloaded-store
 	mkdir -p $(@D)/_build/lapee-preload-src
 	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/preloaded
 	rm -f $(@D)/_build/lapee-preload-src/preloaded/auth/dev_snp.erl
 	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 device preload \
-	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
+	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src,$(HYPERBEAM_DEVICE_DIR)/src/security,$(HYPERBEAM_DEVICE_DIR)/src/sandbox \
 	    --output-dir _build/preloaded-store
 	# Replace every host native artifact with a target build while preserving
 	# the already-generated, architecture-independent Forge store.

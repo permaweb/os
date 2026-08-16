@@ -50,6 +50,9 @@ PREBUILT_UKI=""
 OUT_IMAGE=""
 OUT_DEVICE=""
 SIZE_MIB=auto
+CAPABILITY_INPUT=${LAPEE_CAPABILITY_INPUT:-}
+CAPABILITY_INPUT_NAME=${LAPEE_CAPABILITY_INPUT_NAME:-}
+OPERATOR_CONFIG=${LAPEE_OPERATOR_CONFIG:-$LAPEE_ROOT/config.json}
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -71,6 +74,8 @@ while [[ $# -gt 0 ]]; do
         --size)      SIZE_MIB="$2"; shift 2 ;;
         --image)     OUT_IMAGE="$2"; shift 2 ;;
         --device)    OUT_DEVICE="$2"; shift 2 ;;
+        --capability-input) CAPABILITY_INPUT="$2"; shift 2 ;;
+        --capability-input-name) CAPABILITY_INPUT_NAME="$2"; shift 2 ;;
         -h|--help)   usage ;;
         *) die "unknown argument: $1 (use --help)" ;;
     esac
@@ -96,6 +101,27 @@ if [[ -z "$PREBUILT_UKI" ]]; then
     [[ -f "$INITRAMFS" ]] || die "initramfs not found: $INITRAMFS"
 else
     [[ -f "$PREBUILT_UKI" ]] || die "UKI not found: $PREBUILT_UKI"
+fi
+if [[ -n "$CAPABILITY_INPUT" ]]; then
+    if [[ "$CAPABILITY_INPUT" != /* ]]; then
+        CAPABILITY_INPUT="${LAPEE_ROOT}/${CAPABILITY_INPUT}"
+    fi
+    [[ -f "$CAPABILITY_INPUT" ]] || \
+        die "capability input not found: $CAPABILITY_INPUT"
+    [[ -n "$CAPABILITY_INPUT_NAME" ]] || \
+        die "--capability-input-name is required with --capability-input"
+    [[ "$CAPABILITY_INPUT_NAME" != */* ]] || \
+        die "capability input name must be a basename"
+    [[ "$CAPABILITY_INPUT_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || \
+        die "capability input name has unsupported characters"
+elif [[ -n "$CAPABILITY_INPUT_NAME" ]]; then
+    die "--capability-input is required with --capability-input-name"
+fi
+if [[ "$OPERATOR_CONFIG" != /* ]]; then
+    OPERATOR_CONFIG="$LAPEE_ROOT/$OPERATOR_CONFIG"
+fi
+if [[ -n "${LAPEE_OPERATOR_CONFIG:-}" && ! -f "$OPERATOR_CONFIG" ]]; then
+    die "operator config not found: $OPERATOR_CONFIG"
 fi
 
 mkdir -p "$WORK"
@@ -193,11 +219,21 @@ fi
 # Optional operator HyperBEAM config. Init copies this off the ESP
 # into tmpfs as /tmp/config.json, then starts HB with the measured
 # LapEE config last in HB_CONFIG so enforced devices/hooks win.
-if [[ -f "${LAPEE_ROOT}/config.json" ]]; then
-    cp "${LAPEE_ROOT}/config.json" "$BUILD_DIR/config.json"
-    config_bytes=$(wc -c <"${LAPEE_ROOT}/config.json" | tr -d ' ')
+if [[ -f "$OPERATOR_CONFIG" ]]; then
+    cp "$OPERATOR_CONFIG" "$BUILD_DIR/config.json"
+    config_bytes=$(wc -c <"$OPERATOR_CONFIG" | tr -d ' ')
     STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + config_bytes))
     echo ">> staging config.json (${config_bytes} bytes)"
+fi
+
+# Optional build-only capability input. It is copied to the ESP, never into
+# the measured UKI. A profile-specific measured init hook decides whether and
+# how to consume it before boot-media detach.
+if [[ -n "$CAPABILITY_INPUT" ]]; then
+    cp "$CAPABILITY_INPUT" "$BUILD_DIR/capability-input"
+    capability_bytes=$(file_size "$CAPABILITY_INPUT")
+    STAGED_EXTRA_BYTES=$((STAGED_EXTRA_BYTES + capability_bytes))
+    echo ">> staging capability input $CAPABILITY_INPUT_NAME (${capability_bytes} bytes)"
 fi
 
 # A disk image cannot be exactly the UKI byte length: firmware wants
@@ -281,6 +317,12 @@ docker run --rm $DOCKER_PLATFORM \
         if [[ -f /work/usb-build/config.json ]]; then
             mcopy -i /work/usb-build/esp.img \\
                 /work/usb-build/config.json ::/EFI/boot/config.json
+        fi
+
+        if [[ -f /work/usb-build/capability-input ]]; then
+            mcopy -i /work/usb-build/esp.img \
+                /work/usb-build/capability-input \
+                ::/EFI/boot/${CAPABILITY_INPUT_NAME}
         fi
 
         dd if=/work/usb-build/esp.img of=/work/${IMG_IN_WORK} \\
