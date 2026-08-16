@@ -1,10 +1,21 @@
 # `andock@1.0`
 
-`andock@1.0` implements the same public Linux tool contract as the execution
-devices used by Ouroboros: `read`, `write`, `append`, `edit`, `glob`, `grep`,
-and `bash`, plus the shared file-browsing routes. Authorization, validation,
-deltas, clipping, errors, and status codes come from the same
-`lib_ouroboros_execution` source used to package the other backends.
+`andock@1.0` implements the generic PermawebOS Linux execution-engine contract:
+`read`, `write`, `append`, `edit`, `glob`, `grep`, and `bash`, plus the shared
+`bash-session` control and file-browsing routes. `lib_permawebos_execution`
+owns authorization, validation, deltas, clipping, errors, timeouts, and status
+codes. `bash-session` uses the existing `Bash` capability and supports
+incremental output cursors, bounded waits, optional runtime deadlines, and
+termination.
+
+One member has one execution lane. While its background Bash session is
+running, another Bash or filesystem/tool request fails immediately with status
+409 and `error=member-session-active`; the response identifies the active
+`session-id` and `execution-status`, names `bash-session` as the control action,
+and lists `poll`, `wait`, and `terminate` as the available operations. The
+rejected request does not stop or otherwise disturb the active session. Poll,
+stop, destroy, and service shutdown remain lifecycle controls rather than
+competing executions.
 
 The backend is available when HyperBEAM runs inside an AndEE Android app that
 provides the private `ANDEE_EXECUTION_SOCKET` capability. Selecting the device
@@ -35,8 +46,7 @@ implemented by inspecting command strings.
 
 ## Package boundary
 
-The Andock source package owns only the device adapter and its private local
-transport. At package time it imports the canonical shared execution contract
-from an Ouroboros source checkout; it does not fork that contract. Its emitted
-archive contains no Ouroboros router, provider, UI, member model, node mode, or
-configuration.
+The Andock source package owns the device, neutral execution contract, and its
+private local transport. It builds from PermawebOS source alone. Its emitted
+archive contains no application router, provider, UI, member model, node mode,
+or configuration.

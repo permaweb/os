@@ -198,9 +198,12 @@ name matching, keeps them out of `~meta@1.0` and the public boot measurement.
 
 ### 3.1 Local Andock execution capability
 
-An AndEE build MAY package the generic local capability consumed by a trusted
-`~andock@1.0` execution device. This does not add an AndEE-specific public AO
-protocol or an Ouroboros server to the Android app.
+An AndEE build MUST preload the repository-owned generic `~andock@1.0`
+execution device and package its local capability. This does not add an
+AndEE-specific public AO protocol or any application server to the Android
+app. Application devices MUST remain runtime-loaded trusted packages selected
+through measured node JSON; their source, archives, payloads, pins, and
+provenance MUST NOT enter the APK or its build graph.
 
 Each member MUST have a separate writable filesystem image. The main app MUST
 pass an isolated worker only that member image, a bounded command channel, and

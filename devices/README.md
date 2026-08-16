@@ -11,11 +11,11 @@ These are distribution devices, not kernel patches.
   when their verification path is portable; unsupported local generation fails
   softly while peer verification remains available.
 - `android/` is the Android package overlay: app-private encrypted store
-  support, AndEE metadata, and Android service/payment devices. It intentionally
-  does not fork `measurement@1.0`, `andee@1.0`, or `zone@1.0`.
-- `andock/` is the standalone Android isolated-process Linux execution device.
-  It owns the private AndEE transport and imports the shared seven-tool contract
-  from a generic Ouroboros source checkout only when building its archive.
+  support, AndEE metadata, Android service/payment devices, and the generic
+  `andock@1.0` isolated-process Linux execution device. Andock owns its public
+  PermawebOS execution contract and private Android transport here and builds
+  without an application checkout. The overlay intentionally does not fork
+  `measurement@1.0`, `andee@1.0`, or `zone@1.0`.
 
 Generated `_build/`, runtime caches, and local `rebar.lock` files are ignored.
 Do not vendor generated HyperBEAM checkouts here.

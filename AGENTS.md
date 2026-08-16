@@ -38,6 +38,23 @@ It also owns PermawebOS-specific HyperBEAM device packages under `devices/`.
   it must not bypass enforced PermawebOS config, measurement devices, or boot
   hooks.
 
+## Keep Images Application-Agnostic
+
+- PermawebOS images and AndEE APKs contain platform devices only. Never embed
+  an application's source, device archive, payload, repository pin, or build
+  checkout in an OS image.
+- OS and APK builds must not depend on `OUROBOROS_SRC` or any equivalent
+  application-source variable. Application packages are runtime composition,
+  resolved through measured `trusted-device-signers` and `name-resolvers`
+  configuration.
+- Generic platform capabilities such as `andock@1.0` live entirely in this
+  repository. Application JSON selects them through a public device contract;
+  no application-specific device name, packaging path, or private shortcut is
+  permitted.
+- Treat the measured effective node JSON and trusted-device policy as the
+  composition boundary. Negative source, runtime, and image scans are release
+  gates, not optional hygiene.
+
 ## Cut To Root Causes
 
 - Keep patches surgical unless the task explicitly asks for a refactor.

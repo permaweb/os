@@ -28,7 +28,7 @@ class AndeeIsolatedExecutionService : Service() {
         override fun execute(
             command: String,
             cwd: String,
-            timeoutMs: Int,
+            timeoutMs: Long,
             mergeError: Boolean,
             image: ParcelFileDescriptor,
             input: ParcelFileDescriptor?,
@@ -38,7 +38,7 @@ class AndeeIsolatedExecutionService : Service() {
         ): String = runCommand(
             command,
             cwd,
-            timeoutMs.coerceIn(1, AndeeExecutionPolicy.MAX_TIMEOUT_MS),
+            timeoutMs.coerceAtLeast(1),
             mergeError,
             image,
             input,
@@ -62,7 +62,7 @@ class AndeeIsolatedExecutionService : Service() {
     private fun runCommand(
         command: String,
         cwd: String,
-        timeoutMs: Int,
+        timeoutMs: Long,
         mergeError: Boolean,
         image: ParcelFileDescriptor,
         input: ParcelFileDescriptor?,

@@ -25,7 +25,7 @@ internal class AndeeIsolatedExecutionPool(
         memberId: String,
         command: String,
         cwd: String,
-        timeoutMs: Int,
+        timeoutMs: Long,
         mergeError: Boolean,
         image: ParcelFileDescriptor,
         input: ParcelFileDescriptor?,
@@ -41,6 +41,13 @@ internal class AndeeIsolatedExecutionPool(
                 val selected = workers[memberId]
                     ?.takeUnless(WorkerHandle::isDisconnected)
                     ?: replaceWorker(memberId)
+                if (selected.active) {
+                    throw ExecutionFailure(
+                        409,
+                        "member-busy",
+                        nonfatalWorkerContention = true,
+                    )
+                }
                 selected.active = true
                 selected
             }
@@ -62,14 +69,15 @@ internal class AndeeIsolatedExecutionPool(
         } catch (failure: Throwable) {
             val explicitlyCancelled =
                 failure is ExecutionCancelledException || cancelled.remove(memberId)
-            stopWorker(memberId)
             if (explicitlyCancelled) {
+                stopWorker(memberId)
                 JSONObject()
                     .put("exit-code", 130)
                     .put("timed-out", false)
                     .put("cancelled", true)
                     .put("error", "")
             } else {
+                if (shouldStopWorkerAfterFailure(failure)) stopWorker(memberId)
                 throw failure
             }
         } finally {
@@ -95,7 +103,11 @@ internal class AndeeIsolatedExecutionPool(
             val idle = workers.entries
                 .filter { !it.value.active }
                 .minByOrNull { it.value.lastUsedNanos }
-                ?: throw ExecutionFailure(429, "isolated-execution-capacity-reached")
+                ?: throw ExecutionFailure(
+                    429,
+                    "isolated-execution-capacity-reached",
+                    nonfatalWorkerContention = true,
+                )
             stopWorker(idle.key)
         }
         val handle = WorkerHandle()
@@ -181,3 +193,6 @@ internal class AndeeIsolatedExecutionPool(
 
     private class ExecutionCancelledException : RuntimeException()
 }
+
+internal fun shouldStopWorkerAfterFailure(failure: Throwable): Boolean =
+    failure !is ExecutionFailure || !failure.nonfatalWorkerContention

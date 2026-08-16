@@ -7,7 +7,7 @@ interface IAndeeExecutionWorker {
     String execute(
         String command,
         String cwd,
-        int timeoutMs,
+        long timeoutMs,
         boolean mergeError,
         in ParcelFileDescriptor image,
         in ParcelFileDescriptor input,

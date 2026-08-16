@@ -1,9 +1,0 @@
-{application, andock_devices, [
-    {description, "Andock HyperBEAM execution device"},
-    {vsn, "1.0.0"},
-    {registered, []},
-    {applications, [kernel, stdlib, crypto, public_key, ssl, inets, hb]},
-    {env, []},
-    {modules, []},
-    {licenses, ["MIT"]}
-]}.

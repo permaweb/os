@@ -11,21 +11,21 @@ EXPECTED = {
     "architecture": "arm64",
     "image-logical-bytes": 32 * 1024 * 1024 * 1024,
     "image-sha256":
-        "29a8d9f031e76a0c42cf5b6013e92309925368378d5e944019f1a2985464228b",
+        "ecdc2ac05dfa974dde46f45d5a093bd41be697f2e176d0ea6b732b23caf9ccf2",
     "image-uuid": "4b7e4af2-25cd-4ae5-a14d-8f8628b88f5d",
     "metadata-inventory-sha256":
-        "4bb273ba4f81618fd8bcf99819770d633e11bddd43df704bea6a015b43cb5049",
+        "e739dc242692542fcfe9eb41fbe8b61770e2779714d5403054d32961e877f406",
     "node-sha256":
         "0294e8b915ab75f92c7513d2fcb830ae06e10684e6c603e99a87dbf8835389c1",
     "node-version": "22.23.1",
     "permagit-sha256":
         "6cc1763c3af3072e102ef0d09aaba29fe8c6dd996329d1050c0491dec73d7854",
     "permagit-version": "0.11.3",
-    "provision-revision": "andock-ubuntu-ext4-1",
+    "provision-revision": "andock-ubuntu-ext4-2",
     "source-date-epoch": 1735689600,
     "sparse-image-format": "android-sparse-v1",
     "sparse-image-sha256":
-        "063d3500242a9ab384ad2030c53bf254d0563862cabafd4a05815119a8276e94",
+        "1005630245873148ba24183790c87a33bcde1d2f6fd0d9a05ff2b6eb8ed07ef2",
     "ubuntu-builder-image":
         "ubuntu@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b",
     "ubuntu-snapshot": "20260714T000000Z",

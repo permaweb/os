@@ -4,9 +4,9 @@
 -specification("../docs/device-specs/andock.md").
 -device_libraries([
     lib_andock,
-    lib_ouroboros_execution,
-    lib_ouroboros_execution_tools,
-    lib_ouroboros_utils
+    lib_permawebos_bash_session,
+    lib_permawebos_execution,
+    lib_permawebos_execution_tools
 ]).
 -export([
     info/1,
@@ -19,6 +19,7 @@
     glob/3,
     grep/3,
     bash/3,
+    bash_session/3,
     read_file/3,
     write_file/3,
     list_files/3
@@ -31,25 +32,27 @@
 ).
 
 info(_) ->
-    lib_ouroboros_utils:device_info(
-        lib_ouroboros_utils:handler_map(
-            ?MODULE,
-            [
-                read,
-                write,
-                append,
-                edit,
-                glob,
-                grep,
-                bash,
-                {<<"read-file">>, read_file},
-                {<<"write-file">>, write_file},
-                {<<"list-files">>, list_files}
-            ]
-        ),
-        fun proxy/4,
-        #{ <<"index">> => fun index/3 }
-    ).
+    #{
+        <<"status">> => 404,
+        <<"content-type">> => <<"text/plain; charset=utf-8">>,
+        <<"body">> => <<"Not found">>,
+        handlers => #{
+            <<"read">> => fun ?MODULE:read/3,
+            <<"write">> => fun ?MODULE:write/3,
+            <<"append">> => fun ?MODULE:append/3,
+            <<"edit">> => fun ?MODULE:edit/3,
+            <<"glob">> => fun ?MODULE:glob/3,
+            <<"grep">> => fun ?MODULE:grep/3,
+            <<"bash">> => fun ?MODULE:bash/3,
+            <<"bash-session">> => fun ?MODULE:bash_session/3,
+            <<"read-file">> => fun ?MODULE:read_file/3,
+            <<"write-file">> => fun ?MODULE:write_file/3,
+            <<"list-files">> => fun ?MODULE:list_files/3
+        },
+        default => fun proxy/4,
+        excludes => [<<"keys">>, <<"set">>, <<"remove">>],
+        <<"index">> => fun index/3
+    }.
 
 index(_Base, _Req, _Opts) ->
     {ok,
@@ -65,7 +68,8 @@ index(_Base, _Req, _Opts) ->
                     <<"edit">>,
                     <<"glob">>,
                     <<"grep">>,
-                    <<"bash">>
+                    <<"bash">>,
+                    <<"bash-session">>
                 ]
         }}.
 
@@ -85,9 +89,10 @@ proxy(_Key, _Base, _Req, _Opts) ->
 ?ANDOCK(glob).
 ?ANDOCK(grep).
 ?ANDOCK(bash).
+?ANDOCK(bash_session).
 
 read_file(_Base, Req, Opts) ->
-    lib_ouroboros_execution:handle(
+    lib_permawebos_execution:handle(
         read_file,
         ?DEVICE,
         lib_andock,
@@ -96,7 +101,7 @@ read_file(_Base, Req, Opts) ->
     ).
 
 write_file(_Base, Req, Opts) ->
-    lib_ouroboros_execution:handle(
+    lib_permawebos_execution:handle(
         write_file,
         ?DEVICE,
         lib_andock,
@@ -105,7 +110,7 @@ write_file(_Base, Req, Opts) ->
     ).
 
 list_files(_Base, Req, Opts) ->
-    lib_ouroboros_execution:handle(
+    lib_permawebos_execution:handle(
         list_files,
         ?DEVICE,
         lib_andock,

@@ -38,6 +38,8 @@ class Client:
             **fields,
         }, separators=(",", ":")).encode()
         command_timeout_ms = fields.get("timeout-ms", 0)
+        if not isinstance(command_timeout_ms, (int, float)):
+            command_timeout_ms = 0
         socket_timeout = max(60, math.ceil(command_timeout_ms / 1000) + 15)
         process = subprocess.Popen(
             [
