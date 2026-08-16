@@ -46,6 +46,10 @@ cp -a "$permagit_source/permagit/src" "$permagit_source/permagit/bin" \
     /root/.permagit/app/
 cp "$permagit_source/permagit/package.json" \
     "$permagit_source/permagit/package-lock.json" /root/.permagit/app/
+# The measured runtime contains production Permagit only. Its source archive
+# also ships JavaScript test fixtures, which are neither runtime dependencies
+# nor acceptable application-specific provenance in the generic platform.
+find /root/.permagit/app/src -type f -name '*.test.js' -delete
 (
     cd /root/.permagit/app
     npm ci --omit=dev --no-audit --no-fund

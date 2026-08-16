@@ -14,7 +14,7 @@ from andock_emulator_client import (
     success,
 )
 
-MAX_OUTPUT = 20 * 1024 * 1024
+MAX_OUTPUT = 50 * 1024 * 1024
 
 
 def main():
@@ -32,7 +32,12 @@ def main():
 
     member = "smoke-primary"
     sibling = "smoke-sibling"
-    cancellable = "smoke-cancel"
+    # Reuse the sibling image after its isolation/session-ownership checks so
+    # the workload remains valid on the emulator's deliberately small data
+    # partition without weakening the distinct-member assertions.
+    cancellable = sibling
+    session_member = sibling
+    session_run = f"{time.time_ns():x}"
     unusual_name = "odd\tline\nfile.bin"
     content = bytes(range(256)) * (3 * 1024 * 1024 // 256)
     try:
@@ -185,6 +190,207 @@ def main():
         require(timed["body"]["timed-out"] is True, timed)
         require(timed["body"]["exit-code"] == 124, timed)
 
+        session_id = f"smokesession{session_run}"
+        started = success(client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": session_id,
+                "cwd": "/root",
+                "command": "printf ready; sleep 5; printf done",
+                "timeout-ms": None,
+                "wait-ms": 100,
+                "allow-network": False,
+            },
+        ))
+        require(started["session-id"] == session_id, started)
+        conflict_started = time.monotonic()
+        active_bash_conflict = client.request(
+            "exec",
+            session_member,
+            **{
+                "cwd": "/root",
+                "command": "printf conflict",
+                "timeout-ms": 30_000,
+                "allow-network": False,
+            },
+        )
+        active_bash_elapsed = time.monotonic() - conflict_started
+        require(active_bash_conflict.get("status") == 409, active_bash_conflict)
+        require(active_bash_conflict.get("error") == "member-session-active", active_bash_conflict)
+        require(active_bash_conflict.get("session-id") == session_id, active_bash_conflict)
+        require(active_bash_conflict.get("execution-status") == "running", active_bash_conflict)
+        require(active_bash_conflict.get("session-control-action") == "bash-session", active_bash_conflict)
+        require(
+            active_bash_conflict.get("session-control-operations")
+            == ["poll", "wait", "terminate"],
+            active_bash_conflict,
+        )
+        require(active_bash_elapsed < 3, active_bash_elapsed)
+        read_conflict_started = time.monotonic()
+        active_read_conflict = client.request(
+            "read",
+            session_member,
+            path="/root/conflicting-read",
+        )
+        active_read_elapsed = time.monotonic() - read_conflict_started
+        require(active_read_conflict.get("status") == 409, active_read_conflict)
+        require(active_read_conflict.get("error") == "member-session-active", active_read_conflict)
+        require(active_read_conflict.get("session-id") == session_id, active_read_conflict)
+        require(active_read_elapsed < 3, active_read_elapsed)
+        still_running = success(client.request(
+            "session-poll",
+            session_member,
+            **{
+                "session-id": session_id,
+                "cursor": 0,
+                "wait-ms": 0,
+                "terminate": False,
+            },
+        ))
+        require(still_running["execution-status"] == "running", still_running)
+        replay = success(client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": session_id,
+                "cwd": "/root",
+                "command": "printf ready; sleep 5; printf done",
+                "timeout-ms": None,
+                "wait-ms": 0,
+                "allow-network": False,
+            },
+        ))
+        require(replay["session-id"] == session_id, replay)
+        conflict = client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": session_id,
+                "cwd": "/root",
+                "command": "printf different",
+                "timeout-ms": None,
+                "wait-ms": 0,
+                "allow-network": False,
+            },
+        )
+        require(conflict.get("status") == 409, conflict)
+        encoded_output = started["output"]
+        collected = bytearray(base64.urlsafe_b64decode(
+            encoded_output + "=" * (-len(encoded_output) % 4),
+        ))
+        cursor = started["next-cursor"]
+        terminal = started if started["execution-status"] != "running" else None
+        for _ in range(40):
+            if terminal is not None:
+                break
+            polled = success(client.request(
+                "session-poll",
+                session_member,
+                **{
+                    "session-id": session_id,
+                    "cursor": cursor,
+                    "wait-ms": 200,
+                    "terminate": False,
+                },
+            ))
+            encoded_output = polled["output"]
+            collected.extend(base64.urlsafe_b64decode(
+                encoded_output + "=" * (-len(encoded_output) % 4),
+            ))
+            cursor = polled["next-cursor"]
+            if polled["execution-status"] != "running":
+                terminal = polled
+                break
+        require(
+            bytes(collected) == b"readydone",
+            {"collected": bytes(collected), "started": started, "terminal": terminal},
+        )
+        require(terminal is not None, "session never became terminal")
+        require(terminal["execution-status"] == "exited", terminal)
+        require(terminal["exit-code"] == 0, terminal)
+        foreign = client.request(
+            "session-poll",
+            member,
+            **{
+                "session-id": session_id,
+                "cursor": 0,
+                "wait-ms": 0,
+                "terminate": False,
+            },
+        )
+        require(foreign.get("status") == 404, foreign)
+
+        terminate_id = f"smoketerminate{session_run}"
+        success(client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": terminate_id,
+                "cwd": "/root",
+                "command": "printf running; sleep 30",
+                "timeout-ms": None,
+                "wait-ms": 100,
+                "allow-network": False,
+            },
+        ))
+        terminate_conflict = client.request(
+            "exec",
+            session_member,
+            **{
+                "cwd": "/root",
+                "command": "printf must-not-run",
+                "timeout-ms": 30_000,
+                "allow-network": False,
+            },
+        )
+        require(terminate_conflict.get("status") == 409, terminate_conflict)
+        require(terminate_conflict.get("session-id") == terminate_id, terminate_conflict)
+        terminated = success(client.request(
+            "session-poll",
+            session_member,
+            **{
+                "session-id": terminate_id,
+                "cursor": 0,
+                "wait-ms": 1000,
+                "terminate": True,
+            },
+        ))
+        require(terminated["execution-status"] == "terminated", terminated)
+        require(terminated["exit-code"] == 143, terminated)
+
+        natural_id = f"smokenatural{session_run}"
+        natural = success(client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": natural_id,
+                "cwd": "/root",
+                "command": "exit 124",
+                "timeout-ms": None,
+                "wait-ms": 1000,
+                "allow-network": False,
+            },
+        ))
+        require(natural["execution-status"] == "exited", natural)
+        require(natural["exit-code"] == 124, natural)
+
+        timeout_id = f"smoketimeout{session_run}"
+        expired = success(client.request(
+            "session-start",
+            session_member,
+            **{
+                "session-id": timeout_id,
+                "cwd": "/root",
+                "command": "sleep 30",
+                "timeout-ms": 300,
+                "wait-ms": 1000,
+                "allow-network": False,
+            },
+        ))
+        require(expired["execution-status"] == "timed-out", expired)
+        require(expired["exit-code"] == 124, expired)
+
         archive = exec_command(
             client,
             member,
@@ -303,7 +509,7 @@ def main():
         )
         require(destroyed.get("status") == 404, destroyed)
     finally:
-        for cleanup in (member, sibling, cancellable):
+        for cleanup in (member, sibling, cancellable, session_member):
             try:
                 client.request("destroy", cleanup)
             except Exception:

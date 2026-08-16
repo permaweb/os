@@ -58,3 +58,18 @@ android {
 dependencies {
     testImplementation("junit:junit:4.13.2")
 }
+
+tasks.named("preBuild").configure {
+    doFirst {
+        val runtime = file("src/main/assets/andee-runtime.zip")
+        val nativeRoot = file("src/main/jniLibs")
+        check(runtime.isFile) {
+            "Missing generated AndEE runtime; build APKs through arch/android/Makefile"
+        }
+        for (abi in listOf("arm64-v8a", "x86_64")) {
+            check(file("$nativeRoot/$abi/libandee_hyperbeam.so").isFile) {
+                "Missing generated $abi AndEE native runtime; build through arch/android/Makefile"
+            }
+        }
+    }
+}

@@ -10,15 +10,20 @@ ANDEE_DEVICE_ROOT ?= $(BUILD_DIR)/android-devices
 ANDROID_SDK_ROOT ?= /opt/homebrew/share/android-commandlinetools
 ANDROID_HOME ?= $(ANDROID_SDK_ROOT)
 JAVA_HOME ?= /opt/homebrew/opt/openjdk@17
+ANDROID_BUILD_TOOLS_VERSION ?= 36.0.0
 GRADLE := $(ANDROID_DIR)/gradlew
 ADB := $(ANDROID_SDK_ROOT)/platform-tools/adb
 EMULATOR := $(ANDROID_SDK_ROOT)/emulator/emulator
+AAPT2 := $(ANDROID_SDK_ROOT)/build-tools/$(ANDROID_BUILD_TOOLS_VERSION)/aapt2
+APKSIGNER := $(ANDROID_SDK_ROOT)/build-tools/$(ANDROID_BUILD_TOOLS_VERSION)/apksigner
+DEBUG_APK := $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
+RUNTIME_ZIP := $(ANDROID_DIR)/app/src/main/assets/andee-runtime.zip
 AVD_NAME ?= andee-api-36-arm64
 export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
     ANDEE_DEVICE_ROOT
 
 .PHONY: help android-env android-check android-sdk android-gradle-wrapper fetch-attestation-roots \
-        apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
+        apk verify-apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
         next-boot-config-test android-zone-storage-smoke zone-storage-scenario \
         verify-config-invariants erl-compile andock-template \
         andock-template-reproducibility preloaded-store-reproducibility clean
@@ -31,6 +36,7 @@ help:
 	    '  make android-gradle-wrapper     Generate pinned Gradle wrapper.' \
 	    '  make fetch-attestation-roots    Fetch Android Key Attestation root bundle.' \
 	    '  make apk                        Build the Android APK.' \
+	    '  make verify-apk                 Verify APK identity, signature, and generic composition.' \
 	    '  make release-apk                Build a locally release-signed APK.' \
 	    '  make runtime                    Build AndEE BEAM payload and native Android launcher.' \
 	    '  make android-build              Build runtime + APK.' \
@@ -59,11 +65,20 @@ android-gradle-wrapper:
 fetch-attestation-roots:
 	./scripts/fetch-android-attestation-roots.py
 
-apk:
+apk: runtime
 	rm -f "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 	cd "$(ANDROID_DIR)" && \
 	    ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" \
 	    JAVA_HOME="$(JAVA_HOME)" ./gradlew :app:assembleDebug
+	$(MAKE) verify-apk
+
+verify-apk:
+	JAVA_HOME="$(JAVA_HOME)" ./scripts/verify-generic-andee-artifact.py \
+	    --apk "$(DEBUG_APK)" \
+	    --expected-runtime-sha256 "$$(shasum -a 256 "$(RUNTIME_ZIP)" | awk '{print $$1}')" \
+	    --aapt2 "$(AAPT2)" \
+	    --apksigner "$(APKSIGNER)" \
+	    --evidence "$(BUILD_DIR)/andee-apk-composition.json"
 
 release-keystore:
 	./scripts/android-release-keystore.sh
@@ -76,8 +91,7 @@ release-apk: runtime release-keystore
 runtime:
 	./scripts/build-hb-android-runtime.sh
 
-android-build: runtime
-	$(MAKE) apk
+android-build: apk
 
 emulator-start:
 	AVD_NAME="$(AVD_NAME)" ./scripts/start-emulator.sh
@@ -119,4 +133,5 @@ preloaded-store-reproducibility:
 
 clean:
 	rm -rf "$(BUILD_DIR)" "$(ANDROID_DIR)/app/build" "$(ANDROID_DIR)/build" \
-	    "$(ANDEE_DEVICE_ROOT)/_build"
+	    "$(ANDEE_DEVICE_ROOT)/_build" "$(ANDROID_DIR)/app/src/main/jniLibs"
+	rm -f "$(ANDROID_DIR)/app/src/main/assets/andee-runtime.zip"

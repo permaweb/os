@@ -32,8 +32,9 @@ Android suites require an active adb device or emulator. Start one first:
 make -C arch/android emulator-start
 ```
 
-The `android` suite runs `android-build` once, then runs the AndEE smoke and
-scenario scripts against that APK/runtime. Individual Android runtime cases
+The `android` suite runs `android-build` once, then runs the AndEE platform,
+public `andock@1.0` contract, and scenario smokes against that APK/runtime.
+Individual Android runtime cases
 expect the APK to exist; run `./scripts/smoke.sh android-build android-smoke`
 when starting from a clean tree.
 
@@ -41,7 +42,7 @@ when starting from a clean tree.
 
 ```sh
 ./scripts/smoke.sh linux-config
-./scripts/smoke.sh android-build android-smoke android-next-boot-config
+./scripts/smoke.sh android-build android-smoke android-andock-device
 ./scripts/smoke.sh mixed-andee-qemu-ring
 ```
 

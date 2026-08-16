@@ -3,19 +3,21 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
--export([read/3, write/3, append/3, edit/3, glob/3, grep/3, bash/3, tool_keys/1]).
+-export([read/3, write/3, append/3, edit/3, glob/3, grep/3, bash/3,
+         bash_session/3, tool_keys/1]).
 -export([list_files/3, serve_file/3]).
 -export([container_read/3, container_write/4, container_list_dir/3, exec/6]).
+-export([start_session/8, poll_session/6]).
 -export([stop/2, destroy/2]).
 
 -define(DEVICE, <<"andock@1.0">>).
 -define(EXECUTION_SOCKET_ENV, "ANDEE_EXECUTION_SOCKET").
 -define(PROTOCOL, <<"andock-local@1">>).
 -define(DEFAULT_TIMEOUT_MS, 30000).
--define(MAX_FRAME_BYTES, 32 * 1024 * 1024).
+-define(MAX_FRAME_BYTES, 72 * 1024 * 1024).
 -define(ACTION(Action),
     Action(_Base, Req, Opts) ->
-        lib_ouroboros_execution:handle(Action, ?DEVICE, ?MODULE, Req, Opts)
+        lib_permawebos_execution:handle(Action, ?DEVICE, ?MODULE, Req, Opts)
 ).
 
 ?ACTION(read).
@@ -25,15 +27,16 @@
 ?ACTION(glob).
 ?ACTION(grep).
 ?ACTION(bash).
+?ACTION(bash_session).
 
 tool_keys(Action) ->
-    lib_ouroboros_execution:tool_keys(Action).
+    lib_permawebos_execution:tool_keys(Action).
 
 list_files(MemberId, Path, Opts) ->
-    lib_ouroboros_execution:list_files(MemberId, Path, force_device(Opts)).
+    lib_permawebos_execution:list_files(MemberId, Path, force_backend(Opts)).
 
 serve_file(MemberId, Path, Opts) ->
-    lib_ouroboros_execution:serve_file(MemberId, Path, force_device(Opts)).
+    lib_permawebos_execution:serve_file(MemberId, Path, force_backend(Opts)).
 
 container_read(MemberId, Path, _Opts) ->
     case request(
@@ -50,6 +53,8 @@ container_read(MemberId, Path, _Opts) ->
             {error, enoent};
         {error, 400, <<"path-is-directory">>} ->
             {error, eisdir};
+        {error, Status, Reason, Details} ->
+            {error, Status, Reason, Details};
         {error, _Status, Reason} ->
             {error, Reason}
     end.
@@ -65,6 +70,8 @@ container_write(MemberId, Path, Content, _Opts) ->
         ?DEFAULT_TIMEOUT_MS
     ) of
         {ok, _} -> ok;
+        {error, Status, Reason, Details} ->
+            {error, Status, Reason, Details};
         {error, _Status, Reason} -> {error, Reason}
     end.
 
@@ -81,6 +88,8 @@ container_list_dir(MemberId, Path, _Opts) ->
             {ok, Entries};
         {error, 404, _} ->
             {error, enoent};
+        {error, Status, Reason, Details} ->
+            {error, Status, Reason, Details};
         {error, _Status, Reason} ->
             {error, Reason};
         {ok, _} ->
@@ -107,11 +116,67 @@ exec(MemberId, Cwd, Command, TimeoutMs, DisableNetwork, _Opts) ->
                 {ok, Output} -> {ok, Output, ExitCode};
                 {error, _} -> {error, 500, <<"Invalid execution output.">>}
             end;
+        {error, Status, Reason, Details} ->
+            {error, Status, Reason, Details};
         {error, Status, Reason} ->
             {error, Status, Reason};
         {ok, _} ->
             {error, 500, <<"Invalid execution response.">>}
     end.
+
+start_session(
+    MemberId,
+    SessionId,
+    Cwd,
+    Command,
+    TimeoutMs,
+    WaitMs,
+    DisableNetwork,
+    _Opts
+) ->
+    case request(
+        #{
+            <<"action">> => <<"session-start">>,
+            <<"member-id">> => MemberId,
+            <<"session-id">> => SessionId,
+            <<"cwd">> => Cwd,
+            <<"command">> => Command,
+            <<"timeout-ms">> => optional_timeout(TimeoutMs),
+            <<"wait-ms">> => WaitMs,
+            <<"allow-network">> => not DisableNetwork
+        },
+        WaitMs + 15000
+    ) of
+        {ok, Body} -> decode_session_result(Body);
+        Error -> Error
+    end.
+
+poll_session(MemberId, SessionId, Cursor, WaitMs, Terminate, _Opts) ->
+    case request(
+        #{
+            <<"action">> => <<"session-poll">>,
+            <<"member-id">> => MemberId,
+            <<"session-id">> => SessionId,
+            <<"cursor">> => Cursor,
+            <<"wait-ms">> => WaitMs,
+            <<"terminate">> => Terminate
+        },
+        WaitMs + 15000
+    ) of
+        {ok, Body} -> decode_session_result(Body);
+        Error -> Error
+    end.
+
+optional_timeout(undefined) -> null;
+optional_timeout(TimeoutMs) -> TimeoutMs.
+
+decode_session_result(#{ <<"output">> := Encoded } = Body) ->
+    case decode_content(Encoded) of
+        {ok, Output} -> {ok, Body#{ <<"output">> => Output }};
+        {error, _} -> {error, 500, <<"Invalid session output.">>}
+    end;
+decode_session_result(_) ->
+    {error, 500, <<"Invalid session response.">>}.
 
 stop(MemberId, _Opts) ->
     request(
@@ -125,10 +190,10 @@ destroy(MemberId, _Opts) ->
         10000
     ).
 
-force_device(Opts) ->
+force_backend(Opts) ->
     Opts#{
-        <<"ouroboros-execution-device">> => ?DEVICE,
-        ouroboros_execution_backend => ?MODULE
+        <<"execution-device">> => ?DEVICE,
+        execution_backend => ?MODULE
     }.
 
 decode_content(Encoded) when is_binary(Encoded) ->
@@ -190,9 +255,13 @@ receive_response(Socket, Timeout) ->
 
 response(#{ <<"ok">> := true, <<"body">> := Body }) ->
     {ok, Body};
-response(#{ <<"status">> := Status, <<"error">> := Error })
+response(#{ <<"status">> := Status, <<"error">> := Error } = Response)
         when is_integer(Status), is_binary(Error) ->
-    {error, Status, Error};
+    Details = maps:without([<<"ok">>, <<"status">>, <<"error">>], Response),
+    case map_size(Details) of
+        0 -> {error, Status, Error};
+        _ -> {error, Status, Error, Details}
+    end;
 response(_) ->
     {error, 500, <<"Invalid Andock execution response.">>}.
 
@@ -258,6 +327,24 @@ response_validation_test() ->
     ?assertEqual(
         {error, 409, <<"member-busy">>},
         response(#{ <<"status">> => 409, <<"error">> => <<"member-busy">> })
+    ),
+    ?assertEqual(
+        {error,
+            409,
+            <<"member-session-active">>,
+            #{
+                <<"execution-status">> => <<"running">>,
+                <<"session-id">> => <<"session-1">>
+            }},
+        response(
+            #{
+                <<"ok">> => false,
+                <<"status">> => 409,
+                <<"error">> => <<"member-session-active">>,
+                <<"execution-status">> => <<"running">>,
+                <<"session-id">> => <<"session-1">>
+            }
+        )
     ),
     ?assertEqual(
         {error, 500, <<"Invalid Andock execution response.">>},

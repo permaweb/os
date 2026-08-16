@@ -12,16 +12,17 @@ Android Keystore/StrongBox attestation as the local measurement engine.
 - `specs/andee-device-specification.md` contains the AndEE device
   specification.
 
-Android stages one device package from `devices/common/` plus the
-Android-specific overlay in `devices/android/`. The shared measurement and zone
-devices are therefore identical to the Linux builds; Android contributes the
+Android stages the package from `devices/common/` plus the Android-specific
+overlay in `devices/android/`. The shared measurement and zone devices are
+therefore identical to the Linux builds; the Android overlay contributes the
 AndEE crypto-agent runtime for local measurements, Android system reporting,
-app-private encrypted storage, and service devices. The `andee@1.0` device
-name remains the current AO-Core backend identifier for this architecture.
+app-private encrypted storage, service devices, and the generic `andock@1.0`
+execution device. The `andee@1.0` name remains the measurement backend
+identifier.
 
 ## Andock execution capability
 
-The APK also packages the generic local capability used by `~andock@1.0`.
+The APK preloads `~andock@1.0` and packages its generic local capability.
 Each member receives a complete writable sparse ext4 image copied from a
 measured, deterministic Ubuntu 24.04 template. An Android isolated service
 receives only that image descriptor and the command/network capabilities for
@@ -57,10 +58,15 @@ The release build is ARM64-only. Build the pinned template independently with:
 make -C arch/android andock-template
 ```
 
-`make -C arch/android android-build` validates or rebuilds the template,
+`make -C arch/android apk` validates or rebuilds the runtime and template,
 cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
 normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
 no rootfs or member state is committed to git.
+
+The APK is an application-agnostic platform artifact. Application device
+packages are loaded after boot through measured JSON configuration,
+`trusted-device-signers`, and `name-resolvers`; no application checkout,
+archive, payload, or provenance participates in the Android build.
 
 The packaged HyperBEAM preload uses a public, deterministic Ed25519 build
 identity rather than the node wallet. That identity is not an authorization

@@ -524,7 +524,7 @@ for abi in arm64-v8a x86_64; do
                 cp "$ebin_file" "$APP_LIB/$name/ebin/"
             done
         if [ -d "$app/priv" ]; then
-            find "$app/priv" -type f \
+            find -L "$app/priv" -type f \
                 ! -path '*/crates/*' \
                 ! -name '*.a' \
                 ! -name '*.d' \
@@ -591,6 +591,9 @@ TZ=UTC find "$WORK" -exec touch -h -t "$zip_timestamp" {} +
         LC_ALL=C sort |
         zip -qX "$OUT" -@
 )
+"$ROOT/scripts/verify-generic-andee-artifact.py" \
+    --runtime "$OUT" \
+    --evidence "$WORK/generic-composition.json"
 ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 ANDEE_HYPERBEAM_VERSION="$ANDEE_HYPERBEAM_VERSION" \
 ANDEE_HYPERBEAM_SOURCE_EPOCH="$ANDEE_HYPERBEAM_SOURCE_EPOCH" \
@@ -640,6 +643,9 @@ andock_native = json.loads(
 andock_template = json.loads(
     (work / "execution/andock/andock-ubuntu-arm64.ext4.manifest.json").read_text()
 )
+generic_composition = json.loads(
+    (work / "generic-composition.json").read_text()
+)
 andock_files = {
     "usr/bin/proot": "libandee_proot.so",
     "usr/libexec/andock/proot-launcher": "libandee_andock_launcher.so",
@@ -662,6 +668,7 @@ manifest.write_text(json.dumps({
     "native-payload-count": len(native),
     "native-link-counts": links,
     "native-libraries": native,
+    "generic-composition": generic_composition,
     "preloaded-store": {
         "canonical-format": "lmdb-dump-load-v1",
         "lmdb-sys-checksum": os.environ["ANDEE_LMDB_SYS_CHECKSUM"],

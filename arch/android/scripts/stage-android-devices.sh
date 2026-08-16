@@ -53,6 +53,21 @@ copy_device_tree() {
 
 copy_device_tree "$PERMAWEBOS_COMMON_DEVICE_ROOT"
 copy_device_tree "$ANDEE_DEVICE_OVERLAY_ROOT"
+# The architecture overlay owns the Android HyperBEAM pin. Do not rely on
+# rsync timestamp/size heuristics when common and Android lockfiles differ.
+for overlay_file in rebar.config rebar.lock; do
+    cp "$ANDEE_DEVICE_OVERLAY_ROOT/$overlay_file" \
+        "$ANDEE_DEVICE_ROOT/$overlay_file"
+    if ! cmp -s "$ANDEE_DEVICE_OVERLAY_ROOT/$overlay_file" \
+            "$ANDEE_DEVICE_ROOT/$overlay_file"; then
+        echo "staged Android package lost overlay $overlay_file" >&2
+        exit 1
+    fi
+done
+
+# Prevent the Forge packager from falling back to shared Android priv assets
+# when Andock has no private files of its own.
+mkdir -p "$ANDEE_DEVICE_ROOT/src/priv/dev_andock"
 
 if [ ! -f "$ANDEE_DEVICE_ROOT/rebar.lock" ]; then
     echo "staged Android device package has no rebar.lock" >&2
@@ -77,8 +92,8 @@ rm -f "$ANDEE_DEVICE_ROOT/src/lapee_devices.app.src"
 rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/andee_devices" \
     "$ANDEE_DEVICE_ROOT/_build/default/lib/lapee_devices"
 if [ -d "$ANDEE_DEVICE_ROOT/src/priv" ]; then
-    rm -rf "$ANDEE_DEVICE_ROOT/priv"
-    cp -a "$ANDEE_DEVICE_ROOT/src/priv" "$ANDEE_DEVICE_ROOT/priv"
+    mkdir -p "$ANDEE_DEVICE_ROOT/priv"
+    cp -a "$ANDEE_DEVICE_ROOT/src/priv/." "$ANDEE_DEVICE_ROOT/priv/"
 fi
 
 echo "android device package: $ANDEE_DEVICE_ROOT"

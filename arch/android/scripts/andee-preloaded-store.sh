@@ -102,7 +102,9 @@ build_andee_preloaded_store() {
     (
         trap 'rm -f "$key"' EXIT
         cd "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
-        "$rebar3" device preload \
+        # EUnit auto-export uses an unordered set, so production packages that
+        # include *_test() functions otherwise get nondeterministic debug info.
+        ERL_COMPILER_OPTIONS="[{d,'NOTEST'}]" "$rebar3" device preload \
             --device-src "src/preloaded,$ANDEE_DEVICE_ROOT/src" \
             --output-dir "$out" \
             --key "$key"
@@ -123,15 +125,29 @@ build_andee_preloaded_store() {
                 <<"read-only">> => true
             },
             ok = hb_store:start(Store),
-            case hb_store:resolve(
+            Opts = #{
+                <<"store">> => [Store],
+                <<"preloaded-store">> => Store,
+                <<"trusted-device-signers">> => [],
+                <<"name-resolvers">> => []
+            },
+            case hb_store:read(
                 Store,
-                <<"~meta@1.0/preloaded-devices-index">>,
-                #{}
+                <<"~meta@1.0/preloaded-devices-index/andock@1.0">>,
+                Opts
             ) of
-                {ok, ID} when is_binary(ID), byte_size(ID) > 0 -> halt(0);
+                {ok, SpecID} when is_binary(SpecID), byte_size(SpecID) =:= 43 ->
+                    case hb_device_load:reference(<<"andock@1.0">>, Opts) of
+                        {ok, Module} when is_atom(Module) -> halt(0);
+                        LoadFailure ->
+                            io:format(standard_error,
+                                "cannot load local andock@1.0 archive: ~p~n",
+                                [LoadFailure]),
+                            halt(1)
+                    end;
                 Other ->
                     io:format(standard_error,
-                        "missing in-store preloaded index: ~p~n", [Other]),
+                        "missing local andock@1.0 spec: ~p~n", [Other]),
                     halt(1)
             end.
         ' -extra "$out"

@@ -177,15 +177,17 @@ emulator does not prove every carrier network topology.
 
 ## Device, package, and measurement boundary
 
-AndEE packages only the generic image engine, isolated-service lifecycle,
-PRoot syscall layer, template, and private local transport. It contains no
-Ouroboros router, provider, UI, member model, Python development server, or
-authorization fork.
+AndEE packages the repository-owned `~andock@1.0` device, generic execution
+contract, image engine, isolated-service lifecycle, PRoot syscall layer,
+template, and private local transport. It contains no application router,
+provider, UI, member model, development server, authorization fork, source
+checkout, or device archive.
 
-Ouroboros `~andock@1.0` is a standalone backend package. It selects the local
-transport and delegates tools, validation, member lookup, serialization,
-clipping, errors, files, attachments, and archives to
-`lib_ouroboros_execution`, exactly as the Docker and QEMU backends do.
+Applications select `~andock@1.0` through the same execution-engine interface
+as another conforming backend. Tools, validation, authorization,
+serialization, clipping, errors, files, background sessions, attachments, and
+archives remain properties of the generic public contract; application
+packages load separately through measured trusted-device configuration.
 
 No Andock-specific measurement projection is added. The existing APK-set,
 signing-certificate, runtime-ZIP, native-library-set, and effective node

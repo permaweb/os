@@ -37,6 +37,7 @@ suite_cases() {
                 android-config \
                 android-build \
                 android-smoke \
+                android-andock-device \
                 android-scenarios
             ;;
         mixed)
@@ -75,6 +76,7 @@ Cases:
   android-config
   android-build
   android-smoke
+  android-andock-device
   android-next-boot-config
   android-zone-storage
   android-host-zone-storage
@@ -137,6 +139,9 @@ run_case() {
             ;;
         android-smoke)
             arch/android/scripts/andee-smoke.sh
+            ;;
+        android-andock-device)
+            arch/android/scripts/andock-device-route-smoke.sh
             ;;
         android-next-boot-config)
             arch/android/scripts/andee-next-boot-config-test.sh
