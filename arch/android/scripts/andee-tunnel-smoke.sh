@@ -310,7 +310,13 @@ def is_runtime_store(value):
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": False,
+            "local-store": [
+                {
+                    "store-module": "hb_store_volatile",
+                    "name": "andee-volatile-gateway-cache",
+                    "ao-types": 'store-module="atom"',
+                }
+            ],
             "preloaded-store": {
                 "store-module": "hb_store_lmdb",
                 "name": "_build/preloaded-store",
