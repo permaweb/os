@@ -235,7 +235,13 @@ def is_runtime_store(value):
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": False,
+            "local-store": [
+                {
+                    "store-module": "hb_store_volatile",
+                    "name": "andee-volatile-gateway-cache",
+                    "ao-types": 'store-module="atom"',
+                }
+            ],
             "preloaded-store": {
                 "store-module": "hb_store_lmdb",
                 "name": "_build/preloaded-store",
@@ -312,8 +318,10 @@ def assert_attested_public_runtime_store(node_link):
         fail("attested node store second entry was not gateway")
     if fetch_body(f"{node_link}/store/2/access/1") != "read":
         fail("attested node gateway store was not read-only")
-    if fetch_body(f"{node_link}/store/2/local-store") not in (False, "false"):
-        fail("attested node gateway unexpectedly materialized a local store")
+    if fetch_body(f"{node_link}/store/2/local-store/1/store-module") != "hb_store_volatile":
+        fail("attested node gateway cache was not volatile")
+    if fetch_body(f"{node_link}/store/2/local-store/1/name") != "andee-volatile-gateway-cache":
+        fail("attested node gateway cache name changed")
 
 if not started:
     fail("HyperBEAM did not report startup")

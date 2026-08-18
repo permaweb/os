@@ -90,7 +90,13 @@ def is_runtime_store(value: Any) -> bool:
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
-            "local-store": False,
+            "local-store": [
+                {
+                    "store-module": "hb_store_volatile",
+                    "name": "andee-volatile-gateway-cache",
+                    "ao-types": 'store-module="atom"',
+                }
+            ],
             "preloaded-store": preloaded,
         },
     ]
@@ -143,7 +149,7 @@ def main() -> int:
     if not is_runtime_store(config.get("store")):
         fail(
             "base config must use persistent transactional app-private storage plus "
-            "non-caching gateway reads decoded by the measured preloaded store"
+            "volatile-cached gateway reads decoded by the measured preloaded store"
         )
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
