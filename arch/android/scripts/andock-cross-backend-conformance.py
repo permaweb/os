@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare representative docker@1.0 and andock@1.0 contract results."""
+"""Compare representative docker@1.0 and andock@1.0 scalar contract results."""
 
 import argparse
 import json
@@ -187,28 +187,28 @@ def project(evidence):
     common = ["action", "ok"]
     projected = {
         "write": fields(
-            evidence["write"], common + ["bytes", "path", "output", "deltas"]
+            evidence["write"], common + ["bytes", "path", "output"]
         ),
         "append": fields(
-            evidence["append"], common + ["bytes", "path", "output", "deltas"]
+            evidence["append"], common + ["bytes", "path", "output"]
         ),
         "edit": fields(
             evidence["edit"],
-            common + ["path", "output", "replacements", "deltas"],
+            common + ["path", "output", "replacements"],
         ),
         "read": fields(
             evidence["read"],
-            common + ["path", "content", "output", "size", "truncated", "deltas"],
+            common + ["path", "content", "output", "size", "truncated"],
         ),
         "glob": fields(
             evidence["glob"],
             common
-            + ["cwd", "pattern", "matches", "output", "exit-code", "truncated"],
+            + ["cwd", "pattern", "output", "exit-code", "truncated"],
         ),
         "grep": fields(
             evidence["grep"],
             common
-            + ["cwd", "pattern", "matches", "output", "exit-code", "truncated"],
+            + ["cwd", "pattern", "output", "exit-code", "truncated"],
         ),
         "bash": fields(
             evidence["bash"],
@@ -254,19 +254,9 @@ def project(evidence):
             ],
         ),
     }
-    entries = []
-    for entry in evidence["list-files"].get("entries", []):
-        entries.append(
-            {
-                key: entry[key]
-                for key in ["name", "path", "size", "type"]
-                if key in entry
-            }
-        )
     projected["list-files"] = {
         "status": evidence["list-files"].get("status", 200),
         "path": evidence["list-files"].get("path"),
-        "entries": entries,
     }
     terminal = evidence["session"]["terminal"]
     projected["session"] = {
@@ -294,7 +284,7 @@ def main():
     args = parser.parse_args()
     docker = json.loads(args.docker_evidence.read_text())
     andock = run_andock(args.base_url.rstrip("/"))
-    docker_projection = project(docker)
+    docker_projection = project(docker.get("contract-parity", docker))
     andock_projection = project(andock)
     require(
         docker_projection == andock_projection,

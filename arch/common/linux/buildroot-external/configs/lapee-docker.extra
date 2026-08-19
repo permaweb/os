@@ -1,0 +1,5 @@
+# Optional Docker execution profile. The ordinary LapEE defconfig deliberately
+# omits this complete runtime surface.
+BR2_PACKAGE_DOCKER_ENGINE=y
+BR2_PACKAGE_DOCKER_ENGINE_DOCKER_INIT_TINI=y
+BR2_PACKAGE_DOCKER_CLI=y

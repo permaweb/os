@@ -100,7 +100,7 @@ adb shell rm -f "$REMOTE_CONFIG" >/dev/null 2>&1 || true
 adb shell am start -W -n "$PACKAGE/.OrnamentActivity" > "$OUT/activity.txt"
 
 STARTED=0
-for _ in $(seq 1 45); do
+for _ in $(seq 1 "$PROBE_TIMEOUT"); do
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stdout \
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \
@@ -468,6 +468,17 @@ adb push "$OUT/next-boot-config.json" "$REMOTE_CONFIG" > "$OUT/push-terminate.tx
 adb shell "run-as $PACKAGE sh -c 'cp $REMOTE_CONFIG no_backup/boot-config/next.json'" \
     > "$OUT/restage-terminate.txt"
 adb shell rm -f "$REMOTE_CONFIG" >/dev/null 2>&1 || true
+# A cold runtime extraction can outlast the emulator's display timeout. Wake
+# it and explicitly foreground the ornament before exercising the real button;
+# otherwise the first synthetic tap merely wakes the display.
+adb shell input keyevent KEYCODE_WAKEUP
+adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
+# The first immersive-mode launch on a fresh AVD otherwise places Android's
+# one-time "Viewing full screen" confirmation over the application button.
+adb shell settings put secure immersive_mode_confirmations confirmed \
+    >/dev/null 2>&1 || true
+adb shell am start -W -n "$PACKAGE/.OrnamentActivity" \
+    > "$OUT/pre-terminate-activity.txt"
 # The ornament view polls the app-private boot config every 5s once the node is
 # ready; wait long enough for a directly staged next.json to flip the button.
 sleep 7

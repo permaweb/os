@@ -65,6 +65,23 @@ for overlay_file in rebar.config rebar.lock; do
     fi
 done
 
+EXECUTION_SOURCES=(
+    lib_permawebos_bash_session.erl
+    lib_permawebos_execution.erl
+    lib_permawebos_execution_tools.erl
+)
+for source in "${EXECUTION_SOURCES[@]}"; do
+    if [ ! -f "$ANDEE_DEVICE_ROOT/src/sandbox/$source" ]; then
+        echo "missing shared execution source: $source" >&2
+        exit 1
+    fi
+done
+if rg -n -i 'ouroboros|ouroboros[_-]src' \
+        "${EXECUTION_SOURCES[@]/#/$ANDEE_DEVICE_ROOT/src/sandbox/}"; then
+    echo "staged execution contract contains application-specific source" >&2
+    exit 1
+fi
+
 # Prevent the Forge packager from falling back to shared Android priv assets
 # when Andock has no private files of its own.
 mkdir -p "$ANDEE_DEVICE_ROOT/src/priv/dev_andock"

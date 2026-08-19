@@ -1,0 +1,9 @@
+{application, linux_execution_devices, [
+    {description, "PermawebOS Linux execution devices"},
+    {vsn, "1.0.0"},
+    {registered, []},
+    {applications, [kernel, stdlib, crypto, public_key, ssl, inets, hb]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]}
+]}.

@@ -71,6 +71,18 @@ def collect_session(base_url, started):
     return output, current, polls
 
 
+def run_bash_to_completion(base_url, body):
+    started = successful(request(base_url, "bash", body))
+    if started.get("execution-status") == "running":
+        output, terminal, polls = collect_session(base_url, started)
+    else:
+        output = started.get("output", "")
+        terminal = started
+        polls = []
+    require(terminal.get("execution-status") == "exited", terminal)
+    return output, terminal, polls
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -91,12 +103,12 @@ def main():
 
     root = "/root/neutral-contract-probe"
     route_file = f"{root}/route.txt"
-    successful(request(base_url, "bash", {
+    run_bash_to_completion(base_url, {
         "command": f"rm -rf -- {root}; mkdir -p -- {root}",
         "cwd": "/root",
         "yield-ms": 5000,
         "execution-id": "neutral-contract-clean-start",
-    }))
+    })
     evidence["write"] = successful(request(base_url, "write", {
         "path": route_file,
         "content": "alpha",
@@ -231,21 +243,26 @@ def main():
         tools=["Read"],
     )
     require(evidence["unauthorized"].get("status") == 403, evidence["unauthorized"])
-    evidence["network-denied"] = successful(request(base_url, "bash", {
+    network_output, network_terminal, network_polls = run_bash_to_completion(base_url, {
         "command": "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80' >/dev/null 2>&1",
         "cwd": root,
         "yield-ms": 5000,
         "timeout-ms": 5000,
         "execution-id": "neutral-contract-network-denied",
-    }))
-    require(evidence["network-denied"].get("exit-code") != 0, evidence["network-denied"])
+    })
+    evidence["network-denied"] = {
+        "output": network_output,
+        "terminal": network_terminal,
+        "polls": network_polls,
+    }
+    require(network_terminal.get("exit-code") != 0, evidence["network-denied"])
 
-    successful(request(base_url, "bash", {
+    run_bash_to_completion(base_url, {
         "command": f"rm -rf -- {root}",
         "cwd": "/root",
         "yield-ms": 5000,
         "execution-id": f"neutral-contract-clean-end-{time.time_ns()}",
-    }))
+    })
     evidence["consumer"] = "neutral-contract-probe"
     evidence["passed"] = True
     args.evidence.parent.mkdir(parents=True, exist_ok=True)

@@ -55,7 +55,7 @@ adb shell am start-foreground-service -n "$PACKAGE/.AndeeService" \
     > "$OUT/service-start.txt" 2>&1 || true
 
 STARTED=0
-for _ in $(seq 1 90); do
+for _ in $(seq 1 "$PROBE_TIMEOUT"); do
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stdout \
         > "$OUT/hyperbeam.stdout" 2>/dev/null || true
     adb shell run-as "$PACKAGE" cat no_backup/run/hyperbeam.stderr \

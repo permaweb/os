@@ -268,9 +268,17 @@ ensure_session(
                 Opts
             ) of
                 ok -> launch(MemberId, Paths, DisableNetwork, Opts);
+                {error, _Status, _Message, _Details} = Error ->
+                    Error;
+                {error, _Status, _Message} = Error ->
+                    Error;
                 {error, Reason} ->
                     {error, 500, safe_bin(Reason)}
             end;
+        {error, _Status, _Message, _Details} = Error ->
+            Error;
+        {error, _Status, _Message} = Error ->
+            Error;
         {error, Reason} ->
             {error, 500, safe_bin(Reason)}
     end.
@@ -369,6 +377,10 @@ session_result(MemberId, SessionId, Cursor, Wait, Terminate, Opts) ->
             end;
         {error, enoent} ->
             {error, 404, <<"Unknown Bash session for this member.">>};
+        {error, _Status, _Message, _Details} = Error ->
+            Error;
+        {error, _Status, _Message} = Error ->
+            Error;
         {error, Reason} ->
             {error, 500, safe_bin(Reason)}
     end.

@@ -158,6 +158,35 @@ default_timeout_and_network_denial_are_forwarded_test() ->
         error(contract_exec_not_observed)
     end.
 
+missing_member_network_policy_defaults_to_allowed_test() ->
+    {ok, Response} =
+        call_without_network_policy(
+            #{contract_test_owner => self()}
+        ),
+    ?assertEqual(true, maps:get(<<"ok">>, Response)),
+    receive
+        {contract_exec, ?MEMBER, <<"/root">>, <<"observe">>, undefined, false} ->
+            ok
+    after 1000 ->
+        error(contract_exec_not_observed)
+    end.
+
+backend_can_default_missing_member_network_policy_to_denied_test() ->
+    {ok, Response} =
+        call_without_network_policy(
+            #{
+                contract_test_owner => self(),
+                execution_default_allow_network => false
+            }
+        ),
+    ?assertEqual(true, maps:get(<<"ok">>, Response)),
+    receive
+        {contract_exec, ?MEMBER, <<"/root">>, <<"observe">>, undefined, true} ->
+            ok
+    after 1000 ->
+        error(contract_exec_not_observed)
+    end.
+
 backend_error_status_is_preserved_test() ->
     {ok, Response} =
         call(
@@ -326,6 +355,26 @@ call(Action, Member, Tools, Body, Opts) ->
                             maps:get(contract_allow_network, Opts, false)
                     }
                 }
+        },
+        Opts
+    ).
+
+call_without_network_policy(Opts) ->
+    lib_permawebos_execution:handle(
+        bash,
+        ?DEVICE,
+        ?MODULE,
+        #{
+            <<"method">> => <<"POST">>,
+            <<"body">> => #{
+                <<"member-id">> => ?MEMBER,
+                <<"command">> => <<"observe">>
+            },
+            <<"member-context">> => #{
+                <<"id">> => ?MEMBER,
+                <<"tools">> => [<<"Bash">>],
+                <<"metadata">> => #{}
+            }
         },
         Opts
     ).
