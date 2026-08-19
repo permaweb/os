@@ -59,16 +59,23 @@ andee_lmdb_source_dir() {
 }
 
 andee_lmdb_canonical_tools() {
-    local out source
-    out="$ROOT/build/host-tools/andee-lmdb-canonical-v1"
+    local out source patched
+    out="$ROOT/build/host-tools/andee-lmdb-canonical-v2"
     source="$(andee_lmdb_source_dir)"
     if [ ! -x "$out/mdb_dump" ] || [ ! -x "$out/mdb_load" ]; then
-        mkdir -p "$out"
-        cc -O2 \
-            "$source/mdb_dump.c" "$source/mdb.c" "$source/midl.c" \
+        patched="$out/source"
+        rm -rf "$patched"
+        mkdir -p "$patched"
+        cp "$source/mdb_dump.c" "$source/mdb_load.c" "$patched"
+        patch --quiet -d "$patched" -p0 < "$ROOT/scripts/lmdb-canonical-no-lock.patch"
+        # Canonicalization owns both databases exclusively. Avoid consuming
+        # host-wide POSIX semaphores while dumping and loading these offline
+        # stores; shared build hosts can otherwise exhaust the Darwin limit.
+        cc -O2 -I "$source" \
+            "$patched/mdb_dump.c" "$source/mdb.c" "$source/midl.c" \
             -o "$out/mdb_dump"
-        cc -O2 \
-            "$source/mdb_load.c" "$source/mdb.c" "$source/midl.c" \
+        cc -O2 -I "$source" \
+            "$patched/mdb_load.c" "$source/mdb.c" "$source/midl.c" \
             -o "$out/mdb_load"
     fi
     printf '%s\n' "$out"
@@ -134,25 +141,27 @@ build_andee_preloaded_store() {
                 <<"trusted-device-signers">> => [],
                 <<"name-resolvers">> => []
             },
-            case hb_store:read(
-                Store,
-                <<"~meta@1.0/preloaded-devices-index/andock@1.0">>,
-                Opts
-            ) of
-                {ok, SpecID} when is_binary(SpecID), byte_size(SpecID) =:= 43 ->
-                    case hb_device_load:reference(<<"andock@1.0">>, Opts) of
-                        {ok, Module} when is_atom(Module) -> halt(0);
-                        LoadFailure ->
-                            io:format(standard_error,
-                                "cannot load local andock@1.0 archive: ~p~n",
-                                [LoadFailure]),
-                            halt(1)
-                    end;
-                Other ->
-                    io:format(standard_error,
-                        "missing local andock@1.0 spec: ~p~n", [Other]),
-                    halt(1)
-            end.
+            Check = fun(Name) ->
+                IndexPath = <<"~meta@1.0/preloaded-devices-index/", Name/binary>>,
+                case hb_store:read(Store, IndexPath, Opts) of
+                    {ok, SpecID} when is_binary(SpecID), byte_size(SpecID) =:= 43 ->
+                        case hb_device_load:reference(Name, Opts) of
+                            {ok, Module} when is_atom(Module) -> ok;
+                            LoadFailure ->
+                                io:format(standard_error,
+                                    "cannot load local ~s archive: ~p~n",
+                                    [Name, LoadFailure]),
+                                halt(1)
+                        end;
+                    Other ->
+                        io:format(standard_error,
+                            "missing local ~s spec: ~p~n", [Name, Other]),
+                        halt(1)
+                end
+            end,
+            ok = Check(<<"andock@1.0">>),
+            ok = Check(<<"inference@1.0">>),
+            halt(0).
         ' -extra "$out"
     )
     export ANDEE_PRELOADED_STORE_SIGNER="$ANDEE_PRELOAD_SIGNER_ADDRESS"

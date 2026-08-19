@@ -55,11 +55,31 @@ android {
     }
 }
 
+val liteRtNoticesDirectory = layout.buildDirectory.dir("generated/litert-notices")
+android.sourceSets.getByName("main").assets.directories.add(
+    liteRtNoticesDirectory.get().asFile.absolutePath,
+)
+
+val stageLiteRtNotices = tasks.register<Copy>("stageLiteRtNotices") {
+    from(
+        provider {
+            val artifact = configurations.getByName("debugRuntimeClasspath")
+                .files
+                .single { it.name == "litertlm-android-0.16.1.aar" }
+            zipTree(artifact)
+        },
+    )
+    include("LICENSE", "THIRD_PARTY_NOTICE.txt")
+    into(liteRtNoticesDirectory.map { it.dir("litertlm-android-0.16.1") })
+}
+
 dependencies {
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     testImplementation("junit:junit:4.13.2")
 }
 
 tasks.named("preBuild").configure {
+    dependsOn(stageLiteRtNotices)
     doFirst {
         val runtime = file("src/main/assets/andee-runtime.zip")
         val nativeRoot = file("src/main/jniLibs")
@@ -70,6 +90,9 @@ tasks.named("preBuild").configure {
             check(file("$nativeRoot/$abi/libandee_hyperbeam.so").isFile) {
                 "Missing generated $abi AndEE native runtime; build through arch/android/Makefile"
             }
+        }
+        check(file("$nativeRoot/arm64-v8a/libLiteRtDispatch_GoogleTensor.so").isFile) {
+            "Missing pinned Google Tensor LiteRT dispatch runtime"
         }
     }
 }

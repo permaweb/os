@@ -1,0 +1,15 @@
+diff --git a/src/configs/hardware-config.c b/src/configs/hardware-config.c
+index a3dbebd..7585a64 100644
+--- a/src/configs/hardware-config.c
++++ b/src/configs/hardware-config.c
+@@ -252,6 +252,8 @@ static void init_hardware_config(void) {
+   set_arch_flag(xnn_arch_arm_neon_i8mm, cpuinfo_has_arm_i8mm());
+   set_arch_flag(xnn_arch_arm_sve, cpuinfo_has_arm_sve());
+   set_arch_flag(xnn_arch_arm_sve2, cpuinfo_has_arm_sve2());
+-  set_arch_flag(xnn_arch_arm_sme, cpuinfo_has_arm_sme());
+-  set_arch_flag(xnn_arch_arm_sme2, cpuinfo_has_arm_sme2());
++  set_arch_flag(xnn_arch_arm_sme,
++      XNN_ENABLE_ARM_SME && cpuinfo_has_arm_sme());
++  set_arch_flag(xnn_arch_arm_sme2,
++      XNN_ENABLE_ARM_SME2 && cpuinfo_has_arm_sme2());
+ #endif

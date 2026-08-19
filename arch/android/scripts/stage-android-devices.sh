@@ -85,6 +85,7 @@ fi
 # Prevent the Forge packager from falling back to shared Android priv assets
 # when Andock has no private files of its own.
 mkdir -p "$ANDEE_DEVICE_ROOT/src/priv/dev_andock"
+mkdir -p "$ANDEE_DEVICE_ROOT/src/priv/dev_inference"
 
 if [ ! -f "$ANDEE_DEVICE_ROOT/rebar.lock" ]; then
     echo "staged Android device package has no rebar.lock" >&2

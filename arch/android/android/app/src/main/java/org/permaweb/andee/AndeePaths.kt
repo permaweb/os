@@ -13,6 +13,12 @@ object AndeePaths {
         File(context.noBackupFilesDir, "execution-state")
     fun executionSocketFile(context: Context): File =
         File(runDir(context), "andee-execution.sock")
+    fun inferenceModelsRoot(context: Context): File =
+        File(context.noBackupFilesDir, "inference-models")
+    fun inferenceCacheRoot(context: Context): File =
+        File(context.noBackupFilesDir, "inference-cache")
+    fun inferenceSocketFile(context: Context): File =
+        File(runDir(context), "andee-inference.sock")
     fun encryptedStoreRoot(context: Context): File = File(context.noBackupFilesDir, "encrypted-zones")
     fun cryptoSocketFile(context: Context): File = File(runDir(context), "andee-crypto.sock")
     fun cryptoSocketName(context: Context): String = cryptoSocketFile(context).absolutePath

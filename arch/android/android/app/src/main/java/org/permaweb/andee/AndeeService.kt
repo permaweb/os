@@ -9,10 +9,12 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import java.io.File
 
 class AndeeService : Service() {
     private var cryptoAgent: AndeeCryptoAgent? = null
     private var executionManager: AndeeExecutionManager? = null
+    private var inferenceManager: AndeeInferenceManager? = null
     private var hyperbeamRuntime: HyperbeamRuntime? = null
     private var starterThread: Thread? = null
     @Volatile private var stopping = false
@@ -53,27 +55,36 @@ class AndeeService : Service() {
         Thread {
             var agent: AndeeCryptoAgent? = null
             var execution: AndeeExecutionManager? = null
+            var inference: AndeeInferenceManager? = null
             var runtime: HyperbeamRuntime? = null
             try {
                 val runtimeRoot = RuntimeExtractor(this).extractIfNeeded()
+                val effectiveConfig = AndeeBootConfigStore.effectiveConfigFile(
+                    this,
+                    File(runtimeRoot, "config/andee.json"),
+                )
                 execution = AndeeExecutionManager(this, runtimeRoot).also { it.start() }
+                inference = AndeeInferenceManager(this, effectiveConfig).also { it.start() }
                 val currentAgent = AndeeCryptoAgent(this).also { it.start() }
                 agent = currentAgent
                 if (stopping) {
                     currentAgent.close()
+                    inference.close()
                     execution.close()
                     return@Thread
                 }
                 cryptoAgent = currentAgent
                 executionManager = execution
+                inferenceManager = inference
                 val policy = currentAgent.policyStatus()
                 if (!policy.optBoolean("accepted", false)) {
                     Log.w(TAG, "policy rejected; starting HyperBEAM for rejected measurement")
                 }
-                runtime = HyperbeamRuntime(this, runtimeRoot).also { it.start() }
+                runtime = HyperbeamRuntime(this, runtimeRoot, effectiveConfig).also { it.start() }
                 if (stopping) {
                     runtime?.close()
                     agent?.close()
+                    inference?.close()
                     execution?.close()
                     return@Thread
                 }
@@ -83,6 +94,7 @@ class AndeeService : Service() {
                 Log.e(TAG, "failed to start AndEE runtime", exc)
                 runtime?.close()
                 agent?.close()
+                inference?.close()
                 execution?.close()
                 stopSelf()
             } finally {
@@ -121,6 +133,8 @@ class AndeeService : Service() {
         hyperbeamRuntime = null
         executionManager?.close()
         executionManager = null
+        inferenceManager?.close()
+        inferenceManager = null
         cryptoAgent?.close()
         cryptoAgent = null
         starterThread = null

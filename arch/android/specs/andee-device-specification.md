@@ -228,6 +228,43 @@ UDP disconnect to remove that peer filter while another receive is in flight.
 The immutable template, native engine, compatibility layer, manifests, and
 selected node configuration are committed through the existing APK-set,
 native-library-set, runtime-ZIP, and effective-node-message measurement facts.
+
+### 3.2 Local inference capability
+
+An AndEE build MUST preload the repository-owned generic `~inference@1.0`
+device and package its Android local-compute capability. The public AO surface
+MUST remain application- and provider-agnostic and MUST return non-streaming
+OpenAI chat-completion shapes. Models MUST NOT be embedded in the APK or
+runtime ZIP.
+
+Each model MUST be selected by an id allowlisted in effective measured node
+configuration. The catalogue MUST bind that id to an app-private basename,
+base64url SHA-256 digest, permitted backend set, and resource bounds. Requests
+MUST NOT select filesystem paths, URLs, downloads, or unmeasured model files.
+
+The backend MUST be selected by effective measured configuration and MUST NOT
+be request-overridable. An NPU model MUST declare an exact supported-vendor SoC
+allowlist and the current device, ABI, Android version, vendor dispatch
+library, and model backend MUST match before initialization. Runtime
+initialization failure MUST NOT trigger an application-level retry on CPU or
+GPU. Because the current LiteRT-LM API does not expose effective partition
+delegation and may retain CPU-side work, successful initialization or
+generation MUST NOT be represented as mobile-NPU evidence. Hardware acceptance
+requires an independently observed device trace or counter. Emulator
+acceptance MAY select CPU or GPU in measured configuration but MUST NOT
+represent that run as mobile-NPU evidence.
+
+HyperBEAM and the Android inference broker MUST communicate over an
+app-private, bounded, length-framed Unix socket whose peer UID is the AndEE app
+UID. Model generation MUST be serialized and request text, message count, tool
+count, output tokens, end-to-end duration including engine initialization, and
+frame sizes MUST be bounded. Timeout and service shutdown MUST NOT wait
+unboundedly for vendor cancellation; a non-cooperative native runtime MUST
+trigger an explicit AndEE app-process reset. Health MUST
+distinguish compatible configuration from successful engine initialization.
+Completion evidence MUST state the requested backend, model digest, and SoC,
+and MUST NOT claim effective NPU execution without independent evidence.
+
 Mutable member images MUST NOT enter the boot measurement. No additional
 Andock-specific `~measurement@1.0`, `~system@1.0`, or `~andee@1.0` projection
 is required.

@@ -19,6 +19,8 @@ ABIS = ("arm64-v8a", "x86_64")
 DEVICE_BEAMS = (
     "dev_andock.beam",
     "lib_andock.beam",
+    "dev_inference.beam",
+    "lib_andee_inference.beam",
     "lib_permawebos_bash_session.beam",
     "lib_permawebos_execution.beam",
     "lib_permawebos_execution_tools.beam",
@@ -31,6 +33,15 @@ APK_ANDOCK_NATIVE = (
     "lib/arm64-v8a/libandee_proot.so",
     "lib/arm64-v8a/libandee_andock_launcher.so",
     "lib/arm64-v8a/libandee_proot_loader.so",
+)
+APK_INFERENCE_NATIVE = (
+    "lib/arm64-v8a/libLiteRtDispatch_GoogleTensor.so",
+    "lib/arm64-v8a/liblitertlm_jni.so",
+    "lib/x86_64/liblitertlm_jni.so",
+)
+APK_INFERENCE_NOTICES = (
+    "assets/litertlm-android-0.16.1/LICENSE",
+    "assets/litertlm-android-0.16.1/THIRD_PARTY_NOTICE.txt",
 )
 
 
@@ -58,6 +69,8 @@ def scan_archive(archive: zipfile.ZipFile, label: str) -> None:
         name = info.filename.lower().encode()
         if any(token in name for token in FORBIDDEN_TOKENS):
             raise SystemExit(f"application-specific archive entry in {label}")
+        if name.endswith(b".litertlm"):
+            raise SystemExit(f"inference model embedded in {label}")
         if info.is_dir():
             continue
         with archive.open(info) as handle:
@@ -108,6 +121,12 @@ def inspect_apk(
         for native in APK_ANDOCK_NATIVE:
             if native not in names:
                 raise SystemExit(f"missing generic Andock native capability: {native}")
+        for native in APK_INFERENCE_NATIVE:
+            if native not in names:
+                raise SystemExit(f"missing generic inference native capability: {native}")
+        for notice in APK_INFERENCE_NOTICES:
+            if notice not in names:
+                raise SystemExit(f"missing LiteRT legal notice: {notice}")
         runtime_name = "assets/andee-runtime.zip"
         if runtime_name not in names:
             raise SystemExit("APK does not contain assets/andee-runtime.zip")
@@ -126,6 +145,8 @@ def inspect_apk(
         "apk-sha256": sha256(path),
         "entry-count": len(names),
         "andock-native-capabilities": list(APK_ANDOCK_NATIVE),
+        "inference-native-capabilities": list(APK_INFERENCE_NATIVE),
+        "inference-legal-notices": list(APK_INFERENCE_NOTICES),
         "runtime-sha256": runtime_sha256,
         "runtime": runtime_evidence,
         "application-negative-scan": {
