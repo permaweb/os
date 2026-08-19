@@ -327,6 +327,17 @@ def is_runtime_store(value):
         },
     ]
 
+def is_private_store(value):
+    return value == [
+        {
+            "store-module": "hb_store_lmdb",
+            "name": "../private-store",
+            "capacity": 1073741824,
+            "batch-size": 100,
+            "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
+        }
+    ]
+
 effective = read_json("effective.json")
 local_info = read_json("local-info.materialized.json")
 public_info = read_json("public-info.materialized.json")
@@ -369,8 +380,8 @@ if arweave_index_store != {
     ],
 }:
     fail("effective config did not keep volatile Arweave index store")
-if not is_volatile_store(effective.get("priv-store"), "andee-volatile-priv-store"):
-    fail("effective config did not keep volatile private store")
+if not is_private_store(effective.get("priv-store")):
+    fail("effective config did not keep app-private persistent store")
 for name in (
     "local-address",
     "local-info",

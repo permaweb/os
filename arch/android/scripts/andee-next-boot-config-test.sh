@@ -252,6 +252,17 @@ def is_runtime_store(value):
         },
     ]
 
+def is_private_store(value):
+    return value == [
+        {
+            "store-module": "hb_store_lmdb",
+            "name": "../private-store",
+            "capacity": 1073741824,
+            "batch-size": 100,
+            "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
+        }
+    ]
+
 def is_volatile_arweave_index_store(value):
     return value == {
         "store-module": "hb_store_arweave",
@@ -272,8 +283,8 @@ def assert_base_stores(node, label):
         fail(f"{label} did not enforce volatile match index")
     if not is_volatile_arweave_index_store(node.get("arweave-index-store")):
         fail(f"{label} did not enforce volatile Arweave index store")
-    if not is_volatile_store(node.get("priv-store"), "andee-volatile-priv-store"):
-        fail(f"{label} did not enforce volatile private store")
+    if not is_private_store(node.get("priv-store")):
+        fail(f"{label} did not enforce app-private persistent store")
 
 def linked_value(message, key):
     link = message.get(f"{key}+link")

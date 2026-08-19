@@ -102,6 +102,18 @@ def is_runtime_store(value: Any) -> bool:
     ]
 
 
+def is_private_store(value: Any) -> bool:
+    return value == [
+        {
+            "store-module": "hb_store_lmdb",
+            "name": "../private-store",
+            "capacity": 1073741824,
+            "batch-size": 100,
+            "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
+        }
+    ]
+
+
 def is_volatile_arweave_index_store(value: Any) -> bool:
     return value == {
         "store-module": "hb_store_arweave",
@@ -155,8 +167,8 @@ def main() -> int:
         fail("base config must use volatile Android match index")
     if not is_volatile_arweave_index_store(config.get("arweave-index-store")):
         fail("base config must use volatile Android Arweave index store")
-    if not is_volatile_store(config.get("priv-store"), "andee-volatile-priv-store"):
-        fail("base config must use volatile Android private store")
+    if not is_private_store(config.get("priv-store")):
+        fail("base config must use app-private persistent storage")
     store_text = BOOT_CONFIG_STORE.read_text()
     if '"measurement-body-source"' not in store_text:
         fail("operator config must reserve top-level measurement-body-source")

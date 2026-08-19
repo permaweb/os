@@ -50,9 +50,11 @@
   },
   "priv-store": [
     {
-      "store-module": "hb_store_volatile",
-      "name": "andee-volatile-priv-store",
-      "ao-types": "store-module=\"atom\""
+      "store-module": "hb_store_lmdb",
+      "name": "../private-store",
+      "capacity": 1073741824,
+      "batch-size": 100,
+      "ao-types": "store-module=\"atom\", capacity=\"integer\", batch-size=\"integer\""
     }
   ],
   "on": {
