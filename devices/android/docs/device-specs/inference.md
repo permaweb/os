@@ -42,14 +42,14 @@ The effective boot configuration owns the public catalogue:
     "backend": "npu",
     "models": [
       {
-        "id": "gemma3-1b-it-tensor-g5",
-        "file": "Gemma3-1B-IT_q8_ekv1280_Google_Tensor_G5.litertlm",
-        "sha256": "base64url-sha256",
+        "id": "gemma-4-e2b-it-tensor-g5",
+        "file": "gemma-4-E2B-it_Google_Tensor_G5.litertlm",
+        "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
         "runtime": "litert-lm",
         "backends": ["npu"],
         "soc-models": ["Tensor G5"],
-        "max-context-tokens": 1280,
-        "max-output-tokens": 256
+        "max-context-tokens": 2048,
+        "max-output-tokens": 128
       }
     ]
   }
@@ -67,6 +67,26 @@ independently of the broker if model initialization or generation fails.
 AndEE reserves 4 GiB of physical memory for Android, HyperBEAM, KV/compute
 state, and lifecycle headroom; GGUF files larger than the remaining measured
 `MemTotal` budget are rejected before the child starts.
+
+The generic LiteRT-LM path is validated with the official Apache-2.0 Gemma 4
+E2B and E4B CPU packages at repository revisions
+`6b78abd019e61a1ca4cbe3b212d2c9ce8ff38a94` and
+`2eee7ac325f20eb8c9ac1d0e972f7c84663062da`. The generic E2B file is
+2,588,147,712 bytes with base64url SHA-256
+`GBk4EF4O79EFlhQX6Np1kD6s2hAsT86c6Q9QuXE5pjw`; E4B is 3,659,530,240 bytes
+with digest `CyqJgM4VX9l2c9joILTSnZx9mbj6aAb0JdlpsUW9UuA`. Initial measured entries use
+runtime `litert-lm`, backend `cpu`, and 2,048 context tokens. These are
+operator-provisioned models, not APK assets.
+
+The same E2B revision publishes the 3,113,545,589-byte Tensor G5 AOT artifact
+shown above. Its SHA-256 is
+`af1082986639ecde7db95d91be6fe54f8b6b458104734c5bafc204e69d6852dc`.
+Physical acceptance on a Pixel 10 Pro Fold returned the named tool call and
+`length` control while atrace recorded the Tachyon compute session and TPU
+allocation. The APK declares the Pixel's optional public
+`libedgetpu_litert.so` runtime and fails closed if it cannot be loaded. No
+official Tensor G5 AOT E4B artifact currently exists, so E4B must not be
+advertised as NPU-capable.
 
 NPU models must match the current Google
 Tensor SoC, the pinned runtime's Tensor G3–G6 support, and the dispatch runtime

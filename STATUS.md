@@ -13,8 +13,8 @@
 - Confirmed current Android path is LiteRT-LM. NNAPI is deprecated.
 - Confirmed emulator cannot expose a mobile NPU. Emulator validation must use
   explicit CPU/GPU mode and must not be reported as TPU evidence.
-- Confirmed Google Tensor SDK supports AOT Gemma 3 1B on Tensor G5, including
-  Pixel 10 Pro Fold.
+- Confirmed the official Gemma 4 E2B catalogue includes a Tensor G5 AOT model;
+  E4B currently has generic CPU/GPU packages but no Tensor G5 package.
 - Implemented the AndEE-only AO device, same-UID Android inference broker,
   digest-locked model catalogue, serialized LiteRT-LM engine, measured
   CPU/GPU/NPU selection, and pinned Google Tensor dispatch runtime.
@@ -59,12 +59,53 @@
   emulator-only APK. The release APK keeps Google's unmodified,
   checksum-verified binaries.
 
-## External gate
+## Physical-device acceptance in progress
 
-- The official Tensor G5 AOT artifact remains license-gated. The later Pixel
-  10 Pro Fold proof requires the operator-provisioned artifact and an explicit
-  witnessed physical-device run. No connected physical device was accessed or
-  modified during emulator validation.
+- The operator explicitly authorized the connected physical-device run on
+  2026-08-20. The exact target is ADB serial `58281FDCG0028W`, a Pixel 10 Pro
+  Fold (`rango`) reporting Tensor G5, API 37, 15,949,000 KiB physical RAM, and
+  360,637,520 KiB free `/data` space. Every command is serial-qualified; the
+  shared emulators remain untouched.
+- Smallest-to-largest physical controls now pass through public
+  `~inference@1.0`: FunctionGemma 270M Q8, Gemma 4 E2B CPU, and Gemma 4 E4B
+  CPU all return the exact named `Send` tool call and the resumable one-token
+  `finish_reason: length` control. The CPU process maps contain neither the
+  Google Tensor dispatcher nor the southbound runtime.
+- The official Apache-2.0 Gemma 4 E2B Tensor G5 AOT artifact now passes real
+  NPU execution. Its exact digest is
+  `af1082986639ecde7db95d91be6fe54f8b6b458104734c5bafc204e69d6852dc`;
+  completion and truncation controls both return HTTP 200. Atrace records a
+  `com.google.edgetpu.tachyon.IComputeService` session, `MainTpuActor`, and
+  `AllocateTpu_Init`, while LiteRT reports one of one decode nodes replaced by
+  `DispatchDelegate`. E4B has no official Tensor G5 AOT artifact and must not
+  be relabelled as NPU execution.
+- The first G5 attempt exposed the packaged dispatcher but could not resolve
+  the Pixel southbound runtime. The root cause was Android's target-SDK native
+  library allowlist: the APK had not declared the otherwise public
+  `libedgetpu_litert.so`. Commit `7e2bfae3` adds the optional manifest
+  capability, a fail-closed preload, and an APK release check. The rebuilt APK
+  and unit suite pass, and the physical rerun proves the fix end to end.
+- Next run the exact Qwen3.8-27B `UD-IQ3_XXS` GGUF through the isolated
+  llama.cpp CPU child. The phone began with only 3,624,592 KiB MemAvailable
+  and 2,055,168 KiB free zram, so acceptance requires observed process
+  survival, LMK/RSS/swap evidence, tools, continuation, and `length`.
+  Unrelated phone processes will not be killed.
+- The exact installed debug APK is SHA-256
+  `32736d600cd45c4881f8b32aa79abf90fa912ad6656f457eee192eb2941bf680`;
+  the hash of the installed `/data/app/.../base.apk` matches byte-for-byte.
+  The package scan passed and the installed artifact contains the official
+  LiteRT-LM JNI, Google Tensor dispatcher, and isolated llama.cpp runtime.
+- The physical evidence is retained under
+  `arch/android/build/model-expansion/`; the successful G5 run is
+  `gemma4-e2b-tensor-g5-physical-npu-manifest/` and is bound to the exact
+  installed APK, model digest, device identity, completion, memory snapshots,
+  process maps, logs, and atrace.
+- The phone reports 16,331,776,000 physical bytes. `UD-IQ3_S` plus the enforced
+  4 GiB system reserve is 16,335,850,400 bytes, so this exact phone must reject
+  IQ3_S before launch by 4,074,400 bytes. Preserve that physical negative
+  control and move to `UD-IQ3_XXS` (10,934,860,704 bytes; 5,396,915,296 bytes
+  remain for Android, HyperBEAM, KV/compute, and runtime overhead) rather than
+  weakening the measured reserve.
 
 ## Completed model expansion
 
@@ -108,3 +149,54 @@
   health response, and server timing log are in the same UI evidence folder.
 - The GGUF catalogue fails closed before launch unless the model file plus
   4 GiB of Android/HyperBEAM/compute headroom fits measured physical RAM.
+
+## Active Qwen3.8 conversion mission
+
+- Correction: the requested model is the real, newly published
+  `unsloth/Qwen3.8-27B-GGUF`, not Qwen3.5. The exact public repository revision
+  under test is `27af057ecb382ddfea5d12837360a8980560e3ed` (Apache-2.0).
+- The exact 12,040,883,104-byte `UD-IQ3_S` artifact passes the dedicated
+  16 GiB AVD, but the physical Fold reports only 16,331,776,000 bytes. The
+  model plus the enforced 4 GiB reserve exceeds that by 4,074,400 bytes, and a
+  real physical negative control returns `llama-cpp-insufficient-memory`
+  before any child starts. The selected physical candidate is therefore the
+  10,934,860,704-byte `UD-IQ3_XXS`, not IQ3_S.
+- Critical overnight gate: derive a local, reproducible Qwen3.8-27B LiteRT-LM
+  conversion and packaging path from public source and the official Gemma 4
+  E4B package; test the resulting `.litertlm` on Android rather than treating
+  container assembly or desktop export as success.
+- Required LiteRT-LM behavior is text generation, the native Qwen data
+  processor/chat template, structured tool calls, tool-result continuation,
+  correct `length` termination, digest-bound model selection, and honest CPU,
+  GPU, or NPU evidence. A Tensor-G5 AOT claim requires real compiler output and
+  later physical-device execution; CPU validity alone must not be relabeled as
+  TPU support.
+- The exact Apache-2.0 BF16 source revision
+  `3ea932cee0a432ae86e9c7826cbe8aef52323a28` has been exported with pinned
+  LiteRT Torch `b66af07f...` and AI Edge Quantizer `a8956f3...`. The
+  memory-bounded path creates one 107,637,793,024-byte file-backed FP32 graph,
+  then requantizes it without reloading or duplicating the 27B checkpoint.
+- Five real Android low-bit controls have initialized and executed but failed
+  semantic quality: direct dynamic INT2, blockwise INT2 (unsupported by the
+  XNNPACK runtime), all-INT2 Hadamard, signal-path-protected INT4, and
+  IQ3-sensitive down-projection INT4. A weight-only INT2 graph instead crossed
+  the 16 GiB memory boundary and was killed by Android LMKD. These are retained
+  as negative evidence; container creation and runtime initialization are not
+  being mistaken for a working model.
+- The public LiteRT NPU compiler currently targets Qualcomm and MediaTek only;
+  Google Tensor exposes the AOT runtime/dispatcher but no public custom-model
+  compiler. A CPU-ready Qwen package is locally attainable, but a Qwen Tensor
+  G5 AOT package is blocked at that public compiler boundary. Official Gemma 4
+  E2B remains the later G5 NPU acceptance model; official E4B is CPU/GPU-only.
+- Official Gemma 4 E4B is supported and already passes real LiteRT-LM CPU
+  inference in the owned emulator. The validated Apache-2.0 artifact is
+  `gemma-4-E4B-it.litertlm` at revision
+  `2eee7ac325f20eb8c9ac1d0e972f7c84663062da`, 3,659,530,240 bytes, SHA-256
+  `0b2a8980ce155fd97673d8e820b4d29d9c7d99b8fa6806f425d969b145bd52e0`.
+- Constraints: no publication, external messages, paid APIs/cloud compute,
+  production changes, or changes outside the AndEE implementation/work logs.
+  Physical-device access is now explicitly authorized for the connected Fold;
+  shared emulators `emulator-5570` and
+  `emulator-5582` remain untouched. Task-owned downloads, AVDs, ports, build
+  trees, and processes must be digest-recorded and cleaned or explicitly
+  retained as local evidence.
