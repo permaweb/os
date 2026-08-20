@@ -277,7 +277,15 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         val backend = when (backendName) {
             "cpu" -> Backend.CPU(threadCount = 2)
             "gpu" -> Backend.GPU()
-            "npu" -> Backend.NPU(context.applicationInfo.nativeLibraryDir)
+            "npu" -> {
+                try {
+                    System.loadLibrary(GOOGLE_TENSOR_SOUTHBOUND_LIBRARY)
+                } catch (failure: UnsatisfiedLinkError) {
+                    Log.e(TAG, "Google Tensor southbound runtime could not be loaded", failure)
+                    throw InferenceFailure(503, "npu-southbound-runtime-unavailable")
+                }
+                Backend.NPU(context.applicationInfo.nativeLibraryDir)
+            }
             else -> throw InferenceFailure(400, "unsupported-backend")
         }
         val created = Engine(
@@ -629,6 +637,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
 
     private companion object {
         const val TAG = "AndeeInference"
+        const val GOOGLE_TENSOR_SOUTHBOUND_LIBRARY = "edgetpu_litert"
         const val TIMEOUT_RESET_DELAY_MILLIS = 5_000L
         const val SHUTDOWN_RESET_DELAY_MILLIS = 15_000L
         const val OWNER_WAIT_MILLIS = 15_000L

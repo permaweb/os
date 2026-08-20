@@ -58,6 +58,7 @@ APK_INFERENCE_NOTICES = (
     "assets/litertlm-android-0.16.1/THIRD_PARTY_NOTICE.txt",
     "assets/llama-cpp-b10502/LICENSE",
 )
+APK_OPTIONAL_NATIVE_LIBRARIES = ("libedgetpu_litert.so",)
 
 
 def sha256(path: Path) -> str:
@@ -180,6 +181,30 @@ def inspect_apk(
         if not package_match or package_match.group(1) != "org.permaweb.andee":
             raise SystemExit("unexpected Android package identity")
         evidence["package-name"] = package_match.group(1)
+        manifest = subprocess.run(
+            [
+                str(aapt2),
+                "dump",
+                "xmltree",
+                str(path),
+                "--file",
+                "AndroidManifest.xml",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        for library in APK_OPTIONAL_NATIVE_LIBRARIES:
+            declared = any(
+                library in "\n".join(manifest[index : index + 4])
+                and "required(0x0101028e)=false"
+                in "\n".join(manifest[index : index + 4])
+                for index, line in enumerate(manifest)
+                if "E: uses-native-library" in line
+            )
+            if not declared:
+                raise SystemExit(f"missing optional native library declaration: {library}")
+        evidence["optional-native-libraries"] = list(APK_OPTIONAL_NATIVE_LIBRARIES)
     if apksigner:
         signature = subprocess.run(
             [str(apksigner), "verify", "--print-certs", str(path)],
