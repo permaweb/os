@@ -5,15 +5,19 @@ import android.util.Log
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
-/** Owns the measured model catalogue, LiteRT-LM engine, and private transport. */
+/** Owns the measured model catalogue, local engines, and private transport. */
 internal class AndeeInferenceManager(
     private val context: Context,
     configFile: File,
 ) : AutoCloseable {
     private val models = AndeeInferenceModels(context, configFile)
-    private val engine = AndeeInferenceEngine(context)
+    private val liteRtEngine = AndeeInferenceEngine(context)
+    private val llamaCppEngine = AndeeLlamaCppEngine(context)
     private val server = AndeeInferenceServer(context, ::dispatch, ::failureResponse)
+    private val completionLock = ReentrantLock(true)
     @Volatile private var running = false
 
     fun start() {
@@ -24,7 +28,8 @@ internal class AndeeInferenceManager(
             server.start()
         } catch (failure: Throwable) {
             running = false
-            engine.close()
+            llamaCppEngine.close()
+            liteRtEngine.close()
             throw failure
         }
     }
@@ -32,7 +37,8 @@ internal class AndeeInferenceManager(
     override fun close() {
         running = false
         server.close()
-        engine.close()
+        llamaCppEngine.close()
+        liteRtEngine.close()
     }
 
     private fun dispatch(request: JSONObject): JSONObject {
@@ -47,12 +53,32 @@ internal class AndeeInferenceManager(
         return when (request.getString("action")) {
             "models" -> success(models.catalog(backend))
             "health" -> success(
-                models.health(backend) { model -> engine.isInitialized(model, backend) },
+                models.health(backend) { model ->
+                    when (model.runtime) {
+                        "litert-lm" -> liteRtEngine.isInitialized(model, backend)
+                        "llama-cpp" -> llamaCppEngine.isInitialized(model, backend)
+                        else -> false
+                    }
+                },
             )
             "completions" -> {
                 val payload = request.getJSONObject("payload")
                 val selected = models.resolve(request.optString("model"), backend)
-                success(engine.complete(selected, backend, payload))
+                success(
+                    completionLock.withLock {
+                        when (selected.runtime) {
+                            "litert-lm" -> {
+                                llamaCppEngine.releaseModel()
+                                liteRtEngine.complete(selected, backend, payload)
+                            }
+                            "llama-cpp" -> {
+                                liteRtEngine.releaseModel()
+                                llamaCppEngine.complete(selected, backend, payload)
+                            }
+                            else -> throw InferenceFailure(500, "invalid-model-runtime")
+                        }
+                    },
+                )
             }
             else -> throw InferenceFailure(404, "unknown-action")
         }

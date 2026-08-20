@@ -49,9 +49,9 @@ help:
 	    '  make next-boot-config-test      Verify private next-boot config import path.' \
 	    '  make android-zone-storage-smoke Verify Android app-private encrypted zone storage.' \
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
-	    '  make inference-model-install    Install a digest-locked .litertlm model (ADB_SERIAL + MODEL).' \
+	    '  make inference-model-install    Install a digest-locked .litertlm or .gguf model.' \
 	    '  make inference-emulator-apk     Build the verified Apple-ARM64 emulator LiteRT-LM override.' \
-	    '  make inference-emulator-smoke   Prove real local LiteRT-LM inference on an emulator CPU.' \
+	    '  make inference-emulator-smoke   Prove real local inference on an emulator CPU.' \
 	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \
 	    '  make andock-template-reproducibility  Rebuild and compare the template twice.' \
 	    '  make preloaded-store-reproducibility  Rebuild and compare the preload twice.' \

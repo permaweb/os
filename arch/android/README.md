@@ -22,17 +22,18 @@ execution device, and the generic `inference@1.0` local-compute provider. The
 
 ## Local inference capability
 
-The APK preloads `~inference@1.0` and packages LiteRT-LM for CPU, GPU, and NPU
-execution. NPU is the measured default request; CPU/GPU must be selected in
+The APK preloads `~inference@1.0`, packages LiteRT-LM for CPU, GPU, and NPU
+execution, and packages a pinned ARM64 llama.cpp runtime for CPU-only GGUF
+models. NPU is the measured default request; CPU/GPU must be selected in
 measured configuration for development, rather than by a request. The Android
 emulator has no mobile NPU, so its acceptance test proves real model execution
 on CPU without claiming hardware-accelerator evidence.
 
-Models are not APK assets. Install a `.litertlm` artifact into the app-private
-model directory, then allowlist its filename, base64url SHA-256 digest, and
-backend in measured next-boot configuration. The install helper requires an
-exact ADB serial and refuses physical devices unless the operator explicitly
-enables the hardware workflow:
+Models are not APK assets. Install a `.litertlm` or `.gguf` artifact into the
+app-private model directory, then allowlist its filename, runtime, base64url
+SHA-256 digest, and backend in measured next-boot configuration. GGUF entries
+are ARM64 CPU-only. The install helper requires an exact ADB serial and refuses
+physical devices unless the operator explicitly enables the hardware workflow:
 
 ```sh
 ADB_SERIAL=emulator-NNNN \
@@ -40,6 +41,10 @@ MODEL=/path/to/model.litertlm \
 MODEL_ID=model-id \
 make -C arch/android inference-model-install
 ```
+
+The helper infers `MODEL_RUNTIME=litert-lm` for `.litertlm` and
+`MODEL_RUNTIME=llama-cpp` for `.gguf`; callers may set it explicitly as an
+additional consistency check.
 
 Run the end-to-end emulator proof with the same explicit inputs:
 

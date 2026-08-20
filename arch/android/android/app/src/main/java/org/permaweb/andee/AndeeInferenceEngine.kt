@@ -175,6 +175,13 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
             model.maxContextTokens,
         )
 
+    fun releaseModel() {
+        if (closed.get()) return
+        generationLock.withLock {
+            if (!closed.get()) releaseEngine()
+        }
+    }
+
     override fun close() {
         synchronized(lifecycleLock) {
             if (!closed.compareAndSet(false, true)) return
@@ -537,6 +544,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
                 "andee-execution",
                 JSONObject()
                     .put("requested-backend", backend)
+                    .put("runtime", "litert-lm")
                     .put("runtime-initialized", true)
                     .put("npu-execution-verified", false)
                     .put("model-sha256", model.sha256)

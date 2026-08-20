@@ -13,6 +13,7 @@ internal data class AndeeInferenceModel(
     val id: String,
     val file: File,
     val sha256: String,
+    val runtime: String,
     val backends: Set<String>,
     val socModels: Set<String>,
     val maxContextTokens: Int,
@@ -80,6 +81,7 @@ internal class AndeeInferenceModels(
                             JSONObject().put("input_modalities", JSONArray().put("text")),
                         )
                         .put("andee-backend", backend)
+                        .put("andee-runtime", model.runtime)
                         .put("andee-model-sha256", model.sha256),
                 )
             }
@@ -103,6 +105,7 @@ internal class AndeeInferenceModels(
                 JSONObject()
                     .put("id", model.id)
                     .put("sha256", model.sha256)
+                    .put("runtime", model.runtime)
                     .put("backends", JSONArray(model.backends.sorted()))
                     .put("configured", issue == null)
                     .put("ready", modelReady)
@@ -144,13 +147,19 @@ internal class AndeeInferenceModels(
                 "invalid inference model id"
             }
             val filename = item.getString("file")
-            require(filename.length in 1..255 && filename.endsWith(".litertlm")) {
-                "inference model must be a .litertlm file"
+            val runtime = item.getString("runtime")
+            require(runtime in RUNTIMES) { "unsupported inference model runtime" }
+            val extension = if (runtime == "litert-lm") ".litertlm" else ".gguf"
+            require(filename.length in 1..255 && filename.endsWith(extension)) {
+                "inference model file does not match its runtime"
             }
             require(filename == File(filename).name) { "inference model path is not allowed" }
             val backends = stringSet(item.getJSONArray("backends"))
             require(backends.isNotEmpty() && backends.all { it in AndeeInferencePolicy.BACKENDS }) {
                 "invalid inference model backends"
+            }
+            require(runtime != "llama-cpp" || backends == setOf("cpu")) {
+                "llama.cpp inference models are CPU-only"
             }
             val socModels = item.optJSONArray("soc-models")?.let(::stringSet).orEmpty()
             require("npu" !in backends || socModels.isNotEmpty()) {
@@ -173,6 +182,7 @@ internal class AndeeInferenceModels(
                 id = id,
                 file = File(AndeePaths.inferenceModelsRoot(context), filename),
                 sha256 = sha256,
+                runtime = runtime,
                 backends = backends,
                 socModels = socModels,
                 maxContextTokens = maxContextTokens,
@@ -209,6 +219,19 @@ internal class AndeeInferenceModels(
 
     private fun runtimeIssue(model: AndeeInferenceModel, backend: String): String? {
         if (backend !in model.backends) return "model-backend-mismatch"
+        if (model.runtime == "llama-cpp") {
+            if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" }) {
+                return "llama-cpp-requires-arm64"
+            }
+            llamaCppMemoryIssue(model.file.length(), androidPhysicalMemoryBytes())
+                ?.let { return it }
+            val server = File(context.applicationInfo.nativeLibraryDir, LLAMA_SERVER)
+            return if (server.isFile && server.canExecute()) {
+                null
+            } else {
+                "llama-cpp-runtime-missing"
+            }
+        }
         if (model.socModels.isNotEmpty()) {
             val current = currentSocModel().lowercase(Locale.US)
             if (model.socModels.none { it.lowercase(Locale.US) == current }) {
@@ -250,8 +273,27 @@ internal class AndeeInferenceModels(
 
     private companion object {
         val GOOGLE_TENSOR_SOC = Regex("^Tensor G[3-6]$", RegexOption.IGNORE_CASE)
+        val RUNTIMES = setOf("litert-lm", "llama-cpp")
+        const val LLAMA_SERVER = "libandee_llama_server.so"
     }
 }
+
+internal fun llamaCppMemoryIssue(modelBytes: Long, memoryBytes: Long): String? = when {
+    memoryBytes <= 0L -> "llama-cpp-memory-unavailable"
+    modelBytes > memoryBytes - LLAMA_CPP_MEMORY_HEADROOM_BYTES ->
+        "llama-cpp-insufficient-memory"
+    else -> null
+}
+
+internal const val LLAMA_CPP_MEMORY_HEADROOM_BYTES = 4L * 1024L * 1024L * 1024L
+
+internal fun androidPhysicalMemoryBytes(): Long = runCatching {
+    File("/proc/meminfo").useLines { lines ->
+        lines.first { it.startsWith("MemTotal:") }
+            .split(Regex("\\s+"))[1]
+            .toLong() * 1024L
+    }
+}.getOrDefault(0L)
 
 internal fun currentSocModel(): String = if (Build.VERSION.SDK_INT >= 31) {
     Build.SOC_MODEL.takeIf(String::isNotBlank) ?: "unknown"

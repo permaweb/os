@@ -3,14 +3,22 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-MODEL="${MODEL:?set MODEL to a local .litertlm file}"
-MODEL_ID="${MODEL_ID:-$(basename "$MODEL" .litertlm)}"
+MODEL="${MODEL:?set MODEL to a local .litertlm or .gguf file}"
+case "$MODEL" in
+    *.litertlm) INFERRED_RUNTIME='litert-lm' ;;
+    *.gguf) INFERRED_RUNTIME='llama-cpp' ;;
+    *) INFERRED_RUNTIME='' ;;
+esac
+MODEL_RUNTIME="${MODEL_RUNTIME:-$INFERRED_RUNTIME}"
+MODEL_ID="${MODEL_ID:-$(basename "${MODEL%.*}")}"
 MODEL_CONTEXT_TOKENS="${MODEL_CONTEXT_TOKENS:-1024}"
 EMULATOR_BACKEND="${EMULATOR_BACKEND:-cpu}"
 ADB_SERIAL="${ADB_SERIAL:?set ADB_SERIAL to the emulator serial}"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 HOST_PORT="${HOST_PORT:-28739}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-600}"
+COMPLETION_REPETITIONS="${COMPLETION_REPETITIONS:-1}"
+COLD_REBOOT_AFTER_INSTALL="${COLD_REBOOT_AFTER_INSTALL:-0}"
 PACKAGE='org.permaweb.andee'
 OUT="$BUILD_DIR/andee-inference-emulator"
 RUN_STARTED="$(date '+%m-%d %H:%M:%S.000')"
@@ -40,6 +48,14 @@ if [ ! -f "$APK" ]; then
     echo "APK missing: $APK" >&2
     exit 1
 fi
+if [[ ! "$COMPLETION_REPETITIONS" =~ ^[1-3]$ ]]; then
+    echo "COMPLETION_REPETITIONS must be between 1 and 3" >&2
+    exit 1
+fi
+if [ "$COLD_REBOOT_AFTER_INSTALL" != '0' ] && [ "$COLD_REBOOT_AFTER_INSTALL" != '1' ]; then
+    echo "COLD_REBOOT_AFTER_INSTALL must be 0 or 1" >&2
+    exit 1
+fi
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -65,9 +81,27 @@ finish() {
 trap finish EXIT
 
 adb -s "$ADB_SERIAL" install -r "$APK" > "$OUT/install.txt"
-MODEL="$MODEL" MODEL_ID="$MODEL_ID" MODEL_BACKENDS="$EMULATOR_BACKEND" \
+MODEL="$MODEL" MODEL_ID="$MODEL_ID" MODEL_RUNTIME="$MODEL_RUNTIME" \
+    MODEL_BACKENDS="$EMULATOR_BACKEND" \
     ADB_SERIAL="$ADB_SERIAL" \
     "$ROOT/scripts/andee-inference-model-install.sh" | tee "$OUT/model-install.txt"
+if [ "$COLD_REBOOT_AFTER_INSTALL" = '1' ]; then
+    adb -s "$ADB_SERIAL" reboot
+    adb -s "$ADB_SERIAL" wait-for-device
+    BOOTED=0
+    for _ in $(seq 1 240); do
+        if [ "$(adb -s "$ADB_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = '1' ]; then
+            BOOTED=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$BOOTED" != '1' ]; then
+        echo "Android did not reboot after model installation" >&2
+        exit 1
+    fi
+fi
+adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-prestart.txt"
 
 MODEL_FILE="$(basename "$MODEL")"
 MODEL_DIGEST="$(openssl dgst -sha256 -binary "$MODEL" | \
@@ -86,6 +120,7 @@ jq -n \
     --arg file "$MODEL_FILE" \
     --arg digest "$MODEL_DIGEST" \
     --arg backend "$EMULATOR_BACKEND" \
+    --arg runtime "$MODEL_RUNTIME" \
     --argjson context "$MODEL_CONTEXT_TOKENS" \
     '{
       "andee-inference": {
@@ -94,6 +129,7 @@ jq -n \
           "id": $id,
           "file": $file,
           "sha256": $digest,
+          "runtime": $runtime,
           "backends": [$backend],
           "max-context-tokens": $context,
           "max-output-tokens": 128
@@ -136,6 +172,7 @@ curl -fsS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
     "$BASE_URL/~inference@1.0/health" \
     > "$OUT/health-before.json"
+adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-before.txt"
 jq -n --arg model "local/$MODEL_ID" '{
   model: $model,
   messages: [{
@@ -165,7 +202,63 @@ COMPLETION_STATUS="$(curl -sS --max-time "$PROBE_TIMEOUT" \
     -H 'Content-Type: application/json' \
     --data-binary @"$OUT/request.json" \
     "$BASE_URL/~inference@1.0/completions")"
-jq '.max_tokens = 1' "$OUT/request.json" > "$OUT/length-request.json"
+printf '%s\n' "$COMPLETION_STATUS" > "$OUT/completion-status.txt"
+if [ "$COMPLETION_REPETITIONS" -gt 1 ]; then
+    for repetition in $(seq 2 "$COMPLETION_REPETITIONS"); do
+        curl -sS --max-time "$PROBE_TIMEOUT" \
+            -o "$OUT/completion-$repetition.json" \
+            -w '%{http_code}\n' \
+            -H 'Accept: application/json' \
+            -H 'Content-Type: application/json' \
+            --data-binary @"$OUT/request.json" \
+            "$BASE_URL/~inference@1.0/completions" \
+            > "$OUT/completion-$repetition-status.txt"
+    done
+fi
+CONTINUATION_STATUS='not-run'
+if [ "$MODEL_RUNTIME" = 'llama-cpp' ] && [ "$COMPLETION_STATUS" = '200' ]; then
+    jq -n \
+        --arg model "local/$MODEL_ID" \
+        --argjson first "$(cat "$OUT/completion.json")" \
+        --argjson original "$(cat "$OUT/request.json")" \
+        '{
+          model: $model,
+          messages: (
+            $original.messages +
+            [$first.choices[0].message] +
+            [{
+              role: "tool",
+              tool_call_id: $first.choices[0].message.tool_calls[0].id,
+              content: "delivered"
+            }]
+          ),
+          tools: $original.tools,
+          tool_choice: "none",
+          temperature: 0,
+          max_tokens: 64,
+          stream: false
+        }' > "$OUT/continuation-request.json"
+    CONTINUATION_STATUS="$(curl -sS --max-time "$PROBE_TIMEOUT" \
+        -o "$OUT/continuation.json" -w '%{http_code}' \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        --data-binary @"$OUT/continuation-request.json" \
+        "$BASE_URL/~inference@1.0/completions")"
+fi
+if [ ! -f "$OUT/continuation.json" ]; then
+    printf '%s\n' '{}' > "$OUT/continuation.json"
+fi
+if [ "$MODEL_RUNTIME" = 'llama-cpp' ]; then
+    jq '{
+      model,
+      messages: [{role: "user", content: "Reply with exactly two words"}],
+      temperature: 0,
+      max_tokens: 1,
+      stream: false
+    }' "$OUT/request.json" > "$OUT/length-request.json"
+else
+    jq '.max_tokens = 1' "$OUT/request.json" > "$OUT/length-request.json"
+fi
 LENGTH_STATUS="$(curl -sS --max-time "$PROBE_TIMEOUT" \
     -o "$OUT/length-completion.json" -w '%{http_code}' \
     -H 'Accept: application/json' \
@@ -176,22 +269,41 @@ curl -fsS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
     "$BASE_URL/~inference@1.0/health" \
     > "$OUT/health.json"
+adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-after.txt"
+adb -s "$ADB_SERIAL" shell ps -A -o PID,PPID,RSS,VSZ,NAME,ARGS > "$OUT/ps-after.txt"
+adb -s "$ADB_SERIAL" shell dumpsys meminfo "$PACKAGE" > "$OUT/app-meminfo-after.txt"
+adb -s "$ADB_SERIAL" shell run-as "$PACKAGE" cat no_backup/llama-cpp/server.stderr \
+    > "$OUT/llama-server.stderr" 2>/dev/null || true
+SWAP_FREE_BEFORE_KB="$(awk '$1 == "SwapFree:" {print $2}' "$OUT/meminfo-before.txt")"
+SWAP_FREE_AFTER_KB="$(awk '$1 == "SwapFree:" {print $2}' "$OUT/meminfo-after.txt")"
+SWAP_FREE_PRESTART_KB="$(awk '$1 == "SwapFree:" {print $2}' "$OUT/meminfo-prestart.txt")"
+SWAP_USED_DELTA_KB="$((SWAP_FREE_BEFORE_KB - SWAP_FREE_AFTER_KB))"
+SWAP_USED_TOTAL_KB="$((SWAP_FREE_PRESTART_KB - SWAP_FREE_AFTER_KB))"
+LLAMA_RSS_KB="$(awk '$5 == "libandee_llama_server.so" {print $3}' "$OUT/ps-after.txt")"
+LLAMA_RSS_KB="${LLAMA_RSS_KB:-0}"
 
 jq -n \
     --argjson health "$(cat "$OUT/health.json")" \
     --argjson completion "$(cat "$OUT/completion.json")" \
     --argjson lengthCompletion "$(cat "$OUT/length-completion.json")" \
+    --argjson continuation "$(cat "$OUT/continuation.json")" \
     --arg completionStatus "$COMPLETION_STATUS" \
     --arg lengthStatus "$LENGTH_STATUS" \
+    --arg continuationStatus "$CONTINUATION_STATUS" \
     --arg emulatorBackend "$EMULATOR_BACKEND" \
+    --arg modelRuntime "$MODEL_RUNTIME" \
     --arg expectedModel "$MODEL_ID" \
     --arg expectedDigest "$MODEL_DIGEST" \
     --arg apkSha256 "$APK_DIGEST" \
     --arg embeddedJniSha256 "$EMBEDDED_JNI_DIGEST" \
     --arg embeddedConstraintProviderSha256 "$EMBEDDED_CONSTRAINT_PROVIDER_DIGEST" \
+    --argjson swapUsedDeltaKb "$SWAP_USED_DELTA_KB" \
+    --argjson swapUsedTotalKb "$SWAP_USED_TOTAL_KB" \
+    --argjson llamaRssKb "$LLAMA_RSS_KB" \
     '{
-      scenario: "andee-local-litert-lm-emulator",
+      scenario: "andee-local-inference-emulator",
       emulator_backend: $emulatorBackend,
+      model_runtime: $modelRuntime,
       hardware_npu_claimed: false,
       apk_sha256: $apkSha256,
       embedded_liblitertlm_jni_sha256: $embeddedJniSha256,
@@ -203,11 +315,23 @@ jq -n \
       ),
       tool_call: ($completion.choices[0].message.tool_calls[0] // null),
       requested_backend: $completion["andee-execution"]["requested-backend"],
+      measured_runtime: ($completion["andee-execution"].runtime // "litert-lm"),
       model: $completion.model,
       model_digest: $completion["andee-execution"]["model-sha256"],
       completion_status: $completionStatus,
+      continuation_status: $continuationStatus,
+      continuation_nonempty: (
+        if $modelRuntime == "llama-cpp" then
+          (($continuation.choices[0].message.content // "") | length > 0)
+        else true end
+      ),
       truncated_completion_status: $lengthStatus,
       truncated_finish_reason: $lengthCompletion.choices[0].finish_reason,
+      memory: {
+        swap_used_since_prestart_kb: $swapUsedTotalKb,
+        swap_used_delta_kb: $swapUsedDeltaKb,
+        llama_server_rss_kb: $llamaRssKb
+      },
       passed: (
         $completionStatus == "200" and
         $lengthStatus == "200" and
@@ -216,7 +340,13 @@ jq -n \
         $health.models[0].ready == true and
         $completion.model == $expectedModel and
         $completion["andee-execution"]["requested-backend"] == $emulatorBackend and
+        ($completion["andee-execution"].runtime // "litert-lm") == $modelRuntime and
         $completion["andee-execution"]["model-sha256"] == $expectedDigest and
+        (
+          $modelRuntime != "llama-cpp" or
+          ($continuationStatus == "200" and
+            (($continuation.choices[0].message.content // "") | length > 0))
+        ) and
         (
           (($completion.choices[0].message.content // "") | length > 0) or
           (($completion.choices[0].message.tool_calls // []) | length > 0)

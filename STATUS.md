@@ -65,3 +65,46 @@
   10 Pro Fold proof requires the operator-provisioned artifact and an explicit
   witnessed physical-device run. No connected physical device was accessed or
   modified during emulator validation.
+
+## Completed model expansion
+
+- Acceptance: before touching the real phone, demonstrate the official Gemma 4
+  mobile family and the largest Unsloth Qwen3.5 27B GGUF quantization that can
+  genuinely initialize and generate inside a 16 GiB Android guest budget.
+- Physical devices and the two pre-existing shared emulators remain strictly
+  out of scope. All experiments use a newly started, explicitly addressed AVD.
+- Official public Apache-2.0 Gemma 4 E2B and E4B LiteRT-LM artifacts both pass
+  real emulator generation against the final reproducible APK, named `Send`
+  tool parsing, and the one-token `finish_reason: length` control through the
+  same provider. Only E2B currently has an official Tensor G5 AOT artifact;
+  E4B remains CPU/GPU-only on the planned phone test.
+- Added a generic measured `llama-cpp` runtime behind the unchanged
+  `inference@1.0` device for CPU-only GGUF models. The pinned official b10502
+  Android arm64 server runs as a separately killable child on an app-private
+  Unix socket. Caller-controlled paths, URLs, command arguments, TCP, MCP, web
+  UI, and built-in agent features are not exposed.
+- The 12,289,423,264-byte Unsloth Qwen3.5-27B Q3_K_S quantization is the largest
+  published 27B file that passes the measured physical-RAM plus 4 GiB reserve
+  gate on the 16 GiB guest. It generated the exact named `Send` call three
+  times at 3.50--3.62 decode tokens/s, passed tool-result continuation and
+  `length` handling at a 16,384-token context, and reached 14,126,208 KiB RSS
+  with 576,512 KiB of Android zram in the cold-run evidence.
+- The next larger Q3_K_M and Q4_K_M artifacts fail the physical-memory gate
+  before a child is launched. The Q4_K_M rejection is externally recorded:
+  16,740,812,704 model bytes plus the 4 GiB reserve exceeds the guest's
+  16,750,374,912 physical bytes.
+- Ouroboros was composed at runtime against Q3_K_S. From the real browser UI,
+  the 27B member consumed a 1,465-token agent prompt, called `List(scope=all)`,
+  consumed its 3,099-token continuation, called `Send(to=#general)`, and the
+  channel rendered `QWEN-27B-ANDEE-OK`. The visible channel and complete tool
+  trace are saved under
+  `arch/android/build/model-expansion/qwen35-ouroboros-ui/`.
+- Two consecutive complete builds produced byte-identical emulator APKs with
+  SHA-256 `e7943f4d5819db4fb828c7e0cc0d9f4f62ebde1a8f390b91f705e9a05f16c0ae`.
+  That exact APK then passed a fresh direct Q3_K_S tool call, continuation, and
+  `length` smoke. It also ran a new browser-authored Ouroboros workspace turn,
+  completed `Send(to=#general)`, and rendered
+  `QWEN-27B-REPRODUCIBLE-APK-OK`; the digest-bound screenshots, DOM snapshots,
+  health response, and server timing log are in the same UI evidence folder.
+- The GGUF catalogue fails closed before launch unless the model file plus
+  4 GiB of Android/HyperBEAM/compute headroom fits measured physical RAM.

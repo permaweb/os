@@ -1,6 +1,7 @@
 package org.permaweb.andee
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -84,5 +85,19 @@ class AndeeInferencePolicyTest {
         assertEquals("tool_calls", inferenceFinishReason(true, 64, 64))
         assertEquals("length", inferenceFinishReason(false, 64, 64))
         assertEquals("stop", inferenceFinishReason(false, 19, 64))
+    }
+
+    @Test
+    fun llamaCppLeavesFourGiBOfPhysicalHeadroom() {
+        val sixteenGiB = 16L * 1024L * 1024L * 1024L
+        assertNull(llamaCppMemoryIssue(12L * 1024L * 1024L * 1024L, sixteenGiB))
+        assertEquals(
+            "llama-cpp-insufficient-memory",
+            llamaCppMemoryIssue(12L * 1024L * 1024L * 1024L + 1L, sixteenGiB),
+        )
+        assertEquals(
+            "llama-cpp-memory-unavailable",
+            llamaCppMemoryIssue(1L, 0L),
+        )
     }
 }

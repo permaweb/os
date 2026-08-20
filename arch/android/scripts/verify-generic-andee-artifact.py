@@ -38,10 +38,25 @@ APK_INFERENCE_NATIVE = (
     "lib/arm64-v8a/libLiteRtDispatch_GoogleTensor.so",
     "lib/arm64-v8a/liblitertlm_jni.so",
     "lib/x86_64/liblitertlm_jni.so",
+    "lib/arm64-v8a/libandee_llama_server.so",
+    "lib/arm64-v8a/libllama-server-impl.so",
+    "lib/arm64-v8a/libllama-common.so",
+    "lib/arm64-v8a/libmtmd.so",
+    "lib/arm64-v8a/libllama.so",
+    "lib/arm64-v8a/libggml.so",
+    "lib/arm64-v8a/libggml-base.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
 )
 APK_INFERENCE_NOTICES = (
     "assets/litertlm-android-0.16.1/LICENSE",
     "assets/litertlm-android-0.16.1/THIRD_PARTY_NOTICE.txt",
+    "assets/llama-cpp-b10502/LICENSE",
 )
 
 
@@ -69,7 +84,7 @@ def scan_archive(archive: zipfile.ZipFile, label: str) -> None:
         name = info.filename.lower().encode()
         if any(token in name for token in FORBIDDEN_TOKENS):
             raise SystemExit(f"application-specific archive entry in {label}")
-        if name.endswith(b".litertlm"):
+        if name.endswith((b".litertlm", b".gguf")):
             raise SystemExit(f"inference model embedded in {label}")
         if info.is_dir():
             continue
