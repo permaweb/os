@@ -92,6 +92,8 @@ def main():
 
     configured = []
     for provider in sorted(tuple(providers)):
+        if isinstance(providers[provider].get("inference-device"), str):
+            continue
         key = provider_key(source, provider)
         if key is None:
             del providers[provider]
