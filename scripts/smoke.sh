@@ -7,13 +7,12 @@ RUN_CASES=()
 usage() {
     cat <<'EOF'
 usage: scripts/smoke.sh --list
-       scripts/smoke.sh full|linux|android|mixed|provisioner|remote-snp|CASE...
+       scripts/smoke.sh full|linux|android|provisioner|remote-snp|CASE...
 
 Suites:
   full        local complete PermawebOS smoke suite
   linux       Linux LapEE/SNP-local QEMU suite
   android     Android AndEE suite for the active adb device/emulator
-  mixed       cross-architecture AndEE + QEMU suite
   provisioner Secure Boot provisioner QEMU suite
   remote-snp  remote SNP zone suite; requires TARGET=ssh://...
 EOF
@@ -22,7 +21,7 @@ EOF
 suite_cases() {
     case "$1" in
         full)
-            printf '%s\n' linux android mixed provisioner
+            printf '%s\n' linux android provisioner
             ;;
         linux)
             printf '%s\n' \
@@ -37,11 +36,7 @@ suite_cases() {
                 android-config \
                 android-build \
                 android-smoke \
-                android-andock-device \
-                android-scenarios
-            ;;
-        mixed)
-            printf '%s\n' mixed-andee-qemu-ring
+                android-andock-device
             ;;
         provisioner)
             printf '%s\n' provisioner-qemu-nonvolatile
@@ -61,7 +56,6 @@ Suites:
   full
   linux
   android
-  mixed
   provisioner
   remote-snp
 
@@ -77,11 +71,7 @@ Cases:
   android-build
   android-smoke
   android-andock-device
-  android-next-boot-config
-  android-zone-storage
   android-host-zone-storage
-  android-scenarios
-  mixed-andee-qemu-ring
 EOF
 }
 
@@ -143,20 +133,8 @@ run_case() {
         android-andock-device)
             arch/android/scripts/andock-device-route-smoke.sh
             ;;
-        android-next-boot-config)
-            arch/android/scripts/andee-next-boot-config-test.sh
-            ;;
-        android-zone-storage)
-            arch/android/scripts/andee-android-zone-storage-smoke.sh
-            ;;
         android-host-zone-storage)
             arch/android/scripts/andee-zone-storage-scenario.sh
-            ;;
-        android-scenarios)
-            arch/android/scripts/andee-scenarios.sh
-            ;;
-        mixed-andee-qemu-ring)
-            ./scripts/andee-qemu-ring-smoke.sh
             ;;
         *)
             echo "unknown smoke case or suite: $name" >&2

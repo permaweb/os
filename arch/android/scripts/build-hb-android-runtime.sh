@@ -12,6 +12,9 @@ REBAR3="$ROOT/scripts/verified-rebar3.sh"
 PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
 EXPECTED_HYPERBEAM_VERSION="43d40acd40729f81bb77958c243aa8b0d392183d"
+EXPECTED_WAMR_VERSION="217ba3b10c41036f0e9727aa93c2a164dba35e5c"
+WAMR_REPOSITORY="https://github.com/bytecodealliance/wasm-micro-runtime.git"
+WAMR_PATCH="$ROOT/scripts/wamr-table64.patch"
 
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
@@ -31,7 +34,11 @@ require_tool rustc
 "$ROOT/scripts/stage-android-devices.sh"
 
 HB_REF_MARKER="$ANDEE_DEVICE_ROOT/_build/default/.andee-hyperbeam-ref"
-if [ "$(cat "$HB_REF_MARKER" 2>/dev/null || true)" != "$EXPECTED_HYPERBEAM_VERSION" ]; then
+HB_SOURCE_VERSION="$(
+    git -C "$ANDEE_DEVICE_ROOT/_build/default/lib/hb" rev-parse HEAD 2>/dev/null || true
+)"
+if [ -e "$ANDEE_DEVICE_ROOT/_build/default/lib/hb" ] && \
+    [ "$HB_SOURCE_VERSION" != "$EXPECTED_HYPERBEAM_VERSION" ]; then
     rm -rf "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
 fi
 
@@ -90,6 +97,88 @@ sanitize_native_name() {
     printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_' '_'
 }
 
+native_cache_key() {
+    local clang="$1"
+    shift
+    {
+        printf '%s\n' "$@"
+        "$TOOLCHAIN/$clang" --version
+        shasum -a 256 "$NDK_ROOT/build/cmake/android.toolchain.cmake"
+    } | shasum -a 256 | awk '{print $1}'
+}
+
+prepare_native_cache() {
+    local build="$1"
+    local key="$2"
+    if [ "$(cat "$build/.andee-cache-key" 2>/dev/null || true)" != "$key" ]; then
+        rm -rf "$build"
+        mkdir -p "$build"
+    fi
+}
+
+commit_native_cache() {
+    local build="$1"
+    local key="$2"
+    printf '%s\n' "$key" > "$build/.andee-cache-key"
+}
+
+ensure_pinned_wamr_source() {
+    local hb_app wamr_src actual unexpected
+    hb_app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+    wamr_src="$hb_app/_build/wamr"
+    actual="$(git -C "$wamr_src" rev-parse HEAD 2>/dev/null || true)"
+    if [ "$actual" != "$EXPECTED_WAMR_VERSION" ]; then
+        rm -rf "$wamr_src"
+        mkdir -p "$(dirname "$wamr_src")"
+        git clone --quiet --branch WAMR-2.2.0 --single-branch \
+            "$WAMR_REPOSITORY" "$wamr_src"
+        git -C "$wamr_src" checkout --quiet --detach "$EXPECTED_WAMR_VERSION"
+    fi
+    actual="$(git -C "$wamr_src" rev-parse HEAD)"
+    if [ "$actual" != "$EXPECTED_WAMR_VERSION" ]; then
+        echo "unexpected WAMR source: $actual" >&2
+        exit 1
+    fi
+    # HyperBEAM applies this memory64 fix before its host build. The Android
+    # runtime suppresses that discarded host build, so apply and verify the
+    # same source patch explicitly before cross-compiling.
+    rm -rf "$wamr_src/lib"
+    if git -C "$wamr_src" apply --reverse --check "$WAMR_PATCH" 2>/dev/null; then
+        :
+    elif git -C "$wamr_src" apply --check "$WAMR_PATCH"; then
+        git -C "$wamr_src" apply "$WAMR_PATCH"
+    else
+        echo "pinned WAMR source does not accept the required table64 patch" >&2
+        exit 1
+    fi
+    unexpected="$(
+        git -C "$wamr_src" status --short --untracked-files=all |
+            grep -v '^ M core/iwasm/aot/aot_runtime.c$' || true
+    )"
+    if [ -n "$unexpected" ]; then
+        echo "unexpected generated WAMR source changes:" >&2
+        printf '%s\n' "$unexpected" >&2
+        exit 1
+    fi
+}
+
+ensure_pinned_secp256k1_source() {
+    local hb_app secp_src expected actual
+    hb_app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+    secp_src="$hb_app/native/lib/secp256k1"
+    expected="$(git -C "$hb_app" rev-parse HEAD:native/lib/secp256k1)"
+    actual="$(git -C "$secp_src" rev-parse HEAD 2>/dev/null || true)"
+    if [ "$actual" != "$expected" ]; then
+        git -C "$hb_app" submodule update --init --depth 1 --checkout \
+            native/lib/secp256k1
+    fi
+    actual="$(git -C "$secp_src" rev-parse HEAD)"
+    if [ "$actual" != "$expected" ]; then
+        echo "unexpected HyperBEAM secp256k1 source: $actual" >&2
+        exit 1
+    fi
+}
+
 build_android_elmdb_nif() {
     local abi="$1"
     local target clang target_var target_upper rust_libdir rust_src
@@ -99,6 +188,7 @@ build_android_elmdb_nif() {
     target_upper="$(printf '%s' "$target" | tr '[:lower:]-' '[:upper:]_')"
     rust_libdir="$(rustc --print sysroot)/lib/rustlib/$target/lib"
     rust_src="$(rustc --print sysroot)/lib/rustlib/src/rust/library/std"
+    andee_prepare_elmdb_cargo_lock
 
     local cargo_extra=()
     local rust_env=()
@@ -145,7 +235,7 @@ build_android_hb_keccak_nif() {
 
 build_android_b64veryfast_nif() {
     local abi="$1"
-    local clang target_arch b64_app b64_build erts_include out
+    local clang target_arch b64_app b64_build erts_include out source_version cache_key
     clang="$(clang_for_abi "$abi")"
     target_arch="$(target_arch_for_abi "$abi")"
     b64_app="$ANDEE_DEVICE_ROOT/_build/default/lib/b64veryfast"
@@ -157,12 +247,20 @@ build_android_b64veryfast_nif() {
         echo "missing Android ERTS include dir for $abi: $erts_include" >&2
         exit 1
     fi
-    rm -rf "$b64_build"
-    mkdir -p "$b64_build"
-    cp -a "$b64_app/." "$b64_build/"
+    source_version="$(git -C "$b64_app" rev-parse HEAD)"
+    cache_key="$(native_cache_key "$clang" \
+        b64veryfast-android-v1 "$abi" "$target_arch" "$source_version" \
+        "$(shasum -a 256 "$erts_include/erl_nif.h")")"
+    prepare_native_cache "$b64_build" "$cache_key"
+    if [ ! -f "$b64_build/Makefile" ]; then
+        cp -a "$b64_app/." "$b64_build/"
+        (
+            cd "$b64_build"
+            make clean
+        )
+    fi
     (
         cd "$b64_build"
-        make clean
         make -j "$JOBS" \
             CC="$TOOLCHAIN/$clang" \
             ERL_INCLUDE="$erts_include" \
@@ -170,6 +268,7 @@ build_android_b64veryfast_nif() {
             TARGET_ARCH="$target_arch" \
             all
     )
+    commit_native_cache "$b64_build" "$cache_key"
     mkdir -p "$(dirname "$out")"
     cp "$b64_build/priv/b64veryfast.so" "$out"
 }
@@ -196,7 +295,7 @@ build_android_hb_util_string_nif() {
 
 build_android_secp256k1_nif() {
     local abi="$1"
-    local clang hb_app erts_include secp_src secp_build secp_lib out
+    local clang hb_app erts_include secp_src secp_build secp_lib out source_version cache_key
     clang="$(clang_for_abi "$abi")"
     hb_app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
     erts_include="$BUILD_DIR/android-erts/$abi/erlang/usr/include"
@@ -205,11 +304,16 @@ build_android_secp256k1_nif() {
     secp_lib="$secp_build/lib/libsecp256k1.a"
     out="$WORK/erlang/$abi/lib/hb/priv/secp256k1_arweave.so"
 
+    ensure_pinned_secp256k1_source
     if [ ! -f "$secp_src/CMakeLists.txt" ]; then
         echo "missing pinned HyperBEAM secp256k1 submodule" >&2
         exit 1
     fi
-    rm -rf "$secp_build"
+    source_version="$(git -C "$secp_src" rev-parse HEAD)"
+    cache_key="$(native_cache_key "$clang" \
+        secp256k1-android-v1 "$abi" "$source_version" \
+        "$(shasum -a 256 "$erts_include/erl_nif.h")")"
+    prepare_native_cache "$secp_build" "$cache_key"
     cmake \
         -S "$secp_src" \
         -B "$secp_build" \
@@ -231,6 +335,7 @@ build_android_secp256k1_nif() {
         echo "missing Android secp256k1 static library for $abi: $secp_lib" >&2
         exit 1
     fi
+    commit_native_cache "$secp_build" "$cache_key"
     mkdir -p "$(dirname "$out")"
     "$TOOLCHAIN/$clang" \
         -std=c99 -shared -fPIC -O3 -Wall -Wextra -Wmissing-prototypes \
@@ -246,7 +351,7 @@ build_android_secp256k1_nif() {
 build_android_hb_beamr_driver() {
     local abi="$1"
     local clang hb_app erts_release erts_include ei_lib wamr_src wamr_build
-    local wamr_lib wamr_target out
+    local wamr_lib wamr_target out cache_key
     clang="$(clang_for_abi "$abi")"
     hb_app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
     erts_release="$BUILD_DIR/android-erts/$abi/erlang"
@@ -258,6 +363,7 @@ build_android_hb_beamr_driver() {
     wamr_target="$(wamr_target_for_abi "$abi")"
     out="$WORK/erlang/$abi/lib/hb/priv/hb_beamr.so"
 
+    ensure_pinned_wamr_source
     if [ ! -f "$wamr_src/CMakeLists.txt" ]; then
         echo "missing pinned WAMR source in HyperBEAM build" >&2
         exit 1
@@ -266,7 +372,10 @@ build_android_hb_beamr_driver() {
         echo "missing Android ERTS libei.a for $abi" >&2
         exit 1
     fi
-    rm -rf "$wamr_build"
+    cache_key="$(native_cache_key "$clang" \
+        wamr-android-v1 "$abi" "$wamr_target" "$EXPECTED_WAMR_VERSION" \
+        "$(shasum -a 256 "$WAMR_PATCH" "$erts_include/erl_driver.h" "$ei_lib")")"
+    prepare_native_cache "$wamr_build" "$cache_key"
     cmake \
         -S "$wamr_src" \
         -B "$wamr_build" \
@@ -299,6 +408,7 @@ build_android_hb_beamr_driver() {
         echo "missing Android WAMR static library for $abi: $wamr_lib" >&2
         exit 1
     fi
+    commit_native_cache "$wamr_build" "$cache_key"
     mkdir -p "$(dirname "$out")"
     "$TOOLCHAIN/$clang" \
         -std=c99 -shared -fPIC -O2 -Wall -Wextra \
@@ -375,14 +485,13 @@ rm -f "$OUT"
 if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"
 fi
-# A previous cross-build may have populated the persistent staged dependency
-# tree with an Android object. Host compilation must never reuse that object.
-B64_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/b64veryfast"
-if [ -f "$B64_APP/Makefile" ]; then
-    make -C "$B64_APP" clean
-    make -C "$B64_APP" -j "$JOBS" all
-fi
-(cd "$ANDEE_DEVICE_ROOT" && "$REBAR3" compile)
+(cd "$ANDEE_DEVICE_ROOT" && \
+    REBAR_CONFIG=rebar.runtime.config \
+    "$REBAR3" compile)
+HB_APP="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+make -C "$HB_APP" buildinfo
+mkdir -p "$HB_APP/priv/html"
+cp -a "$HB_APP/src/core/html/." "$HB_APP/priv/html/"
 HB_SCHEMA="$ANDEE_DEVICE_ROOT/_build/default/lib/hb/scripts/schema.gql"
 if [ ! -f "$HB_SCHEMA" ]; then
     echo "missing HyperBEAM GraphQL schema: $HB_SCHEMA" >&2
@@ -392,9 +501,8 @@ mkdir -p "$WORK/scripts"
 cp "$HB_SCHEMA" "$WORK/scripts/schema.gql"
 rm -rf "$WORK/_build"
 build_andee_preloaded_store "$WORK/_build/preloaded-store"
-# Forge invokes the HyperBEAM compile hook while creating the store, which
-# refreshes hb_buildinfo with wall-clock time. Normalize it after the final
-# rebar3 invocation and before copying application priv files into the runtime.
+# Normalize the build information after source packaging and before copying
+# application priv files into the runtime.
 write_reproducible_hb_buildinfo
 printf '%s\n' "$ANDEE_HYPERBEAM_VERSION" > "$HB_REF_MARKER"
 cp "$ANDEE_CONFIG" "$WORK/config/andee.json"
@@ -645,6 +753,7 @@ andock_native = json.loads(
 andock_template = json.loads(
     (work / "execution/andock/andock-ubuntu-arm64.ext4.manifest.json").read_text()
 )
+andee_config = json.loads((work / "config/andee.json").read_text())
 generic_composition = json.loads(
     (work / "generic-composition.json").read_text()
 )
@@ -686,6 +795,7 @@ manifest.write_text(json.dumps({
         "template-image-sha256": andock_template["image-sha256"],
         "template-provision-revision": andock_template["provision-revision"],
         "template-sparse-sha256": andock_template["sparse-image-sha256"],
+        "template-transaction-id": andee_config["andock-default-image"],
         "toolchain-revision": andock_native["toolchain-revision"],
     },
 }, indent=2) + "\n")

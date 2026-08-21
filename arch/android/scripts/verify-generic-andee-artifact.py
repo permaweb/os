@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import subprocess
 import tempfile
 import zipfile
@@ -59,6 +60,7 @@ APK_INFERENCE_NOTICES = (
     "assets/llama-cpp-b10502/LICENSE",
 )
 APK_OPTIONAL_NATIVE_LIBRARIES = ("libedgetpu_litert.so",)
+APK_SIGNING_BLOCK_MAGIC = b"APK Sig Block 42"
 
 
 def sha256(path: Path) -> str:
@@ -93,8 +95,76 @@ def scan_archive(archive: zipfile.ZipFile, label: str) -> None:
             scan_stream(handle, f"{label}:{info.filename}")
 
 
+def inspect_apk_zip_layout(path: Path, archive: zipfile.ZipFile) -> dict[str, int]:
+    """Reject stale local entries left behind by in-place APK rewrites."""
+    entries = sorted(archive.infolist(), key=lambda info: info.header_offset)
+    if not entries or entries[0].header_offset != 0:
+        raise SystemExit("APK ZIP has an unexpected prefix")
+
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        file_size = handle.tell()
+        tail_size = min(file_size, 65_557)
+        handle.seek(file_size - tail_size)
+        tail = handle.read(tail_size)
+        eocd = tail.rfind(b"PK\x05\x06")
+        if eocd < 0:
+            raise SystemExit("APK ZIP end record is missing")
+        central_directory = struct.unpack_from("<I", tail, eocd + 16)[0]
+        payload_end = central_directory
+        if central_directory >= 24:
+            handle.seek(central_directory - 24)
+            footer = handle.read(24)
+            if footer[8:] == APK_SIGNING_BLOCK_MAGIC:
+                block_size = struct.unpack_from("<Q", footer)[0] + 8
+                payload_end -= block_size
+                handle.seek(payload_end)
+                if struct.unpack("<Q", handle.read(8))[0] + 8 != block_size:
+                    raise SystemExit("APK signing block sizes do not match")
+
+        boundaries = [info.header_offset for info in entries[1:]] + [payload_end]
+        for info, next_offset in zip(entries, boundaries):
+            handle.seek(info.header_offset)
+            header = handle.read(30)
+            if len(header) != 30 or header[:4] != b"PK\x03\x04":
+                raise SystemExit(f"invalid APK local entry: {info.filename}")
+            name_size, extra_size = struct.unpack_from("<HH", header, 26)
+            entry_end = (
+                info.header_offset
+                + 30
+                + name_size
+                + extra_size
+                + info.compress_size
+            )
+            gap = next_offset - entry_end
+            allowed_gaps = {0}
+            if info.flag_bits & 0x08:
+                allowed_gaps.update({12, 16, 20, 24})
+            if gap not in allowed_gaps:
+                raise SystemExit(
+                    f"APK ZIP contains {gap} unreferenced bytes after {info.filename}"
+                )
+    return {"entry-count": len(entries), "unreferenced-bytes": 0}
+
+
 def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:
     names = set(archive.namelist())
+    config_name = "config/andee.json"
+    template_manifest_name = (
+        "execution/andock/andock-ubuntu-arm64.ext4.manifest.json"
+    )
+    if config_name not in names or template_manifest_name not in names:
+        raise SystemExit("runtime is missing measured Andock network metadata")
+    embedded_images = sorted(
+        name for name in names if name.endswith((".ext4", ".simg"))
+    )
+    if embedded_images:
+        raise SystemExit(f"Andock rootfs embedded in runtime: {embedded_images}")
+    config = json.loads(archive.read(config_name))
+    template = json.loads(archive.read(template_manifest_name))
+    transaction_id = config.get("andock-default-image")
+    if not isinstance(transaction_id, str) or len(transaction_id) != 43:
+        raise SystemExit("runtime has no measured Andock image transaction ID")
     beams: dict[str, dict[str, str]] = {}
     for abi in ABIS:
         abi_beams: dict[str, str] = {}
@@ -112,6 +182,14 @@ def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:
     return {
         "entry-count": len(names),
         "andock-device-beams": beams,
+        "andock-network-image": {
+            "transaction-id": transaction_id,
+            "sparse-bytes": template["sparse-image-bytes"],
+            "sparse-sha256": template["sparse-image-sha256"],
+            "expanded-bytes": template["image-logical-bytes"],
+            "expanded-sha256": template["image-sha256"],
+            "embedded-image-count": 0,
+        },
         "application-negative-scan": {
             "entries-scanned": len(names),
             "forbidden-token-count": len(FORBIDDEN_TOKENS),
@@ -133,6 +211,7 @@ def inspect_apk(
     apksigner: Path | None,
 ) -> dict[str, object]:
     with zipfile.ZipFile(path) as apk:
+        zip_layout = inspect_apk_zip_layout(path, apk)
         names = set(apk.namelist())
         for native in APK_ANDOCK_NATIVE:
             if native not in names:
@@ -160,6 +239,7 @@ def inspect_apk(
         "artifact": str(path.resolve()),
         "apk-sha256": sha256(path),
         "entry-count": len(names),
+        "zip-layout": zip_layout,
         "andock-native-capabilities": list(APK_ANDOCK_NATIVE),
         "inference-native-capabilities": list(APK_INFERENCE_NATIVE),
         "inference-legal-notices": list(APK_INFERENCE_NOTICES),

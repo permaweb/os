@@ -12,6 +12,12 @@ Android Keystore/StrongBox attestation as the local measurement engine.
 - `specs/andee-device-specification.md` contains the AndEE device
   specification.
 
+Complete redacted operator overlays live in `../../sample-configs/`. Import a
+private copy through the app's **Next boot config** picker; the overlay is
+merged with this application-agnostic base config and measured at the next
+boot. `scripts/prepare-deployment-config.py` can populate an ignored private
+copy from an existing Ouroboros provider-key JSON without printing secrets.
+
 Android stages the package from `devices/common/` plus the Android-specific
 overlay in `devices/android/`. The shared measurement and zone devices are
 therefore identical to the Linux builds; the Android overlay contributes the
@@ -38,28 +44,11 @@ The shipped `local-andee` provider defaults to the Tensor G5 Gemma 4 E2B
 manifest `eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo` and also exposes the
 FunctionGemma mobile-actions manifest
 `wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0` for CPU tool-use checks.
-The install helper is a test/operator shortcut that materializes an already
-verified local copy at the same derived path. It requires an exact ADB serial
-and refuses physical devices unless the operator explicitly enables the
-hardware workflow:
+Run the end-to-end emulator proof against the measured catalogue and normal
+network materializer:
 
 ```sh
 ADB_SERIAL=emulator-NNNN \
-MODEL=/path/to/model.litertlm \
-MODEL_ID=arweave-transaction-id \
-make -C arch/android inference-model-install
-```
-
-The helper infers `MODEL_RUNTIME=litert-lm` for `.litertlm` and
-`MODEL_RUNTIME=llama-cpp` for `.gguf`; callers may set it explicitly as an
-additional consistency check.
-
-Run the end-to-end emulator proof with the same explicit inputs:
-
-```sh
-ADB_SERIAL=emulator-NNNN \
-MODEL=/path/to/model.litertlm \
-MODEL_ID=arweave-transaction-id \
 make -C arch/android inference-emulator-smoke
 ```
 
@@ -74,14 +63,25 @@ The pinned open LiteRT-LM runtime is part of the measured APK. Google Tensor
 NPU models remain SoC-specific AOT artifacts and must include an explicit SoC
 allowlist. The Tensor compiler/runtime terms and model licenses apply to the
 operator-provisioned artifacts; they are not vendored by this repository.
+The Tensor G5 E2B entry uses a 4,096-token context so a normal Ouroboros agent
+prompt, tool catalogue, and reply budget fit without truncating the request.
+The mobile-actions FunctionGemma artifact remains a small specialized router;
+it is not a replacement for the general Ouroboros agent model.
 LiteRT-LM does not expose effective NPU partition delegation, so initialization
 is readiness evidence, not TPU proof. Pixel 10 Pro Fold acceptance additionally
 requires a witnessed Tensor G5 device trace or hardware counter.
 
 ## Andock execution capability
 
-The APK preloads `~andock@1.0` and packages its generic local capability.
-Each member receives a complete writable sparse ext4 image copied from a
+The APK preloads `~andock@1.0` and packages its generic local capability. Its
+measured config identifies the default rootfs by a single native Arweave L1
+transaction ID. The APK retains the source-pinned sparse and expanded sizes
+and SHA-256 values, downloads exactly that transaction through the configured
+gateway, verifies it, expands it into app-private storage, verifies the full
+ext4 digest, and atomically installs a read-only template. No rootfs bytes are
+packaged in the APK.
+
+Each member receives a complete writable sparse ext4 image copied from that
 measured, deterministic Ubuntu 24.04 template. An Android isolated service
 receives only that image descriptor and the command/network capabilities for
 one operation. PRoot supplies Linux pathname and syscall compatibility; the
@@ -116,10 +116,16 @@ The release build is ARM64-only. Build the pinned template independently with:
 make -C arch/android andock-template
 ```
 
-`make -C arch/android apk` validates or rebuilds the runtime and template,
-cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
-normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
-no rootfs or member state is committed to git.
+`make -C arch/android android-build` validates the committed immutable template
+manifest and cross-builds the pinned native PRoot/lwext4 adapter. Images remain
+ignored under `arch/android/build/`; no rootfs or member state is committed to
+git.
+
+For Android application-only iteration, `make -C arch/android apk` packages and
+verifies the already staged runtime without rebuilding BEAM, ERTS, NIFs, WAMR,
+the preloaded store, or the Andock payload. It fails when no runtime is staged;
+use `android-build` after changing any runtime, device, native, or measured
+configuration input.
 
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,

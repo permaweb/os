@@ -55,7 +55,7 @@ copy_device_tree "$PERMAWEBOS_COMMON_DEVICE_ROOT"
 copy_device_tree "$ANDEE_DEVICE_OVERLAY_ROOT"
 # The architecture overlay owns the Android HyperBEAM pin. Do not rely on
 # rsync timestamp/size heuristics when common and Android lockfiles differ.
-for overlay_file in rebar.config rebar.lock; do
+for overlay_file in rebar.config rebar.runtime.config rebar.lock; do
     cp "$ANDEE_DEVICE_OVERLAY_ROOT/$overlay_file" \
         "$ANDEE_DEVICE_ROOT/$overlay_file"
     if ! cmp -s "$ANDEE_DEVICE_OVERLAY_ROOT/$overlay_file" \

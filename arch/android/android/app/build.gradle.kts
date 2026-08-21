@@ -89,8 +89,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
-tasks.named("preBuild").configure {
-    dependsOn(stageLiteRtNotices)
+val verifyGeneratedRuntime = tasks.register("verifyGeneratedRuntime") {
     doFirst {
         val runtime = file("src/main/assets/andee-runtime.zip")
         val nativeRoot = file("src/main/jniLibs")
@@ -131,4 +130,16 @@ tasks.named("preBuild").configure {
             "Missing pinned llama.cpp legal notice"
         }
     }
+}
+
+tasks.matching { task ->
+    task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets"
+}.configureEach {
+    dependsOn(stageLiteRtNotices)
+}
+
+tasks.matching { task ->
+    task.name == "packageDebug" || task.name == "packageRelease"
+}.configureEach {
+    dependsOn(verifyGeneratedRuntime)
 }

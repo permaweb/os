@@ -63,7 +63,11 @@ class AndeeService : Service() {
                     this,
                     File(runtimeRoot, "config/andee.json"),
                 )
-                execution = AndeeExecutionManager(this, runtimeRoot).also { it.start() }
+                execution = AndeeExecutionManager(
+                    this,
+                    runtimeRoot,
+                    effectiveConfig,
+                ).also { it.start() }
                 inference = AndeeInferenceManager(this, effectiveConfig).also { it.start() }
                 val currentAgent = AndeeCryptoAgent(this).also { it.start() }
                 agent = currentAgent

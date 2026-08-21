@@ -85,13 +85,15 @@ rm -f \
     /tmp/permagit.tar.gz
 
 # Copy while still root on Linux so numeric owners, hardlinks, and Linux xattrs
-# never cross a macOS filesystem boundary.
+# never cross a macOS filesystem boundary. Exclude the virtual filesystem
+# mount points themselves: their live directory metadata can change while tar
+# is reading it, and none of that host state belongs in the guest image.
 tar \
     --create --file=- --one-file-system --numeric-owner --sort=name \
     --acls --xattrs --xattrs-include='*' \
     --exclude='./build' --exclude='./output' \
-    --exclude='./dev/*' --exclude='./proc/*' --exclude='./run/*' \
-    --exclude='./sys/*' \
+    --exclude='./dev' --exclude='./proc' --exclude='./run' \
+    --exclude='./sys' \
     --directory=/ . | tar \
         --extract --file=- --numeric-owner --same-owner --same-permissions \
         --acls --xattrs --xattrs-include='*' --directory="$ROOTFS"
@@ -99,6 +101,8 @@ tar \
 mkdir -p \
     "$ROOTFS/dev/pts" "$ROOTFS/dev/shm" "$ROOTFS/proc" "$ROOTFS/root" \
     "$ROOTFS/run" "$ROOTFS/sys" "$ROOTFS/tmp" "$ROOTFS/var/tmp"
+chmod 0755 "$ROOTFS/dev" "$ROOTFS/dev/pts" "$ROOTFS/dev/shm" "$ROOTFS/run"
+chmod 0555 "$ROOTFS/proc" "$ROOTFS/sys"
 printf '127.0.0.1 localhost\n::1 localhost\n' >"$ROOTFS/etc/hosts"
 : >"$ROOTFS/etc/hostname"
 : >"$ROOTFS/etc/resolv.conf"
