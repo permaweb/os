@@ -1,0 +1,91 @@
+{
+  "default-request": "/GW6AnBM60khTfb-Df8JWWdC0s4A-dtstYVNhnCIOSwk",
+  "bundler-ans104": "https://up.arweave.net",
+  "location-url": "https://ne2aq5xqu7twutw4tisdfh4icpowlnrjsts3twjy22xx5omld56q.smoke.solutions",
+  "ouroboros-execution-device": "andock@1.0",
+  "ouroboros-operator-address": "ggltHF0Cnv9ylH3vM1p7amR2vXLMoPLQIUQmAEwLP-k",
+  "process-snapshot-slots": 1,
+  "inference-provider-priority": [
+    "local-andee",
+    "anthropic",
+    "openai",
+    "openrouter"
+  ],
+  "inference-providers": {
+    "anthropic": {
+      "base-url": "https://api.anthropic.com",
+      "default-model": "claude-sonnet-4-6",
+      "priv": {
+        "api-key": "****"
+      }
+    },
+    "openai": {
+      "base-url": "https://api.openai.com/v1",
+      "default-model": "gpt-4.1",
+      "priv": {
+        "api-key": "****"
+      }
+    },
+    "openrouter": {
+      "base-url": "https://openrouter.ai/api/v1",
+      "priv": {
+        "api-key": "****"
+      }
+    }
+  },
+  "priv-hue-address": "http://192.168.1.199",
+  "priv-hue-key": "****",
+  "trusted-devices": {
+    "agent@1.0": "_gnGt6YmIBHbKVxcGwJqms96bdsvAxZRUncrkpf1V48",
+    "inference@1.0": "T3F6f378K38nrP0fI0lFrbkEF4FmZNIe7m5EAUC6r5c",
+    "ouroboros@1.0": "59rg6wgbWB5Lc5yXeKF_rFPj3urDJDWBW9gEQf_05I0",
+    "ouroboros-space@1.0": "z7Gzo9Ec9rky0Y5CfnF-1HDtBw_FZz7a-RAKtTd_-4c",
+    "weavemail@1.0": "QceJsJMNe4GsKNWNf6GeEheJwbrwcvU85462dJKplb0",
+    "tunnel@1.0": "SVKRgrshzPceeBdnknJNvR-m2zQ0mFYJvjMx0rSscW0",
+    "hue@1.0": "FhU1q-cOIq4cKk3YLyUM7sh6AZcmIf1qajbOeBEHzSk"
+  },
+  "on": {
+    "start": [
+      {
+        "device": "tunnel@1.0",
+        "path": "connect",
+        "method": "POST",
+        "peer": "https://smoke.solutions",
+        "workers": 8,
+        "hook": {
+          "result": "ignore"
+        }
+      },
+      {
+        "device": "location@1.0",
+        "path": "node",
+        "method": "POST",
+        "target": "self",
+        "require-codec": "ans104@1.0",
+        "hook": {
+          "result": "ignore",
+          "commit-request": true
+        }
+      },
+      {
+        "device": "ouroboros@1.0",
+        "path": "push-all",
+        "method": "POST",
+        "hook": {
+          "result": "ignore"
+        }
+      }
+    ],
+    "request": [
+      {
+        "device": "name@1.0"
+      },
+      {
+        "device": "manifest@1.0"
+      },
+      {
+        "device": "blacklist@1.0"
+      }
+    ]
+  }
+}

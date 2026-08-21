@@ -43,6 +43,28 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def wait_for_template(base_url, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        response = request(base_url, "bash", {
+            "command": "true",
+            "cwd": "/root",
+            "yield-ms": 5000,
+            "execution-id": "andock-template-readiness",
+        })
+        if response.get("status") == 200:
+            require(response.get("execution-status") == "exited", response)
+            require(response.get("exit-code") == 0, response)
+            return response
+        if (
+            response.get("status") != 503
+            or not response.get("error", "").startswith("andock-default-image-")
+            or time.monotonic() >= deadline
+        ):
+            raise AssertionError(response)
+        time.sleep(2)
+
+
 def successful(response):
     require(response.get("status") == 200, response)
     require(response.get("ok") in (True, "true"), response)
@@ -87,6 +109,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--evidence", type=pathlib.Path, required=True)
+    parser.add_argument("--materialization-timeout", type=int, default=1800)
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
     evidence = {}
@@ -100,6 +123,10 @@ def main():
         index,
     )
     evidence["index"] = index
+    evidence["template-readiness"] = wait_for_template(
+        base_url,
+        args.materialization_timeout,
+    )
 
     root = "/root/neutral-contract-probe"
     route_file = f"{root}/route.txt"

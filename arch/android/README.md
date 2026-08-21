@@ -12,6 +12,12 @@ Android Keystore/StrongBox attestation as the local measurement engine.
 - `specs/andee-device-specification.md` contains the AndEE device
   specification.
 
+Complete redacted operator overlays live in `../../sample-configs/`. Import a
+private copy through the app's **Next boot config** picker; the overlay is
+merged with this application-agnostic base config and measured at the next
+boot. `scripts/prepare-deployment-config.py` can populate an ignored private
+copy from an existing Ouroboros provider-key JSON without printing secrets.
+
 Android stages the package from `devices/common/` plus the Android-specific
 overlay in `devices/android/`. The shared measurement and zone devices are
 therefore identical to the Linux builds; the Android overlay contributes the
@@ -38,28 +44,11 @@ The shipped `local-andee` provider defaults to the Tensor G5 Gemma 4 E2B
 manifest `eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo` and also exposes the
 FunctionGemma mobile-actions manifest
 `wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0` for CPU tool-use checks.
-The install helper is a test/operator shortcut that materializes an already
-verified local copy at the same derived path. It requires an exact ADB serial
-and refuses physical devices unless the operator explicitly enables the
-hardware workflow:
+Run the end-to-end emulator proof against the measured catalogue and normal
+network materializer:
 
 ```sh
 ADB_SERIAL=emulator-NNNN \
-MODEL=/path/to/model.litertlm \
-MODEL_ID=arweave-transaction-id \
-make -C arch/android inference-model-install
-```
-
-The helper infers `MODEL_RUNTIME=litert-lm` for `.litertlm` and
-`MODEL_RUNTIME=llama-cpp` for `.gguf`; callers may set it explicitly as an
-additional consistency check.
-
-Run the end-to-end emulator proof with the same explicit inputs:
-
-```sh
-ADB_SERIAL=emulator-NNNN \
-MODEL=/path/to/model.litertlm \
-MODEL_ID=arweave-transaction-id \
 make -C arch/android inference-emulator-smoke
 ```
 
@@ -74,6 +63,10 @@ The pinned open LiteRT-LM runtime is part of the measured APK. Google Tensor
 NPU models remain SoC-specific AOT artifacts and must include an explicit SoC
 allowlist. The Tensor compiler/runtime terms and model licenses apply to the
 operator-provisioned artifacts; they are not vendored by this repository.
+The Tensor G5 E2B entry uses a 4,096-token context so a normal Ouroboros agent
+prompt, tool catalogue, and reply budget fit without truncating the request.
+The mobile-actions FunctionGemma artifact remains a small specialized router;
+it is not a replacement for the general Ouroboros agent model.
 LiteRT-LM does not expose effective NPU partition delegation, so initialization
 is readiness evidence, not TPU proof. Pixel 10 Pro Fold acceptance additionally
 requires a witnessed Tensor G5 device trace or hardware counter.

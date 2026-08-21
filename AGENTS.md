@@ -5,6 +5,20 @@ packages deployable operating environments for HyperBEAM: Linux LapEE images,
 SNP-capable Linux images, TME/no-TME laptop images, and Android AndEE images.
 It also owns PermawebOS-specific HyperBEAM device packages under `devices/`.
 
+## Critical Rules
+
+- NEVER manually copy, inject, replace, or edit data inside a running or
+  installed PermawebOS environment through ADB, `run-as`, a debug shell,
+  mounted guest storage, direct store access, or any similar debugging trick
+  or backdoor. This includes node stores, preloaded stores, configuration,
+  identities, models, images, and runtime files. Any result observed after
+  such intervention is invalid and MUST NOT be used as evidence of security,
+  correctness, reproducibility, measurement, or end-user behavior.
+- Provision and update PermawebOS only through the same measured, documented,
+  user-reproducible interfaces available to an end user. Debug access may be
+  used read-only for diagnosis, but it must not mutate the environment under
+  test.
+
 ## Work Native To HyperBEAM
 
 - Treat upstream HyperBEAM as the substrate. Do not patch `~/src/hyperbeam`

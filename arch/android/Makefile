@@ -24,9 +24,8 @@ export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
     ANDEE_DEVICE_ROOT
 
 .PHONY: help android-env android-check android-sdk android-gradle-wrapper fetch-attestation-roots \
-        apk verify-apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
-        next-boot-config-test android-zone-storage-smoke zone-storage-scenario \
-        inference-model-install inference-emulator-apk inference-emulator-smoke \
+        apk verify-apk release-keystore release-apk runtime android-build emulator-start install smoke \
+        zone-storage-scenario inference-emulator-apk inference-emulator-smoke \
         verify-config-invariants erl-compile andock-template \
         andock-template-reproducibility preloaded-store-reproducibility clean
 
@@ -43,15 +42,11 @@ help:
 	    '  make runtime                    Rebuild AndEE BEAM and native runtime payloads.' \
 	    '  make android-build              Rebuild the runtime, then package the APK.' \
 	    '  make emulator-start             Start configured Android emulator.' \
-	    '  make install                    Install APK on the active device.' \
+	    '  make install                    Install APK on explicit ADB_SERIAL.' \
 	    '  make smoke                      Boot app/service and collect smoke evidence.' \
-	    '  make scenarios                  Run AndEE scenario harness.' \
-	    '  make next-boot-config-test      Verify private next-boot config import path.' \
-	    '  make android-zone-storage-smoke Verify Android app-private encrypted zone storage.' \
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
-	    '  make inference-model-install    Materialize an Arweave-ID model for local testing.' \
 	    '  make inference-emulator-apk     Build the verified Apple-ARM64 emulator LiteRT-LM override.' \
-	    '  make inference-emulator-smoke   Prove real local inference on an emulator CPU.' \
+	    '  make inference-emulator-smoke   Prove network-materialized inference on an emulator CPU.' \
 	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \
 	    '  make andock-template-reproducibility  Rebuild and compare the template twice.' \
 	    '  make preloaded-store-reproducibility  Rebuild and compare the preload twice.' \
@@ -109,26 +104,16 @@ emulator-start:
 	AVD_NAME="$(AVD_NAME)" ./scripts/start-emulator.sh
 
 install: apk
+	@test -n "$(ADB_SERIAL)" || { echo 'set ADB_SERIAL explicitly' >&2; exit 1; }
 	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" \
-	    "$(ADB)" install -r "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
+	    "$(ADB)" -s "$(ADB_SERIAL)" install -r \
+	        "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 
 smoke: android-build
 	./scripts/andee-smoke.sh
 
-scenarios: android-build
-	./scripts/andee-scenarios.sh
-
-next-boot-config-test: apk
-	./scripts/andee-next-boot-config-test.sh
-
-android-zone-storage-smoke: android-build
-	./scripts/andee-android-zone-storage-smoke.sh
-
 zone-storage-scenario:
 	./scripts/andee-zone-storage-scenario.sh
-
-inference-model-install:
-	./scripts/andee-inference-model-install.sh
 
 inference-emulator-apk: apk
 	./scripts/build-andee-emulator-apk.sh
@@ -138,6 +123,7 @@ inference-emulator-smoke: inference-emulator-apk
 
 verify-config-invariants:
 	./scripts/check-andee-config-invariants.py
+	./scripts/check-no-andee-debug-writes.py
 
 erl-compile:
 	./scripts/stage-android-devices.sh

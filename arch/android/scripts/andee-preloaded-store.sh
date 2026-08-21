@@ -5,6 +5,17 @@ ANDEE_PRELOAD_SIGNER_ADDRESS='cbfIwVIoLq4Q2F9dzmgh66z4ri_KT-Re2CGoqH0DKHk'
 ANDEE_LMDB_SYS_VERSION='0.8.0'
 ANDEE_LMDB_SYS_CHECKSUM='d5b392838cfe8858e86fac37cf97a0e8c55cc60ba0a18365cadc33092f128ce9'
 
+andee_prepare_elmdb_cargo_lock() {
+    local crate lock
+    crate="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb/native/elmdb_nif"
+    lock="$PERMAWEBOS_COMMON_DEVICE_ROOT/cargo-locks/elmdb_nif.Cargo.lock"
+    if [ ! -f "$lock" ]; then
+        echo "missing pinned elmdb_nif Cargo.lock: $lock" >&2
+        return 1
+    fi
+    cp "$lock" "$crate/Cargo.lock"
+}
+
 andee_preload_key() {
     local path="$1"
     local signer
@@ -97,27 +108,104 @@ canonicalize_andee_preloaded_store() {
     mv "$canonical" "$out"
 }
 
+build_andee_host_elmdb_nif() {
+    local app crate library
+    app="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb"
+    crate="$app/native/elmdb_nif"
+    andee_prepare_elmdb_cargo_lock
+    (
+        cd "$crate"
+        cargo build --release --locked
+    )
+    library="$(find "$crate/target/release" -maxdepth 1 -type f \
+        \( -name 'libelmdb_nif.so' -o -name 'libelmdb_nif.dylib' \) \
+        -print -quit)"
+    if [ -z "$library" ]; then
+        echo "host elmdb NIF was not generated" >&2
+        return 1
+    fi
+    mkdir -p "$app/priv"
+    install -m 0755 "$library" "$app/priv/elmdb_nif.so"
+}
+
+build_andee_host_b64veryfast_nif() {
+    local app jobs
+    app="$ANDEE_DEVICE_ROOT/_build/default/lib/b64veryfast"
+    jobs="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
+    make -C "$app" -j "$jobs" all
+    if [ ! -f "$app/priv/b64veryfast.so" ]; then
+        echo "host b64veryfast NIF was not generated" >&2
+        return 1
+    fi
+}
+
+build_andee_host_hb_util_string_nif() {
+    local app erts_root erts_include out
+    local linker_flags
+    app="$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
+    erts_root="$(erl -noshell -eval 'io:format("~s", [code:root_dir()]), halt(0).')"
+    erts_include="$(find "$erts_root" -maxdepth 2 -type d \
+        -path '*/erts-*/include' -print -quit)"
+    out="$app/priv/hb_util_string.so"
+    if [ -z "$erts_include" ]; then
+        echo "missing host ERTS include directory" >&2
+        return 1
+    fi
+    case "$(uname -s)" in
+        Darwin) linker_flags=(-bundle -undefined dynamic_lookup) ;;
+        *) linker_flags=(-shared) ;;
+    esac
+    mkdir -p "$(dirname "$out")"
+    cc -std=c99 -fPIC -O3 -Wall -Wextra \
+        -I "$erts_include" \
+        "${linker_flags[@]}" \
+        -o "$out" \
+        "$app/native/hb_util_string/hb_util_string.c"
+}
+
 build_andee_preloaded_store() {
     local out="$1"
-    local rebar3="${REBAR3:-$ROOT/scripts/verified-rebar3.sh}"
     local key
     key="$out.preload-key.json"
 
     rm -rf "$out"
     mkdir -p "$(dirname "$out")"
+    build_andee_host_elmdb_nif
+    build_andee_host_b64veryfast_nif
+    build_andee_host_hb_util_string_nif
     andee_preload_key "$key"
     (
         trap 'rm -f "$key"' EXIT
         cd "$ANDEE_DEVICE_ROOT/_build/default/lib/hb"
         # EUnit auto-export uses an unordered set, so production packages that
         # include *_test() functions otherwise get nondeterministic debug info.
-        device_src="src/preloaded,$ANDEE_DEVICE_ROOT/src"
-        device_src="$device_src,$ANDEE_DEVICE_ROOT/src/security"
-        device_src="$device_src,$ANDEE_DEVICE_ROOT/src/sandbox"
-        ERL_COMPILER_OPTIONS="[{d,'NOTEST'}]" "$rebar3" device preload \
-            --device-src "$device_src" \
-            --output-dir "$out" \
-            --key "$key"
+        ERL_COMPILER_OPTIONS="[{d,'NOTEST'}]" \
+        erl -noshell -pa "$ANDEE_DEVICE_ROOT"/_build/default/lib/*/ebin \
+            -eval '
+                [Output, Key, DeviceRoot] = init:get_plain_arguments(),
+                DeviceDirs = [
+                    <<"src/preloaded">>,
+                    unicode:characters_to_binary(
+                        filename:join(DeviceRoot, "src")
+                    )
+                ],
+                Wallet = hb:wallet(Key),
+                Groups = hb_packager:scan(DeviceDirs, #{}),
+                Opts = #{
+                    <<"bootstrap-device-src">> => [<<"src/preloaded">>]
+                },
+                {ok, Result} = hb_preload:build_groups(
+                    Groups,
+                    Wallet,
+                    Output,
+                    Opts
+                ),
+                io:format(
+                    "Device preload complete: Store: ~s; Index: ~s.~n",
+                    [Output, maps:get(index, Result)]
+                ),
+                halt(0).
+            ' -extra "$out" "$key" "$ANDEE_DEVICE_ROOT"
     )
     rm -f "$key"
     canonicalize_andee_preloaded_store "$out"

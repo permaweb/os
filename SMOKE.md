@@ -43,7 +43,6 @@ when starting from a clean tree.
 ```sh
 ./scripts/smoke.sh linux-config
 ./scripts/smoke.sh android-build android-smoke android-andock-device
-./scripts/smoke.sh mixed-andee-qemu-ring
 ```
 
 ## Add A Smoke
