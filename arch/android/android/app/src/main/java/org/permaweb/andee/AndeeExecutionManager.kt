@@ -22,8 +22,9 @@ import kotlin.concurrent.withLock
 internal class AndeeExecutionManager(
     private val context: Context,
     runtimeRoot: File,
+    configFile: File,
 ) : AutoCloseable {
-    private val storage = AndeeExecutionStorage(context, runtimeRoot)
+    private val storage = AndeeExecutionStorage(context, runtimeRoot, configFile)
     private val workers = AndeeIsolatedExecutionPool(context)
     private val server = AndeeExecutionServer(context, ::dispatch, ::failureResponse)
     private val locks = mutableMapOf<String, MemberLock>()
@@ -39,6 +40,7 @@ internal class AndeeExecutionManager(
         } catch (failure: Throwable) {
             running = false
             workers.close()
+            storage.close()
             throw failure
         }
     }
@@ -48,6 +50,7 @@ internal class AndeeExecutionManager(
         server.close()
         terminateAllSessions()
         workers.close()
+        storage.close()
     }
 
     private fun dispatch(request: JSONObject): JSONObject {
@@ -193,6 +196,9 @@ internal class AndeeExecutionManager(
         val allowNetwork = request.optBoolean("allow-network", false)
         val key = sessionKey(memberId, sessionId)
         val session = withMemberLock(memberId) {
+            // Session execution is asynchronous, so surface image acquisition and
+            // member creation failures before returning a successful session handle.
+            storage.prepare(memberId)
             synchronized(sessions) {
                 cleanupSessionsLocked()
                 sessions[key]?.also { existing ->
@@ -253,7 +259,8 @@ internal class AndeeExecutionManager(
                         else -> result.status.optInt("exit-code")
                     },
                 )
-            } catch (_failure: Throwable) {
+            } catch (failure: Throwable) {
+                Log.e(TAG, "background execution session failed", failure)
                 session.finish("lost", null)
             }
         }

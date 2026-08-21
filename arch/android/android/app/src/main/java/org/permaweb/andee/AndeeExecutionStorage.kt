@@ -6,7 +6,6 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Base64
-import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -17,37 +16,14 @@ private const val ANDOCK_HOST_FREE_RESERVE_BYTES = 512L * 1024 * 1024
 internal class AndeeExecutionStorage(
     context: Context,
     runtimeRoot: File,
-) {
+    configFile: File,
+) : AutoCloseable {
     private val root = AndeePaths.executionStateRoot(context)
     private val members = File(root, "members")
-    private val template = File(runtimeRoot, TEMPLATE_PATH)
-    private val templateManifest = File(runtimeRoot, TEMPLATE_MANIFEST_PATH)
-    private var templateBytes = 0L
-    private var templateAllocatedBytes = 0L
+    private val materializer = AndeeAndockImageMaterializer(context, runtimeRoot, configFile)
+    private val templateBytes = materializer.logicalBytes
 
     fun start() {
-        require(template.isFile) {
-            "missing packaged Andock filesystem template: ${template.absolutePath}"
-        }
-        require(templateManifest.isFile) { "missing Andock filesystem template manifest" }
-        val manifest = JSONObject(templateManifest.readText())
-        require(manifest.getString("architecture") == "arm64") {
-            "Andock filesystem template architecture is not ARM64"
-        }
-        templateBytes = manifest.getLong("image-logical-bytes")
-        require(templateBytes in MIN_TEMPLATE_BYTES..MAX_TEMPLATE_BYTES) {
-            "invalid Andock filesystem template size: $templateBytes"
-        }
-        require(template.length() == templateBytes) {
-            "unexpected Andock filesystem template size: ${template.length()}"
-        }
-        templateAllocatedBytes = Math.multiplyExact(
-            Os.stat(template.absolutePath).st_blocks,
-            POSIX_BLOCK_BYTES,
-        )
-        require(templateAllocatedBytes in 1..templateBytes) {
-            "invalid Andock filesystem template allocation: $templateAllocatedBytes"
-        }
         require(members.mkdirs() || members.isDirectory) {
             "failed to create Andock member image directory"
         }
@@ -56,15 +32,20 @@ internal class AndeeExecutionStorage(
         members.listFiles { file -> file.name.startsWith('.') && file.name.endsWith(".tmp") }
             .orEmpty()
             .forEach { require(it.delete()) { "failed to remove incomplete member image" } }
+        materializer.start()
     }
 
     fun open(memberId: String): ParcelFileDescriptor {
         val image = memberImage(memberId)
-        if (!image.isFile) create(image)
+        if (!image.isFile) create(image, materializer.requireTemplate())
         return ParcelFileDescriptor.open(
             image,
             ParcelFileDescriptor.MODE_READ_WRITE,
         )
+    }
+
+    fun prepare(memberId: String) {
+        open(memberId).close()
     }
 
     fun destroy(memberId: String) {
@@ -75,7 +56,18 @@ internal class AndeeExecutionStorage(
         }
     }
 
-    private fun create(image: File) {
+    override fun close() {
+        materializer.close()
+    }
+
+    private fun create(image: File, template: File) {
+        val templateAllocatedBytes = Math.multiplyExact(
+            Os.stat(template.absolutePath).st_blocks,
+            POSIX_BLOCK_BYTES,
+        )
+        require(templateAllocatedBytes in 1..templateBytes) {
+            "invalid Andock filesystem template allocation: $templateAllocatedBytes"
+        }
         require(hasAndockCreationCapacity(members.usableSpace, templateAllocatedBytes)) {
             "insufficient app-private storage for a new Andock member image"
         }
@@ -232,11 +224,6 @@ internal class AndeeExecutionStorage(
     }
 
     private companion object {
-        const val TEMPLATE_PATH = "execution/andock/andock-ubuntu-arm64.ext4"
-        const val TEMPLATE_MANIFEST_PATH =
-            "execution/andock/andock-ubuntu-arm64.ext4.manifest.json"
-        const val MIN_TEMPLATE_BYTES = 1024L * 1024 * 1024
-        const val MAX_TEMPLATE_BYTES = 64L * 1024 * 1024 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
         const val FALLBACK_BLOCK_BYTES = 4096
         const val SEEK_DATA = 3

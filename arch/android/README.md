@@ -80,8 +80,15 @@ requires a witnessed Tensor G5 device trace or hardware counter.
 
 ## Andock execution capability
 
-The APK preloads `~andock@1.0` and packages its generic local capability.
-Each member receives a complete writable sparse ext4 image copied from a
+The APK preloads `~andock@1.0` and packages its generic local capability. Its
+measured config identifies the default rootfs by a single native Arweave L1
+transaction ID. The APK retains the source-pinned sparse and expanded sizes
+and SHA-256 values, downloads exactly that transaction through the configured
+gateway, verifies it, expands it into app-private storage, verifies the full
+ext4 digest, and atomically installs a read-only template. No rootfs bytes are
+packaged in the APK.
+
+Each member receives a complete writable sparse ext4 image copied from that
 measured, deterministic Ubuntu 24.04 template. An Android isolated service
 receives only that image descriptor and the command/network capabilities for
 one operation. PRoot supplies Linux pathname and syscall compatibility; the
@@ -116,10 +123,10 @@ The release build is ARM64-only. Build the pinned template independently with:
 make -C arch/android andock-template
 ```
 
-`make -C arch/android android-build` validates or rebuilds the template,
-cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
-normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
-no rootfs or member state is committed to git.
+`make -C arch/android android-build` validates the committed immutable template
+manifest and cross-builds the pinned native PRoot/lwext4 adapter. Images remain
+ignored under `arch/android/build/`; no rootfs or member state is committed to
+git.
 
 For Android application-only iteration, `make -C arch/android apk` packages and
 verifies the already staged runtime without rebuilding BEAM, ERTS, NIFs, WAMR,

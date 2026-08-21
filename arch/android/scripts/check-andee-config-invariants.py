@@ -137,6 +137,9 @@ def main() -> int:
         fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
+    andock_image = config.get("andock-default-image")
+    if not isinstance(andock_image, str) or len(andock_image) != 43:
+        fail("andock-default-image must be one native Arweave transaction ID")
     providers = config.get("inference-providers")
     if not isinstance(providers, dict) or list(providers) != ["local-andee"]:
         fail("base config must define only the local-andee inference provider")

@@ -149,6 +149,22 @@ def inspect_apk_zip_layout(path: Path, archive: zipfile.ZipFile) -> dict[str, in
 
 def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:
     names = set(archive.namelist())
+    config_name = "config/andee.json"
+    template_manifest_name = (
+        "execution/andock/andock-ubuntu-arm64.ext4.manifest.json"
+    )
+    if config_name not in names or template_manifest_name not in names:
+        raise SystemExit("runtime is missing measured Andock network metadata")
+    embedded_images = sorted(
+        name for name in names if name.endswith((".ext4", ".simg"))
+    )
+    if embedded_images:
+        raise SystemExit(f"Andock rootfs embedded in runtime: {embedded_images}")
+    config = json.loads(archive.read(config_name))
+    template = json.loads(archive.read(template_manifest_name))
+    transaction_id = config.get("andock-default-image")
+    if not isinstance(transaction_id, str) or len(transaction_id) != 43:
+        raise SystemExit("runtime has no measured Andock image transaction ID")
     beams: dict[str, dict[str, str]] = {}
     for abi in ABIS:
         abi_beams: dict[str, str] = {}
@@ -166,6 +182,14 @@ def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:
     return {
         "entry-count": len(names),
         "andock-device-beams": beams,
+        "andock-network-image": {
+            "transaction-id": transaction_id,
+            "sparse-bytes": template["sparse-image-bytes"],
+            "sparse-sha256": template["sparse-image-sha256"],
+            "expanded-bytes": template["image-logical-bytes"],
+            "expanded-sha256": template["image-sha256"],
+            "embedded-image-count": 0,
+        },
         "application-negative-scan": {
             "entries-scanned": len(names),
             "forbidden-token-count": len(FORBIDDEN_TOKENS),

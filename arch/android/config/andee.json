@@ -2,6 +2,7 @@
   "render-index-page": false,
   "initialized": "permanent",
   "measurement-device": "andee@1.0",
+  "andock-default-image": "rd2ybWz0XPr29kSWL2OYoTLmz7IhemE51XlsRseOSJk",
   "inference-providers": {
     "local-andee": {
       "inference-device": "andee-inference@1.0",
