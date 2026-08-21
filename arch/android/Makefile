@@ -49,7 +49,7 @@ help:
 	    '  make next-boot-config-test      Verify private next-boot config import path.' \
 	    '  make android-zone-storage-smoke Verify Android app-private encrypted zone storage.' \
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
-	    '  make inference-model-install    Install a digest-locked .litertlm or .gguf model.' \
+	    '  make inference-model-install    Materialize an Arweave-ID model for local testing.' \
 	    '  make inference-emulator-apk     Build the verified Apple-ARM64 emulator LiteRT-LM override.' \
 	    '  make inference-emulator-smoke   Prove real local inference on an emulator CPU.' \
 	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \

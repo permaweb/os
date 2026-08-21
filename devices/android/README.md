@@ -2,7 +2,7 @@
 
 This directory is the Android-specific overlay for the PermawebOS device
 package. It owns the `andock@1.0` Android adapter and the local
-`inference@1.0` provider, and consumes the neutral execution contract from
+`andee-inference@1.0` provider, and consumes the neutral execution contract from
 `devices/common/src/sandbox/`. Applications select these capabilities through
 normal named-device resolution; neither device has an application source or
 build dependency.
@@ -17,7 +17,7 @@ The Andock trusted-device archive contains `dev_andock`, the Android transport
 adapter, and the shared neutral PermawebOS execution contract. The package
 boundary test rejects application and foreign-backend modules.
 
-The inference archive contains only the OpenAI-compatible AO adapter and its
+The inference-provider archive contains only the OpenAI-compatible AO adapter and its
 private framed-socket transport. LiteRT-LM, model validation, and accelerator
 selection remain in the Android service. Its package boundary test rejects
 application, remote-provider, and foreign-execution modules while retaining

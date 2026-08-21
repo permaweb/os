@@ -183,12 +183,12 @@ graph, and its execution workspace recover. Because the pinned stock backend
 acknowledges writes in its in-memory overlay before transaction commit, AndEE
 MUST NOT claim that an arbitrary write-only store call is synchronously durable.
 
-Private node options such as `priv-ouroboros-keys` follow normal HyperBEAM
-configuration semantics. AndEE preserves them in the app-private effective
-configuration and relies on stock HyperBEAM private-key filtering to keep them
-out of `~meta@1.0` and the public boot measurement. Only the explicitly
-protected identity and runtime-control keys listed by the boot-config store are
-rejected.
+Private provider elements under `inference-providers/<provider>/priv` follow
+normal HyperBEAM configuration semantics. AndEE preserves them in the
+app-private effective configuration and relies on stock HyperBEAM private-key
+filtering to keep them out of `~meta@1.0` and the public boot measurement. Only
+the explicitly protected identity and runtime-control keys listed by the
+boot-config store are rejected.
 
 Apart from those protected top-level boot controls, operator configuration is
 merged without AndEE-specific key filtering. Private options such as provider
@@ -231,16 +231,20 @@ native-library-set, runtime-ZIP, and effective-node-message measurement facts.
 
 ### 3.2 Local inference capability
 
-An AndEE build MUST preload the repository-owned generic `~inference@1.0`
-device and package its Android local-compute capability. The public AO surface
-MUST remain application- and provider-agnostic and MUST return non-streaming
-OpenAI chat-completion shapes. Models MUST NOT be embedded in the APK or
-runtime ZIP.
+An AndEE build MUST preload the repository-owned generic
+`~andee-inference@1.0` provider device and package its Android local-compute
+capability. It MUST NOT replace the generic `~inference@1.0` multiplexer. The
+public AO surface MUST remain application- and provider-agnostic and MUST
+return non-streaming OpenAI chat-completion shapes. Models MUST NOT be embedded
+in the APK or runtime ZIP.
 
-Each model MUST be selected by an id allowlisted in effective measured node
-configuration. The catalogue MUST bind that id to an app-private basename,
-base64url SHA-256 digest, permitted backend set, and resource bounds. Requests
-MUST NOT select filesystem paths, URLs, downloads, or unmeasured model files.
+Each model MUST be selected by an id allowlisted beneath its provider in the
+effective measured node configuration. The catalogue MUST bind that name to a
+43-character Arweave `model-id`, exact byte length, base64url SHA-256 digest,
+measured backend, and resource bounds. The Android runtime MAY derive an
+app-private materialization path from the network id. Requests and public
+configuration MUST NOT select filesystem paths, URLs, or unmeasured model
+files.
 
 The backend MUST be selected by effective measured configuration and MUST NOT
 be request-overridable. An NPU model MUST declare an exact supported-vendor SoC

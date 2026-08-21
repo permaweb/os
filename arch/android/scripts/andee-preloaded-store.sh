@@ -160,7 +160,7 @@ build_andee_preloaded_store() {
                 end
             end,
             ok = Check(<<"andock@1.0">>),
-            ok = Check(<<"inference@1.0">>),
+            ok = Check(<<"andee-inference@1.0">>),
             halt(0).
         ' -extra "$out"
     )

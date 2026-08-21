@@ -19,7 +19,7 @@ ABIS = ("arm64-v8a", "x86_64")
 DEVICE_BEAMS = (
     "dev_andock.beam",
     "lib_andock.beam",
-    "dev_inference.beam",
+    "dev_andee_inference.beam",
     "lib_andee_inference.beam",
     "lib_permawebos_bash_session.beam",
     "lib_permawebos_execution.beam",

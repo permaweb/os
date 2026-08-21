@@ -1,6 +1,6 @@
-%%% @doc AndEE local hardware inference device.
--module(dev_inference).
--implements(<<"inference@1.0">>).
+%%% @doc AndEE local hardware inference provider.
+-module(dev_andee_inference).
+-implements(<<"andee-inference@1.0">>).
 -specification("../docs/device-specs/inference.md").
 -device_libraries([lib_andee_inference]).
 -export([info/1, completions/3, chat/3, models/3, health/3, v1/3]).
@@ -8,7 +8,8 @@
 info(_) ->
     #{
         exports => [<<"completions">>, <<"chat">>, <<"models">>, <<"health">>, <<"v1">>],
-        description => <<"AndEE local hardware inference device">>,
+        default => fun dev_message:get/4,
+        description => <<"AndEE local hardware inference provider">>,
         version => <<"1.0">>
     }.
 

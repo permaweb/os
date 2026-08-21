@@ -28,7 +28,7 @@ completions(Base, Req, Opts) ->
     case normalize_boolean(maps:get(<<"stream">>, Payload, false), false) of
         true ->
             format_response(
-                {error, 400, <<"Streaming is not supported by inference@1.0">>},
+                {error, 400, <<"Streaming is not supported by andee-inference@1.0">>},
                 Req,
                 Opts
             );
@@ -37,6 +37,7 @@ completions(Base, Req, Opts) ->
                 maps:get(<<"model">>, Payload, undefined),
                 config_value(<<"inference-model">>, Base, Req, Opts)
             ]),
+            Provider = provider_id(Base, Req, Opts),
             case Model of
                 undefined ->
                     format_response(
@@ -45,9 +46,17 @@ completions(Base, Req, Opts) ->
                         Opts
                     );
                 _ ->
-                    Request = completion_request(Payload, Model),
+                    Request = provider_request(
+                        completion_request(Payload, Model),
+                        Provider
+                    ),
                     ObservedPayload = Payload#{ <<"model">> => Model },
-                    notify_inference_observer(Model, ObservedPayload, Opts),
+                    notify_inference_observer(
+                        Provider,
+                        Model,
+                        ObservedPayload,
+                        Opts
+                    ),
                     format_response(
                         request(Request, ?DEFAULT_TIMEOUT_MS),
                         Req,
@@ -64,16 +73,28 @@ completion_request(Payload, undefined) ->
 completion_request(Payload, Model) ->
     (completion_request(Payload, undefined))#{ <<"model">> => Model }.
 
-models(_Base, Req, Opts) ->
+models(Base, Req, Opts) ->
     format_response(
-        request(#{ <<"action">> => <<"models">> }, 30000),
+        request(
+            provider_request(
+                #{ <<"action">> => <<"models">> },
+                provider_id(Base, Req, Opts)
+            ),
+            30000
+        ),
         Req,
         Opts
     ).
 
-health(_Base, Req, Opts) ->
+health(Base, Req, Opts) ->
     format_response(
-        request(#{ <<"action">> => <<"health">> }, 30000),
+        request(
+            provider_request(
+                #{ <<"action">> => <<"health">> },
+                provider_id(Base, Req, Opts)
+            ),
+            30000
+        ),
         Req,
         Opts
     ).
@@ -82,7 +103,9 @@ v1(Base, Req, Opts) ->
     {ok,
         hb_util:deep_merge(
             hb_message:uncommitted(Base, Opts),
-            (hb_message:uncommitted(Req, Opts))#{ <<"device">> => <<"inference@1.0">> },
+            (hb_message:uncommitted(Req, Opts))#{
+                <<"device">> => <<"andee-inference@1.0">>
+            },
             Opts
         )}.
 
@@ -123,11 +146,22 @@ first_defined([Value | Rest])
 first_defined([Value | _Rest]) ->
     Value.
 
-notify_inference_observer(Model, Payload, Opts) ->
+provider_id(Base, Req, Opts) ->
+    first_defined([
+        config_value(<<"inference-provider">>, Base, Req, Opts),
+        config_value(<<"provider-id">>, Base, Req, Opts)
+    ]).
+
+provider_request(Request, undefined) ->
+    Request;
+provider_request(Request, Provider) ->
+    Request#{ <<"provider">> => Provider }.
+
+notify_inference_observer(Provider, Model, Payload, Opts) ->
     case maps:get(<<"inference-observer-fun">>, Opts, undefined) of
         Fun when is_function(Fun, 1) ->
             Event = #{
-                <<"provider">> => <<"local">>,
+                <<"provider">> => Provider,
                 <<"api">> => <<"openai-chat">>,
                 <<"model">> => Model,
                 <<"base-url">> => <<"andee://local">>,
@@ -348,7 +382,7 @@ inference_observer_receives_provider_payload_before_transport_test() ->
     Parent = self(),
     Observer = fun(Event) -> Parent ! {inference_observer, Event} end,
     {error, _} = completions(
-        #{},
+        #{ <<"inference-provider">> => <<"local-andee">> },
         #{ <<"body">> => #{
             <<"model">> => <<"local/test-model">>,
             <<"messages">> => [#{
@@ -360,7 +394,7 @@ inference_observer_receives_provider_payload_before_transport_test() ->
     ),
     receive
         {inference_observer, Event} ->
-            ?assertEqual(<<"local">>, maps:get(<<"provider">>, Event)),
+            ?assertEqual(<<"local-andee">>, maps:get(<<"provider">>, Event)),
             ?assertEqual(<<"openai-chat">>, maps:get(<<"api">>, Event)),
             ?assertEqual(
                 <<"local/test-model">>,

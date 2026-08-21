@@ -41,6 +41,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
         model: AndeeInferenceModel,
         backendName: String,
         payload: JSONObject,
+        timeoutMillis: Long = AndeeInferencePolicy.GENERATION_TIMEOUT_MILLIS,
     ): JSONObject {
         val future = synchronized(lifecycleLock) {
             if (closed.get()) throw InferenceFailure(503, "inference-runtime-stopped")
@@ -54,7 +55,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
         }
         try {
             return future.get(
-                AndeeInferencePolicy.GENERATION_TIMEOUT_MILLIS,
+                timeoutMillis,
                 TimeUnit.MILLISECONDS,
             )
         } catch (_: TimeoutException) {
@@ -146,7 +147,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
         val logs = AndeePaths.llamaCppLogRoot(context).also(File::mkdirs)
         val process = ProcessBuilder(
             executable.absolutePath,
-            "--model", model.file.absolutePath,
+            "--model", model.materializedFile.absolutePath,
             "--alias", model.id,
             "--host", socket.absolutePath,
             "--ctx-size", model.maxContextTokens.toString(),
@@ -375,8 +376,9 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
                 .put("runtime-commit", BuildConfig.LLAMA_CPP_COMMIT)
                 .put("runtime-initialized", true)
                 .put("npu-execution-verified", false)
+                .put("model-id", model.modelId)
                 .put("model-sha256", model.sha256)
-                .put("model-bytes", model.file.length())
+                .put("model-bytes", model.materializedFile.length())
                 .put("physical-memory-bytes", androidPhysicalMemoryBytes())
                 .put("reserved-memory-bytes", LLAMA_CPP_MEMORY_HEADROOM_BYTES)
                 .put("soc-model", currentSocModel()),

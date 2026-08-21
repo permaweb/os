@@ -10,8 +10,9 @@ case "$MODEL" in
     *) INFERRED_RUNTIME='' ;;
 esac
 MODEL_RUNTIME="${MODEL_RUNTIME:-$INFERRED_RUNTIME}"
-MODEL_ID="${MODEL_ID:-$(basename "${MODEL%.*}")}"
-MODEL_BACKENDS="${MODEL_BACKENDS:-cpu}"
+MODEL_ID="${MODEL_ID:?set MODEL_ID to the model's 43-character Arweave id}"
+MODEL_NAME="${MODEL_NAME:-$(basename "${MODEL%.*}")}"
+MODEL_BACKEND="${MODEL_BACKEND:-cpu}"
 ADB_SERIAL="${ADB_SERIAL:?set ADB_SERIAL to the exact Android target serial}"
 PACKAGE='org.permaweb.andee'
 
@@ -29,16 +30,20 @@ if { [ "$MODEL_RUNTIME" = "litert-lm" ] && [[ "$MODEL" != *.litertlm ]]; } ||
     echo "MODEL_RUNTIME does not match MODEL: $MODEL_RUNTIME / $MODEL" >&2
     exit 1
 fi
-if [[ ! "$MODEL_ID" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
-    echo "invalid MODEL_ID: $MODEL_ID" >&2
+if [[ ! "$MODEL_ID" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    echo "MODEL_ID must be a 43-character Arweave id: $MODEL_ID" >&2
     exit 1
 fi
-if [[ ! "$MODEL_BACKENDS" =~ ^(cpu|gpu|npu)(,(cpu|gpu|npu))*$ ]]; then
-    echo "MODEL_BACKENDS must be a comma-separated subset of cpu,gpu,npu" >&2
+if [[ ! "$MODEL_NAME" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+    echo "invalid MODEL_NAME: $MODEL_NAME" >&2
     exit 1
 fi
-if [ "$MODEL_RUNTIME" = 'llama-cpp' ] && [ "$MODEL_BACKENDS" != 'cpu' ]; then
-    echo "llama-cpp models require MODEL_BACKENDS=cpu" >&2
+if [[ ! "$MODEL_BACKEND" =~ ^(cpu|gpu|npu)$ ]]; then
+    echo "MODEL_BACKEND must be cpu, gpu, or npu" >&2
+    exit 1
+fi
+if [ "$MODEL_RUNTIME" = 'llama-cpp' ] && [ "$MODEL_BACKEND" != 'cpu' ]; then
+    echo "llama-cpp models require MODEL_BACKEND=cpu" >&2
     exit 1
 fi
 if [ "$(adb -s "$ADB_SERIAL" get-state 2>/dev/null)" != "device" ]; then
@@ -55,11 +60,10 @@ if ! adb -s "$ADB_SERIAL" shell run-as "$PACKAGE" true >/dev/null 2>&1; then
     exit 1
 fi
 
-FILENAME="$(basename "$MODEL")"
-if [[ ! "$FILENAME" =~ ^[A-Za-z0-9._-]{1,255}$ ]]; then
-    echo "invalid model filename: $FILENAME" >&2
-    exit 1
-fi
+case "$MODEL_RUNTIME" in
+    litert-lm) FILENAME="$MODEL_ID.litertlm" ;;
+    llama-cpp) FILENAME="$MODEL_ID.gguf" ;;
+esac
 REMOTE="no_backup/inference-models/$FILENAME"
 adb -s "$ADB_SERIAL" shell run-as "$PACKAGE" mkdir -p no_backup/inference-models
 LOCAL_BYTES="$(wc -c < "$MODEL" | tr -d ' ')"
@@ -93,10 +97,10 @@ SHA256_BASE64URL="$(openssl dgst -sha256 -binary "$MODEL" | \
 
 printf '%s\n' \
     "model-id=$MODEL_ID" \
-    "model-file=$FILENAME" \
+    "model-name=$MODEL_NAME" \
     "model-bytes=$LOCAL_BYTES" \
     "model-sha256-hex=$SHA256_HEX" \
     "model-sha256-base64url=$SHA256_BASE64URL" \
     "model-runtime=$MODEL_RUNTIME" \
-    "model-backends=$MODEL_BACKENDS" \
+    "model-backend=$MODEL_BACKEND" \
     "adb-serial=$ADB_SERIAL"

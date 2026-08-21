@@ -1,12 +1,12 @@
 package org.permaweb.andee
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /** Owns the measured model catalogue, local engines, and private transport. */
 internal class AndeeInferenceManager(
@@ -49,36 +49,66 @@ internal class AndeeInferenceManager(
         if (request.has("backend")) {
             throw InferenceFailure(400, "backend-is-measured-configuration")
         }
-        val backend = models.backend
+        val provider = request.optString("provider").takeIf(String::isNotBlank)
         return when (request.getString("action")) {
-            "models" -> success(models.catalog(backend))
+            "models" -> success(models.catalog(provider))
             "health" -> success(
-                models.health(backend) { model ->
+                models.health(provider) { model ->
                     when (model.runtime) {
-                        "litert-lm" -> liteRtEngine.isInitialized(model, backend)
-                        "llama-cpp" -> llamaCppEngine.isInitialized(model, backend)
+                        "litert-lm" -> liteRtEngine.isInitialized(model, model.backend)
+                        "llama-cpp" -> llamaCppEngine.isInitialized(model, model.backend)
                         else -> false
                     }
                 },
             )
             "completions" -> {
                 val payload = request.getJSONObject("payload")
-                val selected = models.resolve(request.optString("model"), backend)
-                success(
-                    completionLock.withLock {
+                val deadline = SystemClock.elapsedRealtime() +
+                    AndeeInferencePolicy.GENERATION_TIMEOUT_MILLIS
+                val locked = try {
+                    completionLock.tryLock(
+                        remainingMillis(deadline),
+                        java.util.concurrent.TimeUnit.MILLISECONDS,
+                    )
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw InferenceFailure(503, "inference-request-interrupted")
+                }
+                if (!locked) {
+                    throw InferenceFailure(408, "generation-timed-out")
+                }
+                try {
+                    val selected = models.resolve(
+                        provider,
+                        request.optString("model"),
+                        deadline,
+                    )
+                    success(
                         when (selected.runtime) {
                             "litert-lm" -> {
                                 llamaCppEngine.releaseModel()
-                                liteRtEngine.complete(selected, backend, payload)
+                                liteRtEngine.complete(
+                                    selected,
+                                    selected.backend,
+                                    payload,
+                                    remainingMillis(deadline),
+                                )
                             }
                             "llama-cpp" -> {
                                 liteRtEngine.releaseModel()
-                                llamaCppEngine.complete(selected, backend, payload)
+                                llamaCppEngine.complete(
+                                    selected,
+                                    selected.backend,
+                                    payload,
+                                    remainingMillis(deadline),
+                                )
                             }
                             else -> throw InferenceFailure(500, "invalid-model-runtime")
                         }
-                    },
-                )
+                    )
+                } finally {
+                    completionLock.unlock()
+                }
             }
             else -> throw InferenceFailure(404, "unknown-action")
         }
@@ -86,6 +116,13 @@ internal class AndeeInferenceManager(
 
     private fun success(body: JSONObject): JSONObject =
         JSONObject().put("ok", true).put("body", body)
+
+    private fun remainingMillis(deadline: Long): Long =
+        (deadline - SystemClock.elapsedRealtime()).also { remaining ->
+            if (remaining <= 0L) {
+                throw InferenceFailure(408, "generation-timed-out")
+            }
+        }
 
     private fun failureResponse(failure: Throwable): JSONObject {
         val inferenceFailure = when (failure) {

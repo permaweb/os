@@ -58,6 +58,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         model: AndeeInferenceModel,
         backendName: String,
         payload: JSONObject,
+        timeoutMillis: Long = AndeeInferencePolicy.GENERATION_TIMEOUT_MILLIS,
     ): JSONObject {
         val expired = AtomicBoolean(false)
         val future = synchronized(lifecycleLock) {
@@ -72,7 +73,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         }
         try {
             return future.get(
-                AndeeInferencePolicy.GENERATION_TIMEOUT_MILLIS,
+                timeoutMillis,
                 TimeUnit.MILLISECONDS,
             )
         } catch (_: TimeoutException) {
@@ -290,7 +291,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         }
         val created = Engine(
             EngineConfig(
-                modelPath = model.file.absolutePath,
+                modelPath = model.materializedFile.absolutePath,
                 backend = backend,
                 maxNumTokens = model.maxContextTokens,
                 cacheDir = AndeePaths.inferenceCacheRoot(context).absolutePath,
@@ -555,6 +556,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
                     .put("runtime", "litert-lm")
                     .put("runtime-initialized", true)
                     .put("npu-execution-verified", false)
+                    .put("model-id", model.modelId)
                     .put("model-sha256", model.sha256)
                     .put("soc-model", currentSocModel()),
             )

@@ -10,9 +10,12 @@ case "$MODEL" in
     *) INFERRED_RUNTIME='' ;;
 esac
 MODEL_RUNTIME="${MODEL_RUNTIME:-$INFERRED_RUNTIME}"
-MODEL_ID="${MODEL_ID:-$(basename "${MODEL%.*}")}"
+MODEL_ID="${MODEL_ID:?set MODEL_ID to the 43-character Arweave model id}"
+MODEL_NAME="${MODEL_NAME:-$(basename "${MODEL%.*}")}"
 MODEL_CONTEXT_TOKENS="${MODEL_CONTEXT_TOKENS:-1024}"
 EMULATOR_BACKEND="${EMULATOR_BACKEND:-cpu}"
+MODEL_GATEWAY="${MODEL_GATEWAY:-}"
+MATERIALIZE_FROM_GATEWAY="${MATERIALIZE_FROM_GATEWAY:-0}"
 ADB_SERIAL="${ADB_SERIAL:?set ADB_SERIAL to the emulator serial}"
 APK="${APK:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
 HOST_PORT="${HOST_PORT:-28739}"
@@ -56,6 +59,16 @@ if [ "$COLD_REBOOT_AFTER_INSTALL" != '0' ] && [ "$COLD_REBOOT_AFTER_INSTALL" != 
     echo "COLD_REBOOT_AFTER_INSTALL must be 0 or 1" >&2
     exit 1
 fi
+if [ "$MATERIALIZE_FROM_GATEWAY" != '0' ] && \
+        [ "$MATERIALIZE_FROM_GATEWAY" != '1' ]; then
+    echo "MATERIALIZE_FROM_GATEWAY must be 0 or 1" >&2
+    exit 1
+fi
+if [ "$MATERIALIZE_FROM_GATEWAY" = '1' ] && \
+        [[ ! "$MODEL_GATEWAY" =~ ^https?://[^/?#]+(:[0-9]+)?$ ]]; then
+    echo "MODEL_GATEWAY must be an HTTP(S) origin" >&2
+    exit 1
+fi
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -81,10 +94,15 @@ finish() {
 trap finish EXIT
 
 adb -s "$ADB_SERIAL" install -r "$APK" > "$OUT/install.txt"
-MODEL="$MODEL" MODEL_ID="$MODEL_ID" MODEL_RUNTIME="$MODEL_RUNTIME" \
-    MODEL_BACKENDS="$EMULATOR_BACKEND" \
-    ADB_SERIAL="$ADB_SERIAL" \
-    "$ROOT/scripts/andee-inference-model-install.sh" | tee "$OUT/model-install.txt"
+if [ "$MATERIALIZE_FROM_GATEWAY" = '1' ]; then
+    printf 'model materialization delegated to %s/%s\n' \
+        "$MODEL_GATEWAY" "$MODEL_ID" | tee "$OUT/model-install.txt"
+else
+    MODEL="$MODEL" MODEL_ID="$MODEL_ID" MODEL_RUNTIME="$MODEL_RUNTIME" \
+        MODEL_NAME="$MODEL_NAME" MODEL_BACKEND="$EMULATOR_BACKEND" \
+        ADB_SERIAL="$ADB_SERIAL" \
+        "$ROOT/scripts/andee-inference-model-install.sh" | tee "$OUT/model-install.txt"
+fi
 if [ "$COLD_REBOOT_AFTER_INSTALL" = '1' ]; then
     adb -s "$ADB_SERIAL" reboot
     adb -s "$ADB_SERIAL" wait-for-device
@@ -103,7 +121,7 @@ if [ "$COLD_REBOOT_AFTER_INSTALL" = '1' ]; then
 fi
 adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-prestart.txt"
 
-MODEL_FILE="$(basename "$MODEL")"
+MODEL_BYTES="$(wc -c < "$MODEL" | tr -d ' ')"
 MODEL_DIGEST="$(openssl dgst -sha256 -binary "$MODEL" | \
     openssl base64 -A | tr '+/' '-_' | tr -d '=')"
 APK_DIGEST="$(shasum -a 256 "$APK" | awk '{print $1}')"
@@ -117,23 +135,29 @@ EMBEDDED_CONSTRAINT_PROVIDER_DIGEST="$(
 )"
 jq -n \
     --arg id "$MODEL_ID" \
-    --arg file "$MODEL_FILE" \
+    --arg name "$MODEL_NAME" \
     --arg digest "$MODEL_DIGEST" \
     --arg backend "$EMULATOR_BACKEND" \
     --arg runtime "$MODEL_RUNTIME" \
+    --arg gateway "$MODEL_GATEWAY" \
+    --argjson bytes "$MODEL_BYTES" \
     --argjson context "$MODEL_CONTEXT_TOKENS" \
-    '{
-      "andee-inference": {
-        "backend": $backend,
-        "models": [{
-          "id": $id,
-          "file": $file,
-          "sha256": $digest,
-          "runtime": $runtime,
-          "backends": [$backend],
-          "max-context-tokens": $context,
-          "max-output-tokens": 128
-        }]
+    '(if $gateway == "" then {} else {gateway: $gateway} end) * {
+      "inference-providers": {
+        "local-andee": {
+          "inference-device": "andee-inference@1.0",
+          "default-model": $name,
+          "models": [{
+            "id": $name,
+            "model-id": $id,
+            "bytes": $bytes,
+            "sha256": $digest,
+            "runtime": $runtime,
+            "backend": $backend,
+            "max-context-tokens": $context,
+            "max-output-tokens": 128
+          }]
+        }
       }
     }' > "$OUT/next.json"
 
@@ -170,10 +194,10 @@ adb -s "$ADB_SERIAL" forward "tcp:$HOST_PORT" tcp:8734 > "$OUT/adb-forward.txt"
 BASE_URL="http://127.0.0.1:$HOST_PORT"
 curl -fsS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
-    "$BASE_URL/~inference@1.0/health" \
+    "$BASE_URL/~andee-inference@1.0/health" \
     > "$OUT/health-before.json"
 adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-before.txt"
-jq -n --arg model "local/$MODEL_ID" '{
+jq -n --arg model "$MODEL_NAME" '{
   model: $model,
   messages: [{
     role: "user",
@@ -201,7 +225,7 @@ COMPLETION_STATUS="$(curl -sS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
     --data-binary @"$OUT/request.json" \
-    "$BASE_URL/~inference@1.0/completions")"
+    "$BASE_URL/~andee-inference@1.0/completions")"
 printf '%s\n' "$COMPLETION_STATUS" > "$OUT/completion-status.txt"
 if [ "$COMPLETION_REPETITIONS" -gt 1 ]; then
     for repetition in $(seq 2 "$COMPLETION_REPETITIONS"); do
@@ -211,14 +235,14 @@ if [ "$COMPLETION_REPETITIONS" -gt 1 ]; then
             -H 'Accept: application/json' \
             -H 'Content-Type: application/json' \
             --data-binary @"$OUT/request.json" \
-            "$BASE_URL/~inference@1.0/completions" \
+            "$BASE_URL/~andee-inference@1.0/completions" \
             > "$OUT/completion-$repetition-status.txt"
     done
 fi
 CONTINUATION_STATUS='not-run'
 if [ "$MODEL_RUNTIME" = 'llama-cpp' ] && [ "$COMPLETION_STATUS" = '200' ]; then
     jq -n \
-        --arg model "local/$MODEL_ID" \
+        --arg model "$MODEL_NAME" \
         --argjson first "$(cat "$OUT/completion.json")" \
         --argjson original "$(cat "$OUT/request.json")" \
         '{
@@ -243,7 +267,7 @@ if [ "$MODEL_RUNTIME" = 'llama-cpp' ] && [ "$COMPLETION_STATUS" = '200' ]; then
         -H 'Accept: application/json' \
         -H 'Content-Type: application/json' \
         --data-binary @"$OUT/continuation-request.json" \
-        "$BASE_URL/~inference@1.0/completions")"
+        "$BASE_URL/~andee-inference@1.0/completions")"
 fi
 if [ ! -f "$OUT/continuation.json" ]; then
     printf '%s\n' '{}' > "$OUT/continuation.json"
@@ -264,10 +288,10 @@ LENGTH_STATUS="$(curl -sS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
     --data-binary @"$OUT/length-request.json" \
-    "$BASE_URL/~inference@1.0/completions")"
+    "$BASE_URL/~andee-inference@1.0/completions")"
 curl -fsS --max-time "$PROBE_TIMEOUT" \
     -H 'Accept: application/json' \
-    "$BASE_URL/~inference@1.0/health" \
+    "$BASE_URL/~andee-inference@1.0/health" \
     > "$OUT/health.json"
 adb -s "$ADB_SERIAL" shell cat /proc/meminfo > "$OUT/meminfo-after.txt"
 adb -s "$ADB_SERIAL" shell ps -A -o PID,PPID,RSS,VSZ,NAME,ARGS > "$OUT/ps-after.txt"
@@ -292,8 +316,11 @@ jq -n \
     --arg continuationStatus "$CONTINUATION_STATUS" \
     --arg emulatorBackend "$EMULATOR_BACKEND" \
     --arg modelRuntime "$MODEL_RUNTIME" \
-    --arg expectedModel "$MODEL_ID" \
+    --arg expectedModel "$MODEL_NAME" \
+    --arg expectedModelId "$MODEL_ID" \
     --arg expectedDigest "$MODEL_DIGEST" \
+    --arg modelGateway "$MODEL_GATEWAY" \
+    --argjson materializedFromGateway "$MATERIALIZE_FROM_GATEWAY" \
     --arg apkSha256 "$APK_DIGEST" \
     --arg embeddedJniSha256 "$EMBEDDED_JNI_DIGEST" \
     --arg embeddedConstraintProviderSha256 "$EMBEDDED_CONSTRAINT_PROVIDER_DIGEST" \
@@ -304,6 +331,8 @@ jq -n \
       scenario: "andee-local-inference-emulator",
       emulator_backend: $emulatorBackend,
       model_runtime: $modelRuntime,
+      materialized_from_gateway: ($materializedFromGateway == 1),
+      model_gateway: (if $modelGateway == "" then null else $modelGateway end),
       hardware_npu_claimed: false,
       apk_sha256: $apkSha256,
       embedded_liblitertlm_jni_sha256: $embeddedJniSha256,
@@ -317,6 +346,7 @@ jq -n \
       requested_backend: $completion["andee-execution"]["requested-backend"],
       measured_runtime: ($completion["andee-execution"].runtime // "litert-lm"),
       model: $completion.model,
+      model_id: $completion["andee-execution"]["model-id"],
       model_digest: $completion["andee-execution"]["model-sha256"],
       completion_status: $completionStatus,
       continuation_status: $continuationStatus,
@@ -336,9 +366,10 @@ jq -n \
         $completionStatus == "200" and
         $lengthStatus == "200" and
         $lengthCompletion.choices[0].finish_reason == "length" and
-        $health.backend == $emulatorBackend and
+        $health.models[0].backend == $emulatorBackend and
         $health.models[0].ready == true and
         $completion.model == $expectedModel and
+        $completion["andee-execution"]["model-id"] == $expectedModelId and
         $completion["andee-execution"]["requested-backend"] == $emulatorBackend and
         ($completion["andee-execution"].runtime // "litert-lm") == $modelRuntime and
         $completion["andee-execution"]["model-sha256"] == $expectedDigest and
