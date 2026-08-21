@@ -35,9 +35,9 @@ Models are not APK assets. Measured provider entries identify them by
 and backend. The app materializes network data into an ID-derived private path;
 host filenames and URLs are not configuration. GGUF entries are ARM64 CPU-only.
 The shipped `local-andee` provider defaults to the Tensor G5 Gemma 4 E2B
-manifest `M5YDfQGoSQGV5q2gIc61Ir60tXiWLR_omFWsdP8IqVk` and also exposes the
+manifest `eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo` and also exposes the
 FunctionGemma mobile-actions manifest
-`GHmDWt7NE6Tw0tyIw6Qsfgln094P09dBIHHtnsFNO20` for CPU tool-use checks.
+`wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0` for CPU tool-use checks.
 The install helper is a test/operator shortcut that materializes an already
 verified local copy at the same derived path. It requires an exact ADB serial
 and refuses physical devices unless the operator explicitly enables the

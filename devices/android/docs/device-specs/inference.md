@@ -45,7 +45,7 @@ The effective boot configuration owns the public catalogue:
       "models": [
         {
           "id": "gemma-4-e2b-it-tensor-g5",
-          "model-id": "M5YDfQGoSQGV5q2gIc61Ir60tXiWLR_omFWsdP8IqVk",
+          "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
           "bytes": 3113545589,
           "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
           "runtime": "litert-lm",
@@ -56,7 +56,7 @@ The effective boot configuration owns the public catalogue:
         },
         {
           "id": "functiongemma-mobile-actions",
-          "model-id": "GHmDWt7NE6Tw0tyIw6Qsfgln094P09dBIHHtnsFNO20",
+          "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
           "bytes": 284426240,
           "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
           "runtime": "litert-lm",
