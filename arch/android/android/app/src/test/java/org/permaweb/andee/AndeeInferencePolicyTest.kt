@@ -88,6 +88,22 @@ class AndeeInferencePolicyTest {
     }
 
     @Test
+    fun liteRtContextOverflowIsAnExplicitClientError() {
+        val failure = checkNotNull(
+            liteRtInferenceFailure(
+                "Failed to call nativeSendMessage: INVALID_ARGUMENT: Input token ids are too " +
+                    "long. Exceeding the maximum number of tokens allowed: 3192 >= 1280",
+            ),
+        )
+
+        assertEquals(400, failure.status)
+        assertEquals("context-window-exceeded", failure.message)
+        assertEquals(3192, failure.details["input-tokens"])
+        assertEquals(1280, failure.details["max-context-tokens"])
+        assertNull(liteRtInferenceFailure("INVALID_ARGUMENT: another failure"))
+    }
+
+    @Test
     fun llamaCppLeavesFourGiBOfPhysicalHeadroom() {
         val sixteenGiB = 16L * 1024L * 1024L * 1024L
         assertNull(llamaCppMemoryIssue(12L * 1024L * 1024L * 1024L, sixteenGiB))

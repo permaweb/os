@@ -12,6 +12,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.LiteRtLmJniException
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
@@ -160,6 +161,9 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
             completionResponse(model, backendName, response, finishReason)
         } catch (failure: Throwable) {
             if (expired.get()) throw InferenceFailure(408, "generation-timed-out")
+            if (failure is LiteRtLmJniException) {
+                throw liteRtInferenceFailure(failure.message) ?: failure
+            }
             throw failure
         } finally {
             conversationLock.withLock {
@@ -647,3 +651,20 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         val OWNER = AtomicBoolean(false)
     }
 }
+
+internal fun liteRtInferenceFailure(message: String?): InferenceFailure? {
+    val match = message?.let(LITE_RT_INPUT_TOO_LONG::find) ?: return null
+    return InferenceFailure(
+        400,
+        "context-window-exceeded",
+        mapOf(
+            "input-tokens" to match.groupValues[1].toInt(),
+            "max-context-tokens" to match.groupValues[2].toInt(),
+        ),
+    )
+}
+
+private val LITE_RT_INPUT_TOO_LONG = Regex(
+    "Input token ids are too long\\. Exceeding the maximum number of tokens allowed: " +
+        "([0-9]+) >= ([0-9]+)",
+)

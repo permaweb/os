@@ -51,7 +51,7 @@ The effective boot configuration owns the public catalogue:
           "runtime": "litert-lm",
           "backend": "npu",
           "soc-models": ["Tensor G5"],
-          "max-context-tokens": 2048,
+          "max-context-tokens": 4096,
           "max-output-tokens": 128
         },
         {
