@@ -116,10 +116,16 @@ The release build is ARM64-only. Build the pinned template independently with:
 make -C arch/android andock-template
 ```
 
-`make -C arch/android apk` validates or rebuilds the runtime and template,
+`make -C arch/android android-build` validates or rebuilds the template,
 cross-builds the pinned native PRoot/lwext4 adapter, and packages both into the
 normal AndEE runtime and APK. Images remain ignored under `arch/android/build/`;
 no rootfs or member state is committed to git.
+
+For Android application-only iteration, `make -C arch/android apk` packages and
+verifies the already staged runtime without rebuilding BEAM, ERTS, NIFs, WAMR,
+the preloaded store, or the Andock payload. It fails when no runtime is staged;
+use `android-build` after changing any runtime, device, native, or measured
+configuration input.
 
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,

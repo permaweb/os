@@ -200,3 +200,47 @@
   `emulator-5582` remain untouched. Task-owned downloads, AVDs, ports, build
   trees, and processes must be digest-recorded and cleaned or explicitly
   retained as local evidence.
+
+## Completed AndEE build-cycle deep clean
+
+- Product surface: `make -C arch/android apk` must produce the same generic,
+  verified AndEE APK with pinned HyperBEAM, platform-only devices, Andock,
+  LiteRT-LM/Google Tensor NPU, llama.cpp, notices, and signature checks.
+- Baseline: `31eabf8c0331cfe8e23013cef57088957cb614da`; branch:
+  `agent/andee-fast-build`; scope: AndEE-specific PermawebOS files only.
+- HyperBEAM remains an unmodified pinned substrate. Existing worktrees,
+  processes, Docker state, and published artifacts are not modified.
+- A fresh `make apk` currently builds Android ERTS and OpenSSL for both ABIs,
+  Andock inputs when their private cache is absent, inference native payloads,
+  a host Forge dependency/NIF tree, the platform preloaded store, the runtime
+  ZIP, and finally the Gradle APK.
+- Root cause: `b0452fdf` changed `apk` from the application packager into a
+  dependency of the phony full-runtime target. Every no-change APK cycle then
+  rebuilt both ABI payloads, WAMR, secp256k1, LMDB NIFs, the Forge store, and
+  the 335 MiB runtime ZIP.
+- Decision: restore the explicit build split instead of adding another cache.
+  `apk` now packages and verifies a staged runtime; `android-build` serially
+  rebuilds the runtime and then invokes `apk`. A missing staged runtime fails
+  immediately with the full-build command. Runtime/device/native/config edits
+  continue to require `android-build` and therefore retain all existing
+  deterministic and application-boundary gates.
+- Warm no-change baseline at the exact parent was 53.24, 55.13, and 55.18
+  seconds. The repaired path, including clean final packaging and every
+  composition/signature check, was 5.52, 5.42, and 5.43 seconds.
+- The existing final-APK removal is not scar tissue. A negative control without
+  it let AGP preserve unreferenced local ZIP data between active entries: the
+  normal 406,873,335-byte artifact grew to 755,362,702 bytes. The deletion is
+  retained and documented; it invalidates only final packaging, not the 39
+  warm Gradle tasks. The verifier now independently rejects non-canonical APK
+  ZIP layouts, and the rebuilt artifact reports zero unreferenced bytes.
+- The repaired serialized `android-build` path completed successfully and
+  retained the generic composition, signature, device payload, legal-notice,
+  and application-negative-scan gates. Repeated `apk` packaging after that full
+  build was byte-stable at SHA-256
+  `8e4f25f526827f5a712a55857803cd171193c9d96fb5438eb0b31980bbe49806`.
+- Re-staging the exact parent runtime and native payloads through the repaired
+  `apk` target reproduced the parent APK byte-for-byte at SHA-256
+  `74d5c17071afdcbe152257f1c59a3bde17d111dbaa4d362a745d91ab26eecf87`
+  and 406,869,011 bytes, with zero unreferenced ZIP bytes.
+- Acceptance: preserve deterministic artifact and package-boundary gates, then
+  demonstrate that no-change build cycles skip unchanged expensive stages.

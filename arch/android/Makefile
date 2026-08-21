@@ -37,11 +37,11 @@ help:
 	    '  make android-sdk                Install/check required SDK packages.' \
 	    '  make android-gradle-wrapper     Generate pinned Gradle wrapper.' \
 	    '  make fetch-attestation-roots    Fetch Android Key Attestation root bundle.' \
-	    '  make apk                        Build the Android APK.' \
+	    '  make apk                        Package the staged runtime into the Android APK.' \
 	    '  make verify-apk                 Verify APK identity, signature, and generic composition.' \
 	    '  make release-apk                Build a locally release-signed APK.' \
-	    '  make runtime                    Build AndEE BEAM payload and native Android launcher.' \
-	    '  make android-build              Build runtime + APK.' \
+	    '  make runtime                    Rebuild AndEE BEAM and native runtime payloads.' \
+	    '  make android-build              Rebuild the runtime, then package the APK.' \
 	    '  make emulator-start             Start configured Android emulator.' \
 	    '  make install                    Install APK on the active device.' \
 	    '  make smoke                      Boot app/service and collect smoke evidence.' \
@@ -70,8 +70,14 @@ android-gradle-wrapper:
 fetch-attestation-roots:
 	./scripts/fetch-android-attestation-roots.py
 
-apk: runtime
-	rm -f "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
+apk:
+	@test -f "$(RUNTIME_ZIP)" || { \
+	    echo 'AndEE runtime is not staged; run `make android-build`.' >&2; \
+	    exit 1; \
+	}
+	# AGP can retain unreachable ZIP data when updating an existing APK.
+	# Remove only the final package; compiled tasks remain warm.
+	rm -f "$(DEBUG_APK)"
 	cd "$(ANDROID_DIR)" && \
 	    ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" \
 	    JAVA_HOME="$(JAVA_HOME)" ./gradlew :app:assembleDebug
@@ -96,7 +102,8 @@ release-apk: runtime release-keystore
 runtime:
 	./scripts/build-hb-android-runtime.sh
 
-android-build: apk
+android-build: runtime
+	$(MAKE) apk
 
 emulator-start:
 	AVD_NAME="$(AVD_NAME)" ./scripts/start-emulator.sh

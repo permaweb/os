@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import subprocess
 import tempfile
 import zipfile
@@ -59,6 +60,7 @@ APK_INFERENCE_NOTICES = (
     "assets/llama-cpp-b10502/LICENSE",
 )
 APK_OPTIONAL_NATIVE_LIBRARIES = ("libedgetpu_litert.so",)
+APK_SIGNING_BLOCK_MAGIC = b"APK Sig Block 42"
 
 
 def sha256(path: Path) -> str:
@@ -91,6 +93,58 @@ def scan_archive(archive: zipfile.ZipFile, label: str) -> None:
             continue
         with archive.open(info) as handle:
             scan_stream(handle, f"{label}:{info.filename}")
+
+
+def inspect_apk_zip_layout(path: Path, archive: zipfile.ZipFile) -> dict[str, int]:
+    """Reject stale local entries left behind by in-place APK rewrites."""
+    entries = sorted(archive.infolist(), key=lambda info: info.header_offset)
+    if not entries or entries[0].header_offset != 0:
+        raise SystemExit("APK ZIP has an unexpected prefix")
+
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        file_size = handle.tell()
+        tail_size = min(file_size, 65_557)
+        handle.seek(file_size - tail_size)
+        tail = handle.read(tail_size)
+        eocd = tail.rfind(b"PK\x05\x06")
+        if eocd < 0:
+            raise SystemExit("APK ZIP end record is missing")
+        central_directory = struct.unpack_from("<I", tail, eocd + 16)[0]
+        payload_end = central_directory
+        if central_directory >= 24:
+            handle.seek(central_directory - 24)
+            footer = handle.read(24)
+            if footer[8:] == APK_SIGNING_BLOCK_MAGIC:
+                block_size = struct.unpack_from("<Q", footer)[0] + 8
+                payload_end -= block_size
+                handle.seek(payload_end)
+                if struct.unpack("<Q", handle.read(8))[0] + 8 != block_size:
+                    raise SystemExit("APK signing block sizes do not match")
+
+        boundaries = [info.header_offset for info in entries[1:]] + [payload_end]
+        for info, next_offset in zip(entries, boundaries):
+            handle.seek(info.header_offset)
+            header = handle.read(30)
+            if len(header) != 30 or header[:4] != b"PK\x03\x04":
+                raise SystemExit(f"invalid APK local entry: {info.filename}")
+            name_size, extra_size = struct.unpack_from("<HH", header, 26)
+            entry_end = (
+                info.header_offset
+                + 30
+                + name_size
+                + extra_size
+                + info.compress_size
+            )
+            gap = next_offset - entry_end
+            allowed_gaps = {0}
+            if info.flag_bits & 0x08:
+                allowed_gaps.update({12, 16, 20, 24})
+            if gap not in allowed_gaps:
+                raise SystemExit(
+                    f"APK ZIP contains {gap} unreferenced bytes after {info.filename}"
+                )
+    return {"entry-count": len(entries), "unreferenced-bytes": 0}
 
 
 def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:
@@ -133,6 +187,7 @@ def inspect_apk(
     apksigner: Path | None,
 ) -> dict[str, object]:
     with zipfile.ZipFile(path) as apk:
+        zip_layout = inspect_apk_zip_layout(path, apk)
         names = set(apk.namelist())
         for native in APK_ANDOCK_NATIVE:
             if native not in names:
@@ -160,6 +215,7 @@ def inspect_apk(
         "artifact": str(path.resolve()),
         "apk-sha256": sha256(path),
         "entry-count": len(names),
+        "zip-layout": zip_layout,
         "andock-native-capabilities": list(APK_ANDOCK_NATIVE),
         "inference-native-capabilities": list(APK_INFERENCE_NATIVE),
         "inference-legal-notices": list(APK_INFERENCE_NOTICES),
