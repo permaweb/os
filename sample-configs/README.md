@@ -7,10 +7,10 @@ application-agnostic base configuration and measures the resulting effective
 node configuration at boot.
 
 `andee-ouroboros-smoke.json` pins the published Ouroboros and tunnel device
-implementations, keeps the preloaded `inference@1.0` multiplexer in use, and
-adds authenticated remote providers alongside the base `local-andee`
-provider. Every `****` value must be replaced in a private copy before use.
-Never commit the private copy.
+implementations, explicitly includes the `local-andee` provider and measured
+model catalogue, keeps the preloaded `inference@1.0` multiplexer in use, and
+adds authenticated remote providers. Every `****` value must be replaced in a
+private copy before use. Never commit the private copy.
 
 To materialize an ignored deployment copy from an existing Ouroboros JSON
 containing provider credentials:
