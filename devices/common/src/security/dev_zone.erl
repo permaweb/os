@@ -164,6 +164,7 @@ join(_Base, Req, Opts) ->
             install_ring_and_storage(
                 Name, Templates, AES, Wallet, NewMembers, Opts),
         hb_http_server:set_opts(NewOpts),
+        notify_zone_join(Name, NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
 
@@ -217,6 +218,15 @@ member(_Base, Req, Opts) ->
             {error, not_found} -> zone_not_initialized(Name)
         end
     end, Opts).
+
+notify_zone_join(Name, Opts) ->
+    {ok, #{<<"status">> := 200, <<"body">> := MembershipProof}} =
+        member(#{}, #{<<"zone">> => Name}, Opts),
+    hb_hook:on(
+        <<"zone-join">>,
+        #{<<"body">> => MembershipProof},
+        Opts
+    ).
 
 with_result(Fun, Opts) ->
     try
@@ -2111,6 +2121,77 @@ zone_allow_policy_test() ->
         assert_zone_install_allowed(
             <<"alpha">>,
             #{<<"zone-allow">> => [<<"alpha">>]})).
+
+zone_join_hook_receives_exact_membership_proof_test() ->
+    Name = <<"alpha">>,
+    NodeWallet = ar_wallet:new(),
+    RingWallet = ar_wallet:new(),
+    NodeAddress = wallet_address(NodeWallet),
+    RingAddress = wallet_address(RingWallet),
+    Member = #{
+        <<"address">> => NodeAddress,
+        <<"role">> => <<"member">>
+    },
+    TestProcess = self(),
+    Handler = #{
+        <<"device">> => #{
+            zone_join =>
+                fun(_, HookReq, _) ->
+                    TestProcess ! {zone_join, maps:get(<<"body">>, HookReq)},
+                    {ok, HookReq}
+                end
+        }
+    },
+    Opts = #{
+        <<"priv-wallet">> => NodeWallet,
+        <<"priv-zones">> => #{
+            Name => #{
+                <<"aes">> => crypto:strong_rand_bytes(32),
+                <<"wallet">> => RingWallet
+            }
+        },
+        <<"zones">> => #{
+            Name => #{<<"members">> => #{NodeAddress => Member}}
+        },
+        <<"identities">> => #{
+            zone_identity(Name) => #{<<"priv-wallet">> => RingWallet}
+        },
+        <<"commitment-device">> => <<"httpsig@1.0">>,
+        <<"on">> => #{<<"zone-join">> => Handler},
+        <<"bootstrap-device-src">> =>
+            hb_util:bin(
+                filename:join(
+                    filename:dirname(
+                        filename:dirname(code:which(hb_forge_seed))
+                    ),
+                    "src/preloaded"
+                )
+            )
+    },
+    hb_forge_seed:with_forge_bootstrap(
+        Opts,
+        fun(SeedOpts) ->
+            {ok, #{<<"body">> := MembershipProof}} =
+                notify_zone_join(Name, SeedOpts),
+            HookProof =
+                receive
+                    {zone_join, ReceivedProof} -> ReceivedProof
+                after 1000 ->
+                    error(zone_join_hook_not_called)
+                end,
+            ?assertEqual(MembershipProof, HookProof),
+            ?assertEqual(NodeAddress, maps:get(<<"address">>, HookProof)),
+            ?assertEqual(
+                RingAddress,
+                maps:get(<<"ring-address">>, HookProof)
+            ),
+            ?assertEqual(
+                [RingAddress],
+                hb_message:signers(HookProof, SeedOpts)
+            ),
+            ?assert(hb_message:verify(HookProof, all, SeedOpts))
+        end
+    ).
 
 nonvolatile_store_blocks_different_zone_test() ->
     Mounted = #{
