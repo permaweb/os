@@ -25,3 +25,8 @@ The command writes
 `arch/android/build/deployment/andee-ouroboros-smoke.json` with mode `0600`.
 Providers without a key in the source file are omitted from that private copy;
 the committed sample retains their redacted entries as documentation.
+
+The tunnel-backed sample intentionally omits the `name@1.0` request hook.
+Tunnel host routing removes its routing `Host` before local execution, while
+`name@1.0` treats a root request without a host as a 404. Keeping the manifest
+and blacklist hooks allows the root `default-request` redirect to run normally.
