@@ -19,6 +19,8 @@ ABIS = ("arm64-v8a", "x86_64")
 DEVICE_BEAMS = (
     "dev_andock.beam",
     "lib_andock.beam",
+    "dev_andee_inference.beam",
+    "lib_andee_inference.beam",
     "lib_permawebos_bash_session.beam",
     "lib_permawebos_execution.beam",
     "lib_permawebos_execution_tools.beam",
@@ -32,6 +34,31 @@ APK_ANDOCK_NATIVE = (
     "lib/arm64-v8a/libandee_andock_launcher.so",
     "lib/arm64-v8a/libandee_proot_loader.so",
 )
+APK_INFERENCE_NATIVE = (
+    "lib/arm64-v8a/libLiteRtDispatch_GoogleTensor.so",
+    "lib/arm64-v8a/liblitertlm_jni.so",
+    "lib/x86_64/liblitertlm_jni.so",
+    "lib/arm64-v8a/libandee_llama_server.so",
+    "lib/arm64-v8a/libllama-server-impl.so",
+    "lib/arm64-v8a/libllama-common.so",
+    "lib/arm64-v8a/libmtmd.so",
+    "lib/arm64-v8a/libllama.so",
+    "lib/arm64-v8a/libggml.so",
+    "lib/arm64-v8a/libggml-base.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+    "lib/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+)
+APK_INFERENCE_NOTICES = (
+    "assets/litertlm-android-0.16.1/LICENSE",
+    "assets/litertlm-android-0.16.1/THIRD_PARTY_NOTICE.txt",
+    "assets/llama-cpp-b10502/LICENSE",
+)
+APK_OPTIONAL_NATIVE_LIBRARIES = ("libedgetpu_litert.so",)
 
 
 def sha256(path: Path) -> str:
@@ -58,6 +85,8 @@ def scan_archive(archive: zipfile.ZipFile, label: str) -> None:
         name = info.filename.lower().encode()
         if any(token in name for token in FORBIDDEN_TOKENS):
             raise SystemExit(f"application-specific archive entry in {label}")
+        if name.endswith((b".litertlm", b".gguf")):
+            raise SystemExit(f"inference model embedded in {label}")
         if info.is_dir():
             continue
         with archive.open(info) as handle:
@@ -108,6 +137,12 @@ def inspect_apk(
         for native in APK_ANDOCK_NATIVE:
             if native not in names:
                 raise SystemExit(f"missing generic Andock native capability: {native}")
+        for native in APK_INFERENCE_NATIVE:
+            if native not in names:
+                raise SystemExit(f"missing generic inference native capability: {native}")
+        for notice in APK_INFERENCE_NOTICES:
+            if notice not in names:
+                raise SystemExit(f"missing LiteRT legal notice: {notice}")
         runtime_name = "assets/andee-runtime.zip"
         if runtime_name not in names:
             raise SystemExit("APK does not contain assets/andee-runtime.zip")
@@ -126,6 +161,8 @@ def inspect_apk(
         "apk-sha256": sha256(path),
         "entry-count": len(names),
         "andock-native-capabilities": list(APK_ANDOCK_NATIVE),
+        "inference-native-capabilities": list(APK_INFERENCE_NATIVE),
+        "inference-legal-notices": list(APK_INFERENCE_NOTICES),
         "runtime-sha256": runtime_sha256,
         "runtime": runtime_evidence,
         "application-negative-scan": {
@@ -144,6 +181,30 @@ def inspect_apk(
         if not package_match or package_match.group(1) != "org.permaweb.andee":
             raise SystemExit("unexpected Android package identity")
         evidence["package-name"] = package_match.group(1)
+        manifest = subprocess.run(
+            [
+                str(aapt2),
+                "dump",
+                "xmltree",
+                str(path),
+                "--file",
+                "AndroidManifest.xml",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        for library in APK_OPTIONAL_NATIVE_LIBRARIES:
+            declared = any(
+                library in "\n".join(manifest[index : index + 4])
+                and "required(0x0101028e)=false"
+                in "\n".join(manifest[index : index + 4])
+                for index, line in enumerate(manifest)
+                if "E: uses-native-library" in line
+            )
+            if not declared:
+                raise SystemExit(f"missing optional native library declaration: {library}")
+        evidence["optional-native-libraries"] = list(APK_OPTIONAL_NATIVE_LIBRARIES)
     if apksigner:
         signature = subprocess.run(
             [str(apksigner), "verify", "--print-certs", str(path)],

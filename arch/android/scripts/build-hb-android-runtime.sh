@@ -369,6 +369,8 @@ mkdir -p "$WORK/config" "$WORK/native-links" "$(dirname "$OUT")" \
 rm -f "$OUT"
 
 "$ROOT/scripts/stage-andock-runtime.sh" "$WORK" "$JNI_DIR"
+"$ROOT/scripts/stage-litert-npu-runtime.sh" "$JNI_DIR"
+"$ROOT/scripts/stage-llama-cpp-runtime.sh" "$JNI_DIR" "$TOOLCHAIN/llvm-strip"
 
 if [ -d "$ANDEE_DEVICE_ROOT/priv" ]; then
     cp -a "$ANDEE_DEVICE_ROOT/priv" "$WORK/priv"

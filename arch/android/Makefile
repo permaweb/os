@@ -17,6 +17,7 @@ EMULATOR := $(ANDROID_SDK_ROOT)/emulator/emulator
 AAPT2 := $(ANDROID_SDK_ROOT)/build-tools/$(ANDROID_BUILD_TOOLS_VERSION)/aapt2
 APKSIGNER := $(ANDROID_SDK_ROOT)/build-tools/$(ANDROID_BUILD_TOOLS_VERSION)/apksigner
 DEBUG_APK := $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
+EMULATOR_INFERENCE_APK := $(BUILD_DIR)/app-debug-emulator.apk
 RUNTIME_ZIP := $(ANDROID_DIR)/app/src/main/assets/andee-runtime.zip
 AVD_NAME ?= andee-api-36-arm64
 export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
@@ -25,6 +26,7 @@ export BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT ANDEE_DEVICE_OVERLAY_ROOT \
 .PHONY: help android-env android-check android-sdk android-gradle-wrapper fetch-attestation-roots \
         apk verify-apk release-keystore release-apk runtime android-build emulator-start install smoke scenarios \
         next-boot-config-test android-zone-storage-smoke zone-storage-scenario \
+        inference-model-install inference-emulator-apk inference-emulator-smoke \
         verify-config-invariants erl-compile andock-template \
         andock-template-reproducibility preloaded-store-reproducibility clean
 
@@ -47,6 +49,9 @@ help:
 	    '  make next-boot-config-test      Verify private next-boot config import path.' \
 	    '  make android-zone-storage-smoke Verify Android app-private encrypted zone storage.' \
 	    '  make zone-storage-scenario      Run host AndEE zone encrypted-store rejoin scenario.' \
+	    '  make inference-model-install    Materialize an Arweave-ID model for local testing.' \
+	    '  make inference-emulator-apk     Build the verified Apple-ARM64 emulator LiteRT-LM override.' \
+	    '  make inference-emulator-smoke   Prove real local inference on an emulator CPU.' \
 	    '  make andock-template            Build pinned ARM64 Andock ext4 and sparse images.' \
 	    '  make andock-template-reproducibility  Rebuild and compare the template twice.' \
 	    '  make preloaded-store-reproducibility  Rebuild and compare the preload twice.' \
@@ -114,6 +119,15 @@ android-zone-storage-smoke: android-build
 
 zone-storage-scenario:
 	./scripts/andee-zone-storage-scenario.sh
+
+inference-model-install:
+	./scripts/andee-inference-model-install.sh
+
+inference-emulator-apk: apk
+	./scripts/build-andee-emulator-apk.sh
+
+inference-emulator-smoke: inference-emulator-apk
+	APK="$(EMULATOR_INFERENCE_APK)" ./scripts/andee-inference-emulator-smoke.sh
 
 verify-config-invariants:
 	./scripts/check-andee-config-invariants.py

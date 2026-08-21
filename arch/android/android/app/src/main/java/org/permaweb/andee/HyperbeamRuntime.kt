@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 class HyperbeamRuntime(
     private val context: Context,
     private val runtimeRoot: File,
+    private val config: File,
 ) : AutoCloseable {
     private var process: Process? = null
 
@@ -23,9 +24,7 @@ class HyperbeamRuntime(
         val apks = listOfNotNull(context.applicationInfo.sourceDir) +
             context.applicationInfo.splitSourceDirs.orEmpty().toList()
 
-        val baseConfig = File(runtimeRoot, "config/andee.json")
-        require(baseConfig.isFile) { "missing AndEE config: ${baseConfig.absolutePath}" }
-        val config = AndeeBootConfigStore.effectiveConfigFile(context, baseConfig)
+        require(config.isFile) { "missing effective AndEE config: ${config.absolutePath}" }
 
         val runDir = AndeePaths.runDir(context)
         runDir.mkdirs()
@@ -62,6 +61,8 @@ class HyperbeamRuntime(
                     AndeePaths.encryptedStoreRoot(context).absolutePath
                 builder.environment()["ANDEE_EXECUTION_SOCKET"] =
                     AndeePaths.executionSocketFile(context).absolutePath
+                builder.environment()["ANDEE_INFERENCE_SOCKET"] =
+                    AndeePaths.inferenceSocketFile(context).absolutePath
             }
             .start()
 

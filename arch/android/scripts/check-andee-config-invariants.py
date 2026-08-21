@@ -137,6 +137,25 @@ def main() -> int:
         fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
+    providers = config.get("inference-providers")
+    if not isinstance(providers, dict) or list(providers) != ["local-andee"]:
+        fail("base config must define only the local-andee inference provider")
+    local_provider = providers["local-andee"]
+    if local_provider.get("inference-device") != "andee-inference@1.0":
+        fail("local-andee must resolve through andee-inference@1.0")
+    if local_provider.get("default-model") != "gemma-4-e2b-it-tensor-g5":
+        fail("Gemma 4 E2B Tensor G5 must be the default local model")
+    models = local_provider.get("models")
+    if not isinstance(models, list) or [model.get("id") for model in models] != [
+        "gemma-4-e2b-it-tensor-g5",
+        "functiongemma-mobile-actions",
+    ]:
+        fail("base local model catalogue must contain only Gemma 4 and FunctionGemma")
+    for model in models:
+        if not isinstance(model.get("model-id"), str) or len(model["model-id"]) != 43:
+            fail("local inference models must use Arweave model-id values")
+        if "file" in model or "url" in model:
+            fail("local inference models must not expose host file or URL mechanics")
     for key in (
         "access-remote-cache-for-client",
         "cache-control",

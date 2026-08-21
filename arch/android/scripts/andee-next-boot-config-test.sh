@@ -61,12 +61,15 @@ cat > "$OUT/next-boot-config.json" <<JSON
   },
   "trusted-device-signers": ["operator-requested-signer"],
   "priv-key-location": "/data/user/0/org.permaweb.andee/no_backup/node-identity/hyperbeam-key.json",
-  "priv-ouroboros-keys": {
+  "inference-providers": {
     "test-provider": {
-      "api-key": "andee-private-test-key",
-      "private-key": "nested-private-key",
-      "secret": "nested-provider-secret",
-      "base-url": "https://provider.example"
+      "base-url": "https://provider.example",
+      "default-model": "test-model",
+      "priv": {
+        "api-key": "andee-private-test-key",
+        "private-key": "nested-private-key",
+        "secret": "nested-provider-secret"
+      }
     }
   },
   "on": {
@@ -348,13 +351,14 @@ if effective.get("priv-key-location") != (
     "/data/user/0/org.permaweb.andee/no_backup/node-identity/hyperbeam-key.json"
 ):
     fail("effective config did not preserve normal priv-key-location")
-if effective.get("priv-ouroboros-keys") != {
-    "test-provider": {
+if effective.get("inference-providers", {}).get("test-provider") != {
+    "base-url": "https://provider.example",
+    "default-model": "test-model",
+    "priv": {
         "api-key": "andee-private-test-key",
         "private-key": "nested-private-key",
         "secret": "nested-provider-secret",
-        "base-url": "https://provider.example",
-    }
+    },
 }:
     fail("effective config did not preserve normal nested private node options")
 for key in reserved_runtime_keys:
@@ -386,16 +390,24 @@ assert_linked_singleton(
     "https://andee-next-boot.example/resolver",
     "stock meta info measured remote name resolvers",
 )
-if "priv-ouroboros-keys" in meta_node:
-    fail("stock meta info exposed private node options")
+meta_provider = meta_node.get("inference-providers", {}).get("test-provider", {})
+if meta_provider.get("base-url") != "https://provider.example":
+    fail("stock meta info omitted public inference provider configuration")
+if "priv" in meta_provider:
+    fail("stock meta info exposed private inference provider options")
 if "priv-key-location" in meta_node:
     fail("stock meta info exposed private node wallet location")
 if attested_node.get("andee-test-marker") != marker:
     fail("attested node message did not include selected marker")
 if attested_node.get("measurement-device") != "andee@1.0":
     fail("attested node message did not enforce andee measurement device")
-if "priv-ouroboros-keys" in attested_node:
-    fail("attested public node exposed private node options")
+attested_provider = attested_node.get("inference-providers", {}).get(
+    "test-provider", {}
+)
+if attested_provider.get("base-url") != "https://provider.example":
+    fail("attested node omitted public inference provider configuration")
+if "priv" in attested_provider:
+    fail("attested public node exposed private inference provider options")
 if "priv-key-location" in attested_node:
     fail("attested public node exposed private node wallet location")
 if attested_node.get("access-remote-cache-for-client") not in (None, False, "false"):
@@ -421,8 +433,8 @@ assert_linked_singleton(
     "https://andee-next-boot.example/resolver",
     "attested node measured remote name resolvers",
 )
-if "priv-ouroboros-keys" in attested_node:
-    fail("attested public node exposed private node options")
+if "priv" in attested_provider:
+    fail("attested public node exposed private inference provider options")
 if "cache-control" in attested_node:
     fail("attested node message preserved operator top-level cache-control override")
 if "store-defaults" in attested_node:

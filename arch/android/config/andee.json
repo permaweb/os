@@ -2,6 +2,39 @@
   "render-index-page": false,
   "initialized": "permanent",
   "measurement-device": "andee@1.0",
+  "inference-providers": {
+    "local-andee": {
+      "inference-device": "andee-inference@1.0",
+      "default-model": "gemma-4-e2b-it-tensor-g5",
+      "models": [
+        {
+          "id": "gemma-4-e2b-it-tensor-g5",
+          "name": "Gemma 4 E2B (Tensor G5)",
+          "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
+          "bytes": 3113545589,
+          "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
+          "runtime": "litert-lm",
+          "backend": "npu",
+          "soc-models": [
+            "Tensor G5"
+          ],
+          "max-context-tokens": 2048,
+          "max-output-tokens": 128
+        },
+        {
+          "id": "functiongemma-mobile-actions",
+          "name": "FunctionGemma Mobile Actions",
+          "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
+          "bytes": 284426240,
+          "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
+          "runtime": "litert-lm",
+          "backend": "cpu",
+          "max-context-tokens": 1280,
+          "max-output-tokens": 64
+        }
+      ]
+    }
+  },
   "store": [
     {
       "store-module": "hb_store_lmdb",

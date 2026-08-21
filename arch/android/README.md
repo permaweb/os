@@ -16,9 +16,67 @@ Android stages the package from `devices/common/` plus the Android-specific
 overlay in `devices/android/`. The shared measurement and zone devices are
 therefore identical to the Linux builds; the Android overlay contributes the
 AndEE crypto-agent runtime for local measurements, Android system reporting,
-app-private encrypted storage, service devices, and the generic `andock@1.0`
-execution device. The `andee@1.0` name remains the measurement backend
-identifier.
+app-private encrypted storage, service devices, the generic `andock@1.0`
+execution device, and the generic `andee-inference@1.0` local-compute provider. The
+`andee@1.0` name remains the measurement backend identifier.
+
+## Local inference capability
+
+The APK preloads `~andee-inference@1.0`, packages LiteRT-LM for CPU, GPU, and NPU
+execution, and packages a pinned ARM64 llama.cpp runtime for CPU-only GGUF
+models. A generic `inference@1.0` device can select it through an
+`inference-providers` entry; the APK does not replace that multiplexer. The
+backend is measured per model and cannot be selected by a request. The Android
+emulator has no mobile NPU, so its acceptance test proves real model execution
+on CPU without claiming hardware-accelerator evidence.
+
+Models are not APK assets. Measured provider entries identify them by
+43-character Arweave `model-id`, exact byte length, runtime, base64url SHA-256,
+and backend. The app materializes network data into an ID-derived private path;
+host filenames and URLs are not configuration. GGUF entries are ARM64 CPU-only.
+The shipped `local-andee` provider defaults to the Tensor G5 Gemma 4 E2B
+manifest `eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo` and also exposes the
+FunctionGemma mobile-actions manifest
+`wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0` for CPU tool-use checks.
+The install helper is a test/operator shortcut that materializes an already
+verified local copy at the same derived path. It requires an exact ADB serial
+and refuses physical devices unless the operator explicitly enables the
+hardware workflow:
+
+```sh
+ADB_SERIAL=emulator-NNNN \
+MODEL=/path/to/model.litertlm \
+MODEL_ID=arweave-transaction-id \
+make -C arch/android inference-model-install
+```
+
+The helper infers `MODEL_RUNTIME=litert-lm` for `.litertlm` and
+`MODEL_RUNTIME=llama-cpp` for `.gguf`; callers may set it explicitly as an
+additional consistency check.
+
+Run the end-to-end emulator proof with the same explicit inputs:
+
+```sh
+ADB_SERIAL=emulator-NNNN \
+MODEL=/path/to/model.litertlm \
+MODEL_ID=arweave-transaction-id \
+make -C arch/android inference-emulator-smoke
+```
+
+On an Apple ARM64 emulator, that target first builds the exact LiteRT-LM
+0.16.1 and XNNPACK revisions with SME dispatch disabled, verifies the JNI and
+FunctionGemma constraint-provider digests, replaces only the emulator APK's
+ARM64 JNI and its required constraint provider, re-signs it, and reruns the
+generic artifact scan. This works around an emulator-only false SME/SME2
+capability report; the normal APK retains Google's pinned Maven binary.
+
+The pinned open LiteRT-LM runtime is part of the measured APK. Google Tensor
+NPU models remain SoC-specific AOT artifacts and must include an explicit SoC
+allowlist. The Tensor compiler/runtime terms and model licenses apply to the
+operator-provisioned artifacts; they are not vendored by this repository.
+LiteRT-LM does not expose effective NPU partition delegation, so initialization
+is readiness evidence, not TPU proof. Pixel 10 Pro Fold acceptance additionally
+requires a witnessed Tensor G5 device trace or hardware counter.
 
 ## Andock execution capability
 
