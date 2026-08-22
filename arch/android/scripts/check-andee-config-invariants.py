@@ -167,6 +167,8 @@ def main() -> int:
         fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
+    if config.get("idle-timeout") != 660000:
+        fail("HTTP idle timeout must exceed the ten-minute inference deadline")
     andock_image = config.get("andock-default-image")
     if not isinstance(andock_image, str) or len(andock_image) != 43:
         fail("andock-default-image must be one native Arweave transaction ID")

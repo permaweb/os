@@ -1,6 +1,7 @@
 {
   "render-index-page": false,
   "initialized": "permanent",
+  "idle-timeout": 660000,
   "measurement-device": "andee@1.0",
   "andock-default-image": "rd2ybWz0XPr29kSWL2OYoTLmz7IhemE51XlsRseOSJk",
   "inference-providers": {

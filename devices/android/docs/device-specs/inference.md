@@ -132,8 +132,10 @@ private Android edge, not a second public inference protocol.
 Requests are serialized and have a ten-minute end-to-end deadline, including
 queueing, any first-use AO-Core cache materialization, backend
 initialization, and generation, because one local request can consume most of
-a phone's accelerator and memory. The Android deadline leaves ten seconds for
-the AO transport to return its error. Cancellation runs off the request and
+a phone's accelerator and memory. AndEE's HTTP idle timeout is eleven minutes,
+so a valid local request cannot be disconnected before that deadline. The
+Android deadline leaves ten seconds for the AO transport to return its error.
+Cancellation runs off the request and
 Android lifecycle threads; if vendor native code does not quiesce, AndEE
 terminates its child HyperBEAM runtime and hard-resets the app process after
 emitting the timeout so a wedged driver cannot permanently block service
