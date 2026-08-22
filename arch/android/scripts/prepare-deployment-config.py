@@ -11,10 +11,10 @@ import urllib.parse
 
 SCRIPT = pathlib.Path(__file__).resolve()
 ROOT = SCRIPT.parents[3]
-DEFAULT_TEMPLATE = ROOT / "sample-configs" / "andee-ouroboros-smoke.json"
+DEFAULT_TEMPLATE = ROOT / "sample-configs" / "andee-ouroboros-with-tunnel.json"
 DEFAULT_OUTPUT = (
     ROOT / "arch" / "android" / "build" / "deployment" /
-    "andee-ouroboros-smoke.json"
+    "andee-ouroboros-with-tunnel.json"
 )
 
 
