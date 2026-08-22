@@ -2,7 +2,7 @@
 -module(dev_andee_inference).
 -implements(<<"andee-inference@1.0">>).
 -specification("../docs/device-specs/inference.md").
--device_libraries([lib_andee_inference]).
+-device_libraries([lib_andee_inference, lib_andee_materialization]).
 -export([info/1, completions/3, chat/3, models/3, health/3, v1/3]).
 
 info(_) ->

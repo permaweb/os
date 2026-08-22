@@ -47,7 +47,6 @@ The effective boot configuration owns the public catalogue:
           "id": "gemma-4-e2b-it-tensor-g5",
           "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
           "bytes": 3113545589,
-          "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
           "runtime": "litert-lm",
           "backend": "npu",
           "soc-models": ["Tensor G5"],
@@ -58,10 +57,9 @@ The effective boot configuration owns the public catalogue:
           "id": "functiongemma-mobile-actions",
           "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
           "bytes": 284426240,
-          "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
           "runtime": "litert-lm",
           "backend": "cpu",
-          "max-context-tokens": 1280,
+          "max-context-tokens": 1024,
           "max-output-tokens": 64
         }
       ]
@@ -70,13 +68,17 @@ The effective boot configuration owns the public catalogue:
 }
 ```
 
-The broker resolves `$gateway/<model-id>`. That transaction may be the model
-data itself or a `permawebos/andee-model/1` manifest containing an ordered,
-bounded list of Arweave chunk IDs. It streams the resulting bytes into an
-ID-derived app-private path, verifies the measured whole-model byte length and
-base64url SHA-256, and only then atomically makes it available to a runtime. This is a
-materialization detail: host filenames are neither configuration nor part of
-the public device contract, and models are not APK or OS-image assets.
+The Erlang device resolves `model-id` through `hb_cache:read`. The configured
+store stack prefers `hb_store_arweave` with remote offset indexing and retains
+the older gateway stores as fallbacks. A model transaction may be the data
+itself or a `permawebos/andee-model/1` message containing an ordered, bounded
+list of Arweave chunk IDs; each ID is resolved through the same AO-Core cache
+path. The Arweave ID is the integrity root, so the model catalogue has no
+parallel digest or URL. Resolved bodies are cached by `hb_store_fs` outside
+BEAM's volatile store and atomically assembled into an ID-derived app-private
+path. Android accepts only that exact path, ID, and measured byte length and
+contains no model network client. Host filenames are neither configuration nor
+part of the public device contract, and models are not APK or OS-image assets.
 `litert-lm` entries are materialized as `.litertlm`. `llama-cpp` entries are
 materialized as `.gguf`, are ARM64 CPU-only, and run as a long-lived child on a
 second app-private filesystem Unix socket. The pinned server has no TCP
@@ -118,7 +120,7 @@ readiness, not TPU execution. Pixel 10 Pro Fold (Tensor G5) acceptance requires
 a witnessed device trace or hardware counter; the provider does not
 manufacture that evidence from successful generation.
 
-Health is `configured` once the model digest and static runtime tuple pass. It
+Health is `configured` once the model ID and static runtime tuple pass. It
 becomes `healthy` only after the matching LiteRT-LM engine initializes or the
 matching llama.cpp child reports ready. Model
 entries likewise keep `ready=false` until that initialization succeeds.
@@ -128,10 +130,12 @@ Unix socket. Android checks that each peer has the app UID. This JSON is a
 private Android edge, not a second public inference protocol.
 
 Requests are serialized and have a ten-minute end-to-end deadline, including
-queueing, any first-use network materialization, digest verification, backend
+queueing, any first-use AO-Core cache materialization, backend
 initialization, and generation, because one local request can consume most of
-a phone's accelerator and memory. The Android deadline leaves ten seconds for
-the AO transport to return its error. Cancellation runs off the request and
+a phone's accelerator and memory. AndEE's HTTP idle timeout is eleven minutes,
+so a valid local request cannot be disconnected before that deadline. The
+Android deadline leaves ten seconds for the AO transport to return its error.
+Cancellation runs off the request and
 Android lifecycle threads; if vendor native code does not quiesce, AndEE
 terminates its child HyperBEAM runtime and hard-resets the app process after
 emitting the timeout so a wedged driver cannot permanently block service

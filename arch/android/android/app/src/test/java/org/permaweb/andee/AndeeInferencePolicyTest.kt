@@ -7,6 +7,19 @@ import org.junit.Test
 
 class AndeeInferencePolicyTest {
     @Test
+    fun contextCompactionPreservesBothEndsAndUtf8Boundaries() {
+        val fitted = truncateUtf8Middle(
+            "prefix-" + "😀".repeat(500) + "-suffix",
+            128,
+        )
+
+        assertEquals(true, fitted.startsWith("prefix-"))
+        assertEquals(true, fitted.endsWith("-suffix"))
+        assertEquals(true, fitted.contains("[context elided]"))
+        assertEquals(true, fitted.toByteArray(Charsets.UTF_8).size <= 128)
+    }
+
+    @Test
     fun namedChoiceExposesAndAcceptsOnlyTheSelectedTool() {
         val choice = AndeeToolChoice.Named("Send")
         val allowed = allowedToolNames(choice, setOf("List", "Send"))
@@ -101,6 +114,21 @@ class AndeeInferencePolicyTest {
         assertEquals(3192, failure.details["input-tokens"])
         assertEquals(1280, failure.details["max-context-tokens"])
         assertNull(liteRtInferenceFailure("INVALID_ARGUMENT: another failure"))
+    }
+
+    @Test
+    fun liteRtPrefillCapacityOverflowIsAnExplicitClientError() {
+        val failure = checkNotNull(
+            liteRtInferenceFailure(
+                "Failed to call nativeSendMessage: FAILED_PRECONDITION: " +
+                    "Prefill input length exceeds available state entries " +
+                    "(remaining capacity: 1024).",
+            ),
+        )
+
+        assertEquals(400, failure.status)
+        assertEquals("context-window-exceeded", failure.message)
+        assertEquals(1024, failure.details["max-context-tokens"])
     }
 
     @Test

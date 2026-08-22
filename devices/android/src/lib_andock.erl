@@ -38,14 +38,15 @@ list_files(MemberId, Path, Opts) ->
 serve_file(MemberId, Path, Opts) ->
     lib_permawebos_execution:serve_file(MemberId, Path, force_backend(Opts)).
 
-container_read(MemberId, Path, _Opts) ->
+container_read(MemberId, Path, Opts) ->
     case request(
         #{
             <<"action">> => <<"read">>,
             <<"member-id">> => MemberId,
             <<"path">> => Path
         },
-        ?DEFAULT_TIMEOUT_MS
+        ?DEFAULT_TIMEOUT_MS,
+        Opts
     ) of
         {ok, #{ <<"content">> := Encoded }} ->
             decode_content(Encoded);
@@ -59,7 +60,7 @@ container_read(MemberId, Path, _Opts) ->
             {error, Reason}
     end.
 
-container_write(MemberId, Path, Content, _Opts) ->
+container_write(MemberId, Path, Content, Opts) ->
     case request(
         #{
             <<"action">> => <<"write">>,
@@ -67,7 +68,8 @@ container_write(MemberId, Path, Content, _Opts) ->
             <<"path">> => Path,
             <<"content">> => hb_util:encode(Content)
         },
-        ?DEFAULT_TIMEOUT_MS
+        ?DEFAULT_TIMEOUT_MS,
+        Opts
     ) of
         {ok, _} -> ok;
         {error, Status, Reason, Details} ->
@@ -75,14 +77,15 @@ container_write(MemberId, Path, Content, _Opts) ->
         {error, _Status, Reason} -> {error, Reason}
     end.
 
-container_list_dir(MemberId, Path, _Opts) ->
+container_list_dir(MemberId, Path, Opts) ->
     case request(
         #{
             <<"action">> => <<"list">>,
             <<"member-id">> => MemberId,
             <<"path">> => Path
         },
-        ?DEFAULT_TIMEOUT_MS
+        ?DEFAULT_TIMEOUT_MS,
+        Opts
     ) of
         {ok, #{ <<"entries">> := Entries }} when is_list(Entries) ->
             {ok, Entries};
@@ -96,7 +99,7 @@ container_list_dir(MemberId, Path, _Opts) ->
             {error, 'invalid-execution-response'}
     end.
 
-exec(MemberId, Cwd, Command, TimeoutMs, DisableNetwork, _Opts) ->
+exec(MemberId, Cwd, Command, TimeoutMs, DisableNetwork, Opts) ->
     case request(
         #{
             <<"action">> => <<"exec">>,
@@ -106,7 +109,8 @@ exec(MemberId, Cwd, Command, TimeoutMs, DisableNetwork, _Opts) ->
             <<"timeout-ms">> => TimeoutMs,
             <<"allow-network">> => not DisableNetwork
         },
-        TimeoutMs + 5000
+        TimeoutMs + 5000,
+        Opts
     ) of
         {ok, #{ <<"timed-out">> := true }} ->
             {error, 408, <<"Command timed out.">>};
@@ -132,7 +136,7 @@ start_session(
     TimeoutMs,
     WaitMs,
     DisableNetwork,
-    _Opts
+    Opts
 ) ->
     case request(
         #{
@@ -145,13 +149,14 @@ start_session(
             <<"wait-ms">> => WaitMs,
             <<"allow-network">> => not DisableNetwork
         },
-        WaitMs + 15000
+        WaitMs + 15000,
+        Opts
     ) of
         {ok, Body} -> decode_session_result(Body);
         Error -> Error
     end.
 
-poll_session(MemberId, SessionId, Cursor, WaitMs, Terminate, _Opts) ->
+poll_session(MemberId, SessionId, Cursor, WaitMs, Terminate, Opts) ->
     case request(
         #{
             <<"action">> => <<"session-poll">>,
@@ -161,7 +166,8 @@ poll_session(MemberId, SessionId, Cursor, WaitMs, Terminate, _Opts) ->
             <<"wait-ms">> => WaitMs,
             <<"terminate">> => Terminate
         },
-        WaitMs + 15000
+        WaitMs + 15000,
+        Opts
     ) of
         {ok, Body} -> decode_session_result(Body);
         Error -> Error
@@ -178,16 +184,18 @@ decode_session_result(#{ <<"output">> := Encoded } = Body) ->
 decode_session_result(_) ->
     {error, 500, <<"Invalid session response.">>}.
 
-stop(MemberId, _Opts) ->
+stop(MemberId, Opts) ->
     request(
         #{ <<"action">> => <<"stop">>, <<"member-id">> => MemberId },
-        10000
+        10000,
+        Opts
     ).
 
-destroy(MemberId, _Opts) ->
+destroy(MemberId, Opts) ->
     request(
         #{ <<"action">> => <<"destroy">>, <<"member-id">> => MemberId },
-        10000
+        10000,
+        Opts
     ).
 
 force_backend(Opts) ->
@@ -205,15 +213,47 @@ decode_content(Encoded) when is_binary(Encoded) ->
 decode_content(_) ->
     {error, 'invalid-execution-content'}.
 
-request(Message, Timeout) ->
+request(Message, Timeout, Opts) ->
     case os:getenv(?EXECUTION_SOCKET_ENV) of
         false ->
             {error, 503, <<"Andock execution runtime is unavailable.">>};
         [] ->
             {error, 503, <<"Andock execution runtime is unavailable.">>};
         SocketPath ->
-            request_socket(SocketPath, Message#{ <<"protocol">> => ?PROTOCOL }, Timeout)
+            case materialize_image(Message, Opts) of
+                {ok, Prepared} ->
+                    request_socket(
+                        SocketPath,
+                        Prepared#{ <<"protocol">> => ?PROTOCOL },
+                        Timeout
+                    );
+                {error, Reason} ->
+                    {error, 503, materialization_error(Reason)}
+            end
     end.
+
+%% @doc Resolve the measured Andock image before invoking Android execution.
+materialize_image(#{ <<"action">> := Action } = Message, _Opts)
+        when Action =:= <<"session-poll">>; Action =:= <<"stop">>;
+             Action =:= <<"destroy">> ->
+    {ok, Message};
+materialize_image(Message, Opts) ->
+    ID = hb_opts:get(andock_default_image, undefined, Opts),
+    case lib_andee_materialization:andock(ID, Opts) of
+        {ok, Materialized} ->
+            {ok, Message#{
+                <<"image-id">> => maps:get(<<"id">>, Materialized),
+                <<"image-path">> => maps:get(<<"path">>, Materialized),
+                <<"image-bytes">> => maps:get(<<"bytes">>, Materialized)
+            }};
+        Error -> Error
+    end.
+
+%% @doc Format internal materialization reasons as hyphenated errors.
+materialization_error(Reason) when is_atom(Reason) ->
+    binary:replace(atom_to_binary(Reason), <<"_">>, <<"-">>, [global]);
+materialization_error(Reason) when is_binary(Reason) -> Reason;
+materialization_error(_) -> <<"andock-image-materialization-failed">>.
 
 request_socket(SocketPath, Message, Timeout) ->
     try

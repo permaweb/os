@@ -1,15 +1,15 @@
 {
   "default-request": "/GW6AnBM60khTfb-Df8JWWdC0s4A-dtstYVNhnCIOSwk",
   "bundler-ans104": "https://up.arweave.net",
-  "location-url": "https://ne2aq5xqu7twutw4tisdfh4icpowlnrjsts3twjy22xx5omld56q.smoke.solutions",
+  "location-url": "https://**[base32 encoded node address]**.smoke.solutions",
+  "node-host": "**[base32 encoded node address]**.smoke.solutions",
   "ouroboros-execution-device": "andock@1.0",
   "ouroboros-operator-address": "ggltHF0Cnv9ylH3vM1p7amR2vXLMoPLQIUQmAEwLP-k",
   "process-snapshot-slots": 1,
   "inference-provider-priority": [
     "local-andee",
     "anthropic",
-    "openai",
-    "openrouter"
+    "openai"
   ],
   "inference-providers": {
     "local-andee": {
@@ -21,13 +21,12 @@
           "name": "Gemma 4 E2B (Tensor G5)",
           "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
           "bytes": 3113545589,
-          "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
           "runtime": "litert-lm",
           "backend": "npu",
           "soc-models": [
             "Tensor G5"
           ],
-          "max-context-tokens": 4096,
+          "max-context-tokens": 32000,
           "max-output-tokens": 128
         },
         {
@@ -35,10 +34,9 @@
           "name": "FunctionGemma Mobile Actions",
           "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
           "bytes": 284426240,
-          "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
           "runtime": "litert-lm",
           "backend": "cpu",
-          "max-context-tokens": 1280,
+          "max-context-tokens": 1024,
           "max-output-tokens": 64
         }
       ]
@@ -56,20 +54,12 @@
       "priv": {
         "api-key": "****"
       }
-    },
-    "openrouter": {
-      "base-url": "https://openrouter.ai/api/v1",
-      "priv": {
-        "api-key": "****"
-      }
     }
   },
-  "priv-hue-address": "http://192.168.1.199",
-  "priv-hue-key": "****",
   "trusted-devices": {
     "agent@1.0": "_gnGt6YmIBHbKVxcGwJqms96bdsvAxZRUncrkpf1V48",
-    "inference@1.0": "T3F6f378K38nrP0fI0lFrbkEF4FmZNIe7m5EAUC6r5c",
-    "ouroboros@1.0": "59rg6wgbWB5Lc5yXeKF_rFPj3urDJDWBW9gEQf_05I0",
+    "inference@1.0": "0U1bbPhfG2B-YSmQfyOvebaH7gSty927hPC9Ud7JLxg",
+    "ouroboros@1.0": "E0VAejUUpBs7nkd98bu40f7EWy7DGte6CVG61IJ7ueE",
     "ouroboros-space@1.0": "z7Gzo9Ec9rky0Y5CfnF-1HDtBw_FZz7a-RAKtTd_-4c",
     "weavemail@1.0": "QceJsJMNe4GsKNWNf6GeEheJwbrwcvU85462dJKplb0",
     "tunnel@1.0": "SVKRgrshzPceeBdnknJNvR-m2zQ0mFYJvjMx0rSscW0",
@@ -108,9 +98,6 @@
       }
     ],
     "request": [
-      {
-        "device": "name@1.0"
-      },
       {
         "device": "manifest@1.0"
       },

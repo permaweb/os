@@ -16,7 +16,7 @@ Complete redacted operator overlays live in `../../sample-configs/`. Import a
 private copy through the app's **Next boot config** picker; the overlay is
 merged with this application-agnostic base config and measured at the next
 boot. `scripts/prepare-deployment-config.py` can populate an ignored private
-copy from an existing Ouroboros provider-key JSON without printing secrets.
+copy from a provider-credentials JSON file without printing secrets.
 
 Android stages the package from `devices/common/` plus the Android-specific
 overlay in `devices/android/`. The shared measurement and zone devices are
@@ -37,15 +37,18 @@ emulator has no mobile NPU, so its acceptance test proves real model execution
 on CPU without claiming hardware-accelerator evidence.
 
 Models are not APK assets. Measured provider entries identify them by
-43-character Arweave `model-id`, exact byte length, runtime, base64url SHA-256,
-and backend. The app materializes network data into an ID-derived private path;
-host filenames and URLs are not configuration. GGUF entries are ARM64 CPU-only.
+43-character Arweave `model-id`, exact byte length, runtime, and backend.
+HyperBEAM resolves every ID through `hb_cache` using the remote-indexed Arweave
+store before the legacy gateway fallbacks, then passes an ID-derived private
+path to Android. The Android broker has no model download client; host filenames,
+URLs, and parallel model digests are not configuration. GGUF entries are ARM64
+CPU-only.
 The shipped `local-andee` provider defaults to the Tensor G5 Gemma 4 E2B
 manifest `eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo` and also exposes the
 FunctionGemma mobile-actions manifest
 `wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0` for CPU tool-use checks.
 Run the end-to-end emulator proof against the measured catalogue and normal
-network materializer:
+AO-Core materializer:
 
 ```sh
 ADB_SERIAL=emulator-NNNN \
@@ -66,7 +69,10 @@ operator-provisioned artifacts; they are not vendored by this repository.
 The Tensor G5 E2B entry uses a 4,096-token context so a normal Ouroboros agent
 prompt, tool catalogue, and reply budget fit without truncating the request.
 The mobile-actions FunctionGemma artifact remains a small specialized router;
-it is not a replacement for the general Ouroboros agent model.
+its compiled state is limited to 1,024 tokens. The provider preserves the
+latest turn and tool contract and, when necessary, reports that it compacted
+older system context in `andee-execution.context-compacted`. It is not a
+replacement for the general Ouroboros agent model.
 LiteRT-LM does not expose effective NPU partition delegation, so initialization
 is readiness evidence, not TPU proof. Pixel 10 Pro Fold acceptance additionally
 requires a witnessed Tensor G5 device trace or hardware counter.
@@ -75,11 +81,11 @@ requires a witnessed Tensor G5 device trace or hardware counter.
 
 The APK preloads `~andock@1.0` and packages its generic local capability. Its
 measured config identifies the default rootfs by a single native Arweave L1
-transaction ID. The APK retains the source-pinned sparse and expanded sizes
-and SHA-256 values, downloads exactly that transaction through the configured
-gateway, verifies it, expands it into app-private storage, verifies the full
-ext4 digest, and atomically installs a read-only template. No rootfs bytes are
-packaged in the APK.
+transaction ID. HyperBEAM resolves that message through the same AO-Core cache
+stack and passes its app-private sparse-image path to Android. Android validates
+the exact ID, path, and source-pinned size, expands it, verifies the resulting
+ext4 digest, and atomically installs a read-only template. It has no rootfs
+network client. No rootfs bytes are packaged in the APK.
 
 Each member receives a complete writable sparse ext4 image copied from that
 measured, deterministic Ubuntu 24.04 template. An Android isolated service

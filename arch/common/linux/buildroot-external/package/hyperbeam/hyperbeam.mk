@@ -28,10 +28,10 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= fcdf5867686c64a8abe79e04e10f3590fbd62b7f
+HYPERBEAM_VERSION ?= 6e6a9bc9543ea4954ab41e8d2e7321b4b39f00b0
 # Reproducible timestamp for the pinned source commit. Update it together with
 # HYPERBEAM_VERSION (`git show -s --format=%ct <version>`).
-HYPERBEAM_SOURCE_DATE_EPOCH ?= 1784211633
+HYPERBEAM_SOURCE_DATE_EPOCH ?= 1787372613
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES

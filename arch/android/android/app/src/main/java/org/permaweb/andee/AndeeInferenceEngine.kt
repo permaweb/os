@@ -34,6 +34,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
+private const val INPUT_ESTIMATE_BYTES_PER_TOKEN = 2
+private const val INPUT_OVERHEAD_TOKENS = 96
+
 /** Serialized LiteRT-LM engine owner with bounded generation and explicit backend requests. */
 @OptIn(ExperimentalApi::class)
 internal class AndeeInferenceEngine(private val context: Context) : AutoCloseable {
@@ -106,7 +109,6 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
     ): JSONObject = generationLock.withLock {
         if (closed.get()) throw InferenceFailure(503, "inference-runtime-stopped")
         if (expired.get()) throw InferenceFailure(408, "generation-timed-out")
-        val input = conversationInput(payload)
         rejectUnsupportedFeatures(payload)
         val rawTools = payload.optJSONArray("tools")
         if (payload.has("tools") && rawTools == null) {
@@ -123,6 +125,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
             .map(ToolBinding::provider)
         val sampler = sampler(payload)
         val maxOutputTokens = outputTokens(payload, model)
+        val input = conversationInput(payload, rawTools, model, maxOutputTokens)
         val config = ConversationConfig(
             initialMessages = requiredToolInstruction(choice)?.let { listOf(Message.system(it)) }
                 .orEmpty() + input.initialMessages,
@@ -158,7 +161,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
                 response.toolCalls.map(ToolCall::name),
                 truncated = finishReason == "length",
             )
-            completionResponse(model, backendName, response, finishReason)
+            completionResponse(model, backendName, response, finishReason, input.compacted)
         } catch (failure: Throwable) {
             if (expired.get()) throw InferenceFailure(408, "generation-timed-out")
             if (failure is LiteRtLmJniException) {
@@ -175,7 +178,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
 
     fun isInitialized(model: AndeeInferenceModel, backendName: String): Boolean =
         !closed.get() && activeKey == EngineKey(
-            model.sha256,
+            model.modelId,
             backendName,
             model.maxContextTokens,
         )
@@ -276,7 +279,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
 
     private fun engine(model: AndeeInferenceModel, backendName: String): Engine {
         if (closed.get()) throw InferenceFailure(503, "inference-runtime-stopped")
-        val key = EngineKey(model.sha256, backendName, model.maxContextTokens)
+        val key = EngineKey(model.modelId, backendName, model.maxContextTokens)
         if (activeKey == key) return checkNotNull(activeEngine)
         releaseEngine()
         val backend = when (backendName) {
@@ -324,7 +327,12 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         return created
     }
 
-    private fun conversationInput(payload: JSONObject): ConversationInput {
+    private fun conversationInput(
+        payload: JSONObject,
+        rawTools: JSONArray?,
+        model: AndeeInferenceModel,
+        maxOutputTokens: Int,
+    ): ConversationInput {
         val raw = payload.optJSONArray("messages")
         if (payload.has("messages") && raw == null) {
             throw InferenceFailure(400, "messages-must-be-an-array")
@@ -333,15 +341,25 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
             val prompt = payload.opt("prompt") as? String
                 ?: throw InferenceFailure(400, "messages-or-prompt-is-required")
             checkTextSize(prompt)
-            return ConversationInput(emptyList(), Message.user(prompt))
+            ensureLatestTurnFits(prompt, rawTools, model, maxOutputTokens)
+            return ConversationInput(emptyList(), Message.user(prompt), false)
         }
         if (raw.length() == 0) throw InferenceFailure(400, "messages-must-not-be-empty")
         if (raw.length() > AndeeInferencePolicy.MAX_MESSAGES) {
             throw InferenceFailure(413, "too-many-messages")
         }
+        val fitted = fitSystemMessages(
+            raw,
+            rawTools,
+            model.maxContextTokens,
+            maxOutputTokens,
+        )
+        if (fitted.compacted) {
+            Log.i(TAG, "compacted system context model=${model.id}")
+        }
         val toolNames = mutableMapOf<String, String>()
-        val parsed = (0 until raw.length()).map { index ->
-            val item = raw.getJSONObject(index)
+        val parsed = (0 until fitted.messages.length()).map { index ->
+            val item = fitted.messages.getJSONObject(index)
             val role = item.getString("role")
             val text = textContent(item.opt("content"))
             checkTextSize(text)
@@ -384,7 +402,23 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         if (lastRole !in setOf("user", "tool")) {
             throw InferenceFailure(400, "conversation-must-end-with-user-or-tool")
         }
-        return ConversationInput(parsed.dropLast(1).map { it.second }, turn)
+        return ConversationInput(parsed.dropLast(1).map { it.second }, turn, fitted.compacted)
+    }
+
+    private fun ensureLatestTurnFits(
+        prompt: String,
+        tools: JSONArray?,
+        model: AndeeInferenceModel,
+        maxOutputTokens: Int,
+    ) {
+        val messages = JSONArray().put(
+            JSONObject().put("role", "user").put("content", prompt),
+        )
+        val estimatedBytes = estimatedConversationBytes(messages, tools)
+        val budgetBytes = inputBudgetBytes(model.maxContextTokens, maxOutputTokens)
+        if (estimatedBytes > budgetBytes) {
+            throw estimatedContextFailure(estimatedBytes, model.maxContextTokens)
+        }
     }
 
     private fun tools(raw: JSONArray?): List<ToolBinding> {
@@ -517,6 +551,7 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
         backend: String,
         response: Message,
         finishReason: String,
+        contextCompacted: Boolean,
     ): JSONObject {
         val toolCalls = JSONArray()
         response.toolCalls.forEachIndexed { index, call ->
@@ -559,9 +594,9 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
                     .put("requested-backend", backend)
                     .put("runtime", "litert-lm")
                     .put("runtime-initialized", true)
+                    .put("context-compacted", contextCompacted)
                     .put("npu-execution-verified", false)
                     .put("model-id", model.modelId)
-                    .put("model-sha256", model.sha256)
                     .put("soc-model", currentSocModel()),
             )
     }
@@ -631,13 +666,14 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
     }
 
     private data class EngineKey(
-        val modelSha256: String,
+        val modelId: String,
         val backend: String,
         val maxContextTokens: Int,
     )
     private data class ConversationInput(
         val initialMessages: List<Message>,
         val turn: Message,
+        val compacted: Boolean,
     )
     private data class ToolBinding(val name: String, val provider: ToolProvider)
 
@@ -652,19 +688,177 @@ internal class AndeeInferenceEngine(private val context: Context) : AutoCloseabl
     }
 }
 
+internal data class FittedMessages(val messages: JSONArray, val compacted: Boolean)
+
+internal fun fitSystemMessages(
+    messages: JSONArray,
+    tools: JSONArray?,
+    maxContextTokens: Int,
+    maxOutputTokens: Int,
+): FittedMessages {
+    val budgetBytes = inputBudgetBytes(maxContextTokens, maxOutputTokens)
+    val originalBytes = estimatedConversationBytes(messages, tools)
+    if (originalBytes <= budgetBytes) return FittedMessages(messages, false)
+
+    val systemIndices = (0 until messages.length()).filter { index ->
+        messages.getJSONObject(index).optString("role") == "system"
+    }
+    if (systemIndices.isEmpty()) {
+        throw estimatedContextFailure(originalBytes, maxContextTokens)
+    }
+    val systemTexts = systemIndices.map { index ->
+        contextText(messages.getJSONObject(index).opt("content"))
+    }
+    val withoutSystemText = compactSystemMessages(messages, systemIndices, systemTexts, 0)
+    val requiredBytes = estimatedConversationBytes(withoutSystemText, tools)
+    if (requiredBytes > budgetBytes) {
+        throw estimatedContextFailure(requiredBytes, maxContextTokens)
+    }
+
+    var low = 0
+    var high = systemTexts.sumOf { it.toByteArray(Charsets.UTF_8).size }
+    var best = withoutSystemText
+    while (low <= high) {
+        val retainedBytes = low + (high - low) / 2
+        val candidate = compactSystemMessages(
+            messages,
+            systemIndices,
+            systemTexts,
+            retainedBytes,
+        )
+        if (estimatedConversationBytes(candidate, tools) <= budgetBytes) {
+            best = candidate
+            low = retainedBytes + 1
+        } else {
+            high = retainedBytes - 1
+        }
+    }
+    return FittedMessages(best, true)
+}
+
+private fun contextText(value: Any?): String = when (value) {
+    null, JSONObject.NULL -> ""
+    is String -> value
+    is JSONArray -> (0 until value.length()).joinToString("") { index ->
+        val part = value.getJSONObject(index)
+        if (part.optString("type") != "text") {
+            throw InferenceFailure(400, "unsupported-content-type")
+        }
+        part.optString("text")
+    }
+    else -> throw InferenceFailure(400, "unsupported-message-content")
+}
+
+private fun inputBudgetBytes(maxContextTokens: Int, maxOutputTokens: Int): Int =
+    (maxContextTokens - maxOutputTokens - INPUT_OVERHEAD_TOKENS)
+        .coerceAtLeast(1) * INPUT_ESTIMATE_BYTES_PER_TOKEN
+
+private fun estimatedConversationBytes(messages: JSONArray, tools: JSONArray?): Int =
+    messages.toString().toByteArray(Charsets.UTF_8).size +
+        (tools?.toString()?.toByteArray(Charsets.UTF_8)?.size ?: 0) +
+        INPUT_OVERHEAD_TOKENS * INPUT_ESTIMATE_BYTES_PER_TOKEN
+
+private fun compactSystemMessages(
+    messages: JSONArray,
+    indices: List<Int>,
+    texts: List<String>,
+    retainedBytes: Int,
+): JSONArray {
+    val result = JSONArray(messages.toString())
+    val totalBytes = texts.sumOf { it.toByteArray(Charsets.UTF_8).size }.coerceAtLeast(1)
+    var remaining = retainedBytes
+    texts.forEachIndexed { position, text ->
+        val originalBytes = text.toByteArray(Charsets.UTF_8).size
+        val allocation = if (position == texts.lastIndex) {
+            remaining
+        } else {
+            minOf(originalBytes, retainedBytes * originalBytes / totalBytes)
+        }
+        remaining -= allocation
+        result.getJSONObject(indices[position]).put(
+            "content",
+            truncateUtf8Middle(text, allocation),
+        )
+    }
+    return result
+}
+
+internal fun truncateUtf8Middle(value: String, maxBytes: Int): String {
+    if (maxBytes <= 0) return ""
+    if (value.toByteArray(Charsets.UTF_8).size <= maxBytes) return value
+    val marker = "\n[context elided]\n"
+    val markerBytes = marker.toByteArray(Charsets.UTF_8).size
+    if (maxBytes <= markerBytes) return utf8Suffix(value, maxBytes)
+    val contentBytes = maxBytes - markerBytes
+    return utf8Prefix(value, contentBytes / 2) + marker +
+        utf8Suffix(value, contentBytes - contentBytes / 2)
+}
+
+private fun utf8Prefix(value: String, maxBytes: Int): String {
+    var end = 0
+    var bytes = 0
+    while (end < value.length) {
+        val codePoint = value.codePointAt(end)
+        val width = String(Character.toChars(codePoint)).toByteArray(Charsets.UTF_8).size
+        if (bytes + width > maxBytes) break
+        bytes += width
+        end += Character.charCount(codePoint)
+    }
+    return value.substring(0, end)
+}
+
+private fun utf8Suffix(value: String, maxBytes: Int): String {
+    var start = value.length
+    var bytes = 0
+    while (start > 0) {
+        val codePoint = value.codePointBefore(start)
+        val width = String(Character.toChars(codePoint)).toByteArray(Charsets.UTF_8).size
+        if (bytes + width > maxBytes) break
+        bytes += width
+        start -= Character.charCount(codePoint)
+    }
+    return value.substring(start)
+}
+
+private fun estimatedContextFailure(
+    estimatedBytes: Int,
+    maxContextTokens: Int,
+): InferenceFailure = InferenceFailure(
+    400,
+    "context-window-exceeded",
+    mapOf(
+        "estimated-input-tokens" to
+            (estimatedBytes + INPUT_ESTIMATE_BYTES_PER_TOKEN - 1) /
+                INPUT_ESTIMATE_BYTES_PER_TOKEN,
+        "max-context-tokens" to maxContextTokens,
+    ),
+)
+
 internal fun liteRtInferenceFailure(message: String?): InferenceFailure? {
-    val match = message?.let(LITE_RT_INPUT_TOO_LONG::find) ?: return null
+    val exact = message?.let(LITE_RT_INPUT_TOO_LONG::find)
+    if (exact != null) {
+        return InferenceFailure(
+            400,
+            "context-window-exceeded",
+            mapOf(
+                "input-tokens" to exact.groupValues[1].toInt(),
+                "max-context-tokens" to exact.groupValues[2].toInt(),
+            ),
+        )
+    }
+    val capacity = message?.let(LITE_RT_PREFILL_TOO_LONG::find) ?: return null
     return InferenceFailure(
         400,
         "context-window-exceeded",
-        mapOf(
-            "input-tokens" to match.groupValues[1].toInt(),
-            "max-context-tokens" to match.groupValues[2].toInt(),
-        ),
+        mapOf("max-context-tokens" to capacity.groupValues[1].toInt()),
     )
 }
 
 private val LITE_RT_INPUT_TOO_LONG = Regex(
     "Input token ids are too long\\. Exceeding the maximum number of tokens allowed: " +
         "([0-9]+) >= ([0-9]+)",
+)
+
+private val LITE_RT_PREFILL_TOO_LONG = Regex(
+    "Prefill input length exceeds available state entries \\(remaining capacity: ([0-9]+)\\)",
 )

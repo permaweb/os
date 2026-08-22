@@ -240,11 +240,13 @@ in the APK or runtime ZIP.
 
 Each model MUST be selected by an id allowlisted beneath its provider in the
 effective measured node configuration. The catalogue MUST bind that name to a
-43-character Arweave `model-id`, exact byte length, base64url SHA-256 digest,
-measured backend, and resource bounds. The Android runtime MAY derive an
-app-private materialization path from the network id. Requests and public
-configuration MUST NOT select filesystem paths, URLs, or unmeasured model
-files.
+43-character Arweave `model-id`, exact byte length, measured backend, and
+resource bounds. HyperBEAM MUST resolve the ID through `hb_cache`; the Android
+runtime MUST NOT implement an independent model network client. Android MAY
+accept an app-private materialization path only when it is deterministically
+derived from and accompanied by the measured network ID. Requests and public
+configuration MUST NOT select filesystem paths, URLs, parallel digest trust
+fields, or unmeasured model files.
 
 The backend MUST be selected by effective measured configuration and MUST NOT
 be request-overridable. An NPU model MUST declare an exact supported-vendor SoC
@@ -266,7 +268,7 @@ frame sizes MUST be bounded. Timeout and service shutdown MUST NOT wait
 unboundedly for vendor cancellation; a non-cooperative native runtime MUST
 trigger an explicit AndEE app-process reset. Health MUST
 distinguish compatible configuration from successful engine initialization.
-Completion evidence MUST state the requested backend, model digest, and SoC,
+Completion evidence MUST state the requested backend, model ID, and SoC,
 and MUST NOT claim effective NPU execution without independent evidence.
 
 Mutable member images MUST NOT enter the boot measurement. No additional

@@ -1,6 +1,7 @@
 {
   "render-index-page": false,
   "initialized": "permanent",
+  "idle-timeout": 660000,
   "measurement-device": "andee@1.0",
   "andock-default-image": "rd2ybWz0XPr29kSWL2OYoTLmz7IhemE51XlsRseOSJk",
   "inference-providers": {
@@ -13,7 +14,6 @@
           "name": "Gemma 4 E2B (Tensor G5)",
           "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
           "bytes": 3113545589,
-          "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
           "runtime": "litert-lm",
           "backend": "npu",
           "soc-models": [
@@ -27,10 +27,9 @@
           "name": "FunctionGemma Mobile Actions",
           "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
           "bytes": 284426240,
-          "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
           "runtime": "litert-lm",
           "backend": "cpu",
-          "max-context-tokens": 1280,
+          "max-context-tokens": 1024,
           "max-output-tokens": 64
         }
       ]
@@ -43,6 +42,25 @@
       "capacity": 8589934592,
       "batch-size": 100,
       "ao-types": "store-module=\"atom\", capacity=\"integer\", batch-size=\"integer\""
+    },
+    {
+      "store-module": "hb_store_arweave",
+      "ao-types": "store-module=\"atom\"",
+      "index-store": [
+        {
+          "store-module": "hb_store_volatile",
+          "name": "andee-volatile-arweave-index-store",
+          "ao-types": "store-module=\"atom\""
+        }
+      ],
+      "local-store": [
+        {
+          "store-module": "hb_store_volatile",
+          "name": "andee-volatile-gateway-cache",
+          "ao-types": "store-module=\"atom\""
+        }
+      ],
+      "remote-index": true
     },
     {
       "store-module": "hb_store_gateway",
@@ -80,7 +98,15 @@
         "name": "andee-volatile-arweave-index-store",
         "ao-types": "store-module=\"atom\""
       }
-    ]
+    ],
+    "local-store": [
+      {
+        "store-module": "hb_store_volatile",
+        "name": "andee-volatile-gateway-cache",
+        "ao-types": "store-module=\"atom\""
+      }
+    ],
+    "remote-index": true
   },
   "priv-store": [
     {

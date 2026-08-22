@@ -23,6 +23,9 @@ BOOT_CONFIG_STORE = (
     / "andee"
     / "AndeeBootConfigStore.kt"
 )
+ANDEE_SOURCE = BOOT_CONFIG_STORE.parent
+INFERENCE_MODELS = ANDEE_SOURCE / "AndeeInferenceModels.kt"
+ANDOCK_MATERIALIZER = ANDEE_SOURCE / "AndeeAndockImageMaterializer.kt"
 
 
 def fail(message: str) -> None:
@@ -87,6 +90,25 @@ def is_runtime_store(value: Any) -> bool:
     return value == [
         persistent,
         {
+            "store-module": "hb_store_arweave",
+            "ao-types": 'store-module="atom"',
+            "index-store": [
+                {
+                    "store-module": "hb_store_volatile",
+                    "name": "andee-volatile-arweave-index-store",
+                    "ao-types": 'store-module="atom"',
+                }
+            ],
+            "local-store": [
+                {
+                    "store-module": "hb_store_volatile",
+                    "name": "andee-volatile-gateway-cache",
+                    "ao-types": 'store-module="atom"',
+                }
+            ],
+            "remote-index": True,
+        },
+        {
             "store-module": "hb_store_gateway",
             "access": ["read"],
             "ao-types": 'store-module="atom"',
@@ -125,6 +147,14 @@ def is_volatile_arweave_index_store(value: Any) -> bool:
                 "ao-types": 'store-module="atom"',
             }
         ],
+        "local-store": [
+            {
+                "store-module": "hb_store_volatile",
+                "name": "andee-volatile-gateway-cache",
+                "ao-types": 'store-module="atom"',
+            }
+        ],
+        "remote-index": True,
     }
 
 
@@ -137,6 +167,8 @@ def main() -> int:
         fail("first on.start hook must be measurement@1.0 boot POST over hook-body")
     if config.get("measurement-device") != "andee@1.0":
         fail("measurement-device must be andee@1.0")
+    if config.get("idle-timeout") != 660000:
+        fail("HTTP idle timeout must exceed the ten-minute inference deadline")
     andock_image = config.get("andock-default-image")
     if not isinstance(andock_image, str) or len(andock_image) != 43:
         fail("andock-default-image must be one native Arweave transaction ID")
@@ -154,11 +186,16 @@ def main() -> int:
         "functiongemma-mobile-actions",
     ]:
         fail("base local model catalogue must contain only Gemma 4 and FunctionGemma")
+    if [model.get("max-context-tokens") for model in models] != [4096, 1024]:
+        fail("local model context limits must match their compiled state")
     for model in models:
         if not isinstance(model.get("model-id"), str) or len(model["model-id"]) != 43:
             fail("local inference models must use Arweave model-id values")
-        if "file" in model or "url" in model:
-            fail("local inference models must not expose host file or URL mechanics")
+        if any(key in model for key in ("file", "url", "sha256")):
+            fail(
+                "local inference models must use their Arweave ID without "
+                "parallel path, URL, or digest trust fields"
+            )
     for key in (
         "access-remote-cache-for-client",
         "cache-control",
@@ -182,13 +219,13 @@ def main() -> int:
             fail(f"base config should inherit common HyperBEAM default for {key}")
     if not is_runtime_store(config.get("store")):
         fail(
-            "base config must use persistent transactional app-private storage plus "
-            "volatile-cached gateway reads decoded by the measured preloaded store"
+            "base config must prefer remote-indexed Arweave reads before the "
+            "volatile-cached gateway fallback"
         )
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
     if not is_volatile_arweave_index_store(config.get("arweave-index-store")):
-        fail("base config must use volatile Android Arweave index store")
+        fail("base config must use remote-indexed volatile Android Arweave storage")
     if not is_private_store(config.get("priv-store")):
         fail("base config must use app-private persistent storage")
     store_text = BOOT_CONFIG_STORE.read_text()
@@ -226,6 +263,15 @@ def main() -> int:
     for key in ("priv-key-location", "priv-wallet", "private-key"):
         if f'"{key}"' in store_text:
             fail(f"operator config must preserve normal private option {key}")
+    for source in (INFERENCE_MODELS, ANDOCK_MATERIALIZER):
+        source_text = source.read_text()
+        for token in (
+            "HttpURLConnection",
+            "java.net.URL",
+            'setRequestProperty("Range"',
+        ):
+            if token in source_text:
+                fail(f"{source.name} must not implement artifact downloading ({token})")
     return 0
 
 

@@ -22,6 +22,7 @@ DEVICE_BEAMS = (
     "lib_andock.beam",
     "dev_andee_inference.beam",
     "lib_andee_inference.beam",
+    "lib_andee_materialization.beam",
     "lib_permawebos_bash_session.beam",
     "lib_permawebos_execution.beam",
     "lib_permawebos_execution_tools.beam",
@@ -112,16 +113,19 @@ def inspect_apk_zip_layout(path: Path, archive: zipfile.ZipFile) -> dict[str, in
             raise SystemExit("APK ZIP end record is missing")
         central_directory = struct.unpack_from("<I", tail, eocd + 16)[0]
         payload_end = central_directory
+        signing_block_present = False
         if central_directory >= 24:
             handle.seek(central_directory - 24)
             footer = handle.read(24)
             if footer[8:] == APK_SIGNING_BLOCK_MAGIC:
+                signing_block_present = True
                 block_size = struct.unpack_from("<Q", footer)[0] + 8
                 payload_end -= block_size
                 handle.seek(payload_end)
                 if struct.unpack("<Q", handle.read(8))[0] + 8 != block_size:
                     raise SystemExit("APK signing block sizes do not match")
 
+        alignment_padding = 0
         boundaries = [info.header_offset for info in entries[1:]] + [payload_end]
         for info, next_offset in zip(entries, boundaries):
             handle.seek(info.header_offset)
@@ -141,10 +145,27 @@ def inspect_apk_zip_layout(path: Path, archive: zipfile.ZipFile) -> dict[str, in
             if info.flag_bits & 0x08:
                 allowed_gaps.update({12, 16, 20, 24})
             if gap not in allowed_gaps:
+                # Current Android build-tools align the APK signing block to a
+                # 4 KiB boundary with zero bytes. This is canonical padding,
+                # not an unreachable stale ZIP entry from an in-place rewrite.
+                if (
+                    signing_block_present
+                    and next_offset == payload_end
+                    and 0 < gap < 4096
+                    and payload_end % 4096 == 0
+                ):
+                    handle.seek(entry_end)
+                    if handle.read(gap) == b"\0" * gap:
+                        alignment_padding += gap
+                        continue
                 raise SystemExit(
                     f"APK ZIP contains {gap} unreferenced bytes after {info.filename}"
                 )
-    return {"entry-count": len(entries), "unreferenced-bytes": 0}
+    return {
+        "entry-count": len(entries),
+        "unreferenced-bytes": 0,
+        "signing-block-alignment-padding-bytes": alignment_padding,
+    }
 
 
 def inspect_runtime(archive: zipfile.ZipFile) -> dict[str, object]:

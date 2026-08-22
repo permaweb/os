@@ -58,7 +58,7 @@ completions(Base, Req, Opts) ->
                         Opts
                     ),
                     format_response(
-                        request(Request, ?DEFAULT_TIMEOUT_MS),
+                        request(Request, ?DEFAULT_TIMEOUT_MS, Opts),
                         Req,
                         Opts
                     )
@@ -80,7 +80,8 @@ models(Base, Req, Opts) ->
                 #{ <<"action">> => <<"models">> },
                 provider_id(Base, Req, Opts)
             ),
-            30000
+            30000,
+            Opts
         ),
         Req,
         Opts
@@ -93,7 +94,8 @@ health(Base, Req, Opts) ->
                 #{ <<"action">> => <<"health">> },
                 provider_id(Base, Req, Opts)
             ),
-            30000
+            30000,
+            Opts
         ),
         Req,
         Opts
@@ -205,17 +207,44 @@ provider_metadata_key(<<"ao-types">>) -> true;
 provider_metadata_key('ao-types') -> true;
 provider_metadata_key(_) -> false.
 
-request(Message, Timeout) ->
+request(Message, Timeout, Opts) ->
     case os:getenv(?INFERENCE_SOCKET_ENV) of
         false -> {error, 503, <<"AndEE inference runtime is unavailable">>};
         [] -> {error, 503, <<"AndEE inference runtime is unavailable">>};
         SocketPath ->
-            request_socket(
-                SocketPath,
-                Message#{ <<"protocol">> => ?PROTOCOL },
-                Timeout
-            )
+            case materialize_model(Message, Opts) of
+                {ok, Prepared} ->
+                    request_socket(
+                        SocketPath,
+                        Prepared#{ <<"protocol">> => ?PROTOCOL },
+                        Timeout
+                    );
+                {error, Reason} ->
+                    {error, 503, materialization_error(Reason)}
+            end
     end.
+
+%% @doc Resolve model bytes through AO-Core before invoking Android inference.
+materialize_model(#{ <<"action">> := <<"completions">> } = Message, Opts) ->
+    Provider = maps:get(<<"provider">>, Message, undefined),
+    Model = maps:get(<<"model">>, Message, undefined),
+    case lib_andee_materialization:model(Provider, Model, Opts) of
+        {ok, Materialized} ->
+            {ok, Message#{
+                <<"model-id">> => maps:get(<<"id">>, Materialized),
+                <<"model-path">> => maps:get(<<"path">>, Materialized),
+                <<"model-bytes">> => maps:get(<<"bytes">>, Materialized)
+            }};
+        Error -> Error
+    end;
+materialize_model(Message, _Opts) ->
+    {ok, Message}.
+
+%% @doc Format internal materialization reasons as hyphenated errors.
+materialization_error(Reason) when is_atom(Reason) ->
+    binary:replace(atom_to_binary(Reason), <<"_">>, <<"-">>, [global]);
+materialization_error(Reason) when is_binary(Reason) -> Reason;
+materialization_error(_) -> <<"inference-model-materialization-failed">>.
 
 request_socket(SocketPath, Message, Timeout) ->
     try

@@ -80,7 +80,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
         val runtime = activeRuntime ?: return false
         return !closed.get() &&
             backendName == "cpu" &&
-            runtime.key == LlamaKey(model.sha256, model.maxContextTokens) &&
+            runtime.key == LlamaKey(model.modelId, model.maxContextTokens) &&
             runtime.process.isAlive &&
             runtime.socket.exists()
     }
@@ -134,7 +134,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
     }
 
     private fun runtime(model: AndeeInferenceModel): LlamaRuntime {
-        val key = LlamaKey(model.sha256, model.maxContextTokens)
+        val key = LlamaKey(model.modelId, model.maxContextTokens)
         activeRuntime?.takeIf { it.key == key && it.process.isAlive }?.let { return it }
         releaseRuntime()
         val nativeRoot = File(context.applicationInfo.nativeLibraryDir)
@@ -377,7 +377,6 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
                 .put("runtime-initialized", true)
                 .put("npu-execution-verified", false)
                 .put("model-id", model.modelId)
-                .put("model-sha256", model.sha256)
                 .put("model-bytes", model.materializedFile.length())
                 .put("physical-memory-bytes", androidPhysicalMemoryBytes())
                 .put("reserved-memory-bytes", LLAMA_CPP_MEMORY_HEADROOM_BYTES)
@@ -558,7 +557,7 @@ internal class AndeeLlamaCppEngine(private val context: Context) : AutoCloseable
         }
     }
 
-    private data class LlamaKey(val modelSha256: String, val maxContextTokens: Int)
+    private data class LlamaKey(val modelId: String, val maxContextTokens: Int)
     private data class LlamaRuntime(val key: LlamaKey, val process: Process, val socket: File)
     private data class PreparedRequest(
         val body: JSONObject,
