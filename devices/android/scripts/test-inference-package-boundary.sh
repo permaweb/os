@@ -18,12 +18,13 @@ fi
 
 ENTRIES="$(unzip -Z1 "$ARCHIVE")"
 PREFIX="$(basename "$ARCHIVE" .beam-archive.zip)"
-if [ "$(wc -l <<<"$ENTRIES" | tr -d ' ')" -ne 2 ]; then
+if [ "$(wc -l <<<"$ENTRIES" | tr -d ' ')" -ne 3 ]; then
     echo "andee-inference@1.0 contains an unexpected number of archive entries." >&2
     printf '%s\n' "$ENTRIES" >&2
     exit 1
 fi
-for expected in "ebin/$PREFIX.beam" "ebin/${PREFIX}__andee_inference.beam"; do
+for expected in "ebin/$PREFIX.beam" "ebin/${PREFIX}__andee_inference.beam" \
+        "ebin/${PREFIX}__andee_materialization.beam"; do
     if ! grep -qxF "$expected" <<<"$ENTRIES"; then
         echo "andee-inference@1.0 is missing $expected." >&2
         exit 1

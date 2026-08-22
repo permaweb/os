@@ -369,4 +369,29 @@ load_config_honors_json_ao_types_test() ->
     ?assertNot(maps:is_key(<<"ao-types">>, Normalized)),
     ?assertEqual(local_confirmation, maps:get(<<"scheduling-mode">>, Normalized)).
 
+remote_indexed_arweave_store_decoding_test() ->
+    [Store] = decode_json_config(hb_json:decode(<<"""
+        [{
+          "store-module": "hb_store_arweave",
+          "ao-types": "store-module=\"atom\"",
+          "index-store": [{
+            "store-module": "hb_store_volatile",
+            "name": "index",
+            "ao-types": "store-module=\"atom\""
+          }],
+          "local-store": [{
+            "store-module": "hb_store_fs",
+            "name": "/tmp/cache",
+            "ao-types": "store-module=\"atom\""
+          }],
+          "remote-index": true
+        }]
+    """>>)),
+    ?assertEqual(hb_store_arweave, maps:get(<<"store-module">>, Store)),
+    ?assertEqual(true, maps:get(<<"remote-index">>, Store)),
+    [Index] = maps:get(<<"index-store">>, Store),
+    ?assertEqual(hb_store_volatile, maps:get(<<"store-module">>, Index)),
+    [Local] = maps:get(<<"local-store">>, Store),
+    ?assertEqual(hb_store_fs, maps:get(<<"store-module">>, Local)).
+
 -endif.

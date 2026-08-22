@@ -81,7 +81,9 @@ internal class AndeeInferenceManager(
                     val selected = models.resolve(
                         provider,
                         request.optString("model"),
-                        deadline,
+                        request.getString("model-id"),
+                        request.getString("model-path"),
+                        request.getLong("model-bytes"),
                     )
                     success(
                         when (selected.runtime) {

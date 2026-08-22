@@ -32,7 +32,10 @@ internal class AndeeExecutionStorage(
         members.listFiles { file -> file.name.startsWith('.') && file.name.endsWith(".tmp") }
             .orEmpty()
             .forEach { require(it.delete()) { "failed to remove incomplete member image" } }
-        materializer.start()
+    }
+
+    fun ensureTemplate(imageId: String, imagePath: String, imageBytes: Long) {
+        materializer.ensure(imageId, imagePath, imageBytes)
     }
 
     fun open(memberId: String): ParcelFileDescriptor {

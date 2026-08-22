@@ -11,10 +11,14 @@ object AndeePaths {
         File(context.noBackupFilesDir, "node-identity/hyperbeam-key.json")
     fun executionStateRoot(context: Context): File =
         File(context.noBackupFilesDir, "execution-state")
+    fun andockImagesRoot(context: Context): File =
+        File(executionStateRoot(context), "sources")
     fun executionSocketFile(context: Context): File =
         File(runDir(context), "andee-execution.sock")
     fun inferenceModelsRoot(context: Context): File =
         File(context.noBackupFilesDir, "inference-models")
+    fun artifactCacheRoot(context: Context): File =
+        File(context.noBackupFilesDir, "artifact-cache")
     fun inferenceCacheRoot(context: Context): File =
         File(context.noBackupFilesDir, "inference-cache")
     fun inferenceSocketFile(context: Context): File =

@@ -2,16 +2,9 @@ package org.permaweb.andee
 
 import android.content.Context
 import android.os.Build
-import android.os.SystemClock
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.OutputStream
-import java.net.HttpURLConnection
-import java.net.URI
-import java.net.URL
-import java.security.MessageDigest
 import java.util.Locale
 
 internal data class AndeeInferenceModel(
@@ -20,7 +13,6 @@ internal data class AndeeInferenceModel(
     val modelId: String,
     val materializedFile: File,
     val bytes: Long,
-    val sha256: String,
     val runtime: String,
     val backend: String,
     val socModels: Set<String>,
@@ -34,47 +26,34 @@ private data class AndeeInferenceProvider(
     val models: List<AndeeInferenceModel>,
 )
 
-/** Resolves only providers and models in the measured effective boot config. */
+/** Resolves only providers, models, and BEAM-materialized paths in measured config. */
 internal class AndeeInferenceModels(
     private val context: Context,
     configFile: File,
 ) {
-    private val root = readConfig(configFile)
-    private val materializer = AndeeModelMaterializer(
-        AndeePaths.inferenceModelsRoot(context),
-        gateway(root),
-    )
-    private val providers = parseProviders(root)
-    private val verification = providers
-        .flatMap(AndeeInferenceProvider::models)
-        .associateWith { materializer.verify(it) }
-        .toMutableMap()
+    private val providers = parseProviders(readConfig(configFile))
 
     fun resolve(
         providerId: String?,
         requestedId: String?,
-        deadlineMillis: Long,
+        materializedId: String,
+        materializedPath: String,
+        materializedBytes: Long,
     ): AndeeInferenceModel {
-        val provider = provider(providerId)
-        val id = requestedId
-            ?.removePrefix("${provider.id}/")
-            ?.takeIf(String::isNotBlank)
-            ?: provider.defaultModel
-        val model = provider.models.singleOrNull { it.id == id }
-            ?: throw InferenceFailure(
-                404,
-                "unknown-model",
-                mapOf("provider" to provider.id, "model" to id),
-            )
+        val model = select(providerId, requestedId)
         validateRuntime(model)
-        val issue = materializer.ensure(model, deadlineMillis)
-        verification[model] = issue
+        val issue = validateMaterialization(
+            model,
+            materializedId,
+            materializedPath,
+            materializedBytes,
+        )
         issue?.let { reason ->
             throw InferenceFailure(
-                if (reason == "generation-timed-out") 408 else 503,
+                503,
                 reason,
                 mapOf(
-                    "provider" to provider.id,
+                    "provider" to model.providerId,
                     "model" to model.id,
                     "model-id" to model.modelId,
                 ),
@@ -99,8 +78,7 @@ internal class AndeeInferenceModels(
                     )
                     .put("andee-backend", model.backend)
                     .put("andee-runtime", model.runtime)
-                    .put("andee-model-id", model.modelId)
-                    .put("andee-model-sha256", model.sha256),
+                    .put("andee-model-id", model.modelId),
             )
         }
         return JSONObject().put("object", "list").put("data", data)
@@ -116,7 +94,7 @@ internal class AndeeInferenceModels(
         var ready = 0
         provider.models.forEach { model ->
             val runtimeIssue = runtimeIssue(model)
-            val materializationIssue = verification.getValue(model)
+            val materializationIssue = verifyMaterialized(model)
             val issue = runtimeIssue ?: materializationIssue
             val modelReady = issue == null && initialized(model)
             if (runtimeIssue == null) compatible += 1
@@ -125,7 +103,6 @@ internal class AndeeInferenceModels(
                 JSONObject()
                     .put("id", model.id)
                     .put("model-id", model.modelId)
-                    .put("sha256", model.sha256)
                     .put("bytes", model.bytes)
                     .put("runtime", model.runtime)
                     .put("backend", model.backend)
@@ -152,6 +129,20 @@ internal class AndeeInferenceModels(
             .put("models", models)
     }
 
+    private fun select(providerId: String?, requestedId: String?): AndeeInferenceModel {
+        val provider = provider(providerId)
+        val id = requestedId
+            ?.removePrefix("${provider.id}/")
+            ?.takeIf(String::isNotBlank)
+            ?: provider.defaultModel
+        return provider.models.singleOrNull { it.id == id }
+            ?: throw InferenceFailure(
+                404,
+                "unknown-model",
+                mapOf("provider" to provider.id, "model" to id),
+            )
+    }
+
     private fun provider(requestedId: String?): AndeeInferenceProvider {
         val id = requestedId?.takeIf(String::isNotBlank)
         if (id == null && providers.size != 1) {
@@ -169,23 +160,34 @@ internal class AndeeInferenceModels(
         }
     }
 
+    private fun validateMaterialization(
+        model: AndeeInferenceModel,
+        materializedId: String,
+        materializedPath: String,
+        materializedBytes: Long,
+    ): String? {
+        return validateMaterializedModel(
+            model.modelId,
+            model.materializedFile,
+            model.bytes,
+            materializedId,
+            materializedPath,
+            materializedBytes,
+        )
+    }
+
+    private fun verifyMaterialized(model: AndeeInferenceModel): String? = when {
+        !model.materializedFile.isFile -> "model-not-materialized"
+        model.materializedFile.length() != model.bytes -> "model-byte-length-mismatch"
+        !model.materializedFile.canRead() -> "model-is-not-readable"
+        else -> null
+    }
+
     private fun readConfig(configFile: File): JSONObject {
         require(configFile.isFile) {
             "missing effective config: ${configFile.absolutePath}"
         }
         return JSONObject(configFile.readText(Charsets.UTF_8))
-    }
-
-    private fun gateway(root: JSONObject): String {
-        val value = root.optString("gateway", DEFAULT_GATEWAY).trimEnd('/')
-        val uri = URI(value)
-        require(uri.scheme in setOf("http", "https") && uri.host != null) {
-            "invalid Arweave gateway"
-        }
-        require(uri.userInfo == null && uri.query == null && uri.fragment == null) {
-            "invalid Arweave gateway"
-        }
-        return value
     }
 
     private fun parseProviders(root: JSONObject): List<AndeeInferenceProvider> {
@@ -260,8 +262,6 @@ internal class AndeeInferenceModels(
         }
         val bytes = item.getLong("bytes")
         require(bytes > 0) { "invalid inference model byte length" }
-        val sha256 = item.getString("sha256")
-        require(decodeDigest(sha256).size == 32) { "invalid inference model digest" }
         val maxContextTokens = item.optInt("max-context-tokens", 1280)
         require(maxContextTokens in 128..32768) { "invalid inference model context limit" }
         val maxOutputTokens = item.optInt("max-output-tokens", 256)
@@ -278,7 +278,6 @@ internal class AndeeInferenceModels(
                 modelId + extension,
             ),
             bytes = bytes,
-            sha256 = sha256,
             runtime = runtime,
             backend = backend,
             socModels = socModels,
@@ -339,16 +338,10 @@ internal class AndeeInferenceModels(
     private fun validIdCharacter(value: Char): Boolean =
         value.isLetterOrDigit() || value in "._-"
 
-    private fun decodeDigest(value: String): ByteArray = Base64.decode(
-        value,
-        Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
-    )
-
     private companion object {
         val ARWEAVE_ID = Regex("^[A-Za-z0-9_-]{43}$")
         val GOOGLE_TENSOR_SOC = Regex("^Tensor G[3-6]$", RegexOption.IGNORE_CASE)
         val RUNTIMES = setOf("litert-lm", "llama-cpp")
-        const val DEFAULT_GATEWAY = "https://arweave.net"
         const val INFERENCE_DEVICE = "andee-inference@1.0"
         const val LLAMA_SERVER = "libandee_llama_server.so"
         const val MAX_MODELS = 64
@@ -356,275 +349,27 @@ internal class AndeeInferenceModels(
     }
 }
 
-private class AndeeModelMaterializer(
-    private val root: File,
-    private val gateway: String,
-) {
-    @Synchronized
-    fun ensure(model: AndeeInferenceModel, deadlineMillis: Long): String? {
-        verify(model, deadlineMillis)?.let { issue ->
-            if (issue in setOf("model-byte-length-mismatch", "model-digest-mismatch")) {
-                model.materializedFile.delete()
-            } else if (issue != "model-not-materialized") {
-                return issue
-            }
-        } ?: return null
-        if (SystemClock.elapsedRealtime() >= deadlineMillis) {
-            return "generation-timed-out"
-        }
-        root.mkdirs()
-        if (root.usableSpace < model.bytes + DOWNLOAD_HEADROOM_BYTES) {
-            return "insufficient-model-storage"
-        }
-        val partial = File(root, "${model.materializedFile.name}.part")
-        partial.delete()
-        val digest = MessageDigest.getInstance("SHA-256")
-        var count = 0L
-        return try {
-            source(model, deadlineMillis).let { source ->
-                partial.outputStream().buffered().use { output ->
-                    source.forEach { chunk ->
-                        count += streamTransaction(
-                            chunk.id,
-                            chunk.bytes,
-                            output,
-                            digest,
-                            deadlineMillis,
-                        )
-                    }
-                }
-            }
-            if (count != model.bytes) throw MaterializationFailure(
-                "model-byte-length-mismatch",
-            )
-            if (base64Url(digest.digest()) != model.sha256) {
-                throw MaterializationFailure("model-digest-mismatch")
-            }
-            if (!partial.renameTo(model.materializedFile)) {
-                throw MaterializationFailure("model-materialization-failed")
-            }
-            model.materializedFile.setReadOnly()
-            null
-        } catch (failure: MaterializationFailure) {
-            failure.reason
-        } catch (_: Exception) {
-            "model-fetch-failed"
-        } finally {
-            if (partial.exists()) partial.delete()
-        }
-    }
-
-    private fun source(
-        model: AndeeInferenceModel,
-        deadlineMillis: Long,
-    ): List<ModelChunk> {
-        val connection = connection(model.modelId, deadlineMillis)
-        return try {
-            val contentType = connection.contentType
-                ?.substringBefore(';')
-                ?.trim()
-                ?.lowercase(Locale.US)
-            if (contentType == MANIFEST_CONTENT_TYPE) {
-                parseManifest(readManifest(connection, deadlineMillis), model)
-            } else {
-                listOf(ModelChunk(model.modelId, model.bytes))
-            }
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun readManifest(
-        connection: HttpURLConnection,
-        deadlineMillis: Long,
-    ): JSONObject {
-        var count = 0
-        val bytes = connection.inputStream.use { input ->
-            buildList<ByteArray> {
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    checkDeadline(deadlineMillis)
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    count += read
-                    if (count > MAX_MANIFEST_BYTES) {
-                        throw MaterializationFailure("invalid-model-manifest")
-                    }
-                    add(buffer.copyOf(read))
-                }
-                buffer.fill(0)
-            }.let { chunks ->
-                ByteArray(count).also { result ->
-                    var offset = 0
-                    chunks.forEach { chunk ->
-                        chunk.copyInto(result, offset)
-                        offset += chunk.size
-                        chunk.fill(0)
-                    }
-                }
-            }
-        }
-        return try {
-            JSONObject(String(bytes, Charsets.UTF_8))
-        } finally {
-            bytes.fill(0)
-        }
-    }
-
-    private fun parseManifest(
-        manifest: JSONObject,
-        model: AndeeInferenceModel,
-    ): List<ModelChunk> {
-        if (
-            manifest.optString("format") != MANIFEST_FORMAT ||
-            manifest.optLong("model-bytes", -1L) != model.bytes ||
-            manifest.optString("model-sha256") != model.sha256
-        ) {
-            throw MaterializationFailure("invalid-model-manifest")
-        }
-        val entries = manifest.optJSONArray("chunks")
-            ?: throw MaterializationFailure("invalid-model-manifest")
-        if (entries.length() !in 1..MAX_MANIFEST_CHUNKS) {
-            throw MaterializationFailure("invalid-model-manifest")
-        }
-        val chunks = (0 until entries.length()).map { index ->
-            val entry = entries.optJSONObject(index)
-                ?: throw MaterializationFailure("invalid-model-manifest")
-            val id = entry.optString("id")
-            val bytes = entry.optLong("bytes", -1L)
-            if (!ARWEAVE_ID.matches(id) || bytes <= 0L || bytes > MAX_CHUNK_BYTES) {
-                throw MaterializationFailure("invalid-model-manifest")
-            }
-            ModelChunk(id, bytes)
-        }
-        if (
-            chunks.map(ModelChunk::id).distinct().size != chunks.size ||
-            chunks.sumOf(ModelChunk::bytes) != model.bytes
-        ) {
-            throw MaterializationFailure("invalid-model-manifest")
-        }
-        return chunks
-    }
-
-    private fun streamTransaction(
-        id: String,
-        expectedBytes: Long,
-        output: OutputStream,
-        digest: MessageDigest,
-        deadlineMillis: Long,
-    ): Long {
-        val connection = connection(id, deadlineMillis)
-        return try {
-            var count = 0L
-            connection.inputStream.use { input ->
-                val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
-                while (true) {
-                    checkDeadline(deadlineMillis)
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    count += read
-                    if (count > expectedBytes) {
-                        throw MaterializationFailure("model-byte-length-mismatch")
-                    }
-                    digest.update(buffer, 0, read)
-                    output.write(buffer, 0, read)
-                }
-                buffer.fill(0)
-            }
-            if (count != expectedBytes) {
-                throw MaterializationFailure("model-byte-length-mismatch")
-            }
-            count
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun connection(
-        id: String,
-        deadlineMillis: Long,
-    ): HttpURLConnection {
-        checkDeadline(deadlineMillis)
-        val connection = URL("$gateway/$id").openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = true
-        connection.connectTimeout = minOf(
-            CONNECT_TIMEOUT_MS,
-            remainingReadTimeout(deadlineMillis),
-        )
-        connection.readTimeout = remainingReadTimeout(deadlineMillis)
-        connection.setRequestProperty(
-            "Accept",
-            "$MANIFEST_CONTENT_TYPE, application/octet-stream",
-        )
-        if (connection.responseCode !in 200..299) {
-            connection.disconnect()
-            throw MaterializationFailure("model-fetch-failed")
-        }
-        return connection
-    }
-
-    private fun checkDeadline(deadlineMillis: Long) {
-        if (SystemClock.elapsedRealtime() >= deadlineMillis) {
-            throw MaterializationFailure("generation-timed-out")
-        }
-    }
-
-    fun verify(
-        model: AndeeInferenceModel,
-        deadlineMillis: Long = Long.MAX_VALUE,
-    ): String? {
-        if (!model.materializedFile.isFile) return "model-not-materialized"
-        if (model.materializedFile.length() != model.bytes) {
-            return "model-byte-length-mismatch"
-        }
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        model.materializedFile.inputStream().use { input ->
-            while (true) {
-                if (SystemClock.elapsedRealtime() >= deadlineMillis) {
-                    return "generation-timed-out"
-                }
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        buffer.fill(0)
-        return if (base64Url(digest.digest()) == model.sha256) {
-            null
-        } else {
-            "model-digest-mismatch"
-        }
-    }
-
-    private fun base64Url(value: ByteArray): String = Base64.encodeToString(
-        value,
-        Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
-    )
-
-    private fun remainingReadTimeout(deadlineMillis: Long): Int {
-        val remaining = deadlineMillis - SystemClock.elapsedRealtime()
-        if (remaining <= 0L) return 1
-        return minOf(READ_TIMEOUT_MS.toLong(), remaining).toInt().coerceAtLeast(1)
-    }
-
-    private companion object {
-        val ARWEAVE_ID = Regex("^[A-Za-z0-9_-]{43}$")
-        const val MANIFEST_FORMAT = "permawebos/andee-model/1"
-        const val MANIFEST_CONTENT_TYPE = "application/vnd.permawebos.andee-model+json"
-        const val CONNECT_TIMEOUT_MS = 30_000
-        const val READ_TIMEOUT_MS = 30_000
-        const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
-        const val DOWNLOAD_HEADROOM_BYTES = 256L * 1024L * 1024L
-        const val MAX_MANIFEST_BYTES = 1024 * 1024
-        const val MAX_MANIFEST_CHUNKS = 128
-        const val MAX_CHUNK_BYTES = 100_000_000L
+internal fun validateMaterializedModel(
+    expectedId: String,
+    expectedFile: File,
+    expectedBytes: Long,
+    materializedId: String,
+    materializedPath: String,
+    materializedBytes: Long,
+): String? {
+    if (materializedId != expectedId) return "model-id-mismatch"
+    if (materializedBytes != expectedBytes) return "model-byte-length-mismatch"
+    val expected = expectedFile.canonicalFile
+    val actual = runCatching { File(materializedPath).canonicalFile }
+        .getOrElse { return "invalid-model-path" }
+    if (actual != expected) return "invalid-model-path"
+    return when {
+        !expectedFile.isFile -> "model-not-materialized"
+        expectedFile.length() != expectedBytes -> "model-byte-length-mismatch"
+        !expectedFile.canRead() -> "model-is-not-readable"
+        else -> null
     }
 }
-
-private data class ModelChunk(val id: String, val bytes: Long)
-
-private class MaterializationFailure(val reason: String) : Exception(reason)
 
 internal fun llamaCppMemoryIssue(modelBytes: Long, memoryBytes: Long): String? = when {
     memoryBytes <= 0L -> "llama-cpp-memory-unavailable"

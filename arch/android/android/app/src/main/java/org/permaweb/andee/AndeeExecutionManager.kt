@@ -59,7 +59,6 @@ internal class AndeeExecutionManager(
         val action = request.getString("action")
         val memberId = validateMemberId(request.getString("member-id"))
         if (action == "session-poll") return pollSession(memberId, request)
-        if (action == "session-start") return startSession(memberId, request)
         if (action == "stop" || action == "destroy") {
             return withMemberCancellationFence(
                 cancel = {
@@ -77,6 +76,12 @@ internal class AndeeExecutionManager(
                 success(JSONObject())
             }
         }
+        storage.ensureTemplate(
+            request.getString("image-id"),
+            request.getString("image-path"),
+            request.getLong("image-bytes"),
+        )
+        if (action == "session-start") return startSession(memberId, request)
         return withMemberLock(memberId) {
             when (action) {
                 "read" -> withIdleMember(memberId) {

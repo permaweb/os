@@ -18,7 +18,7 @@ fi
 
 ENTRIES="$(unzip -Z1 "$ARCHIVE")"
 PREFIX="$(basename "$ARCHIVE" .beam-archive.zip)"
-if [ "$(wc -l <<<"$ENTRIES" | tr -d ' ')" -ne 5 ]; then
+if [ "$(wc -l <<<"$ENTRIES" | tr -d ' ')" -ne 6 ]; then
     echo "andock@1.0 contains an unexpected number of archive entries." >&2
     printf '%s\n' "$ENTRIES" >&2
     exit 1
@@ -28,6 +28,7 @@ while IFS= read -r entry; do
     case "$entry" in
         "ebin/$PREFIX.beam" | \
         "ebin/${PREFIX}__andock.beam" | \
+        "ebin/${PREFIX}__andee_materialization.beam" | \
         "ebin/${PREFIX}__permawebos_bash_session.beam" | \
         "ebin/${PREFIX}__permawebos_execution.beam" | \
         "ebin/${PREFIX}__permawebos_execution_tools.beam")
@@ -39,7 +40,7 @@ while IFS= read -r entry; do
     esac
 done <<<"$ENTRIES"
 
-for module in andock permawebos_bash_session permawebos_execution \
+for module in andock andee_materialization permawebos_bash_session permawebos_execution \
         permawebos_execution_tools; do
     if ! grep -q "__${module}\\.beam$" <<<"$ENTRIES"; then
         echo "andock@1.0 is missing $module." >&2

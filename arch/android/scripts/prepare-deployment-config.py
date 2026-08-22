@@ -6,6 +6,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import urllib.parse
 
 
 SCRIPT = pathlib.Path(__file__).resolve()
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument("--secrets", type=pathlib.Path, required=True)
     parser.add_argument("--template", type=pathlib.Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--output", type=pathlib.Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--location-url")
     return parser.parse_args()
 
 
@@ -89,6 +91,19 @@ def main():
     providers = template.get("inference-providers")
     if not isinstance(providers, dict):
         raise SystemExit("template is missing inference-providers")
+
+    if args.location_url:
+        location = urllib.parse.urlparse(args.location_url)
+        if (
+            location.scheme != "https"
+            or not location.hostname
+            or location.username
+            or location.password
+            or location.query
+            or location.fragment
+        ):
+            raise SystemExit("invalid HTTPS location URL")
+        template["location-url"] = args.location_url.rstrip("/")
 
     configured = []
     for provider in sorted(tuple(providers)):

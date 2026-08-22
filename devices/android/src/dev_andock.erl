@@ -4,6 +4,7 @@
 -specification("../docs/device-specs/andock.md").
 -device_libraries([
     lib_andock,
+    lib_andee_materialization,
     lib_permawebos_bash_session,
     lib_permawebos_execution,
     lib_permawebos_execution_tools

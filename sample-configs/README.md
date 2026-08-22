@@ -17,7 +17,8 @@ containing provider credentials:
 
 ```sh
 arch/android/scripts/prepare-deployment-config.py \
-  --secrets ~/src/ouroboros/custom.json
+  --secrets ~/src/ouroboros/custom.json \
+  --location-url https://NODE.smoke.solutions
 ```
 
 The command writes

@@ -21,7 +21,6 @@
           "name": "Gemma 4 E2B (Tensor G5)",
           "model-id": "eq7Oh5TPjLMvEwpw7vlRtTsArjfYiCNCTAE3d3XhTIo",
           "bytes": 3113545589,
-          "sha256": "rxCCmGY57N59uV2Rvm_lT4trRYEEc0xbr8IE5p1oUtw",
           "runtime": "litert-lm",
           "backend": "npu",
           "soc-models": [
@@ -35,10 +34,9 @@
           "name": "FunctionGemma Mobile Actions",
           "model-id": "wV_QpsZwdNW09poKoOCyo38BCx5Pg64aajoQTEao0d0",
           "bytes": 284426240,
-          "sha256": "khCWlfkR0YcvqK4HweP_DtcPLD0WkNQQ7G24WHwqtAk",
           "runtime": "litert-lm",
           "backend": "cpu",
-          "max-context-tokens": 1280,
+          "max-context-tokens": 1024,
           "max-output-tokens": 64
         }
       ]
@@ -68,8 +66,8 @@
   "priv-hue-key": "****",
   "trusted-devices": {
     "agent@1.0": "_gnGt6YmIBHbKVxcGwJqms96bdsvAxZRUncrkpf1V48",
-    "inference@1.0": "T3F6f378K38nrP0fI0lFrbkEF4FmZNIe7m5EAUC6r5c",
-    "ouroboros@1.0": "59rg6wgbWB5Lc5yXeKF_rFPj3urDJDWBW9gEQf_05I0",
+    "inference@1.0": "0U1bbPhfG2B-YSmQfyOvebaH7gSty927hPC9Ud7JLxg",
+    "ouroboros@1.0": "E0VAejUUpBs7nkd98bu40f7EWy7DGte6CVG61IJ7ueE",
     "ouroboros-space@1.0": "z7Gzo9Ec9rky0Y5CfnF-1HDtBw_FZz7a-RAKtTd_-4c",
     "weavemail@1.0": "QceJsJMNe4GsKNWNf6GeEheJwbrwcvU85462dJKplb0",
     "tunnel@1.0": "SVKRgrshzPceeBdnknJNvR-m2zQ0mFYJvjMx0rSscW0",

@@ -63,6 +63,12 @@ class HyperbeamRuntime(
                     AndeePaths.executionSocketFile(context).absolutePath
                 builder.environment()["ANDEE_INFERENCE_SOCKET"] =
                     AndeePaths.inferenceSocketFile(context).absolutePath
+                builder.environment()["ANDEE_INFERENCE_MODEL_ROOT"] =
+                    AndeePaths.inferenceModelsRoot(context).absolutePath
+                builder.environment()["ANDEE_ANDOCK_IMAGE_ROOT"] =
+                    AndeePaths.andockImagesRoot(context).absolutePath
+                builder.environment()["ANDEE_ARTIFACT_CACHE_ROOT"] =
+                    AndeePaths.artifactCacheRoot(context).absolutePath
             }
             .start()
 

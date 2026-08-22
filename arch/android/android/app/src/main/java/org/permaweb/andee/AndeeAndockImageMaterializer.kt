@@ -5,72 +5,63 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import org.json.JSONObject
-import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URI
-import java.net.URL
 import java.security.MessageDigest
 import kotlin.concurrent.thread
 
 internal data class AndockImageSpec(
     val transactionId: String,
     val sparseBytes: Long,
-    val sparseSha256: String,
     val expandedBytes: Long,
     val expandedSha256: String,
 )
 
-/** Materializes the one source-pinned Andock rootfs through its measured Arweave ID. */
+/** Expands the one source-pinned Andock image resolved and supplied by BEAM. */
 internal class AndeeAndockImageMaterializer(
     context: Context,
     runtimeRoot: File,
     configFile: File,
 ) : AutoCloseable {
+    private val sourceRoot = AndeePaths.andockImagesRoot(context)
     private val root = File(AndeePaths.executionStateRoot(context), "template")
     private val template = File(root, TEMPLATE_NAME)
     private val marker = File(root, MARKER_NAME)
     private val manifestFile = File(runtimeRoot, TEMPLATE_MANIFEST_PATH)
     private val manifestDigest = sha256(manifestFile)
-    private val config = JSONObject(configFile.readText(Charsets.UTF_8))
-    private val spec = parseAndockImageSpec(config, JSONObject(manifestFile.readText()))
-    private val gateway = parseGateway(config)
+    private val spec = parseAndockImageSpec(
+        JSONObject(configFile.readText(Charsets.UTF_8)),
+        JSONObject(manifestFile.readText()),
+    )
     private val lock = Any()
-    @Volatile private var state = State.IDLE
-    @Volatile private var failureReason = "andock-default-image-not-materialized"
     @Volatile private var worker: Thread? = null
-    @Volatile private var connection: HttpURLConnection? = null
+    @Volatile private var stopped = false
+    @Volatile private var failureReason = "andock-default-image-not-materialized"
 
     val logicalBytes: Long get() = spec.expandedBytes
 
-    fun start() {
+    fun ensure(imageId: String, imagePath: String, imageBytes: Long) {
+        val source = validateSource(imageId, imagePath, imageBytes)
+        if (installed()) return
         synchronized(lock) {
-            check(state != State.STOPPED) { "Andock image materializer is stopped" }
-            if (state == State.READY || worker?.isAlive == true) return
-            require(root.mkdirs() || root.isDirectory) {
-                "failed to create Andock template directory"
-            }
-            if (installed()) {
-                state = State.READY
-                failureReason = ""
-                Log.i(TAG, "Andock template ready at ${template.absolutePath}")
-                return
-            }
-            state = State.MATERIALIZING
-            failureReason = "andock-default-image-materializing"
-            worker = thread(name = "AndockImageMaterializer", isDaemon = true) {
-                materialize()
+            check(!stopped) { "Andock image materializer is stopped" }
+            if (installed()) return
+            if (worker?.isAlive != true) {
+                failureReason = "andock-default-image-materializing"
+                worker = thread(name = "AndockImageMaterializer", isDaemon = true) {
+                    expand(source)
+                }
             }
         }
+        throw ExecutionFailure(
+            503,
+            failureReason,
+            mapOf("andock-default-image" to spec.transactionId),
+        )
     }
 
     fun requireTemplate(): File {
-        if (state == State.READY && installed()) return template
-        synchronized(lock) {
-            if (state == State.READY) state = State.IDLE
-        }
-        start()
+        if (installed()) return template
         throw ExecutionFailure(
             503,
             failureReason,
@@ -80,32 +71,52 @@ internal class AndeeAndockImageMaterializer(
 
     override fun close() {
         synchronized(lock) {
-            state = State.STOPPED
-            connection?.disconnect()
+            stopped = true
             worker?.interrupt()
         }
     }
 
-    private fun materialize() {
-        val sparse = File(root, "$TEMPLATE_NAME.simg.part")
+    private fun validateSource(
+        imageId: String,
+        imagePath: String,
+        imageBytes: Long,
+    ): File {
+        if (imageId != spec.transactionId) {
+            throw ExecutionFailure(503, "andock-default-image-id-mismatch")
+        }
+        if (imageBytes != spec.sparseBytes) {
+            throw ExecutionFailure(503, "andock-sparse-image-byte-length-mismatch")
+        }
+        val expected = File(sourceRoot, "$imageId.simg").canonicalFile
+        val source = runCatching { File(imagePath).canonicalFile }
+            .getOrElse { throw ExecutionFailure(503, "invalid-andock-image-path") }
+        if (source != expected) {
+            throw ExecutionFailure(503, "invalid-andock-image-path")
+        }
+        if (!source.isFile || !source.canRead()) {
+            throw ExecutionFailure(503, "andock-default-image-not-materialized")
+        }
+        if (source.length() != spec.sparseBytes) {
+            source.delete()
+            throw ExecutionFailure(503, "andock-sparse-image-byte-length-mismatch")
+        }
+        return source
+    }
+
+    private fun expand(source: File) {
         val expanded = File(root, "$TEMPLATE_NAME.part")
         try {
+            require(root.mkdirs() || root.isDirectory) {
+                "failed-to-create-Andock-template-directory"
+            }
             expanded.delete()
-            marker.delete()
-            template.delete()
-            if (sparse.length() > spec.sparseBytes) sparse.delete()
             require(
-                root.usableSpace >= requiredMaterializationSpace(
-                    spec.sparseBytes,
-                    spec.expandedBytes,
-                    sparse.length(),
-                )
+                root.usableSpace >= requiredExpansionSpace(spec.expandedBytes)
             ) {
                 "insufficient-Andock-template-storage"
             }
-            download(sparse)
             checkRunning()
-            val result = sparse.inputStream().buffered().use { input ->
+            val result = source.inputStream().buffered().use { input ->
                 AndroidSparseImage.expand(input, expanded)
             }
             require(result.bytes == spec.expandedBytes) {
@@ -115,107 +126,19 @@ internal class AndeeAndockImageMaterializer(
                 "Andock-template-digest-mismatch"
             }
             require(expanded.setReadOnly()) { "failed-to-protect-Andock-template" }
-            require(expanded.renameTo(template)) { "failed-to-install-Andock-template" }
+            Os.rename(expanded.absolutePath, template.absolutePath)
             writeMarker()
             syncDirectory(root)
-            sparse.delete()
-            synchronized(lock) {
-                if (state != State.STOPPED) {
-                    state = State.READY
-                    failureReason = ""
-                }
-            }
-            Log.i(TAG, "Andock default image materialized from ${spec.transactionId}")
+            failureReason = ""
+            Log.i(TAG, "Andock default image expanded from ${spec.transactionId}")
         } catch (failure: Throwable) {
-            if (state != State.STOPPED) {
+            if (!stopped) {
                 failureReason = normalizeFailure(failure)
-                state = State.FAILED
-                Log.e(TAG, "Andock default image materialization failed", failure)
+                Log.e(TAG, "Andock default image expansion failed", failure)
             }
         } finally {
-            connection?.disconnect()
-            connection = null
             worker = null
             expanded.delete()
-        }
-    }
-
-    private fun download(output: File) {
-        var count = output.length()
-        val digest = MessageDigest.getInstance("SHA-256")
-        if (count > 0L) {
-            output.inputStream().buffered().use { source ->
-                val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
-                while (true) {
-                    checkRunning()
-                    val read = source.read(buffer)
-                    if (read < 0) break
-                    digest.update(buffer, 0, read)
-                }
-                buffer.fill(0)
-            }
-        }
-        if (count == spec.sparseBytes) {
-            if (digest.digest().toHex() == spec.sparseSha256) return
-            output.delete()
-            error("Andock-sparse-image-digest-mismatch")
-        }
-        val request = URL("$gateway/${spec.transactionId}").openConnection() as HttpURLConnection
-        connection = request
-        request.instanceFollowRedirects = true
-        request.connectTimeout = CONNECT_TIMEOUT_MS
-        request.readTimeout = READ_TIMEOUT_MS
-        request.setRequestProperty("Accept", "application/octet-stream")
-        if (count > 0L) request.setRequestProperty("Range", "bytes=$count-")
-        val response = request.responseCode
-        val append = response == HttpURLConnection.HTTP_PARTIAL &&
-            request.getHeaderField("Content-Range")?.startsWith("bytes $count-") == true
-        if (count > 0L && response == HttpURLConnection.HTTP_OK) {
-            count = 0L
-            digest.reset()
-        } else if (response !in 200..299 || (count > 0L && !append)) {
-            error("Andock-default-image-fetch-failed")
-        }
-        var corrupt = false
-        try {
-            FileOutputStream(output, append).use { file ->
-                val destination = BufferedOutputStream(file, DOWNLOAD_BUFFER_BYTES)
-                try {
-                    request.inputStream.use { source ->
-                        val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
-                        while (true) {
-                            checkRunning()
-                            val read = source.read(buffer)
-                            if (read < 0) break
-                            count += read
-                            if (count > spec.sparseBytes) {
-                                corrupt = true
-                                error("Andock-sparse-image-byte-length-mismatch")
-                            }
-                            digest.update(buffer, 0, read)
-                            destination.write(buffer, 0, read)
-                            if (count % PROGRESS_INTERVAL_BYTES < read) {
-                                Log.i(TAG, "Andock image download: $count/${spec.sparseBytes} bytes")
-                            }
-                        }
-                        buffer.fill(0)
-                    }
-                    destination.flush()
-                    file.fd.sync()
-                } finally {
-                    runCatching { destination.close() }
-                }
-            }
-        } catch (failure: Throwable) {
-            if (corrupt) output.delete()
-            throw failure
-        }
-        if (count != spec.sparseBytes) {
-            error("Andock-sparse-image-byte-length-mismatch")
-        }
-        if (digest.digest().toHex() != spec.sparseSha256) {
-            output.delete()
-            error("Andock-sparse-image-digest-mismatch")
         }
     }
 
@@ -245,7 +168,7 @@ internal class AndeeAndockImageMaterializer(
                 output.write(bytes)
                 output.fd.sync()
             }
-            require(partial.renameTo(marker)) { "failed-to-install-Andock-template-marker" }
+            Os.rename(partial.absolutePath, marker.absolutePath)
         } finally {
             bytes.fill(0)
             partial.delete()
@@ -253,7 +176,7 @@ internal class AndeeAndockImageMaterializer(
     }
 
     private fun checkRunning() {
-        if (state == State.STOPPED || Thread.currentThread().isInterrupted) {
+        if (stopped || Thread.currentThread().isInterrupted) {
             throw InterruptedException("Andock-materialization-stopped")
         }
     }
@@ -265,18 +188,12 @@ internal class AndeeAndockImageMaterializer(
         ?.takeIf(String::isNotEmpty)
         ?: "andock-default-image-materialization-failed"
 
-    private enum class State { IDLE, MATERIALIZING, READY, FAILED, STOPPED }
-
     private companion object {
         const val TAG = "AndockImage"
         const val TEMPLATE_NAME = "andock-ubuntu-arm64.ext4"
         const val MARKER_NAME = ".andock-template.json"
         const val TEMPLATE_MANIFEST_PATH =
             "execution/andock/andock-ubuntu-arm64.ext4.manifest.json"
-        const val CONNECT_TIMEOUT_MS = 30_000
-        const val READ_TIMEOUT_MS = 30_000
-        const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
-        const val PROGRESS_INTERVAL_BYTES = 64L * 1024 * 1024
     }
 }
 
@@ -295,43 +212,20 @@ internal fun parseAndockImageSpec(config: JSONObject, manifest: JSONObject): And
     require(expandedBytes in MIN_TEMPLATE_BYTES..MAX_TEMPLATE_BYTES) {
         "invalid Andock filesystem template size"
     }
-    val sparseSha256 = manifest.getString("sparse-image-sha256")
     val expandedSha256 = manifest.getString("image-sha256")
-    require(SHA256.matches(sparseSha256) && SHA256.matches(expandedSha256)) {
+    require(SHA256.matches(expandedSha256)) {
         "invalid Andock filesystem template digest"
     }
     return AndockImageSpec(
         transactionId,
         sparseBytes,
-        sparseSha256,
         expandedBytes,
         expandedSha256,
     )
 }
 
-internal fun requiredMaterializationSpace(
-    sparseBytes: Long,
-    expandedBytes: Long,
-    downloadedBytes: Long = 0L,
-): Long {
-    require(downloadedBytes in 0..sparseBytes)
-    return Math.addExact(
-        Math.addExact(expandedBytes, sparseBytes - downloadedBytes),
-        ANDOCK_MATERIALIZATION_RESERVE_BYTES,
-    )
-}
-
-private fun parseGateway(config: JSONObject): String {
-    val value = config.optString("gateway", DEFAULT_GATEWAY).trimEnd('/')
-    val uri = URI(value)
-    require(uri.scheme in setOf("http", "https") && uri.host != null) {
-        "invalid Arweave gateway"
-    }
-    require(uri.userInfo == null && uri.query == null && uri.fragment == null) {
-        "invalid Arweave gateway"
-    }
-    return value
-}
+internal fun requiredExpansionSpace(expandedBytes: Long): Long =
+    Math.addExact(expandedBytes, ANDOCK_MATERIALIZATION_RESERVE_BYTES)
 
 private fun sha256(file: File): String {
     require(file.isFile) { "missing Andock filesystem template manifest" }
@@ -365,7 +259,6 @@ private fun syncDirectory(directory: File) {
 
 private val ARWEAVE_ID = Regex("^[A-Za-z0-9_-]{43}$")
 private val SHA256 = Regex("^[a-f0-9]{64}$")
-private const val DEFAULT_GATEWAY = "https://arweave.net"
 private const val MIN_TEMPLATE_BYTES = 1024L * 1024 * 1024
 private const val MAX_TEMPLATE_BYTES = 64L * 1024 * 1024 * 1024
 private const val ANDOCK_MATERIALIZATION_RESERVE_BYTES = 512L * 1024 * 1024
