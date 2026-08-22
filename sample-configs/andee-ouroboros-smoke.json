@@ -1,15 +1,15 @@
 {
   "default-request": "/GW6AnBM60khTfb-Df8JWWdC0s4A-dtstYVNhnCIOSwk",
   "bundler-ans104": "https://up.arweave.net",
-  "location-url": "https://ne2aq5xqu7twutw4tisdfh4icpowlnrjsts3twjy22xx5omld56q.smoke.solutions",
+  "location-url": "https://**[base32 encoded node address]**.smoke.solutions",
+  "node-host": "**[base32 encoded node address]**.smoke.solutions",
   "ouroboros-execution-device": "andock@1.0",
   "ouroboros-operator-address": "ggltHF0Cnv9ylH3vM1p7amR2vXLMoPLQIUQmAEwLP-k",
   "process-snapshot-slots": 1,
   "inference-provider-priority": [
     "local-andee",
     "anthropic",
-    "openai",
-    "openrouter"
+    "openai"
   ],
   "inference-providers": {
     "local-andee": {
@@ -26,7 +26,7 @@
           "soc-models": [
             "Tensor G5"
           ],
-          "max-context-tokens": 4096,
+          "max-context-tokens": 32000,
           "max-output-tokens": 128
         },
         {
@@ -54,16 +54,8 @@
       "priv": {
         "api-key": "****"
       }
-    },
-    "openrouter": {
-      "base-url": "https://openrouter.ai/api/v1",
-      "priv": {
-        "api-key": "****"
-      }
     }
   },
-  "priv-hue-address": "http://192.168.1.199",
-  "priv-hue-key": "****",
   "trusted-devices": {
     "agent@1.0": "_gnGt6YmIBHbKVxcGwJqms96bdsvAxZRUncrkpf1V48",
     "inference@1.0": "0U1bbPhfG2B-YSmQfyOvebaH7gSty927hPC9Ud7JLxg",

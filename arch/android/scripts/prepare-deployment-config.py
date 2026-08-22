@@ -55,7 +55,9 @@ def contains_placeholder(value):
         return any(contains_placeholder(child) for child in value.values())
     if isinstance(value, list):
         return any(contains_placeholder(child) for child in value)
-    return value == "****"
+    return isinstance(value, str) and (
+        "****" in value or "**[base32 encoded node address]**" in value
+    )
 
 
 def require_ignored(path):
@@ -104,6 +106,7 @@ def main():
         ):
             raise SystemExit("invalid HTTPS location URL")
         template["location-url"] = args.location_url.rstrip("/")
+        template["node-host"] = location.hostname
 
     configured = []
     for provider in sorted(tuple(providers)):

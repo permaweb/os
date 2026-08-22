@@ -10,7 +10,8 @@ node configuration at boot.
 implementations, explicitly includes the `local-andee` provider and measured
 model catalogue, keeps the preloaded `inference@1.0` multiplexer in use, and
 adds authenticated remote providers. Every `****` value must be replaced in a
-private copy before use. Never commit the private copy.
+private copy before use. Replace `**[base32 encoded node address]**` with the
+base32 encoding of the boot node address. Never commit the private copy.
 
 To materialize an ignored deployment copy from an existing Ouroboros JSON
 containing provider credentials:
@@ -18,13 +19,15 @@ containing provider credentials:
 ```sh
 arch/android/scripts/prepare-deployment-config.py \
   --secrets ~/src/ouroboros/custom.json \
-  --location-url https://NODE.smoke.solutions
+  --location-url https://BASE32_NODE_ADDRESS.smoke.solutions
 ```
 
 The command writes
 `arch/android/build/deployment/andee-ouroboros-smoke.json` with mode `0600`.
+The location URL also supplies the corresponding `node-host`.
 Providers without a key in the source file are omitted from that private copy;
-the committed sample retains their redacted entries as documentation.
+the committed sample mirrors the deployed provider set with credentials
+replaced by `****`.
 
 The tunnel-backed sample intentionally omits the `name@1.0` request hook.
 Tunnel host routing removes its routing `Host` before local execution, while
