@@ -1,10 +1,12 @@
 {
-  "default-request": "/GW6AnBM60khTfb-Df8JWWdC0s4A-dtstYVNhnCIOSwk",
+  "default-request": "/O2sMjl4tq8TpRHZqXIOVVkpmLjB6jb4eXH_sdLYVuD0",
   "bundler-ans104": "https://up.arweave.net",
   "location-url": "https://**[base32 encoded node address]**.smoke.solutions",
   "node-host": "**[base32 encoded node address]**.smoke.solutions",
   "ouroboros-execution-device": "andock@1.0",
   "ouroboros-operator-address": "ggltHF0Cnv9ylH3vM1p7amR2vXLMoPLQIUQmAEwLP-k",
+  "priv-hue-address": "****",
+  "priv-hue-key": "****",
   "process-snapshot-slots": 1,
   "inference-provider-priority": [
     "local-andee",
@@ -14,8 +16,18 @@
   "inference-providers": {
     "local-andee": {
       "inference-device": "andee-inference@1.0",
-      "default-model": "gemma-4-e2b-it-tensor-g5",
+      "default-model": "qwen3.8-27b-ud-iq2-s",
       "models": [
+        {
+          "id": "qwen3.8-27b-ud-iq2-s",
+          "name": "Qwen3.8 27B UD-IQ2_S (CPU, 32K)",
+          "model-id": "HqQlH1DFWHzkrZEIx-8lIsuQcaKgm1Oz8jbgQ0leLg4",
+          "bytes": 8371970048,
+          "runtime": "llama-cpp",
+          "backend": "cpu",
+          "max-context-tokens": 32768,
+          "max-output-tokens": 512
+        },
         {
           "id": "gemma-4-e2b-it-tensor-g5",
           "name": "Gemma 4 E2B (Tensor G5)",
@@ -57,11 +69,11 @@
     }
   },
   "trusted-devices": {
-    "agent@1.0": "_gnGt6YmIBHbKVxcGwJqms96bdsvAxZRUncrkpf1V48",
-    "inference@1.0": "0U1bbPhfG2B-YSmQfyOvebaH7gSty927hPC9Ud7JLxg",
-    "ouroboros@1.0": "E0VAejUUpBs7nkd98bu40f7EWy7DGte6CVG61IJ7ueE",
-    "ouroboros-space@1.0": "z7Gzo9Ec9rky0Y5CfnF-1HDtBw_FZz7a-RAKtTd_-4c",
-    "weavemail@1.0": "QceJsJMNe4GsKNWNf6GeEheJwbrwcvU85462dJKplb0",
+    "agent@1.0": "_I2X3EKZGVR0w7mu2NLnLKPp5lkgQLKtCUwd84H4lTw",
+    "inference@1.0": "_OqUl_y6EAQV4W3voapMRedzeyc9pnGuSODgKdTTlD8",
+    "ouroboros@1.0": "MD-EVDgS2G--sSerkeDxUluV1D_3itEkatVZf8I_S-w",
+    "ouroboros-space@1.0": "T-Ntcn7uexLvCct1imnKkp5ZWleDx_wf7is9gaJ3QtU",
+    "weavemail@1.0": "K2R1VUZmYhJ1g7kE8T2W6kl_ffWzuWcPNjmCn6BokTA",
     "tunnel@1.0": "SVKRgrshzPceeBdnknJNvR-m2zQ0mFYJvjMx0rSscW0",
     "hue@1.0": "FhU1q-cOIq4cKk3YLyUM7sh6AZcmIf1qajbOeBEHzSk"
   },
