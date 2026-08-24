@@ -16,7 +16,8 @@ Complete redacted operator overlays live in `../../sample-configs/`. Import a
 private copy through the app's **Next boot config** picker; the overlay is
 merged with this application-agnostic base config and measured at the next
 boot. `scripts/prepare-deployment-config.py` can populate an ignored private
-copy from a provider-credentials JSON file without printing secrets.
+copy by applying any private JSON Merge Patch to any public template, without
+knowing about its devices or applications and without printing secrets.
 
 Android stages the package from `devices/common/` plus the Android-specific
 overlay in `devices/android/`. The shared measurement and zone devices are

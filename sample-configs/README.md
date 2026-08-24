@@ -19,22 +19,25 @@ Every `****` value must be replaced in a private copy before use. Replace
 `**[base32 encoded node address]**` with the base32 encoding of the boot node
 address. Never commit the private copy.
 
-To materialize an ignored deployment copy from a JSON file containing provider
-credentials:
+To materialize an ignored deployment copy, create a private JSON Merge Patch
+containing the values that replace this example's redactions. The overlay can
+add, replace, or delete (`null`) arbitrary node options; the materializer has
+no knowledge of particular devices or applications:
 
 ```sh
 arch/android/scripts/prepare-deployment-config.py \
-  --secrets /path/to/provider-keys.json \
+  --template sample-configs/andee-ouroboros-with-tunnel.json \
+  --private-overlay /path/to/private-overlay.json \
+  --output arch/android/build/deployment/andee-ouroboros-with-tunnel.json \
   --location-url https://BASE32_NODE_ADDRESS.smoke.solutions
 ```
 
 The command writes
 `arch/android/build/deployment/andee-ouroboros-with-tunnel.json` with mode
 `0600`.
-The location URL also supplies the corresponding `node-host`.
-Providers without a key in the source file are omitted from that private copy;
-credentials shown in the example are placeholders rather than a prescribed
-provider set.
+The location URL also supplies the corresponding `node-host`. Any redaction
+left unresolved after merging is an error. Credentials shown in the example
+are placeholders rather than a prescribed provider or device set.
 
 This tunnel-backed example intentionally omits the `name@1.0` request hook.
 Tunnel host routing removes its routing `Host` before local execution, while

@@ -9,6 +9,8 @@
 -define(MODEL_MANIFEST_FORMAT, <<"permawebos/andee-model/1">>).
 -define(MAX_MODEL_MANIFEST_BYTES, 1024 * 1024).
 -define(MAX_MODEL_CHUNKS, 128).
+-define(MODEL_STATUS_TIMEOUT_MS, 100).
+-define(MODEL_FAILURE_TIMEOUT_MS, 60000).
 
 %% @doc Resolve a configured model through `hb_cache' and return its local path.
 model(Provider, Model, Opts) ->
@@ -99,32 +101,128 @@ model_extension(_) -> error.
 
 %% @doc Materialize either a direct model message or its authenticated chunks.
 materialize_model(
-        #{id := ID, bytes := Bytes, extension := Extension} = Spec,
+        #{id := ID, extension := Extension} = Spec,
         Opts
     ) ->
     case destination(?MODEL_ROOT_ENV, <<ID/binary, Extension/binary>>) of
         {ok, Path} ->
-            with_lock(
-                Path,
-                fun() ->
-                    case existing(Path, Bytes) of
-                        {ok, Bytes} ->
-                            materialized_model(Spec, Path);
-                        missing ->
-                            case model_parts(ID, Bytes, Opts) of
-                                {ok, Parts} ->
-                                    case write_model_parts(ID, Path, Bytes, Parts, Opts) of
-                                        {ok, _} -> materialized_model(Spec, Path);
-                                        Error -> Error
-                                    end;
-                                Error -> Error
-                            end;
-                        Error -> Error
-                    end
-                end
-            );
+            ensure_model(Spec, Path, Opts);
         Error -> Error
     end.
+
+%% @doc Start one request-independent materializer for a missing model. Large
+%% models can take longer than an HTTP or tunnel request is allowed to live, so
+%% the writer must not share the request process's lifetime.
+ensure_model(#{bytes := Bytes} = Spec, Path, Opts) ->
+    case existing(Path, Bytes) of
+        {ok, Bytes} ->
+            materialized_model(Spec, Path);
+        missing ->
+            start_model_materializer(Spec, Path, Opts);
+        Error -> Error
+    end.
+
+%% @doc Deduplicate background writers by their deterministic destination.
+start_model_materializer(#{bytes := Bytes} = Spec, Path, Opts) ->
+    case existing(Path, Bytes) of
+        {ok, Bytes} ->
+            materialized_model(Spec, Path);
+        missing ->
+            Name = {?MODULE, node(), model, Path},
+            case global:whereis_name(Name) of
+                undefined ->
+                    spawn(fun() -> model_materializer(Name, Spec, Path, Opts) end),
+                    {error, 'inference-model-materializing'};
+                Pid ->
+                    model_materializer_status(Pid)
+            end;
+        Error -> Error
+    end.
+
+%% @doc Resolve and atomically write the model outside the caller's lifetime.
+model_materializer(Name, #{id := ID, bytes := Bytes} = Spec, Path, Opts) ->
+    case global:register_name(Name, self()) of
+        yes ->
+            try
+                process_flag(trap_exit, true),
+                Materializer = self(),
+                Writer = spawn_link(fun() ->
+                    Materializer ! {
+                        model_materializer_result,
+                        self(),
+                        materialize_model_parts(ID, Bytes, Spec, Path, Opts)
+                    }
+                end),
+                coordinate_model_materializer(Writer)
+            after
+                global:unregister_name(Name)
+            end;
+        no ->
+            ok
+    end.
+
+%% @doc Resolve and write the model in a child linked to its registered
+%% coordinator, so killing the coordinator cannot leave an unowned writer.
+materialize_model_parts(ID, Bytes, Spec, Path, Opts) ->
+    cleanup_model_parts(Path),
+    case existing(Path, Bytes) of
+        {ok, Bytes} -> materialized_model(Spec, Path);
+        missing ->
+            case model_parts(ID, Bytes, Opts) of
+                {ok, Parts} -> write_model_parts(ID, Path, Bytes, Parts, Opts);
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+%% @doc Answer progress polls while the writer performs blocking cache reads.
+coordinate_model_materializer(Writer) ->
+    receive
+        {model_materializer_status, From, Ref} ->
+            From ! {Ref, {error, 'inference-model-materializing'}},
+            coordinate_model_materializer(Writer);
+        {model_materializer_result, Writer, Result} ->
+            unlink(Writer),
+            retain_model_failure(Result);
+        {'EXIT', Writer, _Reason} ->
+            retain_model_failure(
+                {error, 'inference-model-materialization-failed'}
+            )
+    end.
+
+%% @doc Return the registered coordinator's current progress or failure result.
+model_materializer_status(Pid) ->
+    Monitor = monitor(process, Pid),
+    Ref = make_ref(),
+    Pid ! {model_materializer_status, self(), Ref},
+    receive
+        {Ref, Result} ->
+            demonitor(Monitor, [flush]),
+            Result;
+        {'DOWN', Monitor, process, Pid, _Reason} ->
+            {error, 'inference-model-materializing'}
+    after ?MODEL_STATUS_TIMEOUT_MS ->
+        demonitor(Monitor, [flush]),
+        {error, 'inference-model-materializing'}
+    end.
+
+%% @doc Keep a failed result only long enough for a retrying request to observe
+%% it. Once reported (or expired), the next request may start a fresh writer.
+retain_model_failure({error, _} = Error) ->
+    receive
+        {model_materializer_status, From, Ref} ->
+            From ! {Ref, Error},
+            ok
+    after ?MODEL_FAILURE_TIMEOUT_MS ->
+        ok
+    end;
+retain_model_failure(Result) ->
+    Result.
+
+%% @doc Remove abandoned temporary files only when no writer owns this path.
+cleanup_model_parts(Path) ->
+    Pattern = binary_to_list(<<Path/binary, ".*.part">>),
+    lists:foreach(fun file:delete/1, filelib:wildcard(Pattern)).
 
 %% @doc Interpret the configured ID as a model manifest only when it says so.
 model_parts(ID, Bytes, Opts) ->
@@ -528,18 +626,55 @@ chunked_model_uses_disk_backed_hb_cache_test() ->
                 }
             }
         },
-        ?assertMatch(
-            {ok, #{<<"id">> := ManifestID, <<"bytes">> := 8}},
+        Destination = filename:join(ModelRoot, <<ManifestID/binary, ".litertlm">>),
+        StalePart = <<Destination/binary, ".1.part">>,
+        ok = filelib:ensure_dir(StalePart),
+        ok = file:write_file(StalePart, <<"stale">>),
+        ?assertEqual(
+            {error, 'inference-model-materializing'},
             model(<<"local-andee">>, <<"test-model">>, Opts)
         ),
+        ?assertMatch(
+            {ok, #{<<"id">> := ManifestID, <<"bytes">> := 8}},
+            wait_for_model(<<"local-andee">>, <<"test-model">>, Opts, 100)
+        ),
+        ?assertEqual(false, filelib:is_file(StalePart)),
         ?assertEqual(
             {ok, <<"abcdefgh">>},
-            file:read_file(filename:join(ModelRoot, <<ManifestID/binary, ".litertlm">>))
+            file:read_file(Destination)
+        ),
+        Providers = maps:get(<<"inference-providers">>, Opts),
+        Provider = maps:get(<<"local-andee">>, Providers),
+        [ConfiguredModel] = maps:get(<<"models">>, Provider),
+        InvalidOpts = Opts#{
+            <<"inference-providers">> => Providers#{
+                <<"local-andee">> => Provider#{
+                    <<"models">> => [ConfiguredModel#{<<"bytes">> => 9}]
+                }
+            }
+        },
+        ?assertEqual(
+            {error, 'inference-model-materializing'},
+            model(<<"local-andee">>, <<"test-model">>, InvalidOpts)
+        ),
+        ?assertEqual(
+            {error, 'model-byte-length-mismatch'},
+            wait_for_model(<<"local-andee">>, <<"test-model">>, InvalidOpts, 100)
         )
     after
         restore_env(?ARTIFACT_CACHE_ROOT_ENV, PreviousArtifactRoot),
         restore_env(?MODEL_ROOT_ENV, PreviousModelRoot),
         file:del_dir_r(Root)
+    end.
+
+wait_for_model(_Provider, _Model, _Opts, 0) ->
+    {error, timeout};
+wait_for_model(Provider, Model, Opts, Attempts) ->
+    case model(Provider, Model, Opts) of
+        {error, 'inference-model-materializing'} ->
+            timer:sleep(10),
+            wait_for_model(Provider, Model, Opts, Attempts - 1);
+        Result -> Result
     end.
 
 restore_env(Name, false) -> os:unsetenv(Name);

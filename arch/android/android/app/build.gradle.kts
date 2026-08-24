@@ -82,6 +82,7 @@ val stageLiteRtNotices = tasks.register<Copy>("stageLiteRtNotices") {
     )
     include("LICENSE", "THIRD_PARTY_NOTICE.txt")
     into(liteRtNoticesDirectory.map { it.dir("litertlm-android-0.16.1") })
+    filePermissions { unix("644") }
 }
 
 dependencies {
@@ -133,7 +134,10 @@ val verifyGeneratedRuntime = tasks.register("verifyGeneratedRuntime") {
 }
 
 tasks.matching { task ->
-    task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets"
+    task.name == "mergeDebugAssets"
+        || task.name == "mergeReleaseAssets"
+        || task.name == "generateReleaseLintVitalReportModel"
+        || task.name == "lintVitalAnalyzeRelease"
 }.configureEach {
     dependsOn(stageLiteRtNotices)
 }
