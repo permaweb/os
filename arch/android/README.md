@@ -138,7 +138,7 @@ packages are loaded after boot through measured JSON configuration,
 `trusted-device-signers`, and `name-resolvers`; no application checkout,
 archive, payload, or provenance participates in the Android build.
 
-The packaged HyperBEAM preload uses a public, deterministic Ed25519 build
+The packaged HyperBEAM preload uses a public, deterministic Ed25519/ANS-104 build
 identity rather than the node wallet. That identity is not an authorization
 root: the measured APK/runtime remains the trust boundary. The build rewrites
 the preload through a sorted LMDB dump/load pass and packages the runtime with

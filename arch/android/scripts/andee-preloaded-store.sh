@@ -192,14 +192,27 @@ build_andee_preloaded_store() {
                 Wallet = hb:wallet(Key),
                 Groups = hb_packager:scan(DeviceDirs, #{}),
                 Opts = #{
-                    <<"bootstrap-device-src">> => [<<"src/preloaded">>]
+                    <<"bootstrap-device-src">> => [<<"src/preloaded">>],
+                    <<"commitment-device">> => <<"ans104@1.0">>
                 },
-                {ok, Result} = hb_preload:build_groups(
-                    Groups,
-                    Wallet,
-                    Output,
-                    Opts
-                ),
+                % ANS-104 supports the deterministic Ed25519 build identity.
+                {ok, Result} =
+                    hb_forge_seed:with_forge_bootstrap(
+                        Opts,
+                        fun(SeedOpts) ->
+                            hb_preload:build_dir(
+                                hb_packager:package_all(Groups, SeedOpts),
+                                Wallet,
+                                Output,
+                                SeedOpts#{
+                                    <<"commitment-device">> => #{
+                                        <<"device">> => <<"ans104@1.0">>,
+                                        <<"type">> => <<"ed25519-sha512">>
+                                    }
+                                }
+                            )
+                        end
+                    ),
                 io:format(
                     "Device preload complete: Store: ~s; Index: ~s.~n",
                     [Output, maps:get(index, Result)]
