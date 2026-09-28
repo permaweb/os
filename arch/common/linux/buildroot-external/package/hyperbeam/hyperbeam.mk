@@ -28,10 +28,10 @@
 # Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= 6e6a9bc9543ea4954ab41e8d2e7321b4b39f00b0
+HYPERBEAM_VERSION ?= 968132cf6e503cbc3c8b579a665b8730a87faba0
 # Reproducible timestamp for the pinned source commit. Update it together with
 # HYPERBEAM_VERSION (`git show -s --format=%ct <version>`).
-HYPERBEAM_SOURCE_DATE_EPOCH ?= 1787372613
+HYPERBEAM_SOURCE_DATE_EPOCH ?= 1790605355
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -451,7 +451,7 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	    '        {start_os_sup,  false}' \
 	    '    ]}' \
 	    '].' \
-	    > $(TARGET_DIR)/usr/lib/hyperbeam/releases/0.0.1/sys.config
+	    > $(TARGET_DIR)/usr/lib/hyperbeam/releases/0.11/sys.config
 	# Ship the splash daemon's compiled .beam under a dedicated
 	# lib path so init's `-pa /usr/local/lib/lapee-splash' picks
 	# it up. lapee_splash.erl lives in this BR2_EXTERNAL tree;
