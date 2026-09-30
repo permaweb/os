@@ -115,6 +115,14 @@ class AndeeService : Service() {
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.e(TAG, "foreground service timed out: startId=$startId type=$fgsType")
+        stopping = true
+        // Request the stop before onDestroy tears down the native runtime.
+        stopForegroundCompat()
+        stopSelf()
+    }
+
     private fun terminateProcess(startId: Int) {
         stopping = true
         stopForegroundCompat()
@@ -173,7 +181,13 @@ class AndeeService : Service() {
     }
 
     private fun foregroundType(): Int {
-        return if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+        return if (Build.VERSION.SDK_INT >= 34) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
     }
 
     companion object {
