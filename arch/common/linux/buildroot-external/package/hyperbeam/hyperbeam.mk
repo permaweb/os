@@ -324,11 +324,12 @@ define HYPERBEAM_BUILD_CMDS
 	cp -af $(HYPERBEAM_DEVICE_DIR)/native/lapee_snp_nif/target/x86_64-unknown-linux-gnu/release/liblapee_snp_nif.so \
 	    $(HYPERBEAM_DEVICE_DIR)/src/security/priv/dev_lapee_snp/crates/lapee_snp_nif/lapee_snp_nif.so
 	rm -rf $(@D)/_build/lapee-preload-src $(@D)/_build/preloaded-store
-	mkdir -p $(@D)/_build/lapee-preload-src
-	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/preloaded
-	rm -f $(@D)/_build/lapee-preload-src/preloaded/auth/dev_snp.erl
+	mkdir -p $(@D)/_build/lapee-preload-src/src
+	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/src/preloaded
+	cp -a $(@D)/specs $(@D)/_build/lapee-preload-src/specs
+	rm -f $(@D)/_build/lapee-preload-src/src/preloaded/auth/dev_snp.erl
 	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 device preload \
-	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
+	    --device-src _build/lapee-preload-src/src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
 	    --output-dir _build/preloaded-store
 	# Replace every host native artifact with a target build while preserving
 	# the already-generated, architecture-independent Forge store.
