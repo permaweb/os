@@ -854,9 +854,11 @@ refresh_current_boot_paths(Store, Opts) ->
     end.
 
 refresh_current_boot_paths_unchecked(Store, Opts) ->
+    % Child links must remain locally readable while the boot tree is written.
+    LocalStore = Store#{<<"scope">> => local},
     PersistentOpts = Opts#{
-        <<"store">> => [Store],
-        <<"match-index">> => [Store]
+        <<"store">> => [LocalStore],
+        <<"match-index">> => [LocalStore]
     },
     case hb_cache:read(?BOOT_ATTESTATION_PATH, Opts) of
         {ok, Boot0} ->
@@ -900,11 +902,10 @@ install_store(Store, BootOpts) ->
     ),
     Stores = hb_opts:get(store, [], Opts),
     MatchIndex = hb_opts:get(<<"match-index">>, [], Opts),
-    StoreName = hb_maps:get(<<"name">>, Store, undefined, Opts),
     Opts#{
-        <<"store">> => [Store | remove_store_name(StoreName, store_list(Stores), Opts)],
+        <<"store">> => add_store_if_missing(Store, store_list(Stores), Opts),
         <<"match-index">> =>
-            [Store | remove_store_name(StoreName, store_list(MatchIndex), Opts)]
+            add_store_if_missing(Store, store_list(MatchIndex), Opts)
     }.
 
 %% @doc Follow store configuration only, retaining each view's access policies.
@@ -932,11 +933,16 @@ replace_store(Source, Name, Opts) when is_map(Opts) ->
 replace_store(_Source, _Name, Other) ->
     Other.
 
-remove_store_name(undefined, Stores, _Opts) ->
-    Stores;
-remove_store_name(Name, Stores, Opts) ->
-    [Store || Store <- Stores,
-              hb_maps:get(<<"name">>, Store, undefined, Opts) =/= Name].
+%% @doc Retain every configured view, adding a default only when absent.
+add_store_if_missing(Store, Stores, Opts) ->
+    Name = hb_maps:get(<<"name">>, Store, undefined, Opts),
+    case lists:any(
+        fun(View) -> hb_maps:get(<<"name">>, View, undefined, Opts) =:= Name end,
+        Stores
+    ) of
+        true -> Stores;
+        false -> [Store | Stores]
+    end.
 
 set_status(Opts, Status) ->
     Opts#{<<"lapee-nonvolatile-status">> => Status}.
@@ -1055,7 +1061,9 @@ mounted_binding_requires_same_zone_and_ring_test() ->
 %% @doc Store views move together without changing policies or unrelated data.
 install_store_views_test() ->
     Boot = hb_test_utils:test_store(hb_store_lmdb),
-    Mounted = hb_test_utils:test_store(hb_store_lmdb),
+    Primary = Boot#{<<"scope">> => remote},
+    Local = Boot#{<<"scope">> => local, <<"access">> => [<<"read">>]},
+    Mounted = (hb_test_utils:test_store(hb_store_lmdb))#{<<"scope">> => remote},
     Name = maps:get(<<"name">>, Mounted),
     Reader = Boot#{<<"access">> => [<<"read">>], <<"prefix">> => <<"index/">>},
     Other = Boot#{<<"name">> => <<"other-store">>},
@@ -1071,7 +1079,7 @@ install_store_views_test() ->
         #{<<"priv-wallet">> => ar_wallet:new(), <<"store">> => []}
     ),
     Opts = #{
-        <<"store">> => [Boot],
+        <<"store">> => [Primary, Local],
         <<"match-index">> => [Boot],
         <<"arweave-index-store">> => Index,
         <<"arweave-block-store">> => Boot,
@@ -1091,8 +1099,8 @@ install_store_views_test() ->
     },
     ?assertEqual(
         Opts#{
-            <<"store">> => [Mounted],
-            <<"match-index">> => [Mounted],
+            <<"store">> => [Mounted, Local#{<<"name">> => Name}],
+            <<"match-index">> => [Boot#{<<"name">> => Name}],
             <<"arweave-index-store">> => MountedIndex,
             <<"arweave-block-store">> => Boot#{<<"name">> => Name},
             <<"scheduler-store">> => [Boot#{<<"name">> => Name}],
@@ -1103,6 +1111,10 @@ install_store_views_test() ->
         Active
     ),
     try
+        {ok, SignedID} = hb_cache:write(Signed, Active),
+        {ok, Cached} = hb_cache:read(SignedID, hb_store:scope(Active, local)),
+        ?assertMatch(#{<<"store">> := Boot},
+            hb_cache:ensure_all_loaded(Cached, hb_store:scope(Active, local))),
         ok = hb_store:write(Mounted, #{<<"key">> => <<"value">>}, Active),
         ?assertEqual(
             {ok, <<"value">>},
@@ -1113,6 +1125,50 @@ install_store_views_test() ->
             hb_store:write(MountedReader, #{<<"index/key">> => <<"changed">>}, Active)
         )
     after
+        hb_store:stop(Mounted)
+    end.
+
+%% @doc Boot refresh can resolve child links when the configured view is remote.
+refresh_current_boot_remote_view_test() ->
+    Boot = hb_test_utils:test_store(hb_store_lmdb),
+    Mounted = (hb_test_utils:test_store(hb_store_lmdb))#{<<"scope">> => remote},
+    Opts = #{
+        <<"priv-wallet">> => ar_wallet:new(),
+        <<"store">> => [
+            Boot#{<<"scope">> => remote},
+            Boot#{<<"scope">> => local, <<"access">> => [<<"read">>]}
+        ]
+    },
+    Measurement = hb_message:commit(
+        #{
+            <<"type">> => <<"lapee-measurement">>,
+            <<"body">> => #{
+                <<"node">> => #{
+                    <<"loaded-device-store">> => [
+                        #{
+                            <<"name">> => <<"loaded-device-volatile-store">>,
+                            <<"store-module">> => hb_store_volatile
+                        }
+                    ]
+                }
+            }
+        },
+        Opts
+    ),
+    try
+        SignedID = hb_message:id(Measurement, signed, Opts),
+        {ok, _} = hb_cache:write(Measurement, Opts),
+        ok = hb_cache:link(SignedID, ?BOOT_ATTESTATION_PATH, Opts),
+        ?assertMatch({ok, #{<<"status">> := <<"refreshed">>}},
+            refresh_current_boot_paths(Mounted, Opts)),
+        ReadOpts = Opts#{<<"store">> => [Mounted#{<<"scope">> => local}]},
+        {ok, Cached} = hb_cache:read(?BOOT_ATTESTATION_PATH, ReadOpts),
+        Loaded = hb_cache:ensure_all_loaded(Cached, ReadOpts),
+        ?assertEqual(SignedID, hb_message:id(Loaded, signed, ReadOpts)),
+        ?assert(hb_message:verify(Loaded, all, ReadOpts)),
+        ?assertEqual(remote, hb_maps:get(<<"scope">>, Mounted, Opts))
+    after
+        hb_store:stop(Boot),
         hb_store:stop(Mounted)
     end.
 
