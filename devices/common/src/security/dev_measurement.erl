@@ -787,7 +787,7 @@ response_body({ok, Msg}, Opts) ->
 response_body({error, Reason}, _Opts) ->
     throw({measurement_error, Reason});
 response_body(Msg, Opts) when is_map(Msg) ->
-    Normalized = hb_link:decode_all_links(normalize_top_keys(Msg)),
+    Normalized = normalize_top_keys(Msg),
     Status = maps:get(<<"status">>, Normalized, undefined),
     Body = maps:get(<<"body">>, Normalized, undefined),
     Type = maps:get(<<"type">>, Normalized, undefined),

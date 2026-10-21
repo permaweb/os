@@ -1023,11 +1023,10 @@ response_body(Body, _Opts) ->
 canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_payload(response_body(Link, Opts), Opts);
 canonical_payload(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
     maps:from_list(
         [
             {Key, canonical_payload(Value, Opts)}
-         || {Key, Value} <- hb_maps:to_list(Decoded, Opts),
+         || {Key, Value} <- hb_maps:to_list(Msg, Opts),
             not detached_transport_key(Key)
         ]);
 canonical_payload(List, Opts) when is_list(List) ->

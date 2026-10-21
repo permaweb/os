@@ -887,7 +887,17 @@ refresh_current_boot_paths_unchecked(Store, Opts) ->
             }}
     end.
 
-install_store(Store, Opts) ->
+%% @doc Activate the mounted store in each configured view of the boot store.
+install_store(Store, BootOpts) ->
+    Source = primary_lmdb_store(BootOpts),
+    Opts = replace_store(
+        hb_maps:get(<<"name">>, Source, undefined, BootOpts),
+        hb_maps:get(<<"name">>, Store, undefined, BootOpts),
+        BootOpts#{
+            <<"store">> => hb_opts:get(store, [], BootOpts),
+            <<"match-index">> => hb_opts:get(<<"match-index">>, [], BootOpts)
+        }
+    ),
     Stores = hb_opts:get(store, [], Opts),
     MatchIndex = hb_opts:get(<<"match-index">>, [], Opts),
     StoreName = hb_maps:get(<<"name">>, Store, undefined, Opts),
@@ -896,6 +906,31 @@ install_store(Store, Opts) ->
         <<"match-index">> =>
             [Store | remove_store_name(StoreName, store_list(MatchIndex), Opts)]
     }.
+
+%% @doc Follow store configuration only, retaining each view's access policies.
+replace_store(Source, Name, Stores) when is_list(Stores) ->
+    [replace_store(Source, Name, Store) || Store <- Stores];
+replace_store(Source, Name,
+        #{<<"store-module">> := hb_store_lmdb, <<"name">> := Source} = Store) ->
+    Store#{<<"name">> => Name};
+replace_store(Source, Name, Opts) when is_map(Opts) ->
+    lists:foldl(
+        fun(Key, Acc) ->
+            case maps:find(Key, Acc) of
+                {ok, Value} ->
+                    Acc#{Key => replace_store(Source, Name, Value)};
+                error -> Acc
+            end
+        end,
+        Opts,
+        [
+            <<"store">>, <<"match-index">>, <<"scheduler-store">>, <<"process-store">>,
+            <<"arweave-index-store">>, <<"arweave-block-store">>,
+            <<"index-store">>, <<"local-store">>, <<"http-extra-opts">>
+        ]
+    );
+replace_store(_Source, _Name, Other) ->
+    Other.
 
 remove_store_name(undefined, Stores, _Opts) ->
     Stores;
@@ -1016,5 +1051,69 @@ mounted_binding_requires_same_zone_and_ring_test() ->
         )
     ),
     ?assertEqual(none, mounted_binding(<<"alpha">>, <<"ring-a">>, #{})).
+
+%% @doc Store views move together without changing policies or unrelated data.
+install_store_views_test() ->
+    Boot = hb_test_utils:test_store(hb_store_lmdb),
+    Mounted = hb_test_utils:test_store(hb_store_lmdb),
+    Name = maps:get(<<"name">>, Mounted),
+    Reader = Boot#{<<"access">> => [<<"read">>], <<"prefix">> => <<"index/">>},
+    Other = Boot#{<<"name">> => <<"other-store">>},
+    Link = {link, hb_util:encode(crypto:strong_rand_bytes(32))},
+    Index = #{
+        <<"store-module">> => hb_store_arweave,
+        <<"index-store">> => [Reader, Other],
+        <<"store">> => [Reader],
+        <<"description">> => Link
+    },
+    Signed = hb_message:commit(
+        #{<<"store">> => Boot},
+        #{<<"priv-wallet">> => ar_wallet:new(), <<"store">> => []}
+    ),
+    Opts = #{
+        <<"store">> => [Boot],
+        <<"match-index">> => [Boot],
+        <<"arweave-index-store">> => Index,
+        <<"arweave-block-store">> => Boot,
+        <<"scheduler-store">> => [Boot],
+        <<"process-store">> => Reader,
+        <<"http-extra-opts">> => #{<<"store">> => [Reader, Index]},
+        <<"on">> => Signed,
+        <<"priv">> => #{<<"store">> => Boot}
+    },
+    ?assertNot(filelib:is_dir(Name)),
+    Active = install_store(Mounted, Opts),
+    ?assertNot(filelib:is_dir(Name)),
+    MountedReader = Reader#{<<"name">> => Name},
+    MountedIndex = Index#{
+        <<"index-store">> => [MountedReader, Other],
+        <<"store">> => [MountedReader]
+    },
+    ?assertEqual(
+        Opts#{
+            <<"store">> => [Mounted],
+            <<"match-index">> => [Mounted],
+            <<"arweave-index-store">> => MountedIndex,
+            <<"arweave-block-store">> => Boot#{<<"name">> => Name},
+            <<"scheduler-store">> => [Boot#{<<"name">> => Name}],
+            <<"process-store">> => MountedReader,
+            <<"http-extra-opts">> =>
+                #{<<"store">> => [MountedReader, MountedIndex]}
+        },
+        Active
+    ),
+    try
+        ok = hb_store:write(Mounted, #{<<"key">> => <<"value">>}, Active),
+        ?assertEqual(
+            {ok, <<"value">>},
+            hb_store:read(MountedReader, <<"index/key">>, Active)
+        ),
+        ?assertEqual(
+            {error, not_found},
+            hb_store:write(MountedReader, #{<<"index/key">> => <<"changed">>}, Active)
+        )
+    after
+        hb_store:stop(Mounted)
+    end.
 
 -endif.

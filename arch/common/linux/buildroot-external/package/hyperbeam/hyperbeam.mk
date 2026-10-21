@@ -25,13 +25,13 @@
 #
 ################################################################################
 
-# Track upstream HyperBEAM edge. LapEE-owned devices are packaged as
+# Pin upstream HyperBEAM. LapEE-owned devices are packaged as
 # an external Forge device source set and baked into the preloaded
 # store without mutating the HyperBEAM checkout.
-HYPERBEAM_VERSION ?= 6e6a9bc9543ea4954ab41e8d2e7321b4b39f00b0
+HYPERBEAM_VERSION ?= 70e610430b7f32afabbe95e318c0c616ea143f05
 # Reproducible timestamp for the pinned source commit. Update it together with
 # HYPERBEAM_VERSION (`git show -s --format=%ct <version>`).
-HYPERBEAM_SOURCE_DATE_EPOCH ?= 1787372613
+HYPERBEAM_SOURCE_DATE_EPOCH ?= 1792623241
 HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
@@ -39,12 +39,9 @@ HYPERBEAM_LICENSE = BSL-1.1
 HYPERBEAM_LICENSE_FILES = LICENSE.md
 HYPERBEAM_DEPENDENCIES = host-erlang erlang openssl tpm2-tss gmp
 
-# rebar3 is not shipped in the HyperBEAM repo. Bootstrap from
-# the canonical S3-hosted self-contained escript that the
-# rebar3 project publishes. (GitHub-release URLs are flaky
-# across versions; the S3 bucket has been the documented
-# install method for years.)
-HYPERBEAM_REBAR3_URL = https://s3.amazonaws.com/rebar3/rebar3
+# rebar3 is not shipped in the HyperBEAM repo. Fetch the release matching
+# the pinned checksum rather than the moving latest escript.
+HYPERBEAM_REBAR3_URL = https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3
 HYPERBEAM_REBAR3_SHA256 = af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf
 HYPERBEAM_REBAR3_PLUGINS = {plugins, [{pc, "1.15.0"}, {rebar_edown_plugin, "0.7.0"}, {rebar3_eunit_start, {git, "https://github.com/permaweb/rebar3_eunit_start.git", {ref, "04ec53fea187039770db0d4459b7aeb01a9021af"}}}]}.
 
@@ -331,7 +328,7 @@ define HYPERBEAM_BUILD_CMDS
 	cp -a $(@D)/src/preloaded $(@D)/_build/lapee-preload-src/preloaded
 	rm -f $(@D)/_build/lapee-preload-src/preloaded/auth/dev_snp.erl
 	cd $(@D) && $(HYPERBEAM_HOST_BUILD_ENV) ./rebar3 device preload \
-	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src,$(HYPERBEAM_DEVICE_DIR)/src/security,$(HYPERBEAM_DEVICE_DIR)/src/sandbox \
+	    --device-src _build/lapee-preload-src/preloaded,$(HYPERBEAM_DEVICE_DIR)/src \
 	    --output-dir _build/preloaded-store
 	# Replace every host native artifact with a target build while preserving
 	# the already-generated, architecture-independent Forge store.
@@ -451,7 +448,7 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 	    '        {start_os_sup,  false}' \
 	    '    ]}' \
 	    '].' \
-	    > $(TARGET_DIR)/usr/lib/hyperbeam/releases/0.0.1/sys.config
+	    > $(TARGET_DIR)/usr/lib/hyperbeam/releases/0.11/sys.config
 	# Ship the splash daemon's compiled .beam under a dedicated
 	# lib path so init's `-pa /usr/local/lib/lapee-splash' picks
 	# it up. lapee_splash.erl lives in this BR2_EXTERNAL tree;
