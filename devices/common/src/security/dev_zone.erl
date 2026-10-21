@@ -13,14 +13,14 @@
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
 -device_libraries([lib_lapee_nonvolatile, lib_permawebos_peer_http]).
--export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
+-export([device_info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
 
 -include_lib("hb/include/hb.hrl").
 
 -define(IDENTITY_PREFIX, <<"zone/">>).
 -define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
@@ -38,7 +38,7 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"version">> => <<"1.0">>,
-            <<"exports">> => maps:get(exports, info(#{}), [])
+            <<"exports">> => maps:get(exports, device_info(#{}), [])
         }
     }}.
 

@@ -8,7 +8,7 @@
 -module(dev_measurement).
 -implements(<<"measurement@1.0">>).
 -device_libraries([lib_permawebos_peer_http]).
--export([info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
+-export([device_info/1, info/3, boot/3, fresh/3, verify/3, verify_peer/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          measurement_body/1, measurement_body_id/2, secret_recipient_id/2,
@@ -24,7 +24,7 @@
 -define(DEFAULT_DEVICES, [<<"snp@1.0">>, <<"tpm@2.0a">>, <<"andee@1.0">>]).
 -define(DEFAULT_TIMEOUT_MS, 30000).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
@@ -1021,6 +1021,34 @@ reason_to_text(T) -> iolist_to_binary(io_lib:format("~0p", [T])).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+platform_device_metadata_test_() ->
+    [
+        {Device, fun() ->
+            Opts = #{<<"store">> => hb_test_utils:test_store()},
+            Base = #{<<"device">> => Device},
+            ?assertMatch(
+                #{exports := [_ | _]},
+                hb_device:device_info(Base, Opts)
+            ),
+            ?assertMatch(
+                {ok, #{<<"status">> := 200}},
+                hb_ao:resolve(Base, <<"info">>, Opts)
+            ),
+            ?assertEqual(
+                {ok, <<"message-value">>},
+                hb_ao:resolve(
+                    Base#{<<"internal-request">> => <<"message-value">>},
+                    <<"internal-request">>,
+                    Opts
+                )
+            )
+        end}
+    || Device <- [
+        <<"system@1.0">>, <<"measurement@1.0">>, <<"zone@1.0">>,
+        <<"snp@1.0">>, <<"tpm@2.0a">>, <<"andee@1.0">>
+    ]
+    ].
 
 engine_request_uses_internal_token_test() ->
     Req = engine_request(#{}),

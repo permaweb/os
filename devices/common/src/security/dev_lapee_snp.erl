@@ -12,7 +12,7 @@
 %%% encrypt admission material to it.
 -module(dev_lapee_snp).
 -implements(<<"snp@1.0">>).
--export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
+-export([device_info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
@@ -27,7 +27,7 @@
 -define(ID_MGF1, {1,2,840,113549,1,1,8}).
 -define(ID_SHA384, {2,16,840,1,101,3,4,2,2}).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,

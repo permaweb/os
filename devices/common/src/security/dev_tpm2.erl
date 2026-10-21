@@ -5,7 +5,7 @@
 -module(dev_tpm2).
 -implements(<<"tpm@2.0a">>).
 -device_libraries([lib_hb_db_tpm, lib_lapee_aia, lib_lapee_tpm_tcg]).
--export([info/1, info/3, supported/3, subject/3, measure/3,
+-export([device_info/1, info/3, supported/3, subject/3, measure/3,
          unwrap_secret/3, activate_credential_secret/2]).
 -export([verify/3]).
 -export([make_credential_for_subject/3]).
@@ -26,7 +26,7 @@
 -define(TCG_EK_CERT_OID, {2, 23, 133, 8, 1}).
 
 
-info(_) ->
+device_info(_) ->
     #{
         exports =>
             [
@@ -44,7 +44,7 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"version">> => <<"2.0a">>,
-            <<"exports">> => maps:get(exports, info(#{}), [])
+            <<"exports">> => maps:get(exports, device_info(#{}), [])
         }
     }}.
 

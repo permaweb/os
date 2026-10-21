@@ -7,7 +7,7 @@
 %%% pure BEAM so Linux/SNP/TPM nodes can validate AndEE peers.
 -module(dev_andee).
 -implements(<<"andee@1.0">>).
--export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
+-export([device_info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          wrap_secret/3, unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
@@ -36,7 +36,7 @@
 -define(VENDOR_PATCH_LEVEL_TAG, 718).
 -define(BOOT_PATCH_LEVEL_TAG, 719).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
