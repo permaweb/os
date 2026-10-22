@@ -37,8 +37,8 @@
   "trusted-devices": {
     "agent@1.0": "c9VNrqBmu3dcM4Xeyz5I_HG8tdFUiC6RWde8jd49CG0",
     "inference@1.0": "8CAlsOd88mfEAmkhBLbskt0zH5nE2WnvOnguweV3BHY",
-    "ouroboros@1.0": "33h4O1W-VHzsvuHm9eT6yqqasuqIW87qoYCnpgymJtc",
-    "ouroboros-space@1.0": "kBuj3Dn6e_OCC-rwRJCNDUMn_Z6Xu1oNbjJ56HMN3kU",
+    "ouroboros@1.0": "RWdNE1p-u0HeksGhuqOqq7upN9y4gPyng-rDr5egobI",
+    "ouroboros-space@1.0": "TizqTOn3xiSG0y000FNrBiGwHBSA3Lro8oiTzWai5WY",
     "weavemail@1.0": "QTmCCs1FKJNKQ_xWbIbIpO4-aFci_LX90_UDp4jRde8",
     "tunnel@1.0": "vFh2OsL7YhAO7XIymiP8mcxE16cmdjQyl06Qzwe2dNU"
   },
