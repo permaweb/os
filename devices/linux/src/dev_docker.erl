@@ -13,7 +13,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 -export([
-    info/1,
+    device_info/1,
     index/3,
     proxy/4,
     read/3,
@@ -38,7 +38,7 @@
         )
 ).
 
-info(_) ->
+device_info(_) ->
     lib_permawebos_execution_runtime:device_info(
         lib_permawebos_execution_runtime:handler_map(
             ?MODULE,
@@ -163,6 +163,18 @@ with_volume(Opts, Fun) ->
     end.
 
 -ifdef(TEST).
+
+%% @doc Unknown tools use the device's public default handler.
+unknown_tool_test() ->
+    {ok, Reply} = hb_ao:resolve(
+        #{<<"device">> => <<"docker@1.0">>},
+        #{<<"path">> => <<"not-a-tool">>},
+        #{}
+    ),
+    ?assertEqual(404, hb_maps:get(<<"status">>, Reply)),
+    ?assertEqual(
+        <<"Unknown docker@1.0 action.">>, hb_maps:get(<<"error">>, Reply)
+    ).
 
 index_fails_closed_without_private_daemon_test() ->
     PreviousHost = os:getenv("DOCKER_HOST"),
