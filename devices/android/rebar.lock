@@ -26,7 +26,7 @@
  {<<"hackney">>,{pkg,<<"hackney">>,<<"1.25.0">>},1},
  {<<"hb">>,
   {git,"https://github.com/permaweb/hyperbeam-dev.git",
-       {ref,"e4cd630ecd1b2bd61a02e02c8188609a170c1aaf"}},
+       {ref,"773ce072192dc55e89b8117905e1e4339a571a72"}},
   0},
  {<<"idna">>,{pkg,<<"idna">>,<<"6.1.1">>},2},
  {<<"luerl">>,{pkg,<<"luerl">>,<<"1.3.0">>},1},
