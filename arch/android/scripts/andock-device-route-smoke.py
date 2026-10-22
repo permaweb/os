@@ -33,9 +33,9 @@ def request(base_url, action, body=None, tools=TOOLS, method="POST"):
             urllib.request.Request(url, data=data, headers=headers, method=method),
             timeout=60,
         ) as response:
-            return json.load(response)
+            return {**json.load(response), "http-status": response.status}
     except urllib.error.HTTPError as failure:
-        return json.load(failure)
+        return {**json.load(failure), "http-status": failure.code}
 
 
 def require(condition, message):
@@ -52,12 +52,13 @@ def wait_for_template(base_url, timeout):
             "yield-ms": 5000,
             "execution-id": "andock-template-readiness",
         })
-        if response.get("status") == 200:
+        if response.get("http-status") == 200:
             require(response.get("execution-status") == "exited", response)
             require(response.get("exit-code") == 0, response)
             return response
         if (
-            response.get("status") != 503
+            response.get("http-status") != 503
+            or response.get("status") != 503
             or not response.get("error", "").startswith("andock-default-image-")
             or time.monotonic() >= deadline
         ):
@@ -66,7 +67,7 @@ def wait_for_template(base_url, timeout):
 
 
 def successful(response):
-    require(response.get("status") == 200, response)
+    require(response.get("http-status") == 200, response)
     require(response.get("ok") in (True, "true"), response)
     require(response.get("device") == "andock@1.0", response)
     return response
@@ -115,6 +116,7 @@ def main():
     evidence = {}
 
     index = request(base_url, "index", method="GET")
+    require(index.get("http-status") == 200, index)
     require(index.get("status") == "ready", index)
     require(index.get("device") == "andock@1.0", index)
     require(
@@ -188,6 +190,7 @@ def main():
     })
     bash_conflict_elapsed = time.monotonic() - conflict_started
     require(bash_conflict.get("status") == 409, bash_conflict)
+    require(bash_conflict.get("http-status") == 409, bash_conflict)
     require(bash_conflict.get("error") == "member-session-active", bash_conflict)
     require(bash_conflict.get("session-id") == session["session-id"], bash_conflict)
     require(bash_conflict.get("execution-status") == "running", bash_conflict)
@@ -202,6 +205,7 @@ def main():
     read_conflict = request(base_url, "read", {"path": route_file})
     read_conflict_elapsed = time.monotonic() - read_conflict_started
     require(read_conflict.get("status") == 409, read_conflict)
+    require(read_conflict.get("http-status") == 409, read_conflict)
     require(read_conflict.get("error") == "member-session-active", read_conflict)
     require(read_conflict.get("session-id") == session["session-id"], read_conflict)
     require(read_conflict_elapsed < 3, read_conflict_elapsed)
@@ -261,8 +265,10 @@ def main():
 
     evidence["unknown"] = request(base_url, "unknown", method="GET")
     require(evidence["unknown"].get("status") == 404, evidence["unknown"])
+    require(evidence["unknown"].get("http-status") == 404, evidence["unknown"])
     evidence["traversal"] = request(base_url, "read", {"path": "../secret"})
     require(evidence["traversal"].get("status") == 400, evidence["traversal"])
+    require(evidence["traversal"].get("http-status") == 400, evidence["traversal"])
     evidence["unauthorized"] = request(
         base_url,
         "bash",
@@ -270,6 +276,7 @@ def main():
         tools=["Read"],
     )
     require(evidence["unauthorized"].get("status") == 403, evidence["unauthorized"])
+    require(evidence["unauthorized"].get("http-status") == 403, evidence["unauthorized"])
     network_output, network_terminal, network_polls = run_bash_to_completion(base_url, {
         "command": "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80' >/dev/null 2>&1",
         "cwd": root,
