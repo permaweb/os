@@ -37,10 +37,10 @@
   "trusted-devices": {
     "agent@1.0": "c9VNrqBmu3dcM4Xeyz5I_HG8tdFUiC6RWde8jd49CG0",
     "inference@1.0": "8CAlsOd88mfEAmkhBLbskt0zH5nE2WnvOnguweV3BHY",
-    "ouroboros@1.0": "RWdNE1p-u0HeksGhuqOqq7upN9y4gPyng-rDr5egobI",
-    "ouroboros-space@1.0": "TizqTOn3xiSG0y000FNrBiGwHBSA3Lro8oiTzWai5WY",
+    "ouroboros@1.0": "WaIwuWV7AslKkkKG-B-MvUjFkE0NErm9xhh5GzNiyKU",
+    "ouroboros-space@1.0": "Wjd0xl0sdU1XkhbbaI0stwWOG3NXP1ft6GMK7DGOQxc",
     "weavemail@1.0": "QTmCCs1FKJNKQ_xWbIbIpO4-aFci_LX90_UDp4jRde8",
-    "tunnel@1.0": "vFh2OsL7YhAO7XIymiP8mcxE16cmdjQyl06Qzwe2dNU"
+    "tunnel@1.0": "BeSxbYISDLOUmZsnVL01WJs1An87vNLjssI4UCkRHgU"
   },
   "on": {
     "start": [
@@ -48,7 +48,7 @@
         "device": "tunnel@1.0",
         "path": "connect",
         "method": "POST",
-        "peer": "https://smoke.solutions",
+        "peer": "https://rc.smoke.solutions",
         "workers": 8,
         "hook": {
           "result": "ignore"
