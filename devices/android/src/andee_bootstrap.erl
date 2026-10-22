@@ -93,46 +93,10 @@ start_store(Opts) ->
     Updated.
 
 load_config(Path) ->
-    case file:read_file(Path) of
-        {ok, Bin} -> decode_json_config(hb_json:decode(Bin));
+    case hb_opts:load(Path, #{}) of
+        {ok, Config} -> Config;
         {error, Reason} -> erlang:error({failed_to_load_andee_config, Path, Reason})
     end.
-
-decode_json_config(Values) when is_list(Values) ->
-    [decode_json_config(Value) || Value <- Values];
-decode_json_config(Config) when is_map(Config) ->
-    Types = decode_ao_types(Config),
-    maps:fold(
-        fun
-            (<<"ao-types">>, _Value, Acc) ->
-                Acc;
-            (RawKey, BinValue, Acc) when is_binary(BinValue) ->
-                case hb_maps:find(hb_ao:normalize_key(RawKey), Types, #{}) of
-                    error -> Acc#{RawKey => BinValue};
-                    {ok, Type} -> Acc#{RawKey => hb_util:decode(Type, BinValue)}
-                end;
-            (RawKey, Child, Acc) when is_map(Child) or is_list(Child) ->
-                Acc#{RawKey => decode_json_config(Child)};
-            (RawKey, Value, Acc) ->
-                Acc#{RawKey => Value}
-        end,
-        #{},
-        Config
-    );
-decode_json_config(Value) ->
-    Value.
-
-decode_ao_types(Config) when is_map(Config) ->
-    decode_ao_types(hb_maps:get(<<"ao-types">>, Config, <<>>, #{}));
-decode_ao_types(Bin) when is_binary(Bin) ->
-    hb_maps:from_list(
-        lists:map(
-            fun({Key, {item, {_, Value}, _}}) ->
-                {hb_escape:decode(Key), Value}
-            end,
-            hb_structured_fields:parse_dictionary(Bin)
-        )
-    ).
 
 runtime_environment() ->
     maps:from_list(
@@ -318,26 +282,34 @@ load_config_honors_json_ao_types_test() ->
     JSON =
         <<"""
         {
-          "ao-types": "scheduling-mode=\"atom\"",
+          "ao-types": "atom=(\"scheduling-mode\")",
           "store": [
             {
               "store-module": "hb_store_volatile",
               "name": "runtime",
-              "ao-types": "store-module=\"atom\""
+              "ao-types": "atom=(\"store-module\")"
             },
             {
               "store-module": "hb_store_gateway",
-              "ao-types": "store-module=\"atom\"",
+              "ao-types": "atom=(\"store-module\")",
               "local-store": [
                 {
                   "store-module": "hb_store_volatile",
                   "name": "runtime",
-                  "ao-types": "store-module=\"atom\""
+                  "ao-types": "atom=(\"store-module\")"
                 }
               ]
             }
           ],
-          "scheduling-mode": "local_confirmation"
+          "scheduling-mode": "local_confirmation",
+          "priv-store": [{
+            "store-module": "hb_store_volatile",
+            "name": "private-runtime",
+            "ao-types": "atom=(\"store-module\")"
+          }],
+          "inference-providers": {
+            "external": {"priv": {"api-key": "opaque-test-key"}}
+          }
         }
         """>>,
     ok = file:write_file(Path, JSON),
@@ -368,27 +340,38 @@ load_config_honors_json_ao_types_test() ->
         ],
         maps:get(<<"store">>, Normalized)
     ),
+    ?assertMatch([#{<<"store-module">> := hb_store_volatile}],
+        maps:get(<<"priv-store">>, Normalized)),
+    ?assertEqual(<<"opaque-test-key">>,
+        hb_private:get(<<"api-key">>,
+            maps:get(<<"external">>, maps:get(<<"inference-providers">>, Normalized)), #{})),
     ?assertNot(maps:is_key(<<"ao-types">>, Normalized)),
     ?assertEqual(local_confirmation, maps:get(<<"scheduling-mode">>, Normalized)).
 
 remote_indexed_arweave_store_decoding_test() ->
-    [Store] = decode_json_config(hb_json:decode(<<"""
-        [{
+    Path = filename:join(<<"/tmp">>,
+        <<"andee_remote_config_",
+            (integer_to_binary(erlang:unique_integer([positive])))/binary,
+            ".json">>),
+    ok = file:write_file(Path, <<"""
+        {"store": [{
           "store-module": "hb_store_arweave",
-          "ao-types": "store-module=\"atom\"",
+          "ao-types": "atom=(\"store-module\")",
           "index-store": [{
             "store-module": "hb_store_volatile",
             "name": "index",
-            "ao-types": "store-module=\"atom\""
+            "ao-types": "atom=(\"store-module\")"
           }],
           "local-store": [{
             "store-module": "hb_store_fs",
             "name": "/tmp/cache",
-            "ao-types": "store-module=\"atom\""
+            "ao-types": "atom=(\"store-module\")"
           }],
           "remote-index": true
-        }]
-    """>>)),
+        }]}
+    """>>),
+    Config = try load_config(Path) after file:delete(Path) end,
+    [Store] = maps:get(<<"store">>, Config),
     ?assertEqual(hb_store_arweave, maps:get(<<"store-module">>, Store)),
     ?assertEqual(true, maps:get(<<"remote-index">>, Store)),
     [Index] = maps:get(<<"index-store">>, Store),
