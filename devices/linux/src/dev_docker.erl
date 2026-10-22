@@ -181,8 +181,7 @@ index_fails_closed_without_private_daemon_test() ->
 zone_volume_is_an_ao_core_failure_test() ->
     Opts = #{
         <<"permawebos-docker-volume">> => <<"zone">>,
-        <<"hashpath">> => ignore,
-        <<"forge-bootstrap">> => #{?DEVICE => ?MODULE}
+        <<"hashpath">> => ignore
     },
     ?assertMatch(
         {failure,
