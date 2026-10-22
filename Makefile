@@ -119,7 +119,7 @@ SB_PROVISION_INITRAMFS = $(SB_PROVISION_BUILD_DIR)/initramfs/initramfs-lapee.cpi
 SB_PROVISION_CMDLINE = console=ttyS0 console=tty0 fbcon=nodefer \
                        loglevel=7 panic=10 rdinit=/init \
                        lapee.mode=sb-provision
-HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam
+HYPERBEAM_REPO ?= https://github.com/permaweb/hyperbeam-dev
 LINUX_ARCH_DIR ?= $(LAPEE_ROOT)/arch/common/linux
 LINUX_BUILDROOT_EXTERNAL ?= $(LINUX_ARCH_DIR)/buildroot-external
 LINUX_DOCKER_DIR ?= $(LINUX_ARCH_DIR)/docker
