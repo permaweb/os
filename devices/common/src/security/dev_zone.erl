@@ -710,7 +710,10 @@ install_ring(Name, Templates0, AES, Wallet, Members, Opts) ->
     }.
 
 install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts) ->
-    Opts1 = install_ring(Name, Templates, AES, Wallet, Members, Opts),
+    Opts1 = install_ring(
+        Name, Templates, AES, Wallet, Members,
+        hb_http_server:with_node_committer(Opts)
+    ),
     RingAddress = wallet_address(Wallet),
     Opts2 =
         case lib_lapee_nonvolatile:activate(Name, RingAddress, AES, Opts1) of
@@ -2196,6 +2199,117 @@ zone_join_hook_receives_exact_membership_proof_test() ->
             ?assert(hb_message:verify(HookProof, all, SeedOpts))
         end
     ).
+
+zone_http_identity_install_test_() ->
+    [
+        {"empty identities", {timeout, 90, fun() ->
+            zone_http_identity_install(#{})
+        end}},
+        {"existing identity", {timeout, 90, fun() ->
+            zone_http_identity_install(#{
+                <<"existing">> => #{<<"priv-wallet">> => ar_wallet:new()}
+            })
+        end}}
+    ].
+
+%% Exercise the post-admission installation boundary through real HTTP opts.
+%% Hardware attestation and admission are independent of this state update.
+zone_http_identity_install(Identities) ->
+    NodeWallet = ar_wallet:new(),
+    ServerID = wallet_address(NodeWallet),
+    Store = hb_test_utils:test_store(),
+    ClientStore = hb_test_utils:test_store(),
+    Device = #{
+        <<"install">> => fun(_, Req, Opts) ->
+            ?assertNot(maps:is_key(<<"priv-wallet">>, Opts)),
+            ?assertNot(maps:is_key(<<"identities">>, Opts)),
+            with_result(fun() ->
+                Name = required_name(Req, Opts),
+                Wallet = ar_wallet:new(),
+                NewOpts = install_ring_and_storage(
+                    Name,
+                    #{<<"test">> => true},
+                    crypto:strong_rand_bytes(32),
+                    Wallet,
+                    #{ServerID => #{<<"address">> => ServerID}},
+                    Opts
+                ),
+                hb_http_server:set_opts(NewOpts),
+                notify_zone_join(Name, NewOpts),
+                status_body(Name, NewOpts)
+            end, Opts)
+        end,
+        <<"member">> => fun member/3
+    },
+    Hook = fun(_, HookReq = #{<<"request">> := Req}, _) ->
+        {ok, HookReq#{<<"body">> => [#{<<"device">> => Device}, Req]}}
+    end,
+    Opts = #{
+        <<"priv-wallet">> => NodeWallet,
+        <<"store">> => [Store],
+        <<"initialized">> => true,
+        <<"commitment-device">> => <<"httpsig@1.0">>,
+        <<"on">> => #{
+            <<"request">> => #{<<"device">> => #{<<"request">> => Hook}}
+        }
+    },
+    NodeOpts =
+        case map_size(Identities) of
+            0 -> Opts;
+            _ -> Opts#{<<"identities">> => Identities}
+        end,
+    URL = hb_http_server:start_node(NodeOpts),
+    ClientOpts = #{
+        <<"store">> => [ClientStore],
+        <<"priv-wallet">> => ar_wallet:new(),
+        <<"http-only-result">> => false
+    },
+    try
+        lists:foldl(fun(Name, Rings) ->
+            {_, Installed} = hb_http:get(URL,
+                #{<<"path">> => <<"/install?name=", Name/binary>>,
+                  <<"accept-bundle">> => true}, ClientOpts),
+            {_, Membership} = hb_http:get(URL,
+                #{<<"path">> => <<"/member?zone=", Name/binary>>,
+                  <<"accept-bundle">> => true}, ClientOpts),
+            ?assertEqual({Name, 200, 200}, {
+                Name,
+                hb_maps:get(<<"status">>, Installed),
+                hb_maps:get(<<"status">>, Membership)
+            }),
+            Body = hb_maps:get(<<"body">>, Installed, #{}, ClientOpts),
+            ZoneDefinition = hb_maps:get(<<"zone">>, Body, #{}, ClientOpts),
+            Ring = hb_maps:get(
+                <<"ring-address">>, ZoneDefinition, undefined, ClientOpts),
+            ?assertNot(lists:keymember(Ring, 2, Rings)),
+            NewRings = [{Name, Ring} | Rings],
+            lists:foreach(fun({Zone, Address}) ->
+                {ok, Reply} = hb_http:get(URL,
+                    #{<<"path">> => <<"/member?zone=", Zone/binary>>,
+                      <<"accept-bundle">> => true}, ClientOpts),
+                ?assertEqual(200, hb_maps:get(<<"status">>, Reply)),
+                Proof = hb_maps:get(<<"body">>, Reply, #{}, ClientOpts),
+                ?assert(hb_message:verify(Proof, all, ClientOpts)),
+                ?assertEqual([Address], [
+                    hb_util:committer_address(Signer)
+                 || Signer <- hb_message:signers(Proof, ClientOpts)
+                ])
+            end, NewRings),
+            Current = hb_http_server:get_opts(#{<<"http-server">> => ServerID}),
+            maps:foreach(fun(Identity, SubOpts) ->
+                {ok, IdentityOpts} = hb_opts:as(Identity, Current),
+                ?assertEqual(
+                    hb_opts:address(SubOpts), hb_opts:address(IdentityOpts)),
+                Signed = hb_message:commit(#{<<"test">> => Name}, IdentityOpts),
+                ?assert(hb_message:verify(Signed, all, ClientOpts))
+            end, Identities),
+            NewRings
+        end, [], [<<"alpha">>, <<"beta">>, <<"gamma">>])
+    after
+        cowboy:stop_listener(ServerID),
+        hb_store:stop(Store),
+        hb_store:stop(ClientStore)
+    end.
 
 nonvolatile_store_blocks_different_zone_test() ->
     Mounted = #{
