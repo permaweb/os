@@ -21,6 +21,8 @@ start() ->
 
 start(ConfigPath) ->
     ensure_preloaded_store(),
+    % Register the bundled kernel modules before decoding atom-typed config.
+    application:load(hb),
     io:format("andee-bootstrap=load-config path=~ts~n", [hb_util:bin(ConfigPath)]),
     Env = hb_opts:default_message_with_env(),
     Loaded =

@@ -141,7 +141,7 @@ archive, payload, or provenance participates in the Android build.
 The packaged HyperBEAM preload uses a public, deterministic Ed25519 build
 identity rather than the node wallet. That identity is not an authorization
 root: the measured APK/runtime remains the trust boundary. The build rewrites
-the preload through a sorted LMDB dump/load pass and packages the runtime with
+the preload through an ordered offline LMDB copy and packages the runtime with
 fixed timestamps and entry order, so unchanged inputs on the pinned build
 host/toolchain produce byte-identical runtime ZIP and APK artifacts.
 

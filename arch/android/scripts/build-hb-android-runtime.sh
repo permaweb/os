@@ -11,7 +11,7 @@ NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
 REBAR3="$ROOT/scripts/verified-rebar3.sh"
 PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
-EXPECTED_HYPERBEAM_VERSION="6e6a9bc9543ea4954ab41e8d2e7321b4b39f00b0"
+EXPECTED_HYPERBEAM_VERSION="70e610430b7f32afabbe95e318c0c616ea143f05"
 EXPECTED_WAMR_VERSION="217ba3b10c41036f0e9727aa93c2a164dba35e5c"
 WAMR_REPOSITORY="https://github.com/bytecodealliance/wasm-micro-runtime.git"
 WAMR_PATCH="$ROOT/scripts/wamr-table64.patch"
@@ -707,8 +707,7 @@ TZ=UTC find "$WORK" -exec touch -h -t "$zip_timestamp" {} +
 ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 ANDEE_HYPERBEAM_VERSION="$ANDEE_HYPERBEAM_VERSION" \
 ANDEE_HYPERBEAM_SOURCE_EPOCH="$ANDEE_HYPERBEAM_SOURCE_EPOCH" \
-ANDEE_LMDB_SYS_CHECKSUM="$ANDEE_LMDB_SYS_CHECKSUM" \
-ANDEE_LMDB_SYS_VERSION="$ANDEE_LMDB_SYS_VERSION" \
+ANDEE_ELMDB_VERSION="$ANDEE_ELMDB_VERSION" \
 ANDEE_PRELOADED_STORE_SHA256="$ANDEE_PRELOADED_STORE_SHA256" \
 ANDEE_PRELOADED_STORE_SIGNER="$ANDEE_PRELOADED_STORE_SIGNER" \
 python3 - <<'PY' "$OUT" "$BUILD_DIR/andee-runtime/manifest.json" "$JNI_DIR" "$WORK"
@@ -781,9 +780,8 @@ manifest.write_text(json.dumps({
     "native-libraries": native,
     "generic-composition": generic_composition,
     "preloaded-store": {
-        "canonical-format": "lmdb-dump-load-v1",
-        "lmdb-sys-checksum": os.environ["ANDEE_LMDB_SYS_CHECKSUM"],
-        "lmdb-sys-version": os.environ["ANDEE_LMDB_SYS_VERSION"],
+        "canonical-format": "lmdb-ordered-copy-v1",
+        "elmdb-version": os.environ["ANDEE_ELMDB_VERSION"],
         "sha256": os.environ["ANDEE_PRELOADED_STORE_SHA256"],
         "signing-algorithm": "ed25519",
         "signer": os.environ["ANDEE_PRELOADED_STORE_SIGNER"],

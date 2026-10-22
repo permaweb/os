@@ -115,7 +115,7 @@ def main():
     evidence = {}
 
     index = request(base_url, "index", method="GET")
-    require(index.get("status") == 200, index)
+    require(index.get("status") == "ready", index)
     require(index.get("device") == "andock@1.0", index)
     require(
         index.get("keys")

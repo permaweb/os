@@ -6,11 +6,11 @@
 %%% input used by `~measurement@1.0'.
 -module(dev_system).
 -implements(<<"system@1.0">>).
--export([info/1, info/3, all/3]).
+-export([device_info/1, info/3, all/3]).
 
 -include_lib("hb/include/hb.hrl").
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
@@ -103,6 +103,18 @@ local_policy_report(Opts) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+android_device_metadata_test_() ->
+    [
+        {Device, fun() ->
+            Opts = #{<<"store">> => hb_test_utils:test_store()},
+            ?assert(map_size(hb_device:device_info(
+                #{<<"device">> => Device}, Opts
+            )) > 0)
+        end}
+     || Device <- [<<"system@1.0">>, <<"andock@1.0">>,
+            <<"andee-inference@1.0">>]
+    ].
 
 report_exposes_artifact_identity_test() ->
     Report =
