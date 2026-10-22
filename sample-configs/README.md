@@ -10,9 +10,9 @@ configuration and measures the resulting effective node configuration at boot.
 `andee-ouroboros-with-tunnel.json` demonstrates composing `tunnel@1.0` with
 Ouroboros on AndEE. Ouroboros supports interchangeable executor backends; this
 example selects the generic Android `andock@1.0` device for that role. A LapEE
-configuration could instead select `qemu@1.0`. The example also includes the
-AndEE local-inference provider and authenticated remote providers behind the
-ordinary `inference@1.0` multiplexer. These are choices made by this example,
+configuration could instead select `qemu@1.0`. The example selects authenticated
+external providers through the ordinary `inference@1.0` multiplexer; it does
+not configure local inference. These are choices made by this example,
 not special properties of PermawebOS, Ouroboros, or any architecture image.
 
 Every `****` value must be replaced in a private copy before use. Replace
