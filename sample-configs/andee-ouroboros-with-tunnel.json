@@ -1,8 +1,8 @@
 {
   "default-request": "/owRdW2U1bKW3Vus0OgkRVwO-9BWc5s102tvWnLww0o0/",
   "bundler-ans104": "https://up.arweave.net",
-  "location-url": "https://**[base32 encoded node address]**.smoke.solutions",
-  "node-host": "**[base32 encoded node address]**.smoke.solutions",
+  "location-url": "https://**[wallet DNS URI]**.smoke.solutions",
+  "node-host": "**[wallet DNS URI]**.smoke.solutions",
   "ouroboros-execution-device": "andock@1.0",
   "ouroboros-operator-address": "ggltHF0Cnv9ylH3vM1p7amR2vXLMoPLQIUQmAEwLP-k",
   "process-snapshot-slots": 1,
@@ -35,12 +35,11 @@
     }
   },
   "trusted-devices": {
-    "agent@1.0": "c9VNrqBmu3dcM4Xeyz5I_HG8tdFUiC6RWde8jd49CG0",
-    "inference@1.0": "8CAlsOd88mfEAmkhBLbskt0zH5nE2WnvOnguweV3BHY",
-    "ouroboros@1.0": "WaIwuWV7AslKkkKG-B-MvUjFkE0NErm9xhh5GzNiyKU",
-    "ouroboros-space@1.0": "Wjd0xl0sdU1XkhbbaI0stwWOG3NXP1ft6GMK7DGOQxc",
-    "weavemail@1.0": "QTmCCs1FKJNKQ_xWbIbIpO4-aFci_LX90_UDp4jRde8",
-    "tunnel@1.0": "BeSxbYISDLOUmZsnVL01WJs1An87vNLjssI4UCkRHgU"
+    "agent@1.0": "bjolkLzCYweY41Bl8La93bAc1EXR3Cz9VgfPnoCJwjg",
+    "inference@1.0": "VJySpkQaiGWZpHWGjxxGUvA97xDAJg8Uq8LXAo5JaFI",
+    "ouroboros@1.0": "YpifRFev7WZddKIS9jcifHwwwyo6paS0BL57_kxkPbY",
+    "ouroboros-space@1.0": "yyzHeuuAdpKlTUf0eZyx90KyaSNo42QTt7FaFer176E",
+    "weavemail@1.0": "yFpbEriI8zVOouqV1e8sMWIiHGRWBsQ4agnWV-uJJ60"
   },
   "on": {
     "start": [
@@ -48,7 +47,7 @@
         "device": "tunnel@1.0",
         "path": "connect",
         "method": "POST",
-        "peer": "https://rc.smoke.solutions",
+        "peer": "https://smoke.solutions",
         "workers": 8,
         "hook": {
           "result": "ignore"
