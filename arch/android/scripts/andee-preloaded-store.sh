@@ -221,6 +221,7 @@ build_andee_preloaded_store() {
             end,
             ok = Check(<<"andock@1.0">>),
             ok = Check(<<"andee-inference@1.0">>),
+            ok = Check(<<"tunnel@1.0">>),
             halt(0).
         ' -extra "$out"
     )

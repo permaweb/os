@@ -83,6 +83,9 @@ val stageLiteRtNotices = tasks.register<Copy>("stageLiteRtNotices") {
 android.sourceSets.getByName("main").assets.srcDir(
     files(liteRtNoticesDirectory).builtBy(stageLiteRtNotices),
 )
+tasks.named("preBuild") {
+    dependsOn(stageLiteRtNotices)
+}
 
 dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")

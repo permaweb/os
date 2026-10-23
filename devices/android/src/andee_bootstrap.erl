@@ -35,7 +35,6 @@ start(ConfigPath) ->
     Merged = hb_maps:merge(Env, Configured),
     ensure_runtime_applications(),
     configure_public_key_cacerts(),
-    hb_http_client:setup_conn(Merged),
     ok = hb_http_client:init_prometheus(),
     io:format("andee-bootstrap=start-store~n"),
     Store = start_store(Merged),
