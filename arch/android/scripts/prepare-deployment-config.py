@@ -56,7 +56,7 @@ def contains_placeholder(value):
     if isinstance(value, list):
         return any(contains_placeholder(child) for child in value)
     return isinstance(value, str) and (
-        "****" in value or "**[base32 encoded node address]**" in value
+        "****" in value or "**[" in value
     )
 
 
