@@ -94,6 +94,7 @@ run_tool() {
         "$LAPEE")   _workdir="/work" ;;
     esac
     docker run --rm $DOCKER_PLATFORM \
+        --user "$(id -u):$(id -g)" \
         -v "$LAPEE":/work \
         -w "$_workdir" \
         "$BUILD_IMAGE" \
