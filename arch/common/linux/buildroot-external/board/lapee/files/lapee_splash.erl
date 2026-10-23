@@ -30,6 +30,10 @@
 -module(lapee_splash).
 -export([main/0, main/1]).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 main()      -> main([]).
 
 %% ============================================================
@@ -1173,6 +1177,8 @@ status_word(Text) ->
 %% during boot. Before networking is up, init writes the current
 %% high-level stage into a tmpfs file; after DHCP, the splash owns the
 %% network/HB-ready phase machine itself.
+footer_text(_, _, _, Status = "Boot stopped: " ++ _) ->
+    Status;
 footer_text(boot, _, _, Status) ->
     default_status(Status, "Starting LapEE.");
 footer_text('net-up', undefined, _, _) ->
@@ -1221,3 +1227,48 @@ log_event(Msg) ->
     Line = io_lib:format("[lapee-splash] ~s~n",
                          [lists:flatten(Msg)]),
     catch file:write_file(log_path(), Line, [append]).
+
+-ifdef(TEST).
+
+stopped_footer_test() ->
+    Status = "Boot stopped: HyperBEAM exited with status 137.",
+    lists:foreach(
+        fun(Phase) ->
+            lists:foreach(
+                fun(Ip) ->
+                    ?assertEqual(Status, footer_text(Phase, Ip, undefined, Status))
+                end,
+                [undefined, "10.0.2.15"]
+            )
+        end,
+        [boot, 'net-up', 'hb-wait', ready]
+    ),
+    ?assertEqual("Running.", footer_text(ready, undefined, undefined, undefined)),
+    ?assertEqual("Running at http://10.0.2.15:8734/",
+        footer_text(ready, "10.0.2.15", undefined, "Starting HyperBEAM.")).
+
+stopped_after_ready_test() ->
+    Path = filename:join(os:getenv("TMPDIR", "/tmp"),
+        "lapee-splash-status-" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Previous = os:getenv("LAPEE_STATUS"),
+    Status = <<"Boot stopped: HyperBEAM exited with status 137.">>,
+    try
+        ok = file:write_file(Path, <<Status/binary, "\n">>),
+        true = os:putenv("LAPEE_STATUS", Path),
+        State = poll_state(#{phase => ready, ip => "10.0.2.15"}),
+        ?assertEqual(binary_to_list(Status), maps:get(status, State)),
+        Frame = iolist_to_binary(render(State#{cols => 160, rows => 50,
+            layout => blue, frame => 96, yaw => 1.15, lid => 1.85,
+            hb_wait_t0 => undefined})),
+        ?assertNotEqual(nomatch, binary:match(Frame, <<"Boot stopped:">>)),
+        ?assertNotEqual(nomatch, binary:match(Frame, <<"137.">>)),
+        ?assertEqual(nomatch, binary:match(Frame, <<"Running at http://">>))
+    after
+        file:delete(Path),
+        case Previous of
+            false -> os:unsetenv("LAPEE_STATUS");
+            _ -> os:putenv("LAPEE_STATUS", Previous)
+        end
+    end.
+
+-endif.
