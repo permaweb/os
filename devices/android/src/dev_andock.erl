@@ -10,7 +10,7 @@
     lib_permawebos_execution_tools
 ]).
 -export([
-    info/1,
+    device_info/1,
     index/3,
     proxy/4,
     read/3,
@@ -32,7 +32,7 @@
         lib_andock:Action(Base, Req, Opts)
 ).
 
-info(_) ->
+device_info(_) ->
     #{
         <<"status">> => 404,
         <<"content-type">> => <<"text/plain; charset=utf-8">>,

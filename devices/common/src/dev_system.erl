@@ -7,12 +7,12 @@
 -module(dev_system).
 -implements(<<"system@1.0">>).
 -device_libraries([lib_lapee_tpm_tcg]).
--export([info/1, info/3, all/3]).
+-export([device_info/1, info/3, all/3]).
 -export([report_from_root/1]).
 -include_lib("kernel/include/file.hrl").
 -define(EFI_GLOBAL_VARIABLE_GUID, "8be4df61-93ca-11d2-aa0d-00e098032b8c").
 -define(MSR_BOOT_GUARD_SACM_INFO, 16#13a).
-info(_) ->
+device_info(_) ->
     #{exports => [<<"info">>, <<"all">>]}.
 
 info(_Base, _Req, _Opts) ->
@@ -20,7 +20,7 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"version">> => <<"1.0">>,
-            <<"exports">> => maps:get(exports, info(#{}), [])
+            <<"exports">> => maps:get(exports, device_info(#{}), [])
         }
     }}.
 

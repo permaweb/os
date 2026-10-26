@@ -67,7 +67,7 @@ def is_volatile_store(value: Any, name: str) -> bool:
         {
             "store-module": "hb_store_volatile",
             "name": name,
-            "ao-types": 'store-module="atom"',
+            "ao-types": 'atom=("store-module")',
         }
     ]
 
@@ -78,32 +78,32 @@ def is_runtime_store(value: Any) -> bool:
         "name": "../node-store",
         "capacity": 8589934592,
         "batch-size": 100,
-        "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
+        "ao-types": 'atom=("store-module")',
     }
     preloaded = {
         "store-module": "hb_store_lmdb",
         "name": "_build/preloaded-store",
         "capacity": 1073741824,
         "read-only": True,
-        "ao-types": 'store-module="atom"',
+        "ao-types": 'atom=("store-module")',
     }
     return value == [
         persistent,
         {
             "store-module": "hb_store_arweave",
-            "ao-types": 'store-module="atom"',
+            "ao-types": 'atom=("store-module")',
             "index-store": [
                 {
                     "store-module": "hb_store_volatile",
                     "name": "andee-volatile-arweave-index-store",
-                    "ao-types": 'store-module="atom"',
+                    "ao-types": 'atom=("store-module")',
                 }
             ],
             "local-store": [
                 {
                     "store-module": "hb_store_volatile",
                     "name": "andee-volatile-gateway-cache",
-                    "ao-types": 'store-module="atom"',
+                    "ao-types": 'atom=("store-module")',
                 }
             ],
             "remote-index": True,
@@ -111,12 +111,12 @@ def is_runtime_store(value: Any) -> bool:
         {
             "store-module": "hb_store_gateway",
             "access": ["read"],
-            "ao-types": 'store-module="atom"',
+            "ao-types": 'atom=("store-module")',
             "local-store": [
                 {
                     "store-module": "hb_store_volatile",
                     "name": "andee-volatile-gateway-cache",
-                    "ao-types": 'store-module="atom"',
+                    "ao-types": 'atom=("store-module")',
                 }
             ],
             "preloaded-store": preloaded,
@@ -131,7 +131,7 @@ def is_private_store(value: Any) -> bool:
             "name": "../private-store",
             "capacity": 1073741824,
             "batch-size": 100,
-            "ao-types": 'store-module="atom", capacity="integer", batch-size="integer"',
+            "ao-types": 'atom=("store-module")',
         }
     ]
 
@@ -139,19 +139,19 @@ def is_private_store(value: Any) -> bool:
 def is_volatile_arweave_index_store(value: Any) -> bool:
     return value == {
         "store-module": "hb_store_arweave",
-        "ao-types": 'store-module="atom"',
+        "ao-types": 'atom=("store-module")',
         "index-store": [
             {
                 "store-module": "hb_store_volatile",
                 "name": "andee-volatile-arweave-index-store",
-                "ao-types": 'store-module="atom"',
+                "ao-types": 'atom=("store-module")',
             }
         ],
         "local-store": [
             {
                 "store-module": "hb_store_volatile",
                 "name": "andee-volatile-gateway-cache",
-                "ao-types": 'store-module="atom"',
+                "ao-types": 'atom=("store-module")',
             }
         ],
         "remote-index": True,

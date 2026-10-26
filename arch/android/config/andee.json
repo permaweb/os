@@ -41,23 +41,23 @@
       "name": "../node-store",
       "capacity": 8589934592,
       "batch-size": 100,
-      "ao-types": "store-module=\"atom\", capacity=\"integer\", batch-size=\"integer\""
+      "ao-types": "atom=(\"store-module\")"
     },
     {
       "store-module": "hb_store_arweave",
-      "ao-types": "store-module=\"atom\"",
+      "ao-types": "atom=(\"store-module\")",
       "index-store": [
         {
           "store-module": "hb_store_volatile",
           "name": "andee-volatile-arweave-index-store",
-          "ao-types": "store-module=\"atom\""
+          "ao-types": "atom=(\"store-module\")"
         }
       ],
       "local-store": [
         {
           "store-module": "hb_store_volatile",
           "name": "andee-volatile-gateway-cache",
-          "ao-types": "store-module=\"atom\""
+          "ao-types": "atom=(\"store-module\")"
         }
       ],
       "remote-index": true
@@ -65,12 +65,12 @@
     {
       "store-module": "hb_store_gateway",
       "access": ["read"],
-      "ao-types": "store-module=\"atom\"",
+      "ao-types": "atom=(\"store-module\")",
       "local-store": [
         {
           "store-module": "hb_store_volatile",
           "name": "andee-volatile-gateway-cache",
-          "ao-types": "store-module=\"atom\""
+          "ao-types": "atom=(\"store-module\")"
         }
       ],
       "preloaded-store": {
@@ -78,7 +78,7 @@
         "name": "_build/preloaded-store",
         "capacity": 1073741824,
         "read-only": true,
-        "ao-types": "store-module=\"atom\""
+        "ao-types": "atom=(\"store-module\")"
       }
     }
   ],
@@ -86,24 +86,24 @@
     {
       "store-module": "hb_store_volatile",
       "name": "andee-volatile-match-index",
-      "ao-types": "store-module=\"atom\""
+      "ao-types": "atom=(\"store-module\")"
     }
   ],
   "arweave-index-store": {
     "store-module": "hb_store_arweave",
-    "ao-types": "store-module=\"atom\"",
+    "ao-types": "atom=(\"store-module\")",
     "index-store": [
       {
         "store-module": "hb_store_volatile",
         "name": "andee-volatile-arweave-index-store",
-        "ao-types": "store-module=\"atom\""
+        "ao-types": "atom=(\"store-module\")"
       }
     ],
     "local-store": [
       {
         "store-module": "hb_store_volatile",
         "name": "andee-volatile-gateway-cache",
-        "ao-types": "store-module=\"atom\""
+        "ao-types": "atom=(\"store-module\")"
       }
     ],
     "remote-index": true
@@ -114,7 +114,7 @@
       "name": "../private-store",
       "capacity": 1073741824,
       "batch-size": 100,
-      "ao-types": "store-module=\"atom\", capacity=\"integer\", batch-size=\"integer\""
+      "ao-types": "atom=(\"store-module\")"
     }
   ],
   "on": {

@@ -12,7 +12,7 @@
 %%% encrypt admission material to it.
 -module(dev_lapee_snp).
 -implements(<<"snp@1.0">>).
--export([info/1, info/3, supported/3, subject/3, measure/3, verify/3,
+-export([device_info/1, info/3, supported/3, subject/3, measure/3, verify/3,
          unwrap_secret/3]).
 -export([wrap_secret_for_subject/3, unwrap_secret_value/2,
          ensure_secret_activation/5]).
@@ -27,7 +27,7 @@
 -define(ID_MGF1, {1,2,840,113549,1,1,8}).
 -define(ID_SHA384, {2,16,840,1,101,3,4,2,2}).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
@@ -127,8 +127,7 @@ measure(_Base, Req, Opts) ->
     end.
 
 verify(Base, Req, Opts) ->
-    Measurement = hb_link:decode_all_links(
-        response_body(resolve_envelope(Base, Req, Opts), Opts)),
+    Measurement = response_body(resolve_envelope(Base, Req, Opts), Opts),
     Evidence = measurement_part(<<"evidence">>, Measurement, Opts),
     Body = hb_maps:get(<<"body">>, Measurement, #{}, Opts),
     Recipient = hb_maps:get(<<"secret-recipient">>, Measurement, #{}, Opts),
@@ -711,8 +710,7 @@ evidence_certificates(Evidence, Opts) ->
             lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>])
         ]).
 
-evidence_certificate_map(Evidence0, Opts) ->
-    Evidence = hb_link:decode_all_links(Evidence0),
+evidence_certificate_map(Evidence, Opts) ->
     case hb_maps:get(<<"certificates">>, Evidence, undefined, Opts) of
         undefined -> #{};
         Certs -> certificate_map_value(Certs, Opts)
@@ -723,16 +721,15 @@ certificate_map_value(Link, Opts) when ?IS_LINK(Link) ->
 certificate_map_value({ok, Msg}, Opts) ->
     certificate_map_value(Msg, Opts);
 certificate_map_value(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
     Entries =
         [
             {Type, certificate_entry_value(Cert, Opts)}
-         || {Type, Cert} <- hb_maps:to_list(Decoded, Opts),
+         || {Type, Cert} <- hb_maps:to_list(Msg, Opts),
             lists:member(Type, [<<"ark">>, <<"ask">>, <<"vcek">>, <<"crl">>])
         ],
     case Entries of
         [] ->
-            case hb_maps:get(<<"body">>, Decoded, undefined, Opts) of
+            case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
                 Body when is_map(Body) -> certificate_map_value(Body, Opts);
                 _ -> #{}
             end;
@@ -747,10 +744,9 @@ certificate_entry_value(Link, Opts) when ?IS_LINK(Link) ->
 certificate_entry_value({ok, Msg}, Opts) ->
     certificate_entry_value(Msg, Opts);
 certificate_entry_value(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
-    case hb_maps:get(<<"body">>, Decoded, undefined, Opts) of
+    case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
         Body when is_map(Body) -> Body;
-        _ -> Decoded
+        _ -> Msg
     end;
 certificate_entry_value(Other, _Opts) ->
     Other.
@@ -1604,11 +1600,10 @@ link_id({link, ID, _LinkOpts}) ->
 canonical_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_payload(response_body(Link, Opts), Opts);
 canonical_payload(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
     maps:from_list(
         [
             {Key, canonical_payload(Value, Opts)}
-         || {Key, Value} <- hb_maps:to_list(Decoded, Opts),
+         || {Key, Value} <- hb_maps:to_list(Msg, Opts),
             Key =/= <<"commitments">>,
             Key =/= <<"ao-types">>
         ]);
@@ -1640,8 +1635,6 @@ load_part(Link, Opts) when ?IS_LINK(Link) ->
     load_part(hb_cache:ensure_loaded(Link, Opts), Opts);
 load_part({ok, Msg}, Opts) ->
     load_part(Msg, Opts);
-load_part(Msg, _Opts) when is_map(Msg) ->
-    hb_link:decode_all_links(Msg);
 load_part(Value, _Opts) ->
     Value.
 

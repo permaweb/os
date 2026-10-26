@@ -13,14 +13,14 @@
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
 -device_libraries([lib_lapee_nonvolatile, lib_permawebos_peer_http]).
--export([info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
+-export([device_info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
 
 -include_lib("hb/include/hb.hrl").
 
 -define(IDENTITY_PREFIX, <<"zone/">>).
 -define(TEMPLATE_META_KEYS, [<<"commitments">>, <<"ao-types">>]).
 
-info(_) ->
+device_info(_) ->
     #{
         exports => [
             <<"info">>,
@@ -38,7 +38,7 @@ info(_Base, _Req, _Opts) ->
         <<"status">> => 200,
         <<"body">> => #{
             <<"version">> => <<"1.0">>,
-            <<"exports">> => maps:get(exports, info(#{}), [])
+            <<"exports">> => maps:get(exports, device_info(#{}), [])
         }
     }}.
 
@@ -380,9 +380,8 @@ stable_authorization_payload_id(Value, _Opts) ->
 authorization_payload_body(Link, Opts) when ?IS_LINK(Link) ->
     authorization_payload_body(hb_cache:ensure_loaded(Link, Opts), Opts);
 authorization_payload_body(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
-    case response_envelope_body(Decoded, Opts) of
-        undefined -> Decoded;
+    case response_envelope_body(Msg, Opts) of
+        undefined -> Msg;
         Body -> authorization_payload_body(Body, Opts)
     end;
 authorization_payload_body(Value, _Opts) ->
@@ -391,13 +390,12 @@ authorization_payload_body(Value, _Opts) ->
 canonical_authorization_payload(Link, Opts) when ?IS_LINK(Link) ->
     canonical_authorization_payload(hb_cache:ensure_loaded(Link, Opts), Opts);
 canonical_authorization_payload(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
-    case response_envelope_body(Decoded, Opts) of
+    case response_envelope_body(Msg, Opts) of
         undefined ->
             maps:from_list(
                 [
                     {Key, canonical_authorization_payload(Value, Opts)}
-                 || {Key, Value} <- hb_maps:to_list(Decoded, Opts),
+                 || {Key, Value} <- hb_maps:to_list(Msg, Opts),
                     not detached_meta_key(Key)
                 ]);
         Body ->
@@ -927,7 +925,7 @@ require_ring(Name, Opts) ->
     case {hb_maps:get(Name, Priv, undefined, Opts),
           hb_maps:get(Name, Zones, undefined, Opts)} of
         {#{<<"aes">> := AES, <<"wallet">> := Wallet}, Zone}
-                when is_binary(AES), tuple_size(Wallet) > 0, is_map(Zone) ->
+                when is_binary(AES), is_map(Wallet), is_map(Zone) ->
             {AES, Wallet, Zone};
         _ -> zone_not_initialized(Name)
     end.
@@ -1674,14 +1672,13 @@ template_mentions_measurement(_Template, _Opts) ->
     false.
 
 measurement_body(Measurement, Opts) when is_map(Measurement) ->
-    Decoded = hb_link:decode_all_links(Measurement),
-    case hb_maps:get(<<"type">>, Decoded, undefined, Opts) of
+    case hb_maps:get(<<"type">>, Measurement, undefined, Opts) of
         <<"lapee-measurement">> ->
             hb_cache:ensure_all_loaded(
-                hb_maps:get(<<"body">>, Decoded, #{}, Opts),
+                hb_maps:get(<<"body">>, Measurement, #{}, Opts),
                 Opts);
         _ ->
-            Decoded
+            Measurement
     end;
 measurement_body(Other, _Opts) ->
     Other.
@@ -1822,7 +1819,10 @@ assert_admission_signature(Admission, Opts) ->
         true -> ok;
         false -> bad_admission(<<"authorization.commitments">>)
     end,
-    case lists:member(RingAddress, Signers) of
+    case lists:member(
+        RingAddress,
+        [hb_util:committer_address(Signer) || Signer <- Signers]
+    ) of
         true -> ok;
         false -> bad_admission(<<"ring-address">>)
     end,
@@ -1929,16 +1929,15 @@ measurement_unwrap_secret_value(Credential, Opts) ->
 response_body(Link, Opts) when ?IS_LINK(Link) ->
     response_body(hb_cache:ensure_loaded(Link, Opts), Opts);
 response_body(Msg, Opts) when is_map(Msg) ->
-    Decoded = hb_link:decode_all_links(Msg),
-    case {hb_maps:get(<<"type">>, Decoded, undefined, Opts),
-          response_wrapper_body(Decoded, Opts)}
+    case {hb_maps:get(<<"type">>, Msg, undefined, Opts),
+          response_wrapper_body(Msg, Opts)}
     of
         {<<"lapee-measurement">>, Body} when Body =/= undefined ->
-            Decoded;
+            Msg;
         {_Type, Body} when Body =/= undefined ->
             response_body(Body, Opts);
         _ ->
-            Decoded
+            Msg
     end;
 response_body(Body, _Opts) ->
     Body.
@@ -2013,6 +2012,8 @@ assert_wallet_matches_admission(Wallet, Admission, Opts) ->
 wallet_address(Wallet) ->
     hb_util:human_id(ar_wallet:to_address(Wallet)).
 
+clean_template(Link, Opts) when ?IS_LINK(Link) ->
+    clean_template(hb_cache:ensure_loaded(Link, Opts), Opts);
 clean_template(Template, Opts) when is_map(Template) ->
     clean_template_map(Template, Opts);
 clean_template(Templates, Opts) when is_list(Templates) ->
@@ -2028,6 +2029,8 @@ clean_template_map(Template, Opts) ->
             not lists:member(Key, ?TEMPLATE_META_KEYS)
         ]).
 
+clean_template_value(Link, Opts) when ?IS_LINK(Link) ->
+    clean_template_value(hb_cache:ensure_loaded(Link, Opts), Opts);
 clean_template_value(Value, Opts) when is_map(Value) ->
     clean_template_map(Value, Opts);
 clean_template_value(Value, Opts) when is_list(Value) ->
@@ -2187,7 +2190,8 @@ zone_join_hook_receives_exact_membership_proof_test() ->
             ),
             ?assertEqual(
                 [RingAddress],
-                hb_message:signers(HookProof, SeedOpts)
+                [hb_util:committer_address(Signer)
+                    || Signer <- hb_message:signers(HookProof, SeedOpts)]
             ),
             ?assert(hb_message:verify(HookProof, all, SeedOpts))
         end
@@ -2276,6 +2280,43 @@ zone_init_allow_policy_test() ->
         assert_zone_initialization_allowed(
             <<"alpha">>,
             #{<<"zone-init-allow">> => 1})).
+
+%% @doc Linked admission templates retain strict matching of the device policy.
+linked_measurement_template_test() ->
+    Opts = #{<<"store">> => [hb_test_utils:test_store()]},
+    {ok, EmptyID} = hb_cache:write(#{}, Opts),
+    Measurement = #{
+        <<"type">> => <<"lapee-measurement">>,
+        <<"body">> => #{<<"trusted-devices">> => #{}}
+    },
+    Template = #{
+        <<"body">> => #{
+            <<"trusted-devices">> => #{
+                <<"match-type">> => <<"strict">>,
+                <<"body">> => {link, <<"ao:", EmptyID/binary>>, #{}}
+            }
+        }
+    },
+    {ok, ID} = hb_cache:write(Measurement, Opts),
+    {ok, Cached} = hb_cache:read(ID, Opts),
+    ?assertMatch(
+        {_, _},
+        matching_template([Template], Cached, <<"test">>, Opts)
+    ),
+    {ok, TemplateID} = hb_cache:write(Template, Opts),
+    ?assertMatch(
+        {_, _},
+        matching_template(
+            [{link, <<"ao:", TemplateID/binary>>, #{}}],
+            Cached, <<"test">>, Opts
+        )
+    ),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        matching_template([Template],
+            #{<<"body">> => #{<<"trusted-devices">> => #{<<"extra">> => true}}},
+            <<"test">>, Opts)
+    ).
 
 alternative_templates_match_first_viable_test() ->
     Measurement = #{
