@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-common.sh"
 
-REBAR3_URL="${REBAR3_URL:-https://s3.amazonaws.com/rebar3/rebar3}"
+REBAR3_URL="${REBAR3_URL:-https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3}"
 REBAR3_SHA256="${REBAR3_SHA256:-af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf}"
 REBAR3_BIN="${REBAR3_BIN:-$BUILD_DIR/tools/rebar3}"
 

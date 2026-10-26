@@ -707,8 +707,7 @@ TZ=UTC find "$WORK" -exec touch -h -t "$zip_timestamp" {} +
 ANDEE_PRUNE_OTP_APPS="$PRUNE_OTP_APPS" \
 ANDEE_HYPERBEAM_VERSION="$ANDEE_HYPERBEAM_VERSION" \
 ANDEE_HYPERBEAM_SOURCE_EPOCH="$ANDEE_HYPERBEAM_SOURCE_EPOCH" \
-ANDEE_LMDB_SYS_CHECKSUM="$ANDEE_LMDB_SYS_CHECKSUM" \
-ANDEE_LMDB_SYS_VERSION="$ANDEE_LMDB_SYS_VERSION" \
+ANDEE_ELMDB_VERSION="$ANDEE_ELMDB_VERSION" \
 ANDEE_PRELOADED_STORE_SHA256="$ANDEE_PRELOADED_STORE_SHA256" \
 ANDEE_PRELOADED_STORE_SIGNER="$ANDEE_PRELOADED_STORE_SIGNER" \
 python3 - <<'PY' "$OUT" "$BUILD_DIR/andee-runtime/manifest.json" "$JNI_DIR" "$WORK"
@@ -781,9 +780,8 @@ manifest.write_text(json.dumps({
     "native-libraries": native,
     "generic-composition": generic_composition,
     "preloaded-store": {
-        "canonical-format": "lmdb-dump-load-v1",
-        "lmdb-sys-checksum": os.environ["ANDEE_LMDB_SYS_CHECKSUM"],
-        "lmdb-sys-version": os.environ["ANDEE_LMDB_SYS_VERSION"],
+        "canonical-format": "lmdb-ordered-copy-v1",
+        "elmdb-version": os.environ["ANDEE_ELMDB_VERSION"],
         "sha256": os.environ["ANDEE_PRELOADED_STORE_SHA256"],
         "signing-algorithm": "ed25519",
         "signer": os.environ["ANDEE_PRELOADED_STORE_SIGNER"],

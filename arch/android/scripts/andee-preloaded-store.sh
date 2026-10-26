@@ -2,8 +2,7 @@
 
 ANDEE_PRELOAD_SIGNER_SEED='PermawebOS AndEE reproducible preloaded-store signer v1'
 ANDEE_PRELOAD_SIGNER_ADDRESS='cbfIwVIoLq4Q2F9dzmgh66z4ri_KT-Re2CGoqH0DKHk'
-ANDEE_LMDB_SYS_VERSION='0.8.0'
-ANDEE_LMDB_SYS_CHECKSUM='d5b392838cfe8858e86fac37cf97a0e8c55cc60ba0a18365cadc33092f128ce9'
+ANDEE_ELMDB_VERSION='94f6d305a6c337dabbeb4eb8358c74fc93f146fd'
 
 andee_prepare_elmdb_cargo_lock() {
     local crate lock
@@ -26,7 +25,7 @@ andee_preload_key() {
             [Output, SeedText] = init:get_plain_arguments(),
             Seed = crypto:hash(sha256, unicode:characters_to_binary(SeedText)),
             {Pub, Priv} = crypto:generate_key(eddsa, ed25519, Seed),
-            Wallet = {{eddsa, ed25519}, Priv, Pub},
+            Wallet = ar_wallet:new({eddsa, ed25519}, Priv, Pub),
             ok = file:write_file(Output, ar_wallet:to_json(Wallet)),
             io:format("~s", [hb_util:human_id(
                 ar_wallet:to_address(Pub, {eddsa, ed25519})
@@ -42,68 +41,36 @@ andee_preload_key() {
 }
 
 andee_lmdb_source_dir() {
-    local cargo_lock registry source version checksum
-    cargo_lock="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb/native/elmdb_nif/Cargo.lock"
-    version="$(awk '
-        $0 == "name = \"lmdb-sys\"" { found = 1; next }
-        found && /^version = / { gsub(/[\" ]/, "", $3); print $3; exit }
-    ' "$cargo_lock")"
-    checksum="$(awk '
-        $0 == "name = \"lmdb-sys\"" { found = 1; next }
-        found && /^checksum = / { gsub(/[\" ]/, "", $3); print $3; exit }
-    ' "$cargo_lock")"
-    if [ "$version" != "$ANDEE_LMDB_SYS_VERSION" ] ||
-        [ "$checksum" != "$ANDEE_LMDB_SYS_CHECKSUM" ]; then
-        echo "unexpected lmdb-sys package: $version $checksum" >&2
+    local app source
+    app="$ANDEE_DEVICE_ROOT/_build/default/lib/elmdb"
+    source='native/elmdb_nif/vendor/lmdb-sys/lmdb/libraries/liblmdb'
+    if [ "$(git -C "$app" rev-parse HEAD)" != "$ANDEE_ELMDB_VERSION" ] ||
+        ! git -C "$app" diff --quiet HEAD -- "$source"; then
+        echo "unexpected vendored LMDB source" >&2
         return 1
     fi
-
-    registry="${CARGO_HOME:-$HOME/.cargo}/registry/src"
-    source="$(find "$registry" -type d \
-        -path "*/lmdb-sys-$ANDEE_LMDB_SYS_VERSION/lmdb/libraries/liblmdb" \
-        -print -quit)"
-    if [ -z "$source" ]; then
-        echo "missing fetched lmdb-sys $ANDEE_LMDB_SYS_VERSION source" >&2
-        return 1
-    fi
-    printf '%s\n' "$source"
+    printf '%s\n' "$app/$source"
 }
 
 andee_lmdb_canonical_tools() {
-    local out source patched
-    out="$ROOT/build/host-tools/andee-lmdb-canonical-v2"
+    local out source
+    out="$BUILD_DIR/host-tools/andee-lmdb-canonical"
     source="$(andee_lmdb_source_dir)"
-    if [ ! -x "$out/mdb_dump" ] || [ ! -x "$out/mdb_load" ]; then
-        patched="$out/source"
-        rm -rf "$patched"
-        mkdir -p "$patched"
-        cp "$source/mdb_dump.c" "$source/mdb_load.c" "$patched"
-        patch --quiet -d "$patched" -p0 < "$ROOT/scripts/lmdb-canonical-no-lock.patch"
-        # Canonicalization owns both databases exclusively. Avoid consuming
-        # host-wide POSIX semaphores while dumping and loading these offline
-        # stores; shared build hosts can otherwise exhaust the Darwin limit.
-        cc -O2 -I "$source" \
-            "$patched/mdb_dump.c" "$source/mdb.c" "$source/midl.c" \
-            -o "$out/mdb_dump"
-        cc -O2 -I "$source" \
-            "$patched/mdb_load.c" "$source/mdb.c" "$source/midl.c" \
-            -o "$out/mdb_load"
-    fi
+    mkdir -p "$(dirname "$out")"
+    cc -O2 -Wall -Wextra -I "$source" \
+        "$ANDEE_RUNTIME_SRC/andee_lmdb_canonical.c" \
+        "$source/mdb.c" "$source/midl.c" -o "$out"
     printf '%s\n' "$out"
 }
 
 canonicalize_andee_preloaded_store() {
     local out="$1"
-    local tools dump canonical
+    local tools canonical
     tools="$(andee_lmdb_canonical_tools)"
-    dump="$out.dump"
     canonical="$out.canonical"
 
     rm -rf "$canonical"
-    mkdir -p "$canonical"
-    "$tools/mdb_dump" "$out" | awk '!/^db_pagesize=/' > "$dump"
-    "$tools/mdb_load" -f "$dump" "$canonical"
-    rm -f "$canonical/lock.mdb" "$dump"
+    "$tools" "$out" "$canonical"
     rm -rf "$out"
     mv "$canonical" "$out"
 }
@@ -243,20 +210,12 @@ build_andee_preloaded_store() {
                 <<"name-resolvers">> => []
             },
             Check = fun(Name) ->
-                IndexPath = <<"~meta@1.0/preloaded-devices-index/", Name/binary>>,
-                case hb_store:read(Store, IndexPath, Opts) of
-                    {ok, SpecID} when is_binary(SpecID), byte_size(SpecID) =:= 43 ->
-                        case hb_device_load:reference(Name, Opts) of
-                            {ok, Module} when is_atom(Module) -> ok;
-                            LoadFailure ->
-                                io:format(standard_error,
-                                    "cannot load local ~s archive: ~p~n",
-                                    [Name, LoadFailure]),
-                                halt(1)
-                        end;
-                    Other ->
+                case hb_device_load:reference(Name, Opts) of
+                    {ok, Module} when is_atom(Module) -> ok;
+                    LoadFailure ->
                         io:format(standard_error,
-                            "missing local ~s spec: ~p~n", [Name, Other]),
+                            "cannot load local ~s archive: ~p~n",
+                            [Name, LoadFailure]),
                         halt(1)
                 end
             end,
