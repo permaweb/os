@@ -62,9 +62,6 @@ android {
 }
 
 val liteRtNoticesDirectory = layout.buildDirectory.dir("generated/litert-notices")
-android.sourceSets.getByName("main").assets.directories.add(
-    liteRtNoticesDirectory.get().asFile.absolutePath,
-)
 val llamaCppNoticesDirectory = rootProject.projectDir.parentFile
     .resolve("build/llama-cpp-runtime/notices")
 android.sourceSets.getByName("main").assets.directories.add(
@@ -82,6 +79,12 @@ val stageLiteRtNotices = tasks.register<Copy>("stageLiteRtNotices") {
     )
     include("LICENSE", "THIRD_PARTY_NOTICE.txt")
     into(liteRtNoticesDirectory.map { it.dir("litertlm-android-0.16.1") })
+}
+android.sourceSets.getByName("main").assets.srcDir(
+    files(liteRtNoticesDirectory).builtBy(stageLiteRtNotices),
+)
+tasks.named("preBuild") {
+    dependsOn(stageLiteRtNotices)
 }
 
 dependencies {
@@ -130,12 +133,6 @@ val verifyGeneratedRuntime = tasks.register("verifyGeneratedRuntime") {
             "Missing pinned llama.cpp legal notice"
         }
     }
-}
-
-tasks.matching { task ->
-    task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets"
-}.configureEach {
-    dependsOn(stageLiteRtNotices)
 }
 
 tasks.matching { task ->
