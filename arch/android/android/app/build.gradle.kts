@@ -88,6 +88,7 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+    implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     testImplementation("junit:junit:4.13.2")
 }

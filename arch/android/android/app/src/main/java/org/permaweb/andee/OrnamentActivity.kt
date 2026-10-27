@@ -19,9 +19,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import java.net.Inet4Address
-import java.net.InetSocketAddress
 import java.net.NetworkInterface
-import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -165,7 +163,7 @@ private class OrnamentView(
     private var animationFramePending = false
     private var startedAt = System.nanoTime()
     private var cachedQrUrl = ""
-    private var cachedQrRows = QrV2L.rowsFor("http://<node>:8734/")
+    private var cachedQrRows = DiscoveryQr.rowsFor("http://<node>:8734/")
     private var phoneRows: List<String> = emptyList()
     private var qrBitmap: Bitmap? = null
     private var qrBitmapStatus: NodeStatus? = null
@@ -427,7 +425,7 @@ private class OrnamentView(
     private fun cachedQrBitmap(status: NodeStatus): Bitmap {
         if (cachedQrUrl != status.url) {
             cachedQrUrl = status.url
-            cachedQrRows = QrV2L.rowsFor(status.url)
+            cachedQrRows = DiscoveryQr.rowsFor(status.url)
             layoutWidth = 0
             layoutHeight = 0
             ensureLayout()
@@ -478,7 +476,7 @@ private class OrnamentView(
 
         rectPaint.style = Paint.Style.FILL
         rectPaint.color = Color.WHITE
-        rectPaint.alpha = if (status.ip == null) 188 else 255
+        rectPaint.alpha = if (status.ready) 255 else 188
         canvas.drawRect(qrX, qrY, qrX + qrSize, qrY + qrSize, rectPaint)
 
         rectPaint.alpha = 255
@@ -499,7 +497,7 @@ private class OrnamentView(
         accentPaint.textSize = (width / 42f).coerceIn(dp(10f), dp(18f))
         accentPaint.color = Color.WHITE
         val labelY = qrY + accentPaint.textSize
-        val labelText = "NODE URL"
+        val labelText = status.label
 
         textPaint.typeface = mono
         textPaint.textSize = (accentPaint.textSize * 0.78f).coerceAtLeast(dp(8f))
@@ -507,7 +505,7 @@ private class OrnamentView(
         textPaint.clearShadowLayer()
         val url = fitMiddle(status.url, max(10, (labelWidth / textPaint.measureText("M")).toInt()))
         val lines = listOf(
-            fitToWidth("LIVE AT: $url", textPaint, labelWidth),
+            fitToWidth(if (status.ready) url else "Waiting for node discovery", textPaint, labelWidth),
         )
         val backingWidth = (
             listOf(accentPaint.measureText(labelText)) +
@@ -735,44 +733,8 @@ private class OrnamentView(
 
 private data class Vec3(val x: Float, val y: Float, val z: Float)
 
-private data class NodeStatus(
-    val ready: Boolean,
-    val ip: String?,
-    val url: String,
-) {
-    companion object {
-        fun booting(): NodeStatus = NodeStatus(
-            ready = false,
-            ip = null,
-            url = "http://<node>:8734/",
-        )
-    }
-}
-
 private object NodeProbe {
-    fun snapshot(): NodeStatus {
-        val ip = lanIpv4()
-        val url = when (ip) {
-            null -> "http://<node>:8734/"
-            else -> "http://$ip:8734/"
-        }
-        return NodeStatus(
-            ready = hyperbeamReady(),
-            ip = ip,
-            url = url,
-        )
-    }
-
-    private fun hyperbeamReady(): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress("127.0.0.1", 8734), 250)
-                true
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
+    fun snapshot(): NodeStatus = NodeDiscovery.snapshot(lanIpv4(), NodeMetadataHttp::read)
 
     private fun lanIpv4(): String? {
         return try {
@@ -798,255 +760,5 @@ private object NodeProbe {
         } catch (_: Exception) {
             null
         }
-    }
-}
-
-private object QrV2L {
-    fun rowsFor(data: String): Array<BooleanArray> {
-        val bytes = data.toByteArray(Charsets.UTF_8)
-        val payload = if (bytes.size <= 32) bytes else "http://node-too-long/".toByteArray(Charsets.UTF_8)
-        val size = 25
-        val modules = Array(size) { BooleanArray(size) }
-        val reserved = Array(size) { BooleanArray(size) }
-
-        drawFinder(modules, reserved, 0, 0)
-        drawFinder(modules, reserved, 0, size - 7)
-        drawFinder(modules, reserved, size - 7, 0)
-        drawAlignment(modules, reserved, 18, 18)
-        drawTiming(modules, reserved, size)
-        put(modules, reserved, 4 * 2 + 9, 8, true, true)
-        reserveFormat(reserved, size)
-
-        val dataCodewords = dataCodewords(payload, 34)
-        val eccCodewords = rsRemainder(dataCodewords, 10)
-        val bits = ArrayList<Int>((dataCodewords.size + eccCodewords.size) * 8)
-        for (codeword in dataCodewords + eccCodewords) {
-            bits.addAll(bitsInt(codeword, 8))
-        }
-        placeBits(modules, reserved, bits, size)
-        applyFormat(modules, size)
-        return addQuietZone(modules, size, 4)
-    }
-
-    private fun dataCodewords(data: ByteArray, target: Int): IntArray {
-        val bits = ArrayList<Int>(target * 8)
-        bits.addAll(listOf(0, 1, 0, 0))
-        bits.addAll(bitsInt(data.size, 8))
-        for (byte in data) bits.addAll(bitsInt(byte.toInt() and 0xff, 8))
-        val maxBits = target * 8
-        repeat(max(0, min(4, maxBits - bits.size))) { bits.add(0) }
-        while (bits.size % 8 != 0) bits.add(0)
-
-        val codewords = ArrayList<Int>(target)
-        var i = 0
-        while (i < bits.size && codewords.size < target) {
-            var value = 0
-            for (j in 0 until 8) value = (value shl 1) or bits[i + j]
-            codewords.add(value)
-            i += 8
-        }
-        var pad = 0xec
-        while (codewords.size < target) {
-            codewords.add(pad)
-            pad = if (pad == 0xec) 0x11 else 0xec
-        }
-        return codewords.toIntArray()
-    }
-
-    private fun bitsInt(value: Int, width: Int): List<Int> {
-        return (width - 1 downTo 0).map { shift -> (value ushr shift) and 1 }
-    }
-
-    private fun rsRemainder(data: IntArray, eccLen: Int): IntArray {
-        val generator = rsGenerator(eccLen)
-        val remainder = IntArray(eccLen)
-        for (byte in data) {
-            val factor = byte xor remainder[0]
-            for (i in 0 until eccLen - 1) {
-                remainder[i] = remainder[i + 1] xor gfMul(factor, generator[i + 1])
-            }
-            remainder[eccLen - 1] = gfMul(factor, generator[eccLen])
-        }
-        return remainder
-    }
-
-    private fun rsGenerator(degree: Int): IntArray {
-        var poly = intArrayOf(1)
-        for (i in 0 until degree) {
-            poly = polyMul(poly, intArrayOf(1, gfPow2(i)))
-        }
-        return poly
-    }
-
-    private fun polyMul(left: IntArray, right: IntArray): IntArray {
-        val out = IntArray(left.size + right.size - 1)
-        for (i in left.indices) {
-            for (j in right.indices) {
-                out[i + j] = out[i + j] xor gfMul(left[i], right[j])
-            }
-        }
-        return out
-    }
-
-    private fun gfPow2(power: Int): Int {
-        var value = 1
-        repeat(power) { value = gfMul(value, 2) }
-        return value
-    }
-
-    private fun gfMul(a0: Int, b0: Int): Int {
-        var a = a0
-        var b = b0
-        var acc = 0
-        while (b != 0) {
-            if ((b and 1) != 0) acc = acc xor a
-            a = if ((a and 0x80) != 0) ((a shl 1) xor 0x11d) and 0xff else (a shl 1) and 0xff
-            b = b ushr 1
-        }
-        return acc
-    }
-
-    private fun drawFinder(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row0: Int,
-        col0: Int,
-    ) {
-        for (r in -1..7) {
-            for (c in -1..7) {
-                val separator = r == -1 || r == 7 || c == -1 || c == 7
-                val dark = !separator &&
-                    (r == 0 || r == 6 || c == 0 || c == 6 || (r in 2..4 && c in 2..4))
-                put(modules, reserved, row0 + r, col0 + c, dark, true)
-            }
-        }
-    }
-
-    private fun drawAlignment(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row0: Int,
-        col0: Int,
-    ) {
-        for (r in -2..2) {
-            for (c in -2..2) {
-                val dark = abs(r) == 2 || abs(c) == 2 || (r == 0 && c == 0)
-                put(modules, reserved, row0 + r, col0 + c, dark, true)
-            }
-        }
-    }
-
-    private fun drawTiming(modules: Array<BooleanArray>, reserved: Array<BooleanArray>, size: Int) {
-        for (i in 8 until size - 8) {
-            val dark = i % 2 == 0
-            put(modules, reserved, 6, i, dark, true)
-            put(modules, reserved, i, 6, dark, true)
-        }
-    }
-
-    private fun reserveFormat(reserved: Array<BooleanArray>, size: Int) {
-        for ((row, col) in formatCoords(size)) {
-            if (row in 0 until size && col in 0 until size) reserved[row][col] = true
-        }
-    }
-
-    private fun placeBits(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        bits: List<Int>,
-        size: Int,
-    ) {
-        var bitIndex = 0
-        var upward = true
-        var col = size - 1
-        while (col > 0) {
-            if (col == 6) col--
-            val rowRange = if (upward) size - 1 downTo 0 else 0 until size
-            for (row in rowRange) {
-                for (c in col downTo col - 1) {
-                    if (!reserved[row][c]) {
-                        val bit = bits.getOrElse(bitIndex) { 0 }
-                        bitIndex++
-                        val mask = (row + c) % 2 == 0
-                        modules[row][c] = (bit == 1) xor mask
-                    }
-                }
-            }
-            upward = !upward
-            col -= 2
-        }
-    }
-
-    private fun applyFormat(modules: Array<BooleanArray>, size: Int) {
-        val bits = IntArray(15) { i -> (0x77c4 ushr i) and 1 }
-        val coords = formatCoords(size)
-        for (i in coords.indices) {
-            val (row, col) = coords[i]
-            modules[row][col] = bits[i % 15] == 1
-        }
-    }
-
-    private fun addQuietZone(modules: Array<BooleanArray>, size: Int, quiet: Int): Array<BooleanArray> {
-        val total = size + quiet * 2
-        val out = Array(total) { BooleanArray(total) }
-        for (r in 0 until total) {
-            for (c in 0 until total) {
-                val innerR = r - quiet
-                val innerC = c - quiet
-                if (innerR in 0 until size && innerC in 0 until size) {
-                    out[r][c] = modules[innerR][innerC]
-                }
-            }
-        }
-        return out
-    }
-
-    private fun put(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row: Int,
-        col: Int,
-        dark: Boolean,
-        reserve: Boolean,
-    ) {
-        if (row in modules.indices && col in modules[row].indices) {
-            modules[row][col] = dark
-            if (reserve) reserved[row][col] = true
-        }
-    }
-
-    private fun formatCoords(size: Int): List<Pair<Int, Int>> {
-        return listOf(
-            0 to 8,
-            1 to 8,
-            2 to 8,
-            3 to 8,
-            4 to 8,
-            5 to 8,
-            7 to 8,
-            8 to 8,
-            8 to 7,
-            8 to 5,
-            8 to 4,
-            8 to 3,
-            8 to 2,
-            8 to 1,
-            8 to 0,
-            8 to size - 1,
-            8 to size - 2,
-            8 to size - 3,
-            8 to size - 4,
-            8 to size - 5,
-            8 to size - 6,
-            8 to size - 7,
-            8 to size - 8,
-            size - 7 to 8,
-            size - 6 to 8,
-            size - 5 to 8,
-            size - 4 to 8,
-            size - 3 to 8,
-            size - 2 to 8,
-            size - 1 to 8,
-        )
     }
 }
