@@ -93,6 +93,8 @@ tasks.named("preBuild") {
 
 dependencies {
     implementation("com.google.zxing:core:3.5.3")
+    // Blockchain Commons UR (fountain-coded multi-part QR) decoder, Apache-2.0, for SCAN setup
+    implementation("com.sparrowwallet:hummingbird:1.7.4")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     testImplementation("junit:junit:4.13.2")
 }

@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- SCAN: read the setup code the PermawebOS extension shows; asked for only when the user taps SCAN -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -31,6 +34,28 @@
             android:name=".ConfiguratorActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+
+        <!-- Setup import: SCAN from the splash, "Open with" / share of a JSON file, and the scriptable
+             IMPORT_CONFIG action. Every path shows a review and stages only on the user's tap. -->
+        <activity
+            android:name=".SetupImportActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="org.permaweb.andee.action.IMPORT_CONFIG" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/json" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/json" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".AndeeService"

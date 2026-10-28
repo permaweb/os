@@ -55,6 +55,12 @@ class OrnamentActivity : Activity() {
                 override fun configure() {
                     startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
                 }
+                override fun scan() {
+                    startActivity(
+                        Intent(this@OrnamentActivity, SetupImportActivity::class.java)
+                            .setAction(SetupImportActivity.ACTION_SCAN),
+                    )
+                }
             },
         )
         setContentView(ornamentView)
@@ -171,6 +177,7 @@ private class OrnamentView(
         fun terminate()
         fun openNode(url: String)
         fun configure()
+        fun scan()
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -189,6 +196,7 @@ private class OrnamentView(
     private var qrBitmapPending = false
     private val configButtonBounds = RectF()
     private val configureButtonBounds = RectF()
+    private val scanButtonBounds = RectF()
     private val qrLinkBounds = RectF()
     private val urlLinkBounds = RectF()
     private var pressedBounds: RectF? = null
@@ -560,8 +568,15 @@ private class OrnamentView(
         val buttonY = qrY + qrSize + dp(18f)
         drawActionButton(canvas, configureButtonBounds, qrX, buttonY, qrSize, "CONFIGURE")
         val pending = nextBootConfigPending.get()
-        drawActionButton(canvas, configButtonBounds, labelX, buttonY, labelWidth,
-            if (pending) "APPLY & CLOSE" else "LOAD JSON", pending)
+        if (pending) {
+            scanButtonBounds.setEmpty()
+            drawActionButton(canvas, configButtonBounds, labelX, buttonY, labelWidth, "APPLY & CLOSE", true)
+        } else {
+            // SCAN reads the setup code the PermawebOS extension shows; LOAD JSON picks a file
+            val half = (labelWidth - dp(8f)) / 2f
+            drawActionButton(canvas, scanButtonBounds, labelX, buttonY, half, "SCAN")
+            drawActionButton(canvas, configButtonBounds, labelX + half + dp(8f), buttonY, half, "LOAD JSON")
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -571,6 +586,7 @@ private class OrnamentView(
                 pressedBounds = when {
                     configButtonBounds.contains(event.x, event.y) -> configButtonBounds
                     configureButtonBounds.contains(event.x, event.y) -> configureButtonBounds
+                    !scanButtonBounds.isEmpty && scanButtonBounds.contains(event.x, event.y) -> scanButtonBounds
                     status?.ready == true && qrLinkBounds.contains(event.x, event.y) -> qrLinkBounds
                     status?.ready == true && urlLinkBounds.contains(event.x, event.y) -> urlLinkBounds
                     else -> null
@@ -611,6 +627,8 @@ private class OrnamentView(
             if (nextBootConfigPending.get()) actions.terminate() else actions.pickNextBootConfig()
         } else if (pressedBounds === configureButtonBounds) {
             actions.configure()
+        } else if (pressedBounds === scanButtonBounds) {
+            actions.scan()
         }
         return true
     }
