@@ -24,7 +24,7 @@ class HyperbeamRuntime(
         val apks = listOfNotNull(context.applicationInfo.sourceDir) +
             context.applicationInfo.splitSourceDirs.orEmpty().toList()
 
-        require(config.isFile) { "missing effective AndEE config: ${config.absolutePath}" }
+        require(config.isFile) { "missing effective node config: ${config.absolutePath}" }
 
         val runDir = AndeePaths.runDir(context)
         runDir.mkdirs()

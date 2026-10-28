@@ -9,7 +9,7 @@ import java.util.zip.DataFormatException
 import java.util.zip.Inflater
 
 /**
- * A boot config handed to AndEE as a Blockchain Commons UR of type `bytes` whose body is the raw-DEFLATE of
+ * A boot config handed to your node as a Blockchain Commons UR of type `bytes` whose body is the raw-DEFLATE of
  * the compact config JSON. The PermawebOS extension shows it as a loop of fountain-coded QR parts; the same
  * string also fits a single intent extra. Decoding only recovers the text: validation, reserved-key stripping
  * and staging stay with [AndeeBootConfigStore.stageNextBootConfig], exactly as for the file picker.

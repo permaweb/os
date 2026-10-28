@@ -138,7 +138,7 @@ class OrnamentActivity : Activity() {
                 addCategory(Intent.CATEGORY_BROWSABLE)
             })
         } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, "Install a browser to open your AndEE.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Install a browser to open your node.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -428,7 +428,7 @@ private class OrnamentView(
         textPaint.textSize = greeterTextSize
         canvas.drawText("PERMAWEBOS", x, y, textPaint)
         textPaint.textSize = dp(16f)
-        canvas.drawText("AndEE", x, y + dp(26f), textPaint)
+        canvas.drawText("Your node", x, y + dp(26f), textPaint)
     }
 
     private fun drawPhone(canvas: Canvas) {

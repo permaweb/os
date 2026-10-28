@@ -46,7 +46,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * SCAN and "Open with AndEE": read a setup, show what it contains, and stage it only when the user says so.
+ * SCAN and "Open with your node": read a setup, show what it contains, and stage it only when the user says so.
  *
  * Sources: the camera (the PermawebOS extension's looping setup code), a JSON document opened or shared to
  * AndEE, or the [ACTION_IMPORT_CONFIG] action carrying a `config` (JSON), `config-b64` or `ur` extra, which
@@ -155,7 +155,7 @@ class SetupImportActivity : Activity() {
         val rows = try {
             summarize(text)
         } catch (exc: Exception) {
-            overlay.showError("That isn't an AndEE setup.", "It must be one JSON object.", canRetry = scanning)
+            overlay.showError("That isn't a node setup.", "It must be one JSON object.", canRetry = scanning)
             return
         }
         reviewText = text
@@ -187,7 +187,7 @@ class SetupImportActivity : Activity() {
             AndeeBootConfigStore.stageNextBootConfig(this, text)
         } catch (exc: Exception) {
             Log.w(TAG, "setup rejected", exc)
-            overlay.showError("AndEE can't use that setup.", "Check it in the configurator and try again.", canRetry = scanning)
+            overlay.showError("Your node can't use that setup.", "Check it in the configurator and try again.", canRetry = scanning)
             return
         }
         Toast.makeText(this, "Setup saved. Tap APPLY & CLOSE to start on it.", Toast.LENGTH_LONG).show()
@@ -258,7 +258,7 @@ class SetupImportActivity : Activity() {
                     CameraCharacteristics.LENS_FACING_BACK
             } ?: manager.cameraIdList.firstOrNull()
             if (id == null) {
-                overlay.showError("This phone has no camera AndEE can use.", "Use LOAD JSON on the home screen.", canRetry = false)
+                overlay.showError("No camera is available.", "Use LOAD JSON on the home screen.", canRetry = false)
                 return
             }
             val map = manager.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)

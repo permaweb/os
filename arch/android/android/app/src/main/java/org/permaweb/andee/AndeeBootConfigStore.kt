@@ -20,7 +20,7 @@ object AndeeBootConfigStore {
     fun commitPendingForNextBoot(context: Context): Boolean = installPendingIfPresent(context)
 
     fun effectiveConfigFile(context: Context, baseConfig: File): File {
-        require(baseConfig.isFile) { "missing base AndEE config: ${baseConfig.absolutePath}" }
+        require(baseConfig.isFile) { "missing base node config: ${baseConfig.absolutePath}" }
         installPendingIfPresent(context)
         val active = activeConfigFile(context)
         if (!active.isFile) return baseConfig
@@ -111,8 +111,8 @@ object AndeeBootConfigStore {
     private fun parseConfigObject(text: String): JSONObject {
         val tokener = JSONTokener(text)
         val value = tokener.nextValue()
-        require(value is JSONObject) { "AndEE boot config must be a JSON object" }
-        require(tokener.nextClean().code == 0) { "AndEE boot config must contain exactly one JSON value" }
+        require(value is JSONObject) { "Node boot config must be a JSON object" }
+        require(tokener.nextClean().code == 0) { "Node boot config must contain exactly one JSON value" }
         return value
     }
 
