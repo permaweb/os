@@ -1,6 +1,9 @@
 %%% @doc Materializes AO-Core model and image messages for Android backends.
 -module(lib_andee_materialization).
 -export([model/3, andock/2]).
+-ifdef(TEST).
+-export([arweave/3]).
+-endif.
 -include_lib("kernel/include/file.hrl").
 
 -define(MODEL_ROOT_ENV, "ANDEE_INFERENCE_MODEL_ROOT").
@@ -12,6 +15,8 @@
 -define(ANDOCK_DEADLINE_MS, 2 * 60 * 60 * 1000).
 -define(ANDOCK_RETRY_DELAY_MS, 60000).
 -define(ANDOCK_STATUS_TIMEOUT_MS, 100).
+-define(ANDOCK_INDEXED_IMAGE, <<"rd2ybWz0XPr29kSWL2OYoTLmz7IhemE51XlsRseOSJk">>).
+-define(ANDOCK_IMAGE_BLOCK, 1984725).
 
 %% @doc Resolve a configured model through `hb_cache' and return its local path.
 model(Provider, Model, Opts) ->
@@ -261,7 +266,12 @@ andock_materializer(ID, Path, Opts) ->
             Fetch = fun() ->
                 case existing(Path, positive) of
                     {ok, Bytes} -> materialized(ID, Path, Bytes);
-                    missing -> materialize_direct(ID, Path, andock_download_opts(Opts));
+                    missing ->
+                        DownloadOpts = andock_download_opts(Opts),
+                        case andock_prepare_index(ID, DownloadOpts) of
+                            ok -> materialize_direct(ID, Path, DownloadOpts);
+                            Error -> Error
+                        end;
                     Error -> Error
                 end
             end,
@@ -292,6 +302,41 @@ andock_store_opts(#{<<"store-module">> := Module} = Store)
         <<"http-retry-response">> => [failure]
     };
 andock_store_opts(Store) -> Store.
+
+%% @doc Index the shipped image's block through its canonical owner before a
+%% cold native read. The ID/block pair is fixed to the measured default image;
+%% alternate images keep their operator-selected store behavior.
+andock_prepare_index(ID, Opts) ->
+    andock_prepare_index(ID, Opts, fun hb_ao:resolve/2).
+
+andock_prepare_index(?ANDOCK_INDEXED_IMAGE = ID, Opts, Resolve) ->
+    case andock_indexed_range(ID, Opts) of
+        {ok, _, _} -> ok;
+        unknown ->
+            Block = integer_to_binary(?ANDOCK_IMAGE_BLOCK),
+            case Resolve(<<"~copycat@1.0/arweave&from=", Block/binary,
+                "&to=", Block/binary, "&mode=shallow&include-proofs=false">>, Opts) of
+                {ok, _} ->
+                    case andock_indexed_range(ID, Opts) of
+                        {ok, _, _} -> ok;
+                        unknown -> {error, 'andock-image-index-unavailable'}
+                    end;
+                {error, Reason} -> {error, Reason}
+            end
+    end;
+andock_prepare_index(_ID, _Opts, _Resolve) -> ok.
+
+%% @doc Use the canonical local index; progress never makes a network lookup.
+andock_indexed_range(ID, Opts) ->
+    try hb_store_arweave:read_index_offset(
+            hb_store_arweave:store_from_opts(Opts), ID) of
+        {ok, #{<<"codec">> := <<"tx@1.0">>, <<"start">> := Start,
+                <<"length">> := Length}}
+                when is_integer(Start), Start >= 0, is_integer(Length), Length > 0 ->
+            {ok, Start + 1, Start + Length};
+        _ -> unknown
+    catch _:_ -> unknown
+    end.
 
 %% @doc Keep a request-independent writer under a bounded lifetime and retain
 %% its terminal failure so polling callers do not silently restart downloads.
@@ -572,6 +617,76 @@ materialized_model(#{provider := Provider, model := Model, id := ID, bytes := By
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+%% A test-only copycat receiver: the real singleton parser and AO resolver must
+%% deliver the range on Request. No network or installed node is involved.
+arweave(_Base, Req, Opts) ->
+    ?assertEqual(?ANDOCK_IMAGE_BLOCK, hb_util:int(maps:get(<<"from">>, Req))),
+    ?assertEqual(?ANDOCK_IMAGE_BLOCK, hb_util:int(maps:get(<<"to">>, Req))),
+    ?assertEqual(<<"shallow">>, maps:get(<<"mode">>, Req)),
+    ?assertEqual(<<"false">>, maps:get(<<"include-proofs">>, Req)),
+    ok = hb_store_arweave:write_offset(hb_store_arweave:store_from_opts(Opts),
+        ?ANDOCK_INDEXED_IMAGE, <<"tx@1.0">>, 100, 100),
+    {ok, ?ANDOCK_IMAGE_BLOCK}.
+
+andock_index_request_reaches_existing_device_through_real_resolver_test() ->
+    Root = filename:dirname(test_image_path()),
+    Index = #{<<"store-module">> => hb_store_fs, <<"name">> => Root},
+    Store = #{<<"store-module">> => hb_store_arweave, <<"index-store">> => Index},
+    Key = {hb_device_load, <<"copycat@1.0">>},
+    Previous = erlang:put(Key, ?MODULE),
+    try
+        ok = hb_store:start(Index),
+        Opts = #{<<"store">> => [Store]},
+        ?assertEqual(ok, andock_prepare_index(?ANDOCK_INDEXED_IMAGE, Opts)),
+        ?assertEqual({ok, 101, 200}, andock_indexed_range(?ANDOCK_INDEXED_IMAGE, Opts))
+    after
+        case Previous of undefined -> erlang:erase(Key); _ -> erlang:put(Key, Previous) end,
+        file:del_dir_r(Root)
+    end.
+
+andock_indexes_only_the_missing_shipped_image_test() ->
+    Root = filename:dirname(test_image_path()),
+    Index = #{<<"store-module">> => hb_store_fs, <<"name">> => Root},
+    Store = #{<<"store-module">> => hb_store_arweave, <<"index-store">> => Index},
+    Opts = #{<<"store">> => [Store]},
+    Unexpected = fun(_, _) -> error(unexpected_index_request) end,
+    try
+        ok = hb_store:start(Index),
+        ?assertEqual(ok, andock_prepare_index(
+            <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>, Opts, Unexpected)),
+        Seed = fun(Request, PassedOpts) ->
+            ?assertEqual(Opts, PassedOpts),
+            %% Exercise f76 singleton parsing, not a copy of its expected wire
+            %% string: copycat reads these fields from Request, never Base.
+            [{as, <<"copycat@1.0">>, Base}, Req] = hb_singleton:from(Request, Opts),
+            ?assertNot(maps:is_key(<<"from">>, Base)),
+            ?assertEqual(?ANDOCK_IMAGE_BLOCK, hb_util:int(maps:get(<<"from">>, Req))),
+            ?assertEqual(?ANDOCK_IMAGE_BLOCK, hb_util:int(maps:get(<<"to">>, Req))),
+            ?assertEqual(<<"shallow">>, maps:get(<<"mode">>, Req)),
+            ?assertEqual(<<"false">>, maps:get(<<"include-proofs">>, Req)),
+            ok = hb_store_arweave:write_offset(
+                Store, ?ANDOCK_INDEXED_IMAGE, <<"tx@1.0">>, 100, 100),
+            {ok, ?ANDOCK_IMAGE_BLOCK}
+        end,
+        ?assertEqual(ok, andock_prepare_index(?ANDOCK_INDEXED_IMAGE, Opts, Seed)),
+        ?assertEqual(ok, andock_prepare_index(?ANDOCK_INDEXED_IMAGE, Opts, Unexpected)),
+        %% The ordinary store read now selects its native offset without any
+        %% remote-index/gateway request, including on the next preparation.
+        ?assertMatch({ok, #{<<"start">> := 100, <<"length">> := 100,
+            <<"codec">> := <<"tx@1.0">>}},
+            hb_store_arweave:read_offset(Store, ?ANDOCK_INDEXED_IMAGE, #{}))
+    after file:del_dir_r(Root)
+    end.
+
+andock_index_failure_never_falls_through_to_gateway_test() ->
+    ?assertEqual({error, unavailable}, andock_prepare_index(?ANDOCK_INDEXED_IMAGE,
+        #{}, fun(_, _) -> {error, unavailable} end)),
+    ?assertEqual({error, 'andock-image-index-unavailable'},
+        andock_prepare_index(?ANDOCK_INDEXED_IMAGE, #{},
+            fun(_, _) -> {ok, ?ANDOCK_IMAGE_BLOCK} end)).
+
+
 
 andock_reports_download_failure_test() ->
     PreviousRoot = os:getenv(?ANDOCK_ROOT_ENV),
