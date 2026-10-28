@@ -376,8 +376,9 @@ retain_andock_failure_until(_Error, _Until, 0) -> ok;
 retain_andock_failure_until({error, Reason, Details} = Error, Until, Remaining) ->
     receive
         {andock_status, Reply} ->
+            RetryIn = max(0, Until - erlang:monotonic_time(millisecond)),
             Reply ! {Reply, {error, Reason,
-                Details#{<<"retry-after">> => (Remaining + 999) div 1000}}},
+                Details#{<<"retry-after">> => (RetryIn + 999) div 1000}}},
             retain_andock_failure_until(Error, Until)
     after Remaining -> ok
     end.
@@ -662,6 +663,24 @@ andock_success_and_crash_release_or_report_test() ->
         poll_test_materializer(Failed, 100)),
     receive {'DOWN', FailedRef, process, Failed, normal} -> ok
     after 1000 -> error(failure_not_released)
+    end.
+
+andock_retry_delay_counts_time_without_polls_test() ->
+    Parent = self(),
+    {Pid, Monitor} = spawn_monitor(fun() ->
+        Parent ! cooldown_started,
+        retain_andock_failure({error, timeout}, erlang:monotonic_time(millisecond), 1100)
+    end),
+    try
+        receive cooldown_started -> ok after 1000 -> error(no_cooldown) end,
+        timer:sleep(250),
+        ?assertMatch({error, _, #{<<"retry-after">> := 1}},
+            andock_materializer_status(Pid)),
+        receive {'DOWN', Monitor, process, Pid, normal} -> ok
+        after 1500 -> error(cooldown_not_released)
+        end
+    after
+        stop_test_process(Pid)
     end.
 
 andock_bounds_existing_http_stores_only_test() ->
