@@ -169,15 +169,14 @@ class SetupImportActivity : Activity() {
         val keyed = providers?.keys()?.asSequence()?.filter { name ->
             providers.optJSONObject(name)?.optJSONObject("priv")?.has("api-key") == true
         }?.toList().orEmpty()
-        val owner = listOf("ouroboros-operator-address", "intelligence-pool-subscription-owner", "operator")
-            .map { config.optString(it) }.firstOrNull { it.length == 43 }
+        val operator = config.optString("operator").takeIf { it.length == 43 }
         return listOfNotNull(
             "PROFILE" to config.optString("andee-profile-source", "custom").substringAfter('/').ifBlank { "custom" },
-            owner?.let { "OWNER" to "${it.take(6)}…${it.takeLast(6)}" },
+            operator?.let { "OPERATOR" to "${it.take(6)}…${it.takeLast(6)}" },
             "SIZE" to "${text.toByteArray().size} B · ${keys.size} settings",
             "BUNDLER" to if (keys.any { it.startsWith("bundler-") }) "yes" else "no",
             // public access is the tunnel device, started from an `on` hook
-            "PUBLIC ACCESS" to if (text.contains("\"tunnel@")) "yes" else "no",
+            "TUNNEL" to if (text.contains("\"tunnel@")) "yes" else "no",
             "API KEY" to if (keyed.isEmpty()) "none" else keyed.joinToString(" · ") + " (hidden)",
         )
     }
