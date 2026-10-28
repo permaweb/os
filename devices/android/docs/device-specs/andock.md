@@ -36,6 +36,11 @@ native expansion, then continue polling health. Only a verified, installed
 filesystem template is `ready`. Failures remain visible through health until
 an explicit preparation retry.
 
+Readiness also requires the packaged executable runtime used by the isolated
+execution service. A platform without that runtime reports `unavailable` with
+`error=execution-runtime-unavailable` after installation. Image preparation can
+still complete there; it does not prove that guest commands can execute.
+
 When the canonical Arweave index provides a range, download status includes
 `downloaded-bytes`, `total-bytes`, and `last-progress-ms` (the age of the last
 newly received bytes). Overlapping/retried chunks are counted once. These are
