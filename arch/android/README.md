@@ -147,6 +147,22 @@ at build time with `-PandeeConfiguratorUrl=https://arweave.net/<manifest>/`;
 loopback URLs are for tethered local review builds only. The default currently
 points to the previous public Configurator, pending the Full profile release.
 
+**Scan** reads the setup code the PermawebOS extension shows: a loop of QR
+codes carrying one Blockchain Commons UR (`ur:bytes`, the raw DEFLATE of the
+compact config JSON), fountain-coded so any sufficient set of frames completes
+it. The same review screen also opens for a JSON file opened or shared to
+AndEE, and for the `org.permaweb.andee.action.IMPORT_CONFIG` action with a
+`config` (JSON), `config-b64` (base64 or base64url JSON) or `ur` extra:
+
+```sh
+adb shell am start -a org.permaweb.andee.action.IMPORT_CONFIG \
+    --es config-b64 "$(base64 -w0 next.json | tr '+/' '-_' | tr -d '=')"
+```
+
+Every source stages only after **Use this setup** and goes through the same
+next-boot store as **Load JSON**; nothing is written outside it. Debug builds
+alone also accept `--ez apply true` to stage without the review.
+
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,
 `trusted-device-signers`, and `name-resolvers`; no application checkout,
