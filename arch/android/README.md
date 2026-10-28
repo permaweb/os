@@ -133,6 +133,12 @@ the preloaded store, or the Andock payload. It fails when no runtime is staged;
 use `android-build` after changing any runtime, device, native, or measured
 configuration input.
 
+The AndEE screen shows a QR code and the node's bare root URL. Tap either the
+QR code or the URL preview to open that root in Android's default browser.
+Tunnel discovery still checks the remote node identity through `meta@1.0`
+before enabling the link; metadata paths are not part of the displayed or
+encoded address. A node without a configured tunnel shows its local root URL.
+
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,
 `trusted-device-signers`, and `name-resolvers`; no application checkout,

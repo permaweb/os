@@ -1,6 +1,7 @@
 package org.permaweb.andee
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -18,6 +19,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.Toast
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,6 +51,7 @@ class OrnamentActivity : Activity() {
             object : OrnamentView.Actions {
                 override fun pickNextBootConfig() = this@OrnamentActivity.pickNextBootConfig()
                 override fun terminate() = this@OrnamentActivity.terminateApp()
+                override fun openNode(url: String) = this@OrnamentActivity.openNode(url)
             },
         )
         setContentView(ornamentView)
@@ -118,6 +121,17 @@ class OrnamentActivity : Activity() {
         startActivityForResult(intent, REQUEST_BOOT_CONFIG)
     }
 
+    private fun openNode(url: String) {
+        val origin = NodeDiscovery.origin(url) ?: return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(origin)).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            })
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "Install a browser to open your AndEE.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun readPickedText(uri: Uri): String {
         return contentResolver.openInputStream(uri)?.use { input ->
             input.bufferedReader(Charsets.UTF_8).readText()
@@ -152,6 +166,7 @@ private class OrnamentView(
     interface Actions {
         fun pickNextBootConfig()
         fun terminate()
+        fun openNode(url: String)
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -169,6 +184,10 @@ private class OrnamentView(
     private var qrBitmapStatus: NodeStatus? = null
     private var qrBitmapPending = false
     private val configButtonBounds = RectF()
+    private val qrLinkBounds = RectF()
+    private val urlLinkBounds = RectF()
+    private var pressedBounds: RectF? = null
+    private var pressedUrl: String? = null
     private val clipBounds = Rect()
     private val clipBoundsF = RectF()
     private val phoneDirty = Rect()
@@ -377,6 +396,8 @@ private class OrnamentView(
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = greeterMargin
         val qrY = height - qrSize - dp(126f)
+
+        qrLinkBounds.set(qrX, qrY, qrX + qrSize, qrY + qrSize)
         qrDrawBounds.set(0f, qrY - dp(28f), width.toFloat(), qrY + qrSize + dp(74f))
     }
 
@@ -524,25 +545,62 @@ private class OrnamentView(
         canvas.drawText(labelText, labelX, labelY, accentPaint)
 
         var textY = labelY + accentPaint.textSize * 1.4f
+        textPaint.isUnderlineText = status.ready
         for (line in lines) {
             canvas.drawText(line, labelX, textY, textPaint)
             textY += textPaint.textSize * 1.35f
         }
+        textPaint.isUnderlineText = false
+        urlLinkBounds.set(labelX - dp(4f), qrY, width - margin, max(qrY + dp(48f), textY))
         drawConfigButton(canvas, qrX, qrY + qrSize + dp(18f), qrSize)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        val inside = configButtonBounds.contains(event.x, event.y)
-        if (event.action == MotionEvent.ACTION_DOWN && inside) return true
-        if (event.action == MotionEvent.ACTION_UP && inside) {
-            if (nextBootConfigPending.get()) {
-                actions.terminate()
-            } else {
-                actions.pickNextBootConfig()
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val status = qrBitmapStatus
+                pressedBounds = when {
+                    configButtonBounds.contains(event.x, event.y) -> configButtonBounds
+                    status?.ready == true && qrLinkBounds.contains(event.x, event.y) -> qrLinkBounds
+                    status?.ready == true && urlLinkBounds.contains(event.x, event.y) -> urlLinkBounds
+                    else -> null
+                }
+                pressedUrl = if (pressedBounds != null && pressedBounds !== configButtonBounds) status?.url else null
+                if (pressedBounds != null) return true
             }
-            return true
+            MotionEvent.ACTION_MOVE -> {
+                val bounds = pressedBounds
+                if (bounds != null && !bounds.contains(event.x, event.y)) {
+                    pressedBounds = null
+                    pressedUrl = null
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (pressedBounds?.contains(event.x, event.y) == true) performClick()
+                pressedBounds = null
+                pressedUrl = null
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pressedBounds = null
+                pressedUrl = null
+                return true
+            }
         }
         return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        val url = pressedUrl
+        if (url != null) {
+            val current = nodeStatus.get()
+            if (current.ready && current.url == url) actions.openNode(url)
+        } else if (pressedBounds === configButtonBounds) {
+            if (nextBootConfigPending.get()) actions.terminate() else actions.pickNextBootConfig()
+        }
+        return true
     }
 
     private fun drawConfigButton(canvas: Canvas, x: Float, y: Float, width: Float) {

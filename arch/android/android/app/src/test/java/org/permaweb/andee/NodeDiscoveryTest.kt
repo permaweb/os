@@ -9,8 +9,8 @@ class NodeDiscoveryTest {
     private val address = "A".repeat(43)
     private val origin = "https://${"a".repeat(52)}.smoke.solutions"
 
-    @Test fun fullTunnelUrlRoundTripsWithoutSubstitution() {
-        val url = origin + NodeDiscovery.INFO
+    @Test fun bareTunnelRootRoundTripsWithoutSubstitution() {
+        val url = origin
         val rows = DiscoveryQr.rowsFor(url)
         // Decode the symbol independently of the renderer, excluding its quiet zone.
         val symbol = BitMatrix(rows.size - 8)
@@ -28,8 +28,8 @@ class NodeDiscoveryTest {
             NodeMetadata(address, origin)
         }
         assertTrue(status.ready)
-        assertEquals(origin + NodeDiscovery.INFO, status.url)
-        assertEquals(listOf("http://127.0.0.1:8734${NodeDiscovery.INFO}", status.url), calls)
+        assertEquals(origin, status.url)
+        assertEquals(listOf("http://127.0.0.1:8734${NodeDiscovery.INFO}", origin + NodeDiscovery.INFO), calls)
     }
 
     @Test fun unreachableOrWrongTunnelDoesNotFallBackToLan() {
@@ -46,7 +46,7 @@ class NodeDiscoveryTest {
     @Test fun changedConfigurationIsReadOnEverySnapshot() {
         for (host in listOf(origin, "https://next.smoke.solutions")) {
             val status = NodeDiscovery.snapshot(null) { NodeMetadata(address, host) }
-            assertEquals(host + NodeDiscovery.INFO, status.url)
+            assertEquals(host, status.url)
         }
     }
 
@@ -56,7 +56,7 @@ class NodeDiscoveryTest {
         val local = NodeDiscovery.snapshot("192.168.1.2") { NodeMetadata(address, null) }
         assertTrue(local.ready)
         assertEquals("LOCAL NETWORK NODE", local.label)
-        assertEquals("http://192.168.1.2:8734${NodeDiscovery.INFO}", local.url)
+        assertEquals("http://192.168.1.2:8734", local.url)
         assertFalse(DiscoveryQr.rowsFor("").any { it.any { cell -> cell } })
     }
 

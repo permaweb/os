@@ -36,13 +36,12 @@ internal object NodeDiscovery {
         if (configured != null) {
             val unavailable = NodeStatus(false, ip, "", "TUNNEL UNAVAILABLE")
             val publicOrigin = origin(configured) ?: return unavailable
-            val url = publicOrigin + INFO
-            val remote = read(url) ?: return unavailable
+            val remote = read(publicOrigin + INFO) ?: return unavailable
             // A reachable gateway alone is insufficient: it must reach this node.
             if (remote.address != local.address) return unavailable
-            return NodeStatus(true, ip, url, "CONNECT YOUR NODE")
+            return NodeStatus(true, ip, publicOrigin, "CONNECT YOUR NODE")
         }
         return if (ip == null) NodeStatus(false, null, "", "NETWORK UNAVAILABLE")
-        else NodeStatus(true, ip, "http://$ip:8734$INFO", "LOCAL NETWORK NODE")
+        else NodeStatus(true, ip, "http://$ip:8734", "LOCAL NETWORK NODE")
     }
 }
