@@ -139,6 +139,14 @@ Tunnel discovery still checks the remote node identity through `meta@1.0`
 before enabling the link; metadata paths are not part of the displayed or
 encoded address. A node without a configured tunnel shows its local root URL.
 
+**Configure** opens the pinned web Configurator in-app. Its **Apply to AndEE**
+action stages JSON through the same next-boot store as **Load JSON**. Tap
+**Apply & close**, then reopen AndEE to boot that configuration. The existing
+node keeps running while the form is open. A reviewed publication is selected
+at build time with `-PandeeConfiguratorUrl=https://arweave.net/<manifest>/`;
+loopback URLs are for tethered local review builds only. The default currently
+points to the previous public Configurator, pending the Full profile release.
+
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,
 `trusted-device-signers`, and `name-resolvers`; no application checkout,

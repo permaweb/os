@@ -27,6 +27,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ConfiguratorActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
         <service
             android:name=".AndeeService"
             android:exported="false"

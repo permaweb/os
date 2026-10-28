@@ -52,6 +52,9 @@ class OrnamentActivity : Activity() {
                 override fun pickNextBootConfig() = this@OrnamentActivity.pickNextBootConfig()
                 override fun terminate() = this@OrnamentActivity.terminateApp()
                 override fun openNode(url: String) = this@OrnamentActivity.openNode(url)
+                override fun configure() {
+                    startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
+                }
             },
         )
         setContentView(ornamentView)
@@ -167,6 +170,7 @@ private class OrnamentView(
         fun pickNextBootConfig()
         fun terminate()
         fun openNode(url: String)
+        fun configure()
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -184,6 +188,7 @@ private class OrnamentView(
     private var qrBitmapStatus: NodeStatus? = null
     private var qrBitmapPending = false
     private val configButtonBounds = RectF()
+    private val configureButtonBounds = RectF()
     private val qrLinkBounds = RectF()
     private val urlLinkBounds = RectF()
     private var pressedBounds: RectF? = null
@@ -552,7 +557,11 @@ private class OrnamentView(
         }
         textPaint.isUnderlineText = false
         urlLinkBounds.set(labelX - dp(4f), qrY, width - margin, max(qrY + dp(48f), textY))
-        drawConfigButton(canvas, qrX, qrY + qrSize + dp(18f), qrSize)
+        val buttonY = qrY + qrSize + dp(18f)
+        drawActionButton(canvas, configureButtonBounds, qrX, buttonY, qrSize, "CONFIGURE")
+        val pending = nextBootConfigPending.get()
+        drawActionButton(canvas, configButtonBounds, labelX, buttonY, labelWidth,
+            if (pending) "APPLY & CLOSE" else "LOAD JSON", pending)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -561,11 +570,12 @@ private class OrnamentView(
                 val status = qrBitmapStatus
                 pressedBounds = when {
                     configButtonBounds.contains(event.x, event.y) -> configButtonBounds
+                    configureButtonBounds.contains(event.x, event.y) -> configureButtonBounds
                     status?.ready == true && qrLinkBounds.contains(event.x, event.y) -> qrLinkBounds
                     status?.ready == true && urlLinkBounds.contains(event.x, event.y) -> urlLinkBounds
                     else -> null
                 }
-                pressedUrl = if (pressedBounds != null && pressedBounds !== configButtonBounds) status?.url else null
+                pressedUrl = if (pressedBounds === qrLinkBounds || pressedBounds === urlLinkBounds) status?.url else null
                 if (pressedBounds != null) return true
             }
             MotionEvent.ACTION_MOVE -> {
@@ -599,25 +609,26 @@ private class OrnamentView(
             if (current.ready && current.url == url) actions.openNode(url)
         } else if (pressedBounds === configButtonBounds) {
             if (nextBootConfigPending.get()) actions.terminate() else actions.pickNextBootConfig()
+        } else if (pressedBounds === configureButtonBounds) {
+            actions.configure()
         }
         return true
     }
 
-    private fun drawConfigButton(canvas: Canvas, x: Float, y: Float, width: Float) {
-        val terminate = nextBootConfigPending.get()
+    private fun drawActionButton(canvas: Canvas, bounds: RectF, x: Float, y: Float, width: Float,
+        label: String, terminate: Boolean = false) {
         val height = dp(44f)
-        configButtonBounds.set(x, y, x + width, y + height)
+        bounds.set(x, y, x + width, y + height)
 
         rectPaint.style = Paint.Style.FILL
         rectPaint.color = if (terminate) TERMINATE_ORANGE else Color.WHITE
         rectPaint.alpha = 255
-        canvas.drawRect(configButtonBounds, rectPaint)
+        canvas.drawRect(bounds, rectPaint)
 
         textPaint.typeface = mono
-        textPaint.textSize = (width / 18.2f).coerceIn(dp(10f), dp(16f))
+        textPaint.textSize = (width / 12f).coerceIn(dp(10f), dp(16f))
         textPaint.color = if (terminate) Color.WHITE else BACKGROUND
         textPaint.clearShadowLayer()
-        val label = if (terminate) "TERMINATE" else "SET NEXT BOOT CONFIG"
         val textWidth = textPaint.measureText(label)
         val metrics = textPaint.fontMetrics
         val textX = x + (width - textWidth) / 2f

@@ -12,6 +12,10 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
+            .getOrElse("https://arweave.net/BD8gs73YRzTwOJ0YpDTE3DOxjbQQ8vhhgIVJc11T_mA/")
+        require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
+        buildConfigField("String", "CONFIGURATOR_URL", "\"$configuratorUrl\"")
         buildConfigField("int", "MIN_OS_PATCH_LEVEL", "202605")
         buildConfigField("int", "MIN_VENDOR_PATCH_LEVEL", "20260501")
         buildConfigField("int", "MIN_BOOT_PATCH_LEVEL", "20260501")
