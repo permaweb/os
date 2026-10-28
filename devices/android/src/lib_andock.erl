@@ -227,6 +227,8 @@ request(Message, Timeout, Opts) ->
                         Prepared#{ <<"protocol">> => ?PROTOCOL },
                         Timeout
                     );
+                {error, Reason, Details} ->
+                    {error, 503, materialization_error(Reason), Details};
                 {error, Reason} ->
                     {error, 503, materialization_error(Reason)}
             end

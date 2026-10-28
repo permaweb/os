@@ -9,6 +9,9 @@
 -define(MODEL_MANIFEST_FORMAT, <<"permawebos/andee-model/1">>).
 -define(MAX_MODEL_MANIFEST_BYTES, 1024 * 1024).
 -define(MAX_MODEL_CHUNKS, 128).
+-define(ANDOCK_DEADLINE_MS, 30 * 60 * 1000).
+-define(ANDOCK_RETRY_DELAY_MS, 60000).
+-define(ANDOCK_STATUS_TIMEOUT_MS, 100).
 
 %% @doc Resolve a configured model through `hb_cache' and return its local path.
 model(Provider, Model, Opts) ->
@@ -231,30 +234,159 @@ materialize_direct(ID, Path, Opts) ->
 %% first request starts one BEAM-side cache materializer and returns a stable
 %% retryable response; Android is not invoked until the sparse image exists.
 ensure_andock(ID, Path, Opts) ->
-    with_lock(
-        Path,
-        fun() ->
-            case existing(Path, positive) of
-                {ok, Bytes} ->
-                    materialized(ID, Path, Bytes);
-                missing ->
-                    case whereis(andee_andock_materializer) of
-                        undefined ->
-                            Pid = spawn(fun() ->
-                                receive
-                                    materialize -> materialize_direct(ID, Path, Opts)
-                                end
-                            end),
-                            true = register(andee_andock_materializer, Pid),
-                            Pid ! materialize,
-                            {error, 'andock-default-image-materializing'};
-                        _ ->
-                            {error, 'andock-default-image-materializing'}
-                    end;
-                Error -> Error
-            end
-        end
-    ).
+    with_lock(Path, fun() -> andock_state(ID, Path, Opts) end).
+
+%% @doc Return a complete image or query its sole background worker.
+andock_state(ID, Path, Opts) ->
+    case existing(Path, positive) of
+        {ok, Bytes} -> materialized(ID, Path, Bytes);
+        missing ->
+            case whereis(andee_andock_materializer) of
+                undefined ->
+                    spawn(fun() -> andock_materializer(ID, Path, Opts) end),
+                    {error, 'andock-default-image-materializing'};
+                Pid -> andock_materializer_status(Pid)
+            end;
+        Error -> Error
+    end.
+
+%% @doc Claim the existing image worker before starting any network or disk work.
+andock_materializer(ID, Path, Opts) ->
+    Claimed = try register(andee_andock_materializer, self()) of
+        true -> true
+    catch error:badarg -> false
+    end,
+    case Claimed of
+        true ->
+            Fetch = fun() ->
+                case existing(Path, positive) of
+                    {ok, Bytes} -> materialized(ID, Path, Bytes);
+                    missing -> materialize_direct(ID, Path, andock_download_opts(Opts));
+                    Error -> Error
+                end
+            end,
+            run_andock_materializer(
+                Fetch, Path, ?ANDOCK_DEADLINE_MS, ?ANDOCK_RETRY_DELAY_MS
+            );
+        false -> ok
+    end.
+
+%% @doc Bound small Arweave reads and allow a large gateway body to make progress.
+%% HTTP transport, verification and caching remain owned by the configured stores.
+andock_download_opts(Opts) ->
+    Stores = hb_opts:get(store, [], Opts),
+    StoreList = case is_list(Stores) of true -> Stores; false -> [Stores] end,
+    Opts#{<<"store">> => [andock_store_opts(Store) || Store <- StoreList]}.
+
+andock_store_opts(#{<<"store-module">> := Module} = Store)
+        when Module =:= hb_store_arweave; Module =:= hb_store_gateway ->
+    Deadline = case Module of
+        hb_store_arweave -> 60000;
+        hb_store_gateway -> ?ANDOCK_DEADLINE_MS
+    end,
+    Store#{
+        <<"http-client-connect-timeout">> => 5000,
+        <<"http-client-send-timeout">> => Deadline,
+        <<"http-client-hackney-recv-timeout">> => 60000,
+        <<"http-retry">> => 0
+    };
+andock_store_opts(Store) -> Store.
+
+%% @doc Keep a request-independent writer under a bounded lifetime and retain
+%% its terminal failure so polling callers do not silently restart downloads.
+run_andock_materializer(Fetch, Path, Timeout, RetryDelay) ->
+    process_flag(trap_exit, true),
+    Started = erlang:monotonic_time(millisecond),
+    Coordinator = self(),
+    Writer = spawn_link(fun() -> Coordinator ! {andock_result, self(), Fetch()} end),
+    Result = try
+        await_andock_materializer(Writer, Started, Started + Timeout)
+    after
+        unlink(Writer),
+        exit(Writer, kill)
+    end,
+    case Result of
+        {ok, _} -> ok;
+        _ ->
+            cleanup_andock_parts(Path),
+            retain_andock_failure(Result, Started, RetryDelay)
+    end.
+
+%% @doc Polls do not extend the absolute deadline of the existing image job.
+await_andock_materializer(Writer, Started, Deadline) ->
+    Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    await_andock_materializer(Writer, Started, Deadline, Remaining).
+
+await_andock_materializer(Writer, _Started, _Deadline, 0) ->
+    stop_andock_writer(Writer);
+await_andock_materializer(Writer, Started, Deadline, Remaining) ->
+    receive
+        {andock_status, Reply} ->
+            Reply ! {Reply, {error, 'andock-default-image-materializing', #{
+                <<"andock-image-state">> => <<"preparing">>,
+                <<"andock-image-elapsed-ms">> => elapsed(Started)
+            }}},
+            await_andock_materializer(Writer, Started, Deadline);
+        {andock_result, Writer, Result} -> Result;
+        {'EXIT', Writer, normal} -> {error, 'image-worker-exited'};
+        {'EXIT', Writer, _Reason} -> {error, 'image-worker-failed'}
+    after Remaining ->
+        stop_andock_writer(Writer)
+    end.
+
+%% @doc Wait for cancellation before allowing another writer or removing parts.
+stop_andock_writer(Writer) ->
+    exit(Writer, kill),
+    receive {'EXIT', Writer, _} -> ok end,
+    {error, 'download-deadline-exceeded'}.
+
+%% @doc A monitor alias drops late replies after a caller stops waiting.
+andock_materializer_status(Pid) ->
+    Ref = monitor(process, Pid, [{alias, reply_demonitor}]),
+    Pid ! {andock_status, Ref},
+    receive
+        {Ref, Result} -> Result;
+        {'DOWN', Ref, process, Pid, _} -> {error, 'andock-default-image-materializing'}
+    after ?ANDOCK_STATUS_TIMEOUT_MS ->
+        demonitor(Ref, [flush]),
+        {error, 'andock-default-image-materializing'}
+    end.
+
+%% @doc Return the same failure throughout a cooldown; only a later tool call
+%% can start another attempt after the worker exits. Never retry on a status poll.
+retain_andock_failure(Result, Started, RetryDelay) ->
+    Cause = case Result of
+        {error, Reason} when is_atom(Reason) -> atom_to_binary(Reason);
+        _ -> <<"image-materialization-failed">>
+    end,
+    Error = {error, <<"andock-default-image-unavailable: ", Cause/binary>>, #{
+        <<"andock-image-state">> => <<"failed">>,
+        <<"andock-image-elapsed-ms">> => elapsed(Started),
+        <<"cause">> => Cause,
+        <<"retry-after">> => (RetryDelay + 999) div 1000
+    }},
+    retain_andock_failure_until(Error, erlang:monotonic_time(millisecond) + RetryDelay).
+
+retain_andock_failure_until(Error, Until) ->
+    Remaining = max(0, Until - erlang:monotonic_time(millisecond)),
+    retain_andock_failure_until(Error, Until, Remaining).
+
+retain_andock_failure_until(_Error, _Until, 0) -> ok;
+retain_andock_failure_until({error, Reason, Details} = Error, Until, Remaining) ->
+    receive
+        {andock_status, Reply} ->
+            Reply ! {Reply, {error, Reason,
+                Details#{<<"retry-after">> => (Remaining + 999) div 1000}}},
+            retain_andock_failure_until(Error, Until)
+    after Remaining -> ok
+    end.
+
+elapsed(Started) -> max(0, erlang:monotonic_time(millisecond) - Started).
+
+%% @doc Remove incomplete output only after the sole image writer has stopped.
+cleanup_andock_parts(Path) ->
+    Pattern = binary_to_list(<<Path/binary, ".*.part">>),
+    lists:foreach(fun file:delete/1, filelib:wildcard(Pattern)).
 
 %% @doc Read through a private disk-backed view of the configured remote stores.
 read_body(ID, Opts) ->
@@ -438,6 +570,230 @@ materialized_model(#{provider := Provider, model := Model, id := ID, bytes := By
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+andock_reports_download_failure_test() ->
+    PreviousRoot = os:getenv(?ANDOCK_ROOT_ENV),
+    PreviousCache = os:getenv(?ARTIFACT_CACHE_ROOT_ENV),
+    Root = filename:join("/tmp", "andock-failure-" ++
+        integer_to_list(erlang:unique_integer([positive, monotonic]))),
+    ID = <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>,
+    try
+        true = os:putenv(?ANDOCK_ROOT_ENV, Root),
+        os:unsetenv(?ARTIFACT_CACHE_ROOT_ENV),
+        andock(ID, #{}),
+        Result = await_andock_failure(ID, 50),
+        ?assertMatch({error, <<"andock-default-image-unavailable: ", _/binary>>,
+            #{<<"cause">> := <<"artifact-cache-root-unavailable">>}}, Result),
+        ?assertEqual(Result, andock(ID, #{}))
+    after
+        case whereis(andee_andock_materializer) of
+            undefined -> ok;
+            Pid -> stop_test_process(Pid)
+        end,
+        restore_env(?ANDOCK_ROOT_ENV, PreviousRoot),
+        restore_env(?ARTIFACT_CACHE_ROOT_ENV, PreviousCache),
+        file:del_dir_r(Root)
+    end.
+
+await_andock_failure(ID, 0) -> andock(ID, #{});
+await_andock_failure(ID, Attempts) ->
+    case andock(ID, #{}) of
+        {error, <<"andock-default-image-unavailable: ", _/binary>>, _} = Error -> Error;
+        _ ->
+            timer:sleep(10),
+            await_andock_failure(ID, Attempts - 1)
+    end.
+
+andock_deadline_stops_writer_despite_status_polls_test() ->
+    Parent = self(),
+    Root = filename:join(<<"/tmp">>, <<"andock-deadline-",
+        (integer_to_binary(erlang:unique_integer([positive, monotonic])))/binary>>),
+    Path = filename:join(Root, <<"image.simg">>),
+    Part = <<Path/binary, ".1.part">>,
+    Fetch = fun() ->
+        ok = filelib:ensure_dir(Path),
+        ok = file:write_file(Part, <<"incomplete">>),
+        Parent ! {writer_started, self()},
+        receive finish -> {ok, unused} end
+    end,
+    {Coordinator, Monitor} = spawn_monitor(fun() ->
+        run_andock_materializer(Fetch, Path, 60, 100)
+    end),
+    try
+        Writer = receive {writer_started, Pid} -> Pid after 1000 -> error(no_writer) end,
+        Result = poll_test_materializer(Coordinator, 500),
+        ?assertMatch({error, _, #{<<"cause">> := <<"download-deadline-exceeded">>}}, Result),
+        ?assertNot(is_process_alive(Writer)),
+        ?assertNot(filelib:is_file(Part)),
+        ?assertNot(filelib:is_file(Path)),
+        ?assertMatch({error, _, #{<<"andock-image-state">> := <<"failed">>}},
+            andock_materializer_status(Coordinator)),
+        receive {'DOWN', Monitor, process, Coordinator, normal} -> ok
+        after 1000 -> error(cooldown_never_ended)
+        end
+    after
+        exit(Coordinator, kill),
+        file:del_dir_r(Root)
+    end.
+
+%% @doc Poll continuously so each message cannot restart the job's time budget.
+poll_test_materializer(Pid, Remaining) when Remaining > 0 ->
+    case andock_materializer_status(Pid) of
+        {error, _, #{<<"andock-image-state">> := <<"failed">>}} = Error -> Error;
+        _ ->
+            timer:sleep(1),
+            poll_test_materializer(Pid, Remaining - 1)
+    end;
+poll_test_materializer(_, _) -> error(no_terminal_failure).
+
+andock_success_and_crash_release_or_report_test() ->
+    Path = test_image_path(),
+    {Success, Ref} = spawn_monitor(fun() ->
+        run_andock_materializer(fun() -> {ok, done} end, Path, 1000, 100)
+    end),
+    receive {'DOWN', Ref, process, Success, normal} -> ok
+    after 1000 -> error(success_not_released)
+    end,
+    {Failed, FailedRef} = spawn_monitor(fun() ->
+        run_andock_materializer(fun() -> error(synthetic_failure) end, Path, 1000, 100)
+    end),
+    ?assertMatch({error, _, #{<<"cause">> := <<"image-worker-failed">>}},
+        poll_test_materializer(Failed, 100)),
+    receive {'DOWN', FailedRef, process, Failed, normal} -> ok
+    after 1000 -> error(failure_not_released)
+    end.
+
+andock_bounds_existing_http_stores_only_test() ->
+    Local = #{<<"store-module">> => hb_store_fs, <<"name">> => <<"/tmp/test">>},
+    Opts = #{<<"store">> => [
+        Local,
+        #{<<"store-module">> => hb_store_arweave, <<"remote-index">> => true},
+        #{<<"store-module">> => hb_store_gateway}
+    ]},
+    #{<<"store">> := [Local, Arweave, Gateway]} = andock_download_opts(Opts),
+    ?assertEqual(true, maps:get(<<"remote-index">>, Arweave)),
+    ?assertEqual(60000, maps:get(<<"http-client-send-timeout">>, Arweave)),
+    ?assertEqual(?ANDOCK_DEADLINE_MS, maps:get(<<"http-client-send-timeout">>, Gateway)),
+    ?assertEqual(60000, maps:get(<<"http-client-hackney-recv-timeout">>, Gateway)),
+    ?assertEqual(0, maps:get(<<"http-retry">>, Gateway)).
+
+andock_retries_after_failure_and_installs_once_test() ->
+    Root = filename:dirname(test_image_path()),
+    ImageRoot = filename:join(Root, <<"images">>),
+    ArtifactRoot = filename:join(Root, <<"artifacts">>),
+    ID = <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>,
+    Path = filename:join(ImageRoot, <<ID/binary, ".simg">>),
+    Cache = #{<<"store-module">> => hb_store_fs,
+        <<"name">> => filename:join(ArtifactRoot, <<"cache">>)},
+    Opts = #{<<"store">> => [#{<<"store-module">> => hb_store_arweave,
+        <<"index-store">> => Cache, <<"remote-index">> => true}]},
+    PreviousRoot = os:getenv(?ANDOCK_ROOT_ENV),
+    PreviousCache = os:getenv(?ARTIFACT_CACHE_ROOT_ENV),
+    Parent = self(),
+    try
+        true = os:putenv(?ANDOCK_ROOT_ENV, binary_to_list(ImageRoot)),
+        true = os:putenv(?ARTIFACT_CACHE_ROOT_ENV, binary_to_list(ArtifactRoot)),
+        {Failed, Monitor} = spawn_monitor(fun() ->
+            true = register(andee_andock_materializer, self()),
+            Parent ! registered,
+            run_andock_materializer(fun() -> {error, timeout} end, Path, 1000, 100)
+        end),
+        receive registered -> ok after 1000 -> error(not_registered) end,
+        ?assertMatch({error, _, #{<<"cause">> := <<"timeout">>}},
+            poll_test_materializer(Failed, 100)),
+        ?assertMatch({error, _, #{<<"retry-after">> := 1}}, andock(ID, Opts)),
+        ?assertNot(filelib:is_file(Path)),
+        receive {'DOWN', Monitor, process, Failed, normal} -> ok
+        after 1000 -> error(cooldown_not_released)
+        end,
+        ok = hb_store:start(Cache),
+        Body = <<"verified-cache-test-image">>,
+        ok = hb_store:write(Cache, #{ID => Body}, #{}),
+        Ref = make_ref(),
+        [spawn(fun() -> Parent ! {Ref, andock(ID, Opts)} end)
+            || _ <- lists:seq(1, 20)],
+        [receive {Ref, _} -> ok after 1000 -> error(caller_blocked) end
+            || _ <- lists:seq(1, 20)],
+        ?assertMatch({ok, #{<<"path">> := Path}}, wait_for_andock(ID, Opts, 100)),
+        ?assertEqual({ok, Body}, file:read_file(Path)),
+        ?assertEqual([], filelib:wildcard(binary_to_list(<<Path/binary, ".*.part">>)))
+    after
+        case whereis(andee_andock_materializer) of
+            undefined -> ok;
+            Pid -> stop_test_process(Pid)
+        end,
+        restore_env(?ANDOCK_ROOT_ENV, PreviousRoot),
+        restore_env(?ARTIFACT_CACHE_ROOT_ENV, PreviousCache),
+        file:del_dir_r(Root)
+    end.
+
+wait_for_andock(_ID, _Opts, 0) -> error(image_not_installed);
+wait_for_andock(ID, Opts, Attempts) ->
+    case andock(ID, Opts) of
+        {ok, _} = Result -> Result;
+        _ -> timer:sleep(10), wait_for_andock(ID, Opts, Attempts - 1)
+    end.
+
+andock_stalled_http_is_reported_and_connection_closed_test_() ->
+    [{timeout, 10, fun() -> stalled_http_test(ReceiveTimeout, JobTimeout, Cause) end}
+        || {ReceiveTimeout, JobTimeout, Cause} <- [
+            {50, 3000, <<"timeout">>},
+            {5000, 100, <<"download-deadline-exceeded">>}
+        ]].
+
+stalled_http_test(ReceiveTimeout, JobTimeout, Cause) ->
+        {ok, _} = application:ensure_all_started(hackney),
+        {ok, Listener} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+        {ok, Port} = inet:port(Listener),
+        Parent = self(),
+        Peer = spawn_link(fun() ->
+            {ok, Socket} = gen_tcp:accept(Listener),
+            {ok, _} = gen_tcp:recv(Socket, 0, 1000),
+            ok = gen_tcp:send(Socket,
+                <<"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\npartial">>),
+            Parent ! {peer_closed, gen_tcp:recv(Socket, 0, 2000)},
+            gen_tcp:close(Socket)
+        end),
+        Options = (andock_store_opts(#{<<"store-module">> => hb_store_gateway}))#{
+            <<"http-client">> => hackney,
+            <<"prometheus">> => false,
+            <<"http-client-hackney-recv-timeout">> => ReceiveTimeout,
+            <<"http-client-send-timeout">> => 5000
+        },
+        Fetch = fun() -> hb_http_client:request(#{
+            peer => <<"http://127.0.0.1:", (integer_to_binary(Port))/binary>>,
+            path => <<"/image">>, method => <<"GET">>, headers => #{}, body => <<>>
+        }, Options) end,
+        {Coordinator, Monitor} = spawn_monitor(fun() ->
+            run_andock_materializer(Fetch, test_image_path(), JobTimeout, 100)
+        end),
+        try
+            ?assertMatch({error, _, #{<<"cause">> := Cause}},
+                poll_test_materializer(Coordinator, 2000)),
+            receive {peer_closed, Closed} -> ?assertEqual({error, closed}, Closed)
+            after 3000 -> error(connection_not_closed)
+            end,
+            receive {'DOWN', Monitor, process, Coordinator, normal} -> ok
+            after 1000 -> error(cooldown_not_released)
+            end
+        after
+            exit(Coordinator, kill),
+            unlink(Peer),
+            exit(Peer, kill),
+            gen_tcp:close(Listener)
+        end.
+
+test_image_path() ->
+    filename:join(<<"/tmp">>, <<"andock-test-",
+        (integer_to_binary(erlang:unique_integer([positive, monotonic])))/binary,
+        "/image.simg">>).
+
+stop_test_process(Pid) ->
+    Ref = monitor(process, Pid),
+    exit(Pid, kill),
+    receive {'DOWN', Ref, process, Pid, _} -> ok
+    after 1000 -> error(test_process_not_stopped)
+    end.
 
 artifact_store_rewrites_only_remote_stores_test() ->
     Cache = #{<<"store-module">> => hb_store_fs, <<"name">> => <<"/tmp/cache">>},
