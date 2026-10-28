@@ -13,10 +13,11 @@ internal object NodeMetadataHttp {
         return try {
             connection = URL(url).openConnection() as HttpURLConnection
             connection.instanceFollowRedirects = false
-            connection.connectTimeout = 1500
-            connection.readTimeout = 1500
+            connection.connectTimeout = 3000
+            connection.readTimeout = 8000
             connection.setRequestProperty("accept", "application/json")
             connection.setRequestProperty("require-codec", "application/json")
+            connection.setRequestProperty("accept-bundle", "true")
             if (connection.responseCode != 200) return null
             val bytes = connection.inputStream.use { input ->
                 val output = ByteArrayOutputStream()
@@ -35,9 +36,18 @@ internal object NodeMetadataHttp {
                 is String -> if (response.has("address")) response else JSONObject(body)
                 else -> response
             }
+            val hooks = data.optJSONObject("on")?.optJSONArray("start")
+            val tunnel = (0 until (hooks?.length() ?: 0)).asSequence()
+                .mapNotNull { hooks?.optJSONObject(it) }
+                .firstOrNull {
+                    it.optString("device") == "tunnel@1.0" &&
+                        it.optString("path") == "connect" && it.optInt("workers", 1) > 0
+                }
             NodeMetadata(
                 data.optString("address", ""),
                 if (data.has("location-url")) data.optString("location-url", "") else null,
+                data.optString("committer", ""),
+                tunnel?.optString("peer", ""),
             )
         } catch (_: Exception) { null }
         finally { connection?.disconnect() }

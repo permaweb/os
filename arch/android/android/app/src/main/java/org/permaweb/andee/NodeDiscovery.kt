@@ -13,7 +13,12 @@ internal data class NodeStatus(
     }
 }
 
-internal data class NodeMetadata(val address: String, val locationUrl: String?)
+internal data class NodeMetadata(
+    val address: String,
+    val locationUrl: String?,
+    val committer: String? = null,
+    val tunnelPeer: String? = null,
+)
 
 /** Presentation of existing meta@1.0 data; no tunnel or identity is created here. */
 internal object NodeDiscovery {
@@ -29,10 +34,23 @@ internal object NodeDiscovery {
         ) null else "${uri.scheme}://${uri.rawAuthority}"
     } catch (_: Exception) { null }
 
+    private fun tunnelOrigin(committer: String?, peer: String): String? {
+        // meta already reports HyperBEAM's DNS-safe committer. Do not re-encode identity.
+        if (committer == null || !Regex("uri-did-ar-[a-z0-9-]{52}").matches(committer)) return null
+        val provider = origin(peer)?.let(::URI) ?: return null
+        if (!provider.host.contains('.') || provider.host.contains(':') ||
+            provider.host.split('.').any { !Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").matches(it) } ||
+            provider.host.all { it.isDigit() || it == '.' }
+        ) return null
+        return origin("${provider.scheme}://$committer.${provider.rawAuthority}")
+    }
+
     fun snapshot(ip: String?, read: (String) -> NodeMetadata?): NodeStatus {
         val local = read("http://127.0.0.1:8734$INFO") ?: return NodeStatus.booting()
         if (!addressPattern.matches(local.address)) return NodeStatus.booting()
-        val configured = local.locationUrl
+        val configured = local.locationUrl ?: local.tunnelPeer?.let {
+            tunnelOrigin(local.committer, it) ?: ""
+        }
         if (configured != null) {
             val unavailable = NodeStatus(false, ip, "", "TUNNEL UNAVAILABLE")
             val publicOrigin = origin(configured) ?: return unavailable
