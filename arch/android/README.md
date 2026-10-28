@@ -90,14 +90,19 @@ network client. No rootfs bytes are packaged in the APK.
 The first execution request starts the image download in the background and
 returns HTTP 503 with `andock-default-image-materializing`. Later requests
 include `andock-image-state` and elapsed milliseconds while it is preparing.
-The job has a 30-minute deadline; its existing Arweave store requests have a
-60-second limit, and gateway downloads have a 60-second idle-read timeout.
+The job has a two-hour safety deadline; its existing Arweave store requests have
+a 60-second limit and up to two retries for transport failures or server errors.
+Gateway downloads have a 60-second idle-read timeout, while a continuously
+progressing body may take up to the overall deadline. The larger limit allows
+the roughly 895 MB image to arrive over slower links.
 A failed attempt returns `andock-default-image-unavailable: <cause>` and a
 `retry-after` delay in seconds for one minute. The next execution request after
 that delay can retry. Transport failures that the store does not preserve are
 reported as a generic materialization failure. Completed cache entries remain
 available to HyperBEAM; an incomplete destination is never passed to Android.
-This does not add byte-progress reporting or resumable gateway downloads.
+The current stores cache complete artifacts, not incomplete image transfers;
+an interrupted transfer may therefore restart from the beginning. Byte-progress
+reporting and resumable transfers require support in the canonical store layer.
 
 Each member receives a complete writable sparse ext4 image copied from that
 measured, deterministic Ubuntu 24.04 template. An Android isolated service

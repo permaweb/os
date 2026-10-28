@@ -9,7 +9,7 @@
 -define(MODEL_MANIFEST_FORMAT, <<"permawebos/andee-model/1">>).
 -define(MAX_MODEL_MANIFEST_BYTES, 1024 * 1024).
 -define(MAX_MODEL_CHUNKS, 128).
--define(ANDOCK_DEADLINE_MS, 30 * 60 * 1000).
+-define(ANDOCK_DEADLINE_MS, 2 * 60 * 60 * 1000).
 -define(ANDOCK_RETRY_DELAY_MS, 60000).
 -define(ANDOCK_STATUS_TIMEOUT_MS, 100).
 
@@ -280,15 +280,16 @@ andock_download_opts(Opts) ->
 
 andock_store_opts(#{<<"store-module">> := Module} = Store)
         when Module =:= hb_store_arweave; Module =:= hb_store_gateway ->
-    Deadline = case Module of
-        hb_store_arweave -> 60000;
-        hb_store_gateway -> ?ANDOCK_DEADLINE_MS
+    {Deadline, Retries} = case Module of
+        hb_store_arweave -> {60000, 2};
+        hb_store_gateway -> {?ANDOCK_DEADLINE_MS, 0}
     end,
     Store#{
         <<"http-client-connect-timeout">> => 5000,
         <<"http-client-send-timeout">> => Deadline,
         <<"http-client-hackney-recv-timeout">> => 60000,
-        <<"http-retry">> => 0
+        <<"http-retry">> => Retries,
+        <<"http-retry-response">> => [failure]
     };
 andock_store_opts(Store) -> Store.
 
@@ -672,10 +673,43 @@ andock_bounds_existing_http_stores_only_test() ->
     ]},
     #{<<"store">> := [Local, Arweave, Gateway]} = andock_download_opts(Opts),
     ?assertEqual(true, maps:get(<<"remote-index">>, Arweave)),
+    ?assertEqual(2, maps:get(<<"http-retry">>, Arweave)),
     ?assertEqual(60000, maps:get(<<"http-client-send-timeout">>, Arweave)),
     ?assertEqual(?ANDOCK_DEADLINE_MS, maps:get(<<"http-client-send-timeout">>, Gateway)),
     ?assertEqual(60000, maps:get(<<"http-client-hackney-recv-timeout">>, Gateway)),
     ?assertEqual(0, maps:get(<<"http-retry">>, Gateway)).
+
+andock_recovers_from_transient_chunk_response_test_() ->
+    {timeout, 10, fun() ->
+        {ok, _} = application:ensure_all_started(hackney),
+        {ok, Listener} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+        {ok, Port} = inet:port(Listener),
+        Parent = self(),
+        Peer = spawn_link(fun() ->
+            lists:foreach(fun({Status, Body}) ->
+                {ok, Socket} = gen_tcp:accept(Listener),
+                {ok, _} = gen_tcp:recv(Socket, 0, 1000),
+                ok = gen_tcp:send(Socket, [<<"HTTP/1.1 ">>, Status,
+                    <<"\r\nConnection: close\r\nContent-Length: ">>,
+                    integer_to_binary(byte_size(Body)), <<"\r\n\r\n">>, Body]),
+                gen_tcp:close(Socket)
+            end, [{<<"503 Unavailable">>, <<"retry">>}, {<<"200 OK">>, <<"chunk">>}]),
+            Parent ! recovered
+        end),
+        Options = (andock_store_opts(#{<<"store-module">> => hb_store_arweave}))#{
+            <<"http-client">> => hackney, <<"prometheus">> => false,
+            <<"http-retry-time">> => 1
+        },
+        try
+            ?assertMatch({ok, 200, _, <<"chunk">>}, hb_http_client:request(#{
+                peer => <<"http://127.0.0.1:", (integer_to_binary(Port))/binary>>,
+                path => <<"/chunk/1">>, method => <<"GET">>, headers => #{}, body => <<>>
+            }, Options)),
+            receive recovered -> ok after 1000 -> error(retry_not_received) end
+        after
+            unlink(Peer), exit(Peer, kill), gen_tcp:close(Listener)
+        end
+    end}.
 
 andock_retries_after_failure_and_installs_once_test() ->
     Root = filename:dirname(test_image_path()),
