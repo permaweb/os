@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -181,6 +182,9 @@ private class OrnamentView(
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+    private val brandMark = BitmapFactory.decodeResource(resources, R.drawable.permawebos_mark)
+    private val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val brandBounds = RectF()
     private val nodeStatus = AtomicReference(NodeStatus.booting())
     private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
     private val presentationActive = AtomicBoolean(false)
@@ -208,7 +212,6 @@ private class OrnamentView(
     private var layoutWidth = 0
     private var layoutHeight = 0
     private var greeterTextSize = 0f
-    private var greeterLineHeight = 0f
     private var greeterMargin = 0f
     private var greeterTopMargin = 0f
     private var greeterBottom = 0f
@@ -369,18 +372,19 @@ private class OrnamentView(
         layoutHeight = height
         greeterMargin = dp(22f)
         greeterTopMargin = dp(40f)
-        var size = (width / 58f).coerceIn(dp(10f), dp(21f))
+        val markSize = min(dp(132f), width * 0.34f)
+        brandBounds.set(greeterMargin, greeterTopMargin, greeterMargin + markSize, greeterTopMargin + markSize)
+        var size = dp(24f)
         textPaint.typeface = mono
         textPaint.textSize = size
-        var maxLine = HYPERBEAM_GREETER.maxOf { textPaint.measureText(it) }
-        val available = width - greeterMargin * 2f
+        val maxLine = textPaint.measureText("PERMAWEBOS")
+        val available = width - brandBounds.right - dp(12f) - greeterMargin
         if (maxLine > available) {
             size *= available / maxLine
             textPaint.textSize = size
         }
         greeterTextSize = size
-        greeterLineHeight = size * 1.08f
-        greeterBottom = greeterTopMargin + size + HYPERBEAM_GREETER.size * greeterLineHeight + size * 0.55f
+        greeterBottom = brandBounds.bottom + dp(20f)
 
         val rows = PHONE_ROWS
         val cols = PHONE_COLS
@@ -415,16 +419,16 @@ private class OrnamentView(
     }
 
     private fun drawGreeter(canvas: Canvas) {
-        var y = greeterTopMargin + greeterTextSize
-
+        canvas.drawBitmap(brandMark, null, brandBounds, brandPaint)
+        val x = brandBounds.right + dp(12f)
+        val y = brandBounds.centerY()
         textPaint.color = Color.WHITE
         textPaint.clearShadowLayer()
         textPaint.typeface = mono
         textPaint.textSize = greeterTextSize
-        for (line in HYPERBEAM_GREETER) {
-            canvas.drawText(line, greeterMargin, y, textPaint)
-            y += greeterLineHeight
-        }
+        canvas.drawText("PERMAWEBOS", x, y, textPaint)
+        textPaint.textSize = dp(16f)
+        canvas.drawText("AndEE", x, y + dp(26f), textPaint)
     }
 
     private fun drawPhone(canvas: Canvas) {
@@ -801,20 +805,6 @@ private class OrnamentView(
         private const val STEADY_POLL_MS = 5_000L
         private const val PHONE_COLS = 36
         private const val PHONE_ROWS = 29
-        private val HYPERBEAM_GREETER = listOf(
-            "\u2588\u2588\u2557  \u2588\u2588\u2557\u2588\u2588\u2557   \u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557",
-            "\u2588\u2588\u2551  \u2588\u2588\u2551\u255a\u2588\u2588\u2557 \u2588\u2588\u2554\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551  \u255a\u2588\u2588\u2554\u255d  \u2588\u2588\u2554\u2550\u2550\u2550\u255d \u2588\u2588\u2554\u2550\u2550\u255d  \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557",
-            "\u2588\u2588\u2551  \u2588\u2588\u2551   \u2588\u2588\u2551   \u2588\u2588\u2551     \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551",
-            "\u255a\u2550\u255d  \u255a\u2550\u255d   \u255a\u2550\u255d   \u255a\u2550\u255d     \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2557   \u2588\u2588\u2588\u2557",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2551",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2554\u2588\u2588\u2588\u2588\u2554\u2588\u2588\u2551",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u255d  \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551\u2588\u2588\u2551\u255a\u2588\u2588\u2554\u255d\u2588\u2588\u2551 EAT GLASS,",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2551 \u255a\u2550\u255d \u2588\u2588\u2551 BUILD THE",
-            "\u255a\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u255d     \u255a\u2550\u255d FUTURE.",
-        )
     }
 }
 
