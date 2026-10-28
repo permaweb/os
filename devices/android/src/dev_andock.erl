@@ -12,6 +12,8 @@
 -export([
     device_info/1,
     index/3,
+    health/3,
+    prepare/3,
     proxy/4,
     read/3,
     write/3,
@@ -38,6 +40,8 @@ device_info(_) ->
         <<"content-type">> => <<"text/plain; charset=utf-8">>,
         <<"body">> => <<"Not found">>,
         handlers => #{
+            <<"health">> => fun ?MODULE:health/3,
+            <<"prepare">> => fun ?MODULE:prepare/3,
             <<"read">> => fun ?MODULE:read/3,
             <<"write">> => fun ?MODULE:write/3,
             <<"append">> => fun ?MODULE:append/3,
@@ -55,11 +59,11 @@ device_info(_) ->
         <<"index">> => fun index/3
     }.
 
-index(_Base, _Req, _Opts) ->
+index(Base, Req, Opts) ->
+    {ok, Health} = health(Base, Req, Opts),
     {ok,
-        #{
+        Health#{
             <<"device">> => ?DEVICE,
-            <<"status">> => <<"ready">>,
             <<"isolation">> => <<"android-isolated-uid">>,
             <<"keys">> =>
                 [
@@ -73,6 +77,9 @@ index(_Base, _Req, _Opts) ->
                     <<"bash-session">>
                 ]
         }}.
+
+health(Base, Req, Opts) -> lib_andock:health(Base, Req, Opts).
+prepare(Base, Req, Opts) -> lib_andock:prepare(Base, Req, Opts).
 
 proxy(_Key, _Base, _Req, _Opts) ->
     {ok,

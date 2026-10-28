@@ -1,6 +1,6 @@
 %%% @doc Materializes AO-Core model and image messages for Android backends.
 -module(lib_andee_materialization).
--export([model/3, andock/2]).
+-export([model/3, andock/2, andock_status/2]).
 -ifdef(TEST).
 -export([arweave/3]).
 -endif.
@@ -15,6 +15,8 @@
 -define(ANDOCK_DEADLINE_MS, 2 * 60 * 60 * 1000).
 -define(ANDOCK_RETRY_DELAY_MS, 60000).
 -define(ANDOCK_STATUS_TIMEOUT_MS, 100).
+-define(ANDOCK_CHUNK_BYTES, 256 * 1024).
+-define(ANDOCK_RECEIPT_BYTES, 512 * 1024).
 -define(ANDOCK_INDEXED_IMAGE, <<"rd2ybWz0XPr29kSWL2OYoTLmz7IhemE51XlsRseOSJk">>).
 -define(ANDOCK_IMAGE_BLOCK, 1984725).
 
@@ -37,6 +39,24 @@ andock(ID, Opts) when is_binary(ID), byte_size(ID) =:= 43 ->
     end;
 andock(_, _) ->
     {error, 'invalid-andock-image-id'}.
+
+%% @doc Observe the existing image job without starting or retrying a download.
+andock_status(ID, _Opts) when is_binary(ID), byte_size(ID) =:= 43 ->
+    case {valid_id(ID), destination(?ANDOCK_ROOT_ENV, <<ID/binary, ".simg">>)} of
+        {true, {ok, Path}} ->
+            case existing(Path, positive) of
+                {ok, Bytes} -> materialized(ID, Path, Bytes);
+                missing ->
+                    case whereis(andee_andock_materializer) of
+                        undefined -> {error, 'andock-default-image-missing'};
+                        Pid -> andock_materializer_status(Pid)
+                    end;
+                Error -> Error
+            end;
+        {false, _} -> {error, 'invalid-andock-image-id'};
+        {_, Error} -> Error
+    end;
+andock_status(_, _) -> {error, 'invalid-andock-image-id'}.
 
 %% @doc Find the selected model in the measured provider configuration.
 model_spec(Provider0, Model0, Opts) ->
@@ -263,20 +283,23 @@ andock_materializer(ID, Path, Opts) ->
     end,
     case Claimed of
         true ->
+            Coordinator = self(),
+            ProgressRef = make_ref(),
             Fetch = fun() ->
                 case existing(Path, positive) of
                     {ok, Bytes} -> materialized(ID, Path, Bytes);
                     missing ->
                         DownloadOpts = andock_download_opts(Opts),
                         case andock_prepare_index(ID, DownloadOpts) of
-                            ok -> materialize_direct(ID, Path, DownloadOpts);
+                            ok -> materialize_direct(ID, Path, andock_progress_opts(
+                                ID, DownloadOpts, Coordinator, ProgressRef));
                             Error -> Error
                         end;
                     Error -> Error
                 end
             end,
             run_andock_materializer(
-                Fetch, Path, ?ANDOCK_DEADLINE_MS, ?ANDOCK_RETRY_DELAY_MS
+                Fetch, Path, ?ANDOCK_DEADLINE_MS, ?ANDOCK_RETRY_DELAY_MS, ProgressRef
             );
         false -> ok
     end.
@@ -326,6 +349,27 @@ andock_prepare_index(?ANDOCK_INDEXED_IMAGE = ID, Opts, Resolve) ->
     end;
 andock_prepare_index(_ID, _Opts, _Resolve) -> ok.
 
+%% @doc Observe the existing HTTP receipt hook only for an indexed image.
+%% The private closure cannot be addressed through a public device action.
+%% Received bytes are informational: canonical stores still verify the image.
+andock_progress_opts(ID, Opts, Coordinator, Ref) ->
+    case andock_indexed_range(ID, Opts) of
+        {ok, Start, End} ->
+            Coordinator ! {andock_progress, Ref, {range, Start, End}},
+            Hook = <<"http-client-admissible-receipt">>,
+            Existing = hb_hook:find(Hook, Opts),
+            On = hb_opts:get(on, #{}, Opts),
+            Observer = #{
+                <<"path">> => <<"observe">>,
+                <<"device">> => #{observe => fun(_Base, Req, HookOpts) ->
+                    andock_chunk_receipt(Req, HookOpts, Coordinator, Ref),
+                    {ok, Req}
+                end}
+            },
+            Opts#{<<"on">> => On#{Hook => Existing ++ [Observer]}};
+        unknown -> Opts
+    end.
+
 %% @doc Use the canonical local index; progress never makes a network lookup.
 andock_indexed_range(ID, Opts) ->
     try hb_store_arweave:read_index_offset(
@@ -338,15 +382,70 @@ andock_indexed_range(ID, Opts) ->
     catch _:_ -> unknown
     end.
 
+andock_chunk_receipt(Req, Opts, Coordinator, Ref) ->
+    try
+        Receipt = hb_maps:get(<<"body">>, Req, Opts),
+        <<"GET">> = hb_maps:get(<<"request-method">>, Receipt, Opts),
+        Path = hb_maps:get(<<"request-path">>, Receipt, Opts),
+        Offset = andock_chunk_offset(Path),
+        Response = hb_maps:get(<<"response">>, Receipt, Opts),
+        200 = hb_util:int(hb_maps:get(<<"status">>, Response, Opts)),
+        Body = hb_maps:get(<<"body">>, Response, Opts),
+        true = is_binary(Body) andalso byte_size(Body) =< ?ANDOCK_RECEIPT_BYTES,
+        JSON = hb_json:decode(Body),
+        Chunk = hb_util:decode(maps:get(<<"chunk">>, JSON)),
+        Size = byte_size(Chunk),
+        true = Size > 0 andalso Size =< ?ANDOCK_CHUNK_BYTES,
+        End = hb_util:int(maps:get(<<"absolute_end_offset">>, JSON)),
+        Start = End - Size + 1,
+        true = Start >= 0 andalso Start =< Offset andalso Offset =< End,
+        Coordinator ! {andock_progress, Ref, {chunk, Start, End}},
+        ok
+    catch _:_ -> ok
+    end.
+
+andock_chunk_offset(<<"/arweave/chunk/", Offset/binary>>) -> binary_to_integer(Offset);
+andock_chunk_offset(<<"/chunk/", Offset/binary>>) -> binary_to_integer(Offset).
+
+andock_progress({range, Start, End}, Progress) when not is_map_key(range, Progress) ->
+    Progress#{range => {Start, End}, intervals => [], bytes => 0};
+andock_progress({chunk, Start, End}, Progress = #{range := {First, Last}}) ->
+    case {max(Start, First), min(End, Last)} of
+        {From, To} when From =< To ->
+            Intervals = andock_merge_intervals(
+                lists:sort([{From, To} | maps:get(intervals, Progress)]), []),
+            Bytes = lists:sum([B - A + 1 || {A, B} <- Intervals]),
+            case Bytes > maps:get(bytes, Progress) of
+                true -> Progress#{intervals => Intervals, bytes => Bytes,
+                    last => erlang:monotonic_time(millisecond)};
+                false -> Progress
+            end;
+        _ -> Progress
+    end;
+andock_progress(_, Progress) -> Progress.
+
+andock_merge_intervals([], Acc) -> Acc;
+andock_merge_intervals([{Start, End} | Rest], [{First, Last} | Acc])
+        when Start =< Last + 1 ->
+    andock_merge_intervals(Rest, [{First, max(End, Last)} | Acc]);
+andock_merge_intervals([Interval | Rest], Acc) ->
+    andock_merge_intervals(Rest, [Interval | Acc]).
+
+andock_progress_details(#{range := {First, Last}, bytes := Bytes, last := LastProgress}) ->
+    #{<<"downloaded-bytes">> => Bytes, <<"total-bytes">> => Last - First + 1,
+        <<"last-progress-ms">> => elapsed(LastProgress)};
+andock_progress_details(_) -> #{}.
+
 %% @doc Keep a request-independent writer under a bounded lifetime and retain
 %% its terminal failure so polling callers do not silently restart downloads.
-run_andock_materializer(Fetch, Path, Timeout, RetryDelay) ->
+run_andock_materializer(Fetch, Path, Timeout, RetryDelay, ProgressRef) ->
     process_flag(trap_exit, true),
     Started = erlang:monotonic_time(millisecond),
     Coordinator = self(),
     Writer = spawn_link(fun() -> Coordinator ! {andock_result, self(), Fetch()} end),
-    Result = try
-        await_andock_materializer(Writer, Started, Started + Timeout)
+    {Result, Progress} = try
+        await_andock_materializer(Writer, Started, Started + Timeout,
+            #{ref => ProgressRef, last => Started})
     after
         unlink(Writer),
         exit(Writer, kill)
@@ -355,29 +454,34 @@ run_andock_materializer(Fetch, Path, Timeout, RetryDelay) ->
         {ok, _} -> ok;
         _ ->
             cleanup_andock_parts(Path),
-            retain_andock_failure(Result, Started, RetryDelay)
+            retain_andock_failure(Result, Started, RetryDelay, Progress)
     end.
 
 %% @doc Polls do not extend the absolute deadline of the existing image job.
-await_andock_materializer(Writer, Started, Deadline) ->
+await_andock_materializer(Writer, Started, Deadline, Progress) ->
     Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
-    await_andock_materializer(Writer, Started, Deadline, Remaining).
+    await_andock_materializer(Writer, Started, Deadline, Progress, Remaining).
 
-await_andock_materializer(Writer, _Started, _Deadline, 0) ->
-    stop_andock_writer(Writer);
-await_andock_materializer(Writer, Started, Deadline, Remaining) ->
+await_andock_materializer(Writer, _Started, _Deadline, Progress, 0) ->
+    {stop_andock_writer(Writer), Progress};
+await_andock_materializer(Writer, Started, Deadline, Progress = #{ref := Ref}, Remaining) ->
     receive
         {andock_status, Reply} ->
-            Reply ! {Reply, {error, 'andock-default-image-materializing', #{
+            Reply ! {Reply, {error, 'andock-default-image-materializing', maps:merge(#{
                 <<"andock-image-state">> => <<"preparing">>,
                 <<"andock-image-elapsed-ms">> => elapsed(Started)
-            }}},
-            await_andock_materializer(Writer, Started, Deadline);
-        {andock_result, Writer, Result} -> Result;
-        {'EXIT', Writer, normal} -> {error, 'image-worker-exited'};
-        {'EXIT', Writer, _Reason} -> {error, 'image-worker-failed'}
+            }, andock_progress_details(Progress))}},
+            await_andock_materializer(Writer, Started, Deadline, Progress);
+        {andock_progress, Ref, Update} ->
+            await_andock_materializer(Writer, Started, Deadline,
+                andock_progress(Update, Progress));
+        {andock_progress, _OtherRef, _Update} ->
+            await_andock_materializer(Writer, Started, Deadline, Progress);
+        {andock_result, Writer, Result} -> {Result, Progress};
+        {'EXIT', Writer, normal} -> {{error, 'image-worker-exited'}, Progress};
+        {'EXIT', Writer, _Reason} -> {{error, 'image-worker-failed'}, Progress}
     after Remaining ->
-        stop_andock_writer(Writer)
+        {stop_andock_writer(Writer), Progress}
     end.
 
 %% @doc Wait for cancellation before allowing another writer or removing parts.
@@ -400,7 +504,7 @@ andock_materializer_status(Pid) ->
 
 %% @doc Return the same failure throughout a cooldown; only a later tool call
 %% can start another attempt after the worker exits. Never retry on a status poll.
-retain_andock_failure(Result, Started, RetryDelay) ->
+retain_andock_failure(Result, Started, RetryDelay, Progress) ->
     Cause = case Result of
         {error, Reason} when is_atom(Reason) -> atom_to_binary(Reason);
         _ -> <<"image-materialization-failed">>
@@ -411,20 +515,21 @@ retain_andock_failure(Result, Started, RetryDelay) ->
         <<"cause">> => Cause,
         <<"retry-after">> => (RetryDelay + 999) div 1000
     }},
-    retain_andock_failure_until(Error, erlang:monotonic_time(millisecond) + RetryDelay).
+    retain_andock_failure_until(Error, erlang:monotonic_time(millisecond) + RetryDelay, Progress).
 
-retain_andock_failure_until(Error, Until) ->
+retain_andock_failure_until(Error, Until, Progress) ->
     Remaining = max(0, Until - erlang:monotonic_time(millisecond)),
-    retain_andock_failure_until(Error, Until, Remaining).
+    retain_andock_failure_until(Error, Until, Progress, Remaining).
 
-retain_andock_failure_until(_Error, _Until, 0) -> ok;
-retain_andock_failure_until({error, Reason, Details} = Error, Until, Remaining) ->
+retain_andock_failure_until(_Error, _Until, _Progress, 0) -> ok;
+retain_andock_failure_until({error, Reason, Details} = Error, Until, Progress, Remaining) ->
     receive
         {andock_status, Reply} ->
             RetryIn = max(0, Until - erlang:monotonic_time(millisecond)),
             Reply ! {Reply, {error, Reason,
-                Details#{<<"retry-after">> => (RetryIn + 999) div 1000}}},
-            retain_andock_failure_until(Error, Until)
+                maps:merge(Details#{<<"retry-after">> => (RetryIn + 999) div 1000},
+                    andock_progress_details(Progress))}},
+            retain_andock_failure_until(Error, Until, Progress)
     after Remaining -> ok
     end.
 
@@ -686,7 +791,109 @@ andock_index_failure_never_falls_through_to_gateway_test() ->
         andock_prepare_index(?ANDOCK_INDEXED_IMAGE, #{},
             fun(_, _) -> {ok, ?ANDOCK_IMAGE_BLOCK} end)).
 
+run_andock_materializer(Fetch, Path, Timeout, RetryDelay) ->
+    run_andock_materializer(Fetch, Path, Timeout, RetryDelay, make_ref()).
 
+retain_andock_failure(Result, Started, RetryDelay) ->
+    retain_andock_failure(Result, Started, RetryDelay, #{}).
+
+andock_progress_counts_union_and_preserves_stall_age_test() ->
+    Initial = #{last => erlang:monotonic_time(millisecond) - 100},
+    ?assertEqual(#{}, andock_progress_details(Initial)),
+    P0 = andock_progress({range, 101, 200}, Initial),
+    P1 = andock_progress({chunk, 90, 130}, P0),
+    P2 = andock_progress({chunk, 120, 150}, P1),
+    P3 = andock_progress({chunk, 180, 220}, P2),
+    ?assertMatch(#{<<"downloaded-bytes">> := 71, <<"total-bytes">> := 100},
+        andock_progress_details(P3)),
+    ?assertEqual(P3, andock_progress({chunk, 120, 150}, P3)),
+    ?assertEqual(P3, andock_progress({chunk, 300, 400}, P3)),
+    P4 = andock_progress({chunk, 140, 190}, P3),
+    ?assertMatch(#{<<"downloaded-bytes">> := 100}, andock_progress_details(P4)).
+
+andock_receipt_ignores_unrelated_and_malformed_data_test() ->
+    Ref = make_ref(),
+    Receipt = test_chunk_receipt(101, 110, <<"ten-bytes!">>),
+    ?assertEqual(ok, andock_chunk_receipt(#{<<"body">> => Receipt}, #{}, self(), Ref)),
+    receive {andock_progress, Ref, {chunk, 101, 110}} -> ok
+    after 100 -> error(no_chunk_observation)
+    end,
+    [andock_chunk_receipt(#{<<"body">> => Bad}, #{}, self(), Ref) || Bad <- [
+        Receipt#{<<"request-method">> => <<"POST">>},
+        Receipt#{<<"request-path">> => <<"/arweave/tx/other">>},
+        Receipt#{<<"request-path">> => <<"/arweave/chunk/999">>},
+        Receipt#{<<"response">> => #{<<"status">> => 503, <<"body">> => <<"{}">>}},
+        Receipt#{<<"response">> => #{<<"status">> => 200, <<"body">> => <<"invalid">>}},
+        Receipt#{<<"response">> => #{<<"status">> => 200,
+            <<"body">> => binary:copy(<<"x">>, ?ANDOCK_RECEIPT_BYTES + 1)}},
+        test_chunk_receipt(1, ?ANDOCK_CHUNK_BYTES + 1,
+            binary:copy(<<"x">>, ?ANDOCK_CHUNK_BYTES + 1))
+    ]],
+    receive {andock_progress, Ref, _} -> error(unexpected_chunk_observation)
+    after 0 -> ok
+    end.
+
+test_chunk_receipt(Offset, End, Chunk) ->
+    #{<<"request-method">> => <<"GET">>,
+        <<"request-path">> => <<"/arweave/chunk/", (integer_to_binary(Offset))/binary>>,
+        <<"response">> => #{<<"status">> => 200,
+            <<"body">> => iolist_to_binary(hb_json:encode(#{
+                <<"chunk">> => hb_util:encode(Chunk),
+                <<"absolute_end_offset">> => integer_to_binary(End)
+            }))}}.
+
+andock_progress_uses_only_canonical_index_and_preserves_hooks_test() ->
+    Root = filename:dirname(test_image_path()),
+    Index = #{<<"store-module">> => hb_store_fs, <<"name">> => Root},
+    Store = #{<<"store-module">> => hb_store_arweave, <<"index-store">> => Index},
+    ID = <<"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">>,
+    Hook = <<"http-client-admissible-receipt">>,
+    Existing = #{<<"device">> => <<"existing-observer">>},
+    Opts = #{<<"store">> => [Store], <<"on">> => #{Hook => Existing}},
+    Ref = make_ref(),
+    try
+        ok = hb_store:start(Index),
+        ?assertEqual(Opts, andock_progress_opts(ID, Opts, self(), Ref)),
+        ok = hb_store_arweave:write_offset(Store, ID, <<"tx@1.0">>, 100, 100),
+        ?assertEqual({ok, 101, 200}, andock_indexed_range(ID, Opts)),
+        WithObserver = andock_progress_opts(ID, Opts, self(), Ref),
+        [Existing, #{<<"device">> := #{observe := Observer}}] =
+            hb_hook:find(Hook, WithObserver),
+        receive {andock_progress, Ref, {range, 101, 200}} -> ok
+        after 100 -> error(no_canonical_range)
+        end,
+        Req = #{<<"body">> => test_chunk_receipt(101, 110, <<"ten-bytes!">>)},
+        ?assertEqual({ok, Req}, Observer(#{}, Req, #{})),
+        receive {andock_progress, Ref, {chunk, 101, 110}} -> ok
+        after 100 -> error(private_observer_failed)
+        end
+    after file:del_dir_r(Root)
+    end.
+
+andock_progress_is_job_scoped_and_retained_on_failure_test() ->
+    Ref = make_ref(),
+    {Coordinator, Monitor} = spawn_monitor(fun() ->
+        run_andock_materializer(fun() -> receive finish -> {ok, done} end end,
+            test_image_path(), 100, 150, Ref)
+    end),
+    try
+        Coordinator ! {andock_progress, Ref, {range, 101, 200}},
+        Coordinator ! {andock_progress, make_ref(), {chunk, 101, 200}},
+        Coordinator ! {andock_progress, Ref, {chunk, 101, 125}},
+        ?assertMatch({error, _, #{<<"downloaded-bytes">> := 25,
+            <<"total-bytes">> := 100}}, andock_materializer_status(Coordinator)),
+        timer:sleep(20),
+        Coordinator ! {andock_progress, Ref, {chunk, 101, 125}},
+        {error, _, #{<<"last-progress-ms">> := Age}} = andock_materializer_status(Coordinator),
+        ?assert(Age >= 20),
+        ?assertMatch({error, _, #{<<"downloaded-bytes">> := 25,
+            <<"cause">> := <<"download-deadline-exceeded">>}},
+            poll_test_materializer(Coordinator, 500)),
+        receive {'DOWN', Monitor, process, Coordinator, normal} -> ok
+        after 1000 -> error(cooldown_not_released)
+        end
+    after stop_test_process(Coordinator)
+    end.
 
 andock_reports_download_failure_test() ->
     PreviousRoot = os:getenv(?ANDOCK_ROOT_ENV),

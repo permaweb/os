@@ -57,6 +57,12 @@ internal class AndeeExecutionManager(
         check(running) { "execution manager is stopped" }
         require(request.optString("protocol") == PROTOCOL) { "unsupported-protocol" }
         val action = request.getString("action")
+        if (action == "health") return success(JSONObject(storage.templateHealth()))
+        if (action == "prepare") return success(JSONObject(storage.prepareTemplate(
+            request.getString("image-id"),
+            request.getString("image-path"),
+            request.getLong("image-bytes"),
+        )))
         val memberId = validateMemberId(request.getString("member-id"))
         if (action == "session-poll") return pollSession(memberId, request)
         if (action == "stop" || action == "destroy") {

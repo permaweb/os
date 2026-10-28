@@ -38,6 +38,11 @@ internal class AndeeExecutionStorage(
         materializer.ensure(imageId, imagePath, imageBytes)
     }
 
+    fun templateHealth(): Map<String, Any> = materializer.health()
+
+    fun prepareTemplate(imageId: String, imagePath: String, imageBytes: Long): Map<String, Any> =
+        materializer.prepare(imageId, imagePath, imageBytes)
+
     fun open(memberId: String): ParcelFileDescriptor {
         val image = memberImage(memberId)
         if (!image.isFile) create(image, materializer.requireTemplate())
