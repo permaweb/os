@@ -173,7 +173,7 @@ class AndeeService : Service() {
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_andee)
+            .setSmallIcon(R.drawable.ic_stat_permawebos)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText("Runtime active")
             .setOngoing(true)
