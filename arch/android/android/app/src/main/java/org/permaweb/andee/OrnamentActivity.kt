@@ -18,6 +18,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -345,11 +346,11 @@ private class OrnamentView(
         minimumHeight = 0
         minWidth = 0
         minimumWidth = 0
-        setPadding(dp(12f).toInt(), 0, dp(12f).toInt(), 0)
+        setPadding(dp(6f).toInt(), 0, dp(6f).toInt(), 0)
         maxLines = 1
         setHorizontallyScrolling(false)
         setAutoSizeTextTypeUniformWithConfiguration(8, 12, 1, TypedValue.COMPLEX_UNIT_SP)
-        compoundDrawablePadding = dp(8f).toInt()
+        compoundDrawablePadding = dp(6f).toInt()
         setOnClickListener {
             if (nextBootConfigPending.get()) actions.terminate() else actions.scan()
         }
@@ -359,7 +360,10 @@ private class OrnamentView(
     private val copyUrlButton = iconButton(R.drawable.ic_node_copy, "Copy node URL") {
         val status = nodeStatus.get()
         if (status.ready) actions.copyNode(status.url)
-    }.apply { visibility = View.INVISIBLE }
+    }.apply {
+        visibility = View.INVISIBLE
+        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, ColorDrawable(Color.WHITE))
+    }
     private val backgroundAccessButton = Button(context).apply {
         typeface = mono
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -377,7 +381,7 @@ private class OrnamentView(
     private val controls = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        addView(setupButton, LinearLayout.LayoutParams(0, dp(48f).toInt(), 1f))
+        addView(setupButton, LinearLayout.LayoutParams(dp(132f).toInt(), dp(48f).toInt()))
         for (button in listOf(settingsButton, importButton)) {
             addView(button, LinearLayout.LayoutParams(dp(48f).toInt(), dp(48f).toInt()).apply {
                 marginStart = dp(8f).toInt()
@@ -413,7 +417,7 @@ private class OrnamentView(
 
     private fun controlBackground(primary: Boolean, pending: Boolean = false): RippleDrawable {
         val shape = GradientDrawable().apply {
-            cornerRadius = dp(6f)
+            cornerRadius = 0f
             setColor(if (pending) TERMINATE_ORANGE else if (primary) Color.WHITE else BACKGROUND)
             if (!primary) setStroke(dp(1f).toInt().coerceAtLeast(1), Color.argb(110, 255, 255, 255))
         }
@@ -428,7 +432,7 @@ private class OrnamentView(
         setupButton.background = controlBackground(primary = true, pending = pending)
         val icon = if (pending) null else context.getDrawable(R.drawable.ic_setup_scan)?.mutate()?.apply {
             setTint(BACKGROUND)
-            setBounds(0, 0, dp(20f).toInt(), dp(20f).toInt())
+            setBounds(0, 0, dp(16f).toInt(), dp(16f).toInt())
         }
         setupButton.setCompoundDrawablesRelative(icon, null, null, null)
         importButton.visibility = if (pending) View.GONE else View.VISIBLE
@@ -438,9 +442,16 @@ private class OrnamentView(
         super.onLayout(changed, left, top, right, bottom)
         updateQrUrl(nodeStatus.get().url)
         ensureLayout()
-        val copyRight = width - dp(22f).toInt()
-        val copyBottom = qrLinkBounds.top.toInt()
-        copyUrlButton.layout(copyRight - dp(48f).toInt(), copyBottom - dp(48f).toInt(), copyRight, copyBottom)
+        val copySize = dp(9f).toInt()
+        val copyTarget = dp(48f).toInt()
+        val copyLeft = qrLinkBounds.right.toInt() - copySize
+        val copyTop = (qrLinkBounds.top - dp(52f)).toInt()
+        textPaint.textSize = dp(9f)
+        val textCenter = qrLinkBounds.top - dp(12f) + (textPaint.fontMetrics.ascent + textPaint.fontMetrics.descent) / 2f
+        val copyPaddingTop = (textCenter - copyTop - copySize / 2f).toInt().coerceIn(0, copyTarget - copySize)
+        // The glyph ends at the QR edge; its invisible target extends right, clear of the URL and QR.
+        copyUrlButton.setPadding(0, copyPaddingTop, copyTarget - copySize, copyTarget - copyPaddingTop - copySize)
+        copyUrlButton.layout(copyLeft, copyTop, copyLeft + copyTarget, copyTop + copyTarget)
         val x = dp(22f).toInt()
         val y = height - dp(142f).toInt()
         controls.layout(x, y, x + controls.measuredWidth, y + controls.measuredHeight)
@@ -449,7 +460,10 @@ private class OrnamentView(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        controls.layoutParams.width = min(dp(272f).toInt(), (MeasureSpec.getSize(widthMeasureSpec) - dp(44f).toInt()).coerceAtLeast(0))
+        updateQrUrl(nodeStatus.get().url)
+        val qrWidth = qrModulePixels(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec)) * cachedQrRows.size
+        setupButton.layoutParams.width = qrWidth
+        controls.layoutParams.width = qrWidth + dp(if (importButton.visibility == View.GONE) 56f else 112f).toInt()
         backgroundAccessButton.layoutParams.width = controls.layoutParams.width
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
@@ -607,8 +621,7 @@ private class OrnamentView(
         phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
         val moduleCount = cachedQrRows.size
-        val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
-        val modulePx = max(3, floor(target / moduleCount).toInt())
+        val modulePx = qrModulePixels(width, height)
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = greeterMargin
         val qrY = height - qrSize - dp(160f)
@@ -714,8 +727,7 @@ private class OrnamentView(
         val margin = dp(22f)
 
         val moduleCount = cachedQrRows.size
-        val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
-        val modulePx = max(3, floor(target / moduleCount).toInt())
+        val modulePx = qrModulePixels(width, height)
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = margin
         val qrY = height - qrSize - dp(160f)
@@ -737,7 +749,7 @@ private class OrnamentView(
             }
         }
 
-        val labelWidth = width - margin * 2f
+        val labelWidth = qrSize
         val labelY = qrY - dp(30f)
         accentPaint.typeface = mono
         accentPaint.textSize = dp(10f)
@@ -746,15 +758,16 @@ private class OrnamentView(
         textPaint.textSize = dp(9f)
         textPaint.color = Color.argb(225, 238, 251, 255)
         textPaint.clearShadowLayer()
-        val urlWidth = if (status.ready) labelWidth - dp(56f) else labelWidth
+        val urlWidth = if (status.ready) labelWidth - dp(15f) else labelWidth
         val url = fitToWidth(if (status.ready) status.url else "Waiting for node discovery", textPaint, urlWidth)
         rectPaint.color = BACKGROUND
-        canvas.drawRect(margin - dp(4f), qrY - dp(48f), width - margin, qrY - dp(4f), rectPaint)
+        canvas.drawRect(margin - dp(4f), qrY - dp(48f), margin + labelWidth, qrY - dp(4f), rectPaint)
         canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
         textPaint.isUnderlineText = status.ready
         canvas.drawText(url, margin, qrY - dp(12f), textPaint)
         textPaint.isUnderlineText = false
-        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), margin + urlWidth, qrY - dp(4f))
+        val linkRight = if (status.ready) margin + labelWidth - dp(9f) else margin + labelWidth
+        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), linkRight, qrY - dp(4f))
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -923,6 +936,11 @@ private class OrnamentView(
 
     private fun MutableList<Pair<Vec3, Vec3>>.addLoop(points: List<Vec3>) {
         for (i in points.indices) add(points[i] to points[(i + 1) % points.size])
+    }
+
+    private fun qrModulePixels(w: Int, h: Int): Int {
+        val target = min(w * 0.34f, h * 0.16f).coerceAtLeast(dp(132f))
+        return max(3, floor(target / cachedQrRows.size).toInt())
     }
 
     private fun fitToWidth(text: String, paint: Paint, maxWidth: Float): String {
