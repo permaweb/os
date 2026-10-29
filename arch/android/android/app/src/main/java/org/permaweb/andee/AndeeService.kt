@@ -13,6 +13,8 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import java.io.File
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 class AndeeService : Service() {
     private var cryptoAgent: AndeeCryptoAgent? = null
@@ -196,6 +198,10 @@ class AndeeService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+    }
+
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        if (hyperbeamRuntime?.dumpStartup(writer, args) != true) super.dump(fd, writer, args)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

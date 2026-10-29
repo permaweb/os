@@ -3,6 +3,7 @@ package org.permaweb.andee
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.PrintWriter
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -12,6 +13,7 @@ class HyperbeamRuntime(
     private val config: File,
 ) : AutoCloseable {
     private var process: Process? = null
+    private var startupDiagnostics: HyperbeamStartupDiagnostics? = null
 
     fun start() {
         if (process?.isAlive == true) return
@@ -28,6 +30,9 @@ class HyperbeamRuntime(
 
         val runDir = AndeePaths.runDir(context)
         runDir.mkdirs()
+        if (BuildConfig.STARTUP_DIAGNOSTICS) {
+            startupDiagnostics = HyperbeamStartupDiagnostics(runDir)
+        }
 
         process = ProcessBuilder(
             executable.absolutePath,
@@ -71,9 +76,13 @@ class HyperbeamRuntime(
                     AndeePaths.artifactCacheRoot(context).absolutePath
             }
             .start()
+        startupDiagnostics?.process = process
 
         Log.i(TAG, "HyperBEAM native launcher started with config ${config.absolutePath}")
     }
+
+    fun dumpStartup(writer: PrintWriter, args: Array<out String>): Boolean =
+        startupDiagnostics?.dump(BuildConfig.STARTUP_DIAGNOSTICS, args, writer) ?: false
 
     fun isAlive(): Boolean = process?.isAlive == true
 
