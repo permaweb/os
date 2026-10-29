@@ -11,7 +11,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.11"
         val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
             .getOrElse("https://arweave.net/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc/")
         require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
