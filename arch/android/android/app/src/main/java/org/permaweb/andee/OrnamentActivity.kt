@@ -182,9 +182,8 @@ private class OrnamentView(
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-    private val brandMark = BitmapFactory.decodeResource(resources, R.drawable.permawebos_mark)
-    private val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val brandBounds = RectF()
+    private val splashMark by lazy { BitmapFactory.decodeResource(resources, R.drawable.os_splash_mark) }
+    private val splashMarkPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val nodeStatus = AtomicReference(NodeStatus.booting())
     private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
     private val presentationActive = AtomicBoolean(false)
@@ -211,7 +210,6 @@ private class OrnamentView(
 
     private var layoutWidth = 0
     private var layoutHeight = 0
-    private var greeterTextSize = 0f
     private var greeterMargin = 0f
     private var greeterTopMargin = 0f
     private var greeterBottom = 0f
@@ -372,40 +370,19 @@ private class OrnamentView(
         layoutHeight = height
         greeterMargin = dp(22f)
         greeterTopMargin = dp(40f)
-        val markSize = min(dp(132f), width * 0.34f)
-        brandBounds.set(greeterMargin, greeterTopMargin, greeterMargin + markSize, greeterTopMargin + markSize)
-        var size = dp(24f)
-        textPaint.typeface = mono
-        textPaint.textSize = size
-        val maxLine = textPaint.measureText("PERMAWEBOS")
-        val available = width - brandBounds.right - dp(12f) - greeterMargin
-        if (maxLine > available) {
-            size *= available / maxLine
-            textPaint.textSize = size
-        }
-        greeterTextSize = size
-        greeterBottom = brandBounds.bottom + dp(20f)
+        greeterBottom = greeterTopMargin + dp(88f)
 
-        val rows = PHONE_ROWS
-        val cols = PHONE_COLS
         val availableHeight = height - greeterBottom
-        val sizeByWidth = width / (cols * 0.42f)
-        val sizeByHeight = availableHeight / (rows * 1.08f) * 1.18f
-        phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f).coerceIn(dp(18f), dp(76f))
-        phonePaint.typeface = mono
+        val sizeByWidth = width / (PHONE_COLS * 0.42f)
+        val sizeByHeight = availableHeight / (PHONE_ROWS * 1.08f) * 1.18f
+        phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f)
+            .coerceIn(dp(18f), dp(76f)) * 1.332f
         phonePaint.textSize = phoneTextSize
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
-        val blockWidth = charWidth * cols
-        phoneX = width * 0.62f - blockWidth * 0.50f
-        phoneTop = greeterBottom + dp(18f)
-        val phonePad = dp(18f)
-        phoneDirty.set(
-            floor(phoneX - phonePad).toInt().coerceAtLeast(0),
-            floor(phoneTop - phonePad).toInt().coerceAtLeast(0),
-            kotlin.math.ceil(phoneX + blockWidth + phonePad).toInt().coerceAtMost(width),
-            kotlin.math.ceil(phoneTop + rows * phoneLineHeight + phonePad).toInt().coerceAtMost(height),
-        )
+        phoneX = width * 0.78f - PHONE_COLS * charWidth / 2f
+        phoneTop = greeterBottom
+        phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
         val moduleCount = cachedQrRows.size
         val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
@@ -419,16 +396,20 @@ private class OrnamentView(
     }
 
     private fun drawGreeter(canvas: Canvas) {
-        canvas.drawBitmap(brandMark, null, brandBounds, brandPaint)
-        val x = brandBounds.right + dp(12f)
-        val y = brandBounds.centerY()
+        val size = dp(80f)
+        val x = greeterMargin - size * 40f / 1024f
+        val y = greeterTopMargin - size * 40f / 1024f
+        canvas.drawBitmap(splashMark, null, RectF(x, y, x + size, y + size), splashMarkPaint)
+
+        val labelX = greeterMargin + dp(85.25f)
+        val centerY = greeterTopMargin + dp(35.625f)
+        textPaint.typeface = mono
         textPaint.color = Color.WHITE
         textPaint.clearShadowLayer()
-        textPaint.typeface = mono
-        textPaint.textSize = greeterTextSize
-        canvas.drawText("PERMAWEBOS", x, y, textPaint)
-        textPaint.textSize = dp(16f)
-        canvas.drawText("Your node", x, y + dp(26f), textPaint)
+        textPaint.textSize = dp(12f)
+        canvas.drawText("PermawebOS", labelX, centerY - dp(1.5f), textPaint)
+        textPaint.textSize = dp(8f)
+        canvas.drawText("VERSION ${BuildConfig.VERSION_NAME}", labelX, centerY + dp(10.5f), textPaint)
     }
 
     private fun drawPhone(canvas: Canvas) {
@@ -437,10 +418,12 @@ private class OrnamentView(
         phonePaint.textSize = phoneTextSize
         phonePaint.color = Color.WHITE
         phonePaint.setShadowLayer(dp(11f), 0f, 0f, Color.rgb(85, 229, 255))
-
+        val saved = canvas.save()
+        canvas.clipRect(0f, phoneTop, width.toFloat(), height.toFloat())
         for ((index, text) in phoneRows.withIndex()) {
             canvas.drawText(text, phoneX, phoneTop + (index + 1) * phoneLineHeight, phonePaint)
         }
+        canvas.restoreToCount(saved)
         phonePaint.clearShadowLayer()
     }
 
