@@ -592,11 +592,11 @@ private class OrnamentView(
         val sizeByWidth = width / (PHONE_COLS * 0.42f)
         val sizeByHeight = availableHeight / (PHONE_ROWS * 1.08f) * 1.18f
         phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f)
-            .coerceIn(dp(18f), dp(76f)) * 1.1322f
+            .coerceIn(dp(18f), dp(76f)) * 1.332f
         phonePaint.textSize = phoneTextSize
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
-        phoneX = width * 0.78f - PHONE_COLS * charWidth / 2f
+        phoneX = width * 0.55f - PHONE_COLS * charWidth / 2f
         phoneTop = 0f
         phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
@@ -801,9 +801,9 @@ private class OrnamentView(
         val grid = Array(rows) { CharArray(cols) { ' ' } }
         val yaw = elapsed * 0.82f
         val pitch = -0.10f + sin(elapsed * 0.37f) * 0.05f
-        val scale = 8.15f
+        val scale = 5.0f
         val cx = cols / 2f
-        val cy = rows / 2f + 1.35f
+        val cy = rows / 2f - 1.5f
 
         for ((from, to) in phoneEdges()) {
             val p1 = project(from, yaw, pitch, scale, cx, cy)
