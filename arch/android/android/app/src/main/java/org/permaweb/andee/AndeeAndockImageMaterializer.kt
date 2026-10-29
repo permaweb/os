@@ -41,18 +41,28 @@ internal class AndeeAndockImageMaterializer(
     val logicalBytes: Long get() = spec.expandedBytes
 
     fun ensure(imageId: String, imagePath: String, imageBytes: Long) {
-        prepare(imageId, imagePath, imageBytes)
+        prepare(imageId, imagePath, imageBytes, retryFailed = false)
         requireTemplate()
     }
 
     /** Starts the existing expansion worker without creating a member workspace. */
-    fun prepare(imageId: String, imagePath: String, imageBytes: Long): Map<String, Any> {
+    fun prepare(imageId: String, imagePath: String, imageBytes: Long): Map<String, Any> =
+        prepare(imageId, imagePath, imageBytes, retryFailed = true)
+
+    private fun prepare(
+        imageId: String,
+        imagePath: String,
+        imageBytes: Long,
+        retryFailed: Boolean,
+    ): Map<String, Any> {
         val source = validateSource(imageId, imagePath, imageBytes)
         if (installed()) return health()
         synchronized(lock) {
             check(!stopped) { "Andock image materializer is stopped" }
             if (installed()) return health()
             if (worker?.isAlive != true) {
+                // Ordinary tool access reports the failure; only explicit preparation retries it.
+                if (!retryFailed && health()["state"] == "failed") return health()
                 failureReason = "andock-default-image-materializing"
                 worker = thread(name = "AndockImageMaterializer", isDaemon = true) {
                     expand(source)
