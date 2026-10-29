@@ -1,8 +1,12 @@
 package org.permaweb.andee
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -17,6 +21,8 @@ import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.MotionEvent
@@ -44,6 +50,7 @@ import kotlin.math.sin
 
 class OrnamentActivity : Activity() {
     private lateinit var ornamentView: OrnamentView
+    private val backgroundPreferences by lazy { getPreferences(MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +72,7 @@ class OrnamentActivity : Activity() {
                 override fun configure() {
                     startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
                 }
+                override fun backgroundAccess() = showBackgroundAccess()
                 override fun scan() {
                     startActivity(
                         Intent(this@OrnamentActivity, SetupImportActivity::class.java)
@@ -81,7 +89,16 @@ class OrnamentActivity : Activity() {
         super.onResume()
         startForegroundService(Intent(this, AndeeService::class.java))
         ornamentView.resumePresentation()
+        ornamentView.setBackgroundAccess(backgroundAccessAllowed())
         hideSystemBars()
+        if (!backgroundPreferences.getBoolean("background-setup-reviewed", false)) {
+            if (backgroundAccessAllowed()) {
+                backgroundPreferences.edit().putBoolean("background-setup-reviewed", true).apply()
+                maybeRequestNotifications()
+            } else {
+                showBackgroundAccess()
+            }
+        }
     }
 
     override fun onPause() {
@@ -115,6 +132,11 @@ class OrnamentActivity : Activity() {
     @Deprecated("Deprecated by Activity; used here to avoid adding an AndroidX dependency.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_BACKGROUND_ACCESS) {
+            ornamentView.setBackgroundAccess(backgroundAccessAllowed())
+            maybeRequestNotifications()
+            return
+        }
         if (requestCode != REQUEST_BOOT_CONFIG || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
@@ -125,6 +147,60 @@ class OrnamentActivity : Activity() {
         } catch (exc: Exception) {
             Log.e(TAG, "failed to import next boot config", exc)
         }
+    }
+
+    private fun backgroundAccessAllowed(): Boolean =
+        getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+    private fun showBackgroundAccess() {
+        backgroundPreferences.edit().putBoolean("background-setup-reviewed", true).apply()
+        val allowed = backgroundAccessAllowed()
+        AlertDialog.Builder(this)
+            .setTitle(if (allowed) "Background use allowed" else "Keep your node online")
+            .setMessage(
+                "Allow background use so your node and its tunnel can stay available when " +
+                    "the screen is locked. This uses more battery. Keep your phone plugged in " +
+                    "for long sessions.",
+            )
+            .setPositiveButton(if (allowed) "Android settings" else "Allow background use") { _, _ ->
+                requestBackgroundAccess(allowed)
+            }
+            .setNegativeButton(if (allowed) "Done" else "Not now") { _, _ -> maybeRequestNotifications() }
+            .setOnCancelListener { maybeRequestNotifications() }
+            .show()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBackgroundAccess(alreadyAllowed: Boolean) {
+        // Serving the user's HTTP node/tunnel requires an uninterrupted connection;
+        // deferred jobs or FCM cannot implement that core function.
+        val intent = if (alreadyAllowed) {
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        } else {
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        }
+        try {
+            startActivityForResult(intent, REQUEST_BACKGROUND_ACCESS)
+        } catch (_: ActivityNotFoundException) {
+            try {
+                startActivityForResult(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                    REQUEST_BACKGROUND_ACCESS,
+                )
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(this, "Open Android Settings > Battery to allow background use.", Toast.LENGTH_LONG).show()
+                maybeRequestNotifications()
+            }
+        }
+    }
+
+    private fun maybeRequestNotifications() {
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED ||
+            backgroundPreferences.getBoolean("notification-prompted", false)
+        ) return
+        backgroundPreferences.edit().putBoolean("notification-prompted", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
     }
 
     private fun pickNextBootConfig() {
@@ -175,6 +251,8 @@ class OrnamentActivity : Activity() {
     companion object {
         private const val TAG = "OrnamentActivity"
         private const val REQUEST_BOOT_CONFIG = 7342
+        private const val REQUEST_BACKGROUND_ACCESS = 7344
+        private const val REQUEST_NOTIFICATIONS = 7343
     }
 }
 
@@ -188,6 +266,7 @@ private class OrnamentView(
         fun openNode(url: String)
         fun configure()
         fun scan()
+        fun backgroundAccess()
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -263,6 +342,20 @@ private class OrnamentView(
     }
     private val settingsButton = iconButton(R.drawable.ic_setup_settings, "Node settings") { actions.configure() }
     private val importButton = iconButton(R.drawable.ic_setup_import, "Import configuration JSON") { actions.pickNextBootConfig() }
+    private val backgroundAccessButton = Button(context).apply {
+        typeface = mono
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        isAllCaps = false
+        gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        setTextColor(Color.LTGRAY)
+        background = null
+        setPadding(0, 0, 0, 0)
+        minHeight = 0
+        minimumHeight = 0
+        maxLines = 1
+        setAutoSizeTextTypeUniformWithConfiguration(8, 10, 1, TypedValue.COMPLEX_UNIT_SP)
+        setOnClickListener { actions.backgroundAccess() }
+    }
     private val controls = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
@@ -280,7 +373,13 @@ private class OrnamentView(
             leftMargin = dp(22f).toInt()
             rightMargin = dp(22f).toInt()
         })
+        addView(backgroundAccessButton, LayoutParams(dp(272f).toInt(), dp(48f).toInt()))
         updateControls()
+    }
+
+    fun setBackgroundAccess(allowed: Boolean) {
+        backgroundAccessButton.text = if (allowed) "Background use allowed" else "Background use restricted · Change"
+        backgroundAccessButton.contentDescription = backgroundAccessButton.text.toString() + ". Background settings"
     }
 
     private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
@@ -321,10 +420,13 @@ private class OrnamentView(
         val x = dp(22f).toInt()
         val y = height - dp(142f).toInt()
         controls.layout(x, y, x + controls.measuredWidth, y + controls.measuredHeight)
+        val backgroundY = y + controls.measuredHeight + dp(4f).toInt()
+        backgroundAccessButton.layout(x, backgroundY, x + controls.measuredWidth, backgroundY + dp(48f).toInt())
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         controls.layoutParams.width = min(dp(272f).toInt(), (MeasureSpec.getSize(widthMeasureSpec) - dp(44f).toInt()).coerceAtLeast(0))
+        backgroundAccessButton.layoutParams.width = controls.layoutParams.width
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 
