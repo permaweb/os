@@ -13,7 +13,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
-            .getOrElse("https://arweave.net/ztrNGDc0Nyj2P6RSZSjCWNe2Q1OdTqxoPdk_QK_ZiGc/")
+            .getOrElse("https://arweave.net/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc/")
         require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
         buildConfigField("String", "CONFIGURATOR_URL", "\"$configuratorUrl\"")
         buildConfigField("int", "MIN_OS_PATCH_LEVEL", "202605")
