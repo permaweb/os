@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -69,6 +71,7 @@ class OrnamentActivity : Activity() {
                 override fun pickNextBootConfig() = this@OrnamentActivity.pickNextBootConfig()
                 override fun terminate() = this@OrnamentActivity.terminateApp()
                 override fun openNode(url: String) = this@OrnamentActivity.openNode(url)
+                override fun copyNode(url: String) = this@OrnamentActivity.copyNode(url)
                 override fun configure() {
                     startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
                 }
@@ -227,6 +230,16 @@ class OrnamentActivity : Activity() {
         }
     }
 
+    private fun copyNode(url: String) {
+        val origin = NodeDiscovery.origin(url) ?: return
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("Node URL", origin))
+        // Android 13+ supplies its own clipboard confirmation.
+        if (Build.VERSION.SDK_INT < 33) {
+            Toast.makeText(this, "Node URL copied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun readPickedText(uri: Uri): String {
         return contentResolver.openInputStream(uri)?.use { input ->
             input.bufferedReader(Charsets.UTF_8).readText()
@@ -264,6 +277,7 @@ private class OrnamentView(
         fun pickNextBootConfig()
         fun terminate()
         fun openNode(url: String)
+        fun copyNode(url: String)
         fun configure()
         fun scan()
         fun backgroundAccess()
@@ -342,6 +356,10 @@ private class OrnamentView(
     }
     private val settingsButton = iconButton(R.drawable.ic_setup_settings, "Node settings") { actions.configure() }
     private val importButton = iconButton(R.drawable.ic_setup_import, "Import configuration JSON") { actions.pickNextBootConfig() }
+    private val copyUrlButton = iconButton(R.drawable.ic_node_copy, "Copy node URL") {
+        val status = nodeStatus.get()
+        if (status.ready) actions.copyNode(status.url)
+    }.apply { visibility = View.INVISIBLE }
     private val backgroundAccessButton = Button(context).apply {
         typeface = mono
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -374,6 +392,7 @@ private class OrnamentView(
             rightMargin = dp(22f).toInt()
         })
         addView(backgroundAccessButton, LayoutParams(dp(272f).toInt(), dp(48f).toInt()))
+        addView(copyUrlButton, LayoutParams(dp(48f).toInt(), dp(48f).toInt()))
         updateControls()
     }
 
@@ -417,6 +436,11 @@ private class OrnamentView(
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
+        updateQrUrl(nodeStatus.get().url)
+        ensureLayout()
+        val copyRight = width - dp(22f).toInt()
+        val copyBottom = qrLinkBounds.top.toInt()
+        copyUrlButton.layout(copyRight - dp(48f).toInt(), copyBottom - dp(48f).toInt(), copyRight, copyBottom)
         val x = dp(22f).toInt()
         val y = height - dp(142f).toInt()
         controls.layout(x, y, x + controls.measuredWidth, y + controls.measuredHeight)
@@ -517,6 +541,8 @@ private class OrnamentView(
                 var changed = false
                 if (nodeStatus.get() != status) {
                     nodeStatus.set(status)
+                    copyUrlButton.visibility = if (status.ready) View.VISIBLE else View.INVISIBLE
+                    requestLayout()
                     qrBitmapStatus = null
                     changed = true
                 }
@@ -639,10 +665,10 @@ private class OrnamentView(
         canvas.drawBitmap(bitmap, qrDrawBounds.left, qrDrawBounds.top, null)
     }
 
-    private fun cachedQrBitmap(status: NodeStatus): Bitmap {
-        if (cachedQrUrl != status.url) {
-            cachedQrUrl = status.url
-            cachedQrRows = DiscoveryQr.rowsFor(status.url)
+    private fun updateQrUrl(url: String) {
+        if (cachedQrUrl != url) {
+            cachedQrUrl = url
+            cachedQrRows = DiscoveryQr.rowsFor(url)
             layoutWidth = 0
             layoutHeight = 0
             ensureLayout()
@@ -650,7 +676,10 @@ private class OrnamentView(
             qrBitmap = null
             qrBitmapStatus = null
         }
+    }
 
+    private fun cachedQrBitmap(status: NodeStatus): Bitmap {
+        updateQrUrl(status.url)
         val left = floor(qrDrawBounds.left).toInt()
         val top = floor(qrDrawBounds.top).toInt()
         val bitmapWidth = kotlin.math.ceil(qrDrawBounds.width()).toInt().coerceAtLeast(1)
@@ -717,14 +746,15 @@ private class OrnamentView(
         textPaint.textSize = dp(9f)
         textPaint.color = Color.argb(225, 238, 251, 255)
         textPaint.clearShadowLayer()
-        val url = fitToWidth(if (status.ready) status.url else "Waiting for node discovery", textPaint, labelWidth)
+        val urlWidth = if (status.ready) labelWidth - dp(56f) else labelWidth
+        val url = fitToWidth(if (status.ready) status.url else "Waiting for node discovery", textPaint, urlWidth)
         rectPaint.color = BACKGROUND
         canvas.drawRect(margin - dp(4f), qrY - dp(48f), width - margin, qrY - dp(4f), rectPaint)
         canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
         textPaint.isUnderlineText = status.ready
         canvas.drawText(url, margin, qrY - dp(12f), textPaint)
         textPaint.isUnderlineText = false
-        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), width - margin, qrY - dp(4f))
+        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), margin + urlWidth, qrY - dp(4f))
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
