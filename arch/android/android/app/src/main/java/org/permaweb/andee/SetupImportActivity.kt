@@ -41,6 +41,7 @@ import com.google.zxing.ReaderException
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import java.util.concurrent.Executor
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
@@ -164,20 +165,19 @@ class SetupImportActivity : Activity() {
 
     private fun summarize(text: String): List<Pair<String, String>> {
         val config = JSONObject(text)
-        val keys = config.keys().asSequence().toList()
-        val providers = config.optJSONObject("inference-providers")
-        val keyed = providers?.keys()?.asSequence()?.filter { name ->
-            providers.optJSONObject(name)?.optJSONObject("priv")?.has("api-key") == true
-        }?.toList().orEmpty()
-        val operator = config.optString("operator").takeIf { it.length == 43 }
-        return listOfNotNull(
-            "PROFILE" to config.optString("andee-profile-source", "custom").substringAfter('/').ifBlank { "custom" },
-            operator?.let { "OPERATOR" to "${it.take(6)}…${it.takeLast(6)}" },
-            "SIZE" to "${text.toByteArray().size} B · ${keys.size} settings",
-            "BUNDLER" to if (keys.any { it.startsWith("bundler-") }) "yes" else "no",
-            // public access is the tunnel device, started from an `on` hook
-            "TUNNEL" to if (text.contains("\"tunnel@")) "yes" else "no",
-            "API KEY" to if (keyed.isEmpty()) "none" else keyed.joinToString(" · ") + " (hidden)",
+        val hooks = when (val start = config.optJSONObject("on")?.opt("start")) {
+            is JSONArray -> (0 until start.length()).mapNotNull { start.optJSONObject(it) }
+            is JSONObject -> listOf(start)
+            else -> emptyList()
+        }
+        val tunnelPeers = hooks.filter { hook ->
+            hook.optString("device").startsWith("tunnel@") && hook.optString("path") == "connect" &&
+                hook.optInt("workers", 1) > 0
+        }.map { it.optString("peer") }
+        return SetupReviewSummary.rows(
+            config.optString("andee-profile-source"), config.optString("inference-provider"),
+            tunnelPeers, config.optString("operator"),
+            if (config.has("admin")) config.optString("admin") else null,
         )
     }
 
@@ -556,25 +556,32 @@ private class SetupOverlay(context: android.content.Context, private val actions
 
     private fun drawReview(canvas: Canvas, w: Float, h: Float, m: Float) {
         canvas.drawColor(BACKGROUND)
-        title(canvas, "SETUP RECEIVED", "CHECK IT, THEN USE IT", m, dp(76f))
-        var y = dp(140f)
+        text.textSize = dp(11f); text.color = CYAN
+        canvas.drawText("PermawebOS", m, dp(44f), text)
+        text.textSize = dp(21f); text.color = INK
+        canvas.drawText("Review your node", m, dp(77f), text)
+        var y = dp(119f)
+        val rowGap = ((h - dp(288f)) / rows.size - dp(22f)).coerceIn(dp(14f), dp(41f))
         for ((k, v) in rows) {
-            text.textSize = dp(11f); text.color = MUTED
+            text.textSize = dp(11.5f); text.color = MUTED
             canvas.drawText(k, m, y, text)
-            text.textSize = dp(13.5f); text.color = INK
+            text.textSize = dp(15f); text.color = INK
             for (line in wrap(v, w - 2 * m)) {
-                y += dp(19f)
+                y += dp(22f)
                 canvas.drawText(line, m, y, text)
             }
-            y += dp(26f)
+            y += rowGap * .4f
+            stroke.color = Color.argb(35, 238, 251, 255); stroke.strokeWidth = dp(1f)
+            canvas.drawLine(m, y, w - m, y, stroke)
+            y += rowGap * .6f
         }
         text.textSize = dp(11.5f); text.color = MUTED
-        for (line in wrap("Your node key is made on this phone. It is never part of the setup.", w - 2 * m)) {
-            canvas.drawText(line, m, y, text)
+        for (line in wrap("Your node key stays on this phone.", w - 2 * m)) {
+            if (y < h - dp(148f)) canvas.drawText(line, m, y, text)
             y += dp(16f)
         }
-        button(canvas, primary, m, h - dp(132f), w - 2 * m, "USE THIS SETUP", filled = true, glow = true)
-        button(canvas, secondary, m, h - dp(76f), w - 2 * m, "DISCARD", filled = false)
+        button(canvas, primary, m, h - dp(132f), w - 2 * m, "Save setup", filled = true)
+        button(canvas, secondary, m, h - dp(76f), w - 2 * m, "Cancel", filled = false)
     }
 
     private fun drawError(canvas: Canvas, w: Float, h: Float, m: Float) {
@@ -591,7 +598,7 @@ private class SetupOverlay(context: android.content.Context, private val actions
     }
 
     private fun button(canvas: Canvas, bounds: RectF, x: Float, y: Float, width: Float, label: String, filled: Boolean, glow: Boolean = false) {
-        bounds.set(x, y, x + width, y + dp(46f))
+        bounds.set(x, y, x + width, y + dp(48f))
         if (filled) {
             fill.color = Color.WHITE
             if (glow) fill.setShadowLayer(dp(12f), 0f, 0f, CYAN)
@@ -603,13 +610,23 @@ private class SetupOverlay(context: android.content.Context, private val actions
         }
         text.textSize = dp(14f); text.color = if (filled) BACKGROUND else INK
         val fm = text.fontMetrics
-        canvas.drawText(label, x + (width - text.measureText(label)) / 2f, y + (dp(46f) - fm.ascent - fm.descent) / 2f, text)
+        canvas.drawText(label, x + (width - text.measureText(label)) / 2f, y + (dp(48f) - fm.ascent - fm.descent) / 2f, text)
     }
 
     private fun wrap(value: String, maxWidth: Float): List<String> {
         val lines = mutableListOf<String>()
         var line = ""
         for (word in value.split(' ')) {
+            if (text.measureText(word) > maxWidth) {
+                if (line.isNotEmpty()) { lines += line; line = "" }
+                var remaining = word
+                while (remaining.isNotEmpty()) {
+                    val count = text.breakText(remaining, true, maxWidth, null).coerceAtLeast(1)
+                    lines += remaining.take(count)
+                    remaining = remaining.drop(count)
+                }
+                continue
+            }
             val next = if (line.isEmpty()) word else "$line $word"
             if (text.measureText(next) <= maxWidth || line.isEmpty()) line = next else { lines += line; line = word }
         }
