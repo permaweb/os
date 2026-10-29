@@ -592,7 +592,7 @@ private class OrnamentView(
         val sizeByWidth = width / (PHONE_COLS * 0.42f)
         val sizeByHeight = availableHeight / (PHONE_ROWS * 1.08f) * 1.18f
         phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f)
-            .coerceIn(dp(18f), dp(76f)) * 1.332f
+            .coerceIn(dp(18f), dp(76f)) * 1.1322f
         phonePaint.textSize = phoneTextSize
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
