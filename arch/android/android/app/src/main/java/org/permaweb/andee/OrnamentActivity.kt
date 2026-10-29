@@ -38,6 +38,7 @@ import android.widget.Toast
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -76,7 +77,6 @@ class OrnamentActivity : Activity() {
                 override fun configure() {
                     startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
                 }
-                override fun backgroundAccess() = showBackgroundAccess()
                 override fun scan() {
                     startActivity(
                         Intent(this@OrnamentActivity, SetupImportActivity::class.java)
@@ -93,7 +93,6 @@ class OrnamentActivity : Activity() {
         super.onResume()
         startForegroundService(Intent(this, AndeeService::class.java))
         ornamentView.resumePresentation()
-        ornamentView.setBackgroundAccess(backgroundAccessAllowed())
         hideSystemBars()
         if (!backgroundPreferences.getBoolean("background-setup-reviewed", false)) {
             if (backgroundAccessAllowed()) {
@@ -137,7 +136,6 @@ class OrnamentActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_BACKGROUND_ACCESS) {
-            ornamentView.setBackgroundAccess(backgroundAccessAllowed())
             maybeRequestNotifications()
             return
         }
@@ -281,7 +279,6 @@ private class OrnamentView(
         fun copyNode(url: String)
         fun configure()
         fun scan()
-        fun backgroundAccess()
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -362,47 +359,25 @@ private class OrnamentView(
         if (status.ready) actions.copyNode(status.url)
     }.apply {
         visibility = View.INVISIBLE
+        scaleType = ImageView.ScaleType.FIT_CENTER
         background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, ColorDrawable(Color.WHITE))
-    }
-    private val backgroundAccessButton = Button(context).apply {
-        typeface = mono
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-        isAllCaps = false
-        gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        setTextColor(Color.LTGRAY)
-        background = null
-        setPadding(0, 0, 0, 0)
-        minHeight = 0
-        minimumHeight = 0
-        maxLines = 1
-        setAutoSizeTextTypeUniformWithConfiguration(8, 10, 1, TypedValue.COMPLEX_UNIT_SP)
-        setOnClickListener { actions.backgroundAccess() }
     }
     private val controls = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        addView(setupButton, LinearLayout.LayoutParams(dp(132f).toInt(), dp(48f).toInt()))
         for (button in listOf(settingsButton, importButton)) {
             addView(button, LinearLayout.LayoutParams(dp(48f).toInt(), dp(48f).toInt()).apply {
-                marginStart = dp(8f).toInt()
+                if (button === importButton) marginStart = dp(8f).toInt()
             })
         }
     }
 
     init {
         setWillNotDraw(false)
-        addView(controls, LayoutParams(dp(272f).toInt(), dp(48f).toInt()).apply {
-            leftMargin = dp(22f).toInt()
-            rightMargin = dp(22f).toInt()
-        })
-        addView(backgroundAccessButton, LayoutParams(dp(272f).toInt(), dp(48f).toInt()))
+        addView(setupButton, LayoutParams(dp(132f).toInt(), dp(48f).toInt()))
+        addView(controls, LayoutParams(dp(104f).toInt(), dp(48f).toInt()))
         addView(copyUrlButton, LayoutParams(dp(48f).toInt(), dp(48f).toInt()))
         updateControls()
-    }
-
-    fun setBackgroundAccess(allowed: Boolean) {
-        backgroundAccessButton.text = if (allowed) "Background use allowed" else "Background use restricted · Change"
-        backgroundAccessButton.contentDescription = backgroundAccessButton.text.toString() + ". Background settings"
     }
 
     private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
@@ -454,17 +429,22 @@ private class OrnamentView(
         copyUrlButton.layout(copyLeft, copyTop, copyLeft + copyTarget, copyTop + copyTarget)
         val x = dp(22f).toInt()
         val y = height - dp(142f).toInt()
-        controls.layout(x, y, x + controls.measuredWidth, y + controls.measuredHeight)
-        val backgroundY = y + controls.measuredHeight + dp(4f).toInt()
-        backgroundAccessButton.layout(x, backgroundY, x + controls.measuredWidth, backgroundY + dp(48f).toInt())
+        setupButton.layout(x, y, x + setupButton.measuredWidth, y + setupButton.measuredHeight)
+        val controlsY = y + setupButton.measuredHeight + dp(8f).toInt()
+        controls.layout(x, controlsY, x + controls.measuredWidth, controlsY + controls.measuredHeight)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         updateQrUrl(nodeStatus.get().url)
         val qrWidth = qrModulePixels(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec)) * cachedQrRows.size
         setupButton.layoutParams.width = qrWidth
-        controls.layoutParams.width = qrWidth + dp(if (importButton.visibility == View.GONE) 56f else 112f).toInt()
-        backgroundAccessButton.layoutParams.width = controls.layoutParams.width
+        val labelSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12f, resources.displayMetrics)
+        val labelWidth = setupButton.paint.measureText(setupButton.text.toString()) * labelSize / setupButton.textSize
+        val iconWidth = setupButton.compoundDrawablesRelative[0]?.bounds?.width() ?: 0
+        val contentWidth = labelWidth + iconWidth + if (iconWidth > 0) setupButton.compoundDrawablePadding else 0
+        val padding = ((qrWidth - contentWidth) / 2f).toInt().coerceAtLeast(dp(6f).toInt())
+        setupButton.setPadding(padding, 0, padding, 0)
+        controls.layoutParams.width = dp(if (importButton.visibility == View.GONE) 48f else 104f).toInt()
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 
@@ -542,8 +522,8 @@ private class OrnamentView(
 
         val status = nodeStatus.get()
         drawBackground(canvas)
-        if (clipBounds.top < greeterBottom) drawGreeter(canvas)
         if (Rect.intersects(clipBounds, phoneDirty)) drawPhone(canvas)
+        if (clipBounds.top < greeterBottom) drawGreeter(canvas)
         if (RectF.intersects(qrDrawBounds, clipBoundsF)) drawQr(canvas, status)
     }
 
@@ -617,7 +597,7 @@ private class OrnamentView(
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
         phoneX = width * 0.78f - PHONE_COLS * charWidth / 2f
-        phoneTop = greeterBottom
+        phoneTop = 0f
         phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
         val moduleCount = cachedQrRows.size
@@ -759,7 +739,7 @@ private class OrnamentView(
         textPaint.color = Color.argb(225, 238, 251, 255)
         textPaint.clearShadowLayer()
         val urlWidth = if (status.ready) labelWidth - dp(15f) else labelWidth
-        val url = fitToWidth(if (status.ready) status.url else "Waiting for node discovery", textPaint, urlWidth)
+        val url = fitToWidth(if (status.ready) status.url else "Finding your node…", textPaint, urlWidth)
         rectPaint.color = BACKGROUND
         canvas.drawRect(margin - dp(4f), qrY - dp(48f), margin + labelWidth, qrY - dp(4f), rectPaint)
         canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
