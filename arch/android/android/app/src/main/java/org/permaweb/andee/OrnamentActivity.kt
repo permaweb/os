@@ -596,7 +596,7 @@ private class OrnamentView(
         phonePaint.textSize = phoneTextSize
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
-        phoneX = width * 0.55f - PHONE_COLS * charWidth / 2f
+        phoneX = width * 0.60f - PHONE_COLS * charWidth / 2f
         phoneTop = 0f
         phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
