@@ -3,6 +3,7 @@ package org.permaweb.andee
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -11,16 +12,24 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.TypedValue
 import android.view.MotionEvent
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.Toast
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.LinearLayout
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicBoolean
@@ -172,7 +181,7 @@ class OrnamentActivity : Activity() {
 private class OrnamentView(
     context: android.content.Context,
     private val actions: Actions,
-) : View(context) {
+) : FrameLayout(context) {
     interface Actions {
         fun pickNextBootConfig()
         fun terminate()
@@ -197,9 +206,6 @@ private class OrnamentView(
     private var qrBitmap: Bitmap? = null
     private var qrBitmapStatus: NodeStatus? = null
     private var qrBitmapPending = false
-    private val configButtonBounds = RectF()
-    private val configureButtonBounds = RectF()
-    private val scanButtonBounds = RectF()
     private val qrLinkBounds = RectF()
     private val urlLinkBounds = RectF()
     private var pressedBounds: RectF? = null
@@ -236,6 +242,92 @@ private class OrnamentView(
     }
     private val rectPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    // Native controls keep the compact icon buttons reachable by touch, keyboard and TalkBack.
+    private val setupButton = Button(context).apply {
+        typeface = mono
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        isAllCaps = false
+        gravity = Gravity.CENTER
+        minHeight = 0
+        minimumHeight = 0
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(dp(12f).toInt(), 0, dp(12f).toInt(), 0)
+        maxLines = 1
+        setHorizontallyScrolling(false)
+        setAutoSizeTextTypeUniformWithConfiguration(8, 12, 1, TypedValue.COMPLEX_UNIT_SP)
+        compoundDrawablePadding = dp(8f).toInt()
+        setOnClickListener {
+            if (nextBootConfigPending.get()) actions.terminate() else actions.scan()
+        }
+    }
+    private val settingsButton = iconButton(R.drawable.ic_setup_settings, "Node settings") { actions.configure() }
+    private val importButton = iconButton(R.drawable.ic_setup_import, "Import configuration JSON") { actions.pickNextBootConfig() }
+    private val controls = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(setupButton, LinearLayout.LayoutParams(0, dp(48f).toInt(), 1f))
+        for (button in listOf(settingsButton, importButton)) {
+            addView(button, LinearLayout.LayoutParams(dp(48f).toInt(), dp(48f).toInt()).apply {
+                marginStart = dp(8f).toInt()
+            })
+        }
+    }
+
+    init {
+        setWillNotDraw(false)
+        addView(controls, LayoutParams(dp(272f).toInt(), dp(48f).toInt()).apply {
+            leftMargin = dp(22f).toInt()
+            rightMargin = dp(22f).toInt()
+        })
+        updateControls()
+    }
+
+    private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
+        setImageResource(icon)
+        imageTintList = ColorStateList.valueOf(Color.WHITE)
+        setPadding(dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt())
+        background = controlBackground(primary = false)
+        contentDescription = label
+        tooltipText = label
+        setOnClickListener { action() }
+    }
+
+    private fun controlBackground(primary: Boolean, pending: Boolean = false): RippleDrawable {
+        val shape = GradientDrawable().apply {
+            cornerRadius = dp(6f)
+            setColor(if (pending) TERMINATE_ORANGE else if (primary) Color.WHITE else BACKGROUND)
+            if (!primary) setStroke(dp(1f).toInt().coerceAtLeast(1), Color.argb(110, 255, 255, 255))
+        }
+        return RippleDrawable(ColorStateList.valueOf(if (primary) 0x22000000 else 0x33FFFFFF), shape, null)
+    }
+
+    private fun updateControls() {
+        val pending = nextBootConfigPending.get()
+        setupButton.text = if (pending) "APPLY & CLOSE" else "CONFIGURE"
+        setupButton.contentDescription = if (pending) "Apply configuration and close node" else "Configure by scanning a setup code"
+        setupButton.setTextColor(if (pending) Color.WHITE else BACKGROUND)
+        setupButton.background = controlBackground(primary = true, pending = pending)
+        val icon = if (pending) null else context.getDrawable(R.drawable.ic_setup_scan)?.mutate()?.apply {
+            setTint(BACKGROUND)
+            setBounds(0, 0, dp(20f).toInt(), dp(20f).toInt())
+        }
+        setupButton.setCompoundDrawablesRelative(icon, null, null, null)
+        importButton.visibility = if (pending) View.GONE else View.VISIBLE
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        val x = dp(22f).toInt()
+        val y = height - dp(142f).toInt()
+        controls.layout(x, y, x + controls.measuredWidth, y + controls.measuredHeight)
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        controls.layoutParams.width = min(dp(272f).toInt(), (MeasureSpec.getSize(widthMeasureSpec) - dp(44f).toInt()).coerceAtLeast(0))
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
     private val animationTick = object : Runnable {
         override fun run() {
             animationFramePending = false
@@ -248,6 +340,7 @@ private class OrnamentView(
     fun setNextBootConfigPending(pending: Boolean) {
         if (nextBootConfigPending.getAndSet(pending) != pending) {
             qrBitmapStatus = null
+            updateControls()
             invalidate()
         }
     }
@@ -327,6 +420,7 @@ private class OrnamentView(
                 }
                 if (nextBootConfigPending.get() != pending) {
                     nextBootConfigPending.set(pending)
+                    updateControls()
                     qrBitmapStatus = null
                     changed = true
                 }
@@ -389,10 +483,10 @@ private class OrnamentView(
         val modulePx = max(3, floor(target / moduleCount).toInt())
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = greeterMargin
-        val qrY = height - qrSize - dp(126f)
+        val qrY = height - qrSize - dp(160f)
 
         qrLinkBounds.set(qrX, qrY, qrX + qrSize, qrY + qrSize)
-        qrDrawBounds.set(0f, qrY - dp(28f), width.toFloat(), qrY + qrSize + dp(74f))
+        qrDrawBounds.set(0f, qrY - dp(56f), width.toFloat(), qrY + qrSize)
     }
 
     private fun drawGreeter(canvas: Canvas) {
@@ -493,7 +587,7 @@ private class OrnamentView(
         val modulePx = max(3, floor(target / moduleCount).toInt())
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = margin
-        val qrY = height - qrSize - dp(126f)
+        val qrY = height - qrSize - dp(160f)
 
         rectPaint.style = Paint.Style.FILL
         rectPaint.color = Color.WHITE
@@ -512,58 +606,23 @@ private class OrnamentView(
             }
         }
 
-        val labelX = qrX + qrSize + dp(18f)
-        val labelWidth = width - labelX - margin
+        val labelWidth = width - margin * 2f
+        val labelY = qrY - dp(30f)
         accentPaint.typeface = mono
-        accentPaint.textSize = (width / 42f).coerceIn(dp(10f), dp(18f))
+        accentPaint.textSize = dp(10f)
         accentPaint.color = Color.WHITE
-        val labelY = qrY + accentPaint.textSize
-        val labelText = status.label
-
         textPaint.typeface = mono
-        textPaint.textSize = (accentPaint.textSize * 0.78f).coerceAtLeast(dp(8f))
-        textPaint.color = Color.argb(235, 238, 251, 255)
+        textPaint.textSize = dp(9f)
+        textPaint.color = Color.argb(225, 238, 251, 255)
         textPaint.clearShadowLayer()
-        val url = fitMiddle(status.url, max(10, (labelWidth / textPaint.measureText("M")).toInt()))
-        val lines = listOf(
-            fitToWidth(if (status.ready) url else "Waiting for node discovery", textPaint, labelWidth),
-        )
-        val backingWidth = (
-            listOf(accentPaint.measureText(labelText)) +
-                lines.map { textPaint.measureText(it) }
-        ).maxOrNull()?.coerceAtMost(labelWidth) ?: 0f
-
-        rectPaint.style = Paint.Style.FILL
+        val url = fitToWidth(if (status.ready) status.url else "Waiting for node discovery", textPaint, labelWidth)
         rectPaint.color = BACKGROUND
-        canvas.drawRect(
-            labelX - dp(4f),
-            labelY - accentPaint.textSize * 1.25f,
-            labelX + backingWidth + dp(6f),
-            labelY + accentPaint.textSize * 2.25f,
-            rectPaint,
-        )
-        canvas.drawText(labelText, labelX, labelY, accentPaint)
-
-        var textY = labelY + accentPaint.textSize * 1.4f
+        canvas.drawRect(margin - dp(4f), qrY - dp(48f), width - margin, qrY - dp(4f), rectPaint)
+        canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
         textPaint.isUnderlineText = status.ready
-        for (line in lines) {
-            canvas.drawText(line, labelX, textY, textPaint)
-            textY += textPaint.textSize * 1.35f
-        }
+        canvas.drawText(url, margin, qrY - dp(12f), textPaint)
         textPaint.isUnderlineText = false
-        urlLinkBounds.set(labelX - dp(4f), qrY, width - margin, max(qrY + dp(48f), textY))
-        val buttonY = qrY + qrSize + dp(18f)
-        drawActionButton(canvas, configureButtonBounds, qrX, buttonY, qrSize, "CONFIGURE")
-        val pending = nextBootConfigPending.get()
-        if (pending) {
-            scanButtonBounds.setEmpty()
-            drawActionButton(canvas, configButtonBounds, labelX, buttonY, labelWidth, "APPLY & CLOSE", true)
-        } else {
-            // SCAN reads the setup code the PermawebOS extension shows; LOAD JSON picks a file
-            val half = (labelWidth - dp(8f)) / 2f
-            drawActionButton(canvas, scanButtonBounds, labelX, buttonY, half, "SCAN")
-            drawActionButton(canvas, configButtonBounds, labelX + half + dp(8f), buttonY, half, "LOAD JSON")
-        }
+        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), width - margin, qrY - dp(4f))
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -571,9 +630,6 @@ private class OrnamentView(
             MotionEvent.ACTION_DOWN -> {
                 val status = qrBitmapStatus
                 pressedBounds = when {
-                    configButtonBounds.contains(event.x, event.y) -> configButtonBounds
-                    configureButtonBounds.contains(event.x, event.y) -> configureButtonBounds
-                    !scanButtonBounds.isEmpty && scanButtonBounds.contains(event.x, event.y) -> scanButtonBounds
                     status?.ready == true && qrLinkBounds.contains(event.x, event.y) -> qrLinkBounds
                     status?.ready == true && urlLinkBounds.contains(event.x, event.y) -> urlLinkBounds
                     else -> null
@@ -610,35 +666,8 @@ private class OrnamentView(
         if (url != null) {
             val current = nodeStatus.get()
             if (current.ready && current.url == url) actions.openNode(url)
-        } else if (pressedBounds === configButtonBounds) {
-            if (nextBootConfigPending.get()) actions.terminate() else actions.pickNextBootConfig()
-        } else if (pressedBounds === configureButtonBounds) {
-            actions.configure()
-        } else if (pressedBounds === scanButtonBounds) {
-            actions.scan()
         }
         return true
-    }
-
-    private fun drawActionButton(canvas: Canvas, bounds: RectF, x: Float, y: Float, width: Float,
-        label: String, terminate: Boolean = false) {
-        val height = dp(44f)
-        bounds.set(x, y, x + width, y + height)
-
-        rectPaint.style = Paint.Style.FILL
-        rectPaint.color = if (terminate) TERMINATE_ORANGE else Color.WHITE
-        rectPaint.alpha = 255
-        canvas.drawRect(bounds, rectPaint)
-
-        textPaint.typeface = mono
-        textPaint.textSize = (width / 12f).coerceIn(dp(10f), dp(16f))
-        textPaint.color = if (terminate) Color.WHITE else BACKGROUND
-        textPaint.clearShadowLayer()
-        val textWidth = textPaint.measureText(label)
-        val metrics = textPaint.fontMetrics
-        val textX = x + (width - textWidth) / 2f
-        val textY = y + (height - metrics.ascent - metrics.descent) / 2f
-        canvas.drawText(label, textX, textY, textPaint)
     }
 
     private fun renderPhoneGrid(elapsed: Float): Array<CharArray> {
