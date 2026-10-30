@@ -13,7 +13,7 @@ android {
         versionCode = 1
         versionName = "0.11"
         val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
-            .getOrElse("https://arweave.net/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc/")
+            .getOrElse("https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/")
         require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
         buildConfigField("String", "CONFIGURATOR_URL", "\"$configuratorUrl\"")
         val startupDiagnostics = providers.gradleProperty("andeeStartupDiagnostics")

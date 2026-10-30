@@ -38,4 +38,20 @@ class ConfiguratorLocationTest {
         assertFalse(preview.contains("http://127.0.0.1:5498/configurator/"))
         assertFalse(preview.contains("http://127.0.0.1:5497/other/"))
     }
+
+    @Test fun explicitManifestDeviceKeepsEntryAndAssetsWithinThePinnedRelease() {
+        val base = "https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/"
+        val manifest = ConfiguratorLocation(base)
+        assertEquals(base + "index.html", manifest.entryUrl)
+        assertEquals(manifest.entryUrl, ConfiguratorLocation(base.trimEnd('/')).entryUrl)
+        assertTrue(manifest.contains(manifest.entryUrl))
+        assertTrue(manifest.contains(base + "src/app.js?v=20260929-standalone-market"))
+        assertTrue(manifest.contains(base + "styles.css?v=20260929-standalone-market"))
+        for (url in listOf(
+            "https://bundler.mystical.computer/$tx~manifest@1.0/index.html",
+            base.replace("bundler.mystical.computer", "other.example") + "index.html",
+            base + "../other/index.html",
+            base + "%2e%2e/other/index.html",
+        )) assertFalse(url, manifest.contains(url))
+    }
 }
