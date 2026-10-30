@@ -7,6 +7,7 @@ import java.util.Base64
 internal class ConfiguratorLocation(val url: String) {
     private val root = URI(url)
     private val path = root.rawPath.trimEnd('/') + "/"
+    val entryUrl: String = root.resolve(path + "index.html").toString()
     private val sandbox = if (root.host == "arweave.net") {
         val tx = path.trim('/')
         require(Regex("[A-Za-z0-9_-]{43}").matches(tx))

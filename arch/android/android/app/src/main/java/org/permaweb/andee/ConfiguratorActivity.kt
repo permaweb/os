@@ -53,7 +53,7 @@ class ConfiguratorActivity : Activity() {
             addJavascriptInterface(Bridge(), "AndeeBridge")
         }
         setContentView(web)
-        web.loadUrl(location.url)
+        web.loadUrl(location.entryUrl)
     }
 
     override fun onDestroy() {
