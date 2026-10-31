@@ -360,6 +360,30 @@ remote_indexed_arweave_store_decoding_test() ->
             "store-module": "hb_store_volatile",
             "name": "index",
             "ao-types": "atom=(\"store-module\")"
+          }, {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-offset-index",
+            "root": "7vg2832WFsisEcBr1oBQ8ldc4EGOkjQdwW46hDvJsOs",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=77",
+            "from-value": "~bits@1.0/from=_:77,start:49+integer,length:34+integer",
+            "ao-types": "atom=(\"store-module\")"
+          }, {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-redstone-offset-index",
+            "root": "aOlX-irO0DEKk1U0dP4ZEoBNd2LyKVXFqaEUuxpihLI",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=77",
+            "from-value": "~bits@1.0/from=_:77,start:49+integer,length:34+integer/set&codec=ans104@1.0",
+            "ao-types": "atom=(\"store-module\")"
+          }, {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-l1-offset-index",
+            "root": "_BjLm7-qslpbSLcqNBQepUZMFoxgdeIbOdnRsaPAnuQ",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=71",
+            "from-value": "~bits@1.0/from=_:71,start:49+integer,length:40+integer/set&codec=tx@1.0",
+            "ao-types": "atom=(\"store-module\")"
           }],
           "local-store": [{
             "store-module": "hb_store_fs",
@@ -373,8 +397,15 @@ remote_indexed_arweave_store_decoding_test() ->
     [Store] = maps:get(<<"store">>, Config),
     ?assertEqual(hb_store_arweave, maps:get(<<"store-module">>, Store)),
     ?assertEqual(true, maps:get(<<"remote-index">>, Store)),
-    [Index] = maps:get(<<"index-store">>, Store),
+    [Index | PublishedIndexes] = maps:get(<<"index-store">>, Store),
     ?assertEqual(hb_store_volatile, maps:get(<<"store-module">>, Index)),
+    [DefaultArweave] = [
+        S || S <- maps:get(<<"store">>, hb_opts:default_message()),
+        maps:get(<<"store-module">>, S) == hb_store_arweave
+    ],
+    [_Primary | UpstreamIndexes] = maps:get(<<"index-store">>, DefaultArweave),
+    ?assertEqual(3, length(PublishedIndexes)),
+    ?assertEqual(UpstreamIndexes, PublishedIndexes),
     [Local] = maps:get(<<"local-store">>, Store),
     ?assertEqual(hb_store_fs, maps:get(<<"store-module">>, Local)).
 
