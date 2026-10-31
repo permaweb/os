@@ -73,6 +73,43 @@ def is_volatile_store(value: Any, name: str) -> bool:
     ]
 
 
+def arweave_offset_indexes() -> list[dict[str, Any]]:
+    return [
+        {
+            "store-module": "hb_store_volatile",
+            "name": "andee-volatile-arweave-index-store",
+            "ao-types": 'atom=("store-module")',
+        },
+        {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-offset-index",
+            "root": "7vg2832WFsisEcBr1oBQ8ldc4EGOkjQdwW46hDvJsOs",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=77",
+            "from-value": "~bits@1.0/from=_:77,start:49+integer,length:34+integer",
+            "ao-types": 'atom=("store-module")',
+        },
+        {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-redstone-offset-index",
+            "root": "aOlX-irO0DEKk1U0dP4ZEoBNd2LyKVXFqaEUuxpihLI",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=77",
+            "from-value": "~bits@1.0/from=_:77,start:49+integer,length:34+integer/set&codec=ans104@1.0",
+            "ao-types": 'atom=("store-module")',
+        },
+        {
+            "store-module": "hb_store_arlmdb",
+            "name": "published-l1-offset-index",
+            "root": "_BjLm7-qslpbSLcqNBQepUZMFoxgdeIbOdnRsaPAnuQ",
+            "prefix": "~arweave@2.9/offset=",
+            "to-key": "~base64url@1.0/decode/~bits@1.0/take=71",
+            "from-value": "~bits@1.0/from=_:71,start:49+integer,length:40+integer/set&codec=tx@1.0",
+            "ao-types": 'atom=("store-module")',
+        },
+    ]
+
+
 def is_runtime_store(value: Any) -> bool:
     persistent = {
         "store-module": "hb_store_lmdb",
@@ -93,13 +130,7 @@ def is_runtime_store(value: Any) -> bool:
         {
             "store-module": "hb_store_arweave",
             "ao-types": 'atom=("store-module")',
-            "index-store": [
-                {
-                    "store-module": "hb_store_volatile",
-                    "name": "andee-volatile-arweave-index-store",
-                    "ao-types": 'atom=("store-module")',
-                }
-            ],
+            "index-store": arweave_offset_indexes(),
             "local-store": [
                 {
                     "store-module": "hb_store_volatile",
@@ -137,17 +168,11 @@ def is_private_store(value: Any) -> bool:
     ]
 
 
-def is_volatile_arweave_index_store(value: Any) -> bool:
+def is_arweave_index_store(value: Any) -> bool:
     return value == {
         "store-module": "hb_store_arweave",
         "ao-types": 'atom=("store-module")',
-        "index-store": [
-            {
-                "store-module": "hb_store_volatile",
-                "name": "andee-volatile-arweave-index-store",
-                "ao-types": 'atom=("store-module")',
-            }
-        ],
+        "index-store": arweave_offset_indexes(),
         "local-store": [
             {
                 "store-module": "hb_store_volatile",
@@ -232,8 +257,8 @@ def main() -> int:
         )
     if not is_volatile_store(config.get("match-index"), "andee-volatile-match-index"):
         fail("base config must use volatile Android match index")
-    if not is_volatile_arweave_index_store(config.get("arweave-index-store")):
-        fail("base config must use remote-indexed volatile Android Arweave storage")
+    if not is_arweave_index_store(config.get("arweave-index-store")):
+        fail("base config must use a volatile index before the published Arweave indexes")
     if not is_private_store(config.get("priv-store")):
         fail("base config must use app-private persistent storage")
     store_text = BOOT_CONFIG_STORE.read_text()
