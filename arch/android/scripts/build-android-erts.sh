@@ -17,7 +17,7 @@ NDK_ROOT="${ANDROID_NDK_ROOT:-}"
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
 fi
-TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/$(android_ndk_host_tag)/bin"
 
 require_tool curl
 require_tool make

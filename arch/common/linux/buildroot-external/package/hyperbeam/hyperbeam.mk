@@ -32,7 +32,7 @@ HYPERBEAM_VERSION ?= 1c13c775b8087ff33bd418a6959f74cbbfbd6bf0
 # Reproducible timestamp for the pinned source commit. Update it together with
 # HYPERBEAM_VERSION (`git show -s --format=%ct <version>`).
 HYPERBEAM_SOURCE_DATE_EPOCH ?= 1793452648
-HYPERBEAM_SITE = https://github.com/permaweb/hyperbeam-dev.git
+HYPERBEAM_SITE = https://github.com/permaweb/HyperBEAM.git
 HYPERBEAM_SITE_METHOD = git
 HYPERBEAM_GIT_SUBMODULES = YES
 HYPERBEAM_LICENSE = BSL-1.1

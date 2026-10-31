@@ -22,6 +22,17 @@ export PERMAWEBOS_ROOT BUILD_DIR PERMAWEBOS_COMMON_DEVICE_ROOT \
 
 mkdir -p "$BUILD_DIR"
 
+android_ndk_host_tag() {
+    case "$(uname -s)-$(uname -m)" in
+        Darwin-*) echo darwin-x86_64 ;;
+        Linux-x86_64) echo linux-x86_64 ;;
+        *)
+            echo "unsupported Android NDK build host" >&2
+            return 1
+            ;;
+    esac
+}
+
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "missing required tool: $1" >&2

@@ -11,7 +11,14 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.11"
+        val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
+            .getOrElse("https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/")
+        require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
+        buildConfigField("String", "CONFIGURATOR_URL", "\"$configuratorUrl\"")
+        val startupDiagnostics = providers.gradleProperty("andeeStartupDiagnostics")
+            .getOrElse("false").toBooleanStrict()
+        buildConfigField("boolean", "STARTUP_DIAGNOSTICS", startupDiagnostics.toString())
         buildConfigField("int", "MIN_OS_PATCH_LEVEL", "202605")
         buildConfigField("int", "MIN_VENDOR_PATCH_LEVEL", "20260501")
         buildConfigField("int", "MIN_BOOT_PATCH_LEVEL", "20260501")
@@ -88,6 +95,9 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+    implementation("com.google.zxing:core:3.5.3")
+    // Blockchain Commons UR (fountain-coded multi-part QR) decoder, Apache-2.0, for SCAN setup
+    implementation("com.sparrowwallet:hummingbird:1.7.4")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     testImplementation("junit:junit:4.13.2")
 }

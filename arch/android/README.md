@@ -87,6 +87,23 @@ the exact ID, path, and source-pinned size, expands it, verifies the resulting
 ext4 digest, and atomically installs a read-only template. It has no rootfs
 network client. No rootfs bytes are packaged in the APK.
 
+The first execution request starts the image download in the background and
+returns HTTP 503 with `andock-default-image-materializing`. Later requests
+include `andock-image-state` and elapsed milliseconds while it is preparing.
+The job has a two-hour safety deadline; its existing Arweave store requests have
+a 60-second limit and up to two retries for transport failures or server errors.
+Gateway downloads have a 60-second idle-read timeout, while a continuously
+progressing body may take up to the overall deadline. The larger limit allows
+the roughly 895 MB image to arrive over slower links.
+A failed attempt returns `andock-default-image-unavailable: <cause>` and a
+`retry-after` delay in seconds for one minute. The next execution request after
+that delay can retry. Transport failures that the store does not preserve are
+reported as a generic materialization failure. Completed cache entries remain
+available to HyperBEAM; an incomplete destination is never passed to Android.
+The current stores cache complete artifacts, not incomplete image transfers;
+an interrupted transfer may therefore restart from the beginning. Byte-progress
+reporting and resumable transfers require support in the canonical store layer.
+
 Each member receives a complete writable sparse ext4 image copied from that
 measured, deterministic Ubuntu 24.04 template. An Android isolated service
 receives only that image descriptor and the command/network capabilities for
@@ -133,12 +150,42 @@ the preloaded store, or the Andock payload. It fails when no runtime is staged;
 use `android-build` after changing any runtime, device, native, or measured
 configuration input.
 
+The AndEE screen shows a QR code and the node's bare root URL. Tap either the
+QR code or the URL preview to open that root in Android's default browser.
+Tunnel discovery still checks the remote node identity through `meta@1.0`
+before enabling the link; metadata paths are not part of the displayed or
+encoded address. A node without a configured tunnel shows its local root URL.
+
+**Configure** opens the pinned web Configurator in-app. Its **Apply to AndEE**
+action stages JSON through the same next-boot store as **Load JSON**. Tap
+**Apply & close**, then reopen AndEE to boot that configuration. The existing
+node keeps running while the form is open. A reviewed publication is selected
+at build time with `-PandeeConfiguratorUrl=https://arweave.net/<manifest>/`;
+loopback URLs are for tethered local review builds only. The default currently
+points to the previous public Configurator, pending the Full profile release.
+
+**Scan** reads the setup code the PermawebOS extension shows: a loop of QR
+codes carrying one Blockchain Commons UR (`ur:bytes`, the raw DEFLATE of the
+compact config JSON), fountain-coded so any sufficient set of frames completes
+it. The same review screen also opens for a JSON file opened or shared to
+AndEE, and for the `org.permaweb.andee.action.IMPORT_CONFIG` action with a
+`config` (JSON), `config-b64` (base64 or base64url JSON) or `ur` extra:
+
+```sh
+adb shell am start -a org.permaweb.andee.action.IMPORT_CONFIG \
+    --es config-b64 "$(base64 -w0 next.json | tr '+/' '-_' | tr -d '=')"
+```
+
+Every source stages only after **Use this setup** and goes through the same
+next-boot store as **Load JSON**; nothing is written outside it. Debug builds
+alone also accept `--ez apply true` to stage without the review.
+
 The APK is an application-agnostic platform artifact. Application device
 packages are loaded after boot through measured JSON configuration,
 `trusted-device-signers`, and `name-resolvers`; no application checkout,
 archive, payload, or provenance participates in the Android build.
 
-The packaged HyperBEAM preload uses a public, deterministic Ed25519 build
+The packaged HyperBEAM preload uses a public, deterministic Ed25519/ANS-104 build
 identity rather than the node wallet. That identity is not an authorization
 root: the measured APK/runtime remains the trust boundary. The build rewrites
 the preload through an ordered offline LMDB copy and packages the runtime with

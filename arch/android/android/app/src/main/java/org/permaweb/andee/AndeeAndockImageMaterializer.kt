@@ -41,23 +41,47 @@ internal class AndeeAndockImageMaterializer(
     val logicalBytes: Long get() = spec.expandedBytes
 
     fun ensure(imageId: String, imagePath: String, imageBytes: Long) {
+        prepare(imageId, imagePath, imageBytes, retryFailed = false)
+        requireTemplate()
+    }
+
+    /** Starts the existing expansion worker without creating a member workspace. */
+    fun prepare(imageId: String, imagePath: String, imageBytes: Long): Map<String, Any> =
+        prepare(imageId, imagePath, imageBytes, retryFailed = true)
+
+    private fun prepare(
+        imageId: String,
+        imagePath: String,
+        imageBytes: Long,
+        retryFailed: Boolean,
+    ): Map<String, Any> {
         val source = validateSource(imageId, imagePath, imageBytes)
-        if (installed()) return
+        if (installed()) return health()
         synchronized(lock) {
             check(!stopped) { "Andock image materializer is stopped" }
-            if (installed()) return
+            if (installed()) return health()
             if (worker?.isAlive != true) {
+                // Ordinary tool access reports the failure; only explicit preparation retries it.
+                if (!retryFailed && health()["state"] == "failed") return health()
                 failureReason = "andock-default-image-materializing"
                 worker = thread(name = "AndockImageMaterializer", isDaemon = true) {
                     expand(source)
                 }
             }
         }
-        throw ExecutionFailure(
-            503,
-            failureReason,
-            mapOf("andock-default-image" to spec.transactionId),
-        )
+        return health()
+    }
+
+    /** Observes only: a failed or missing template is never started by polling. */
+    fun health(): Map<String, Any> = andockTemplateHealth(
+        installed(), worker?.isAlive == true, stopped, failureReason,
+    ).toMutableMap().also { status ->
+        if (status["state"] == "failed" &&
+            failureReason == "insufficient-andock-template-storage"
+        ) {
+            status["required-storage-bytes"] = requiredExpansionSpace(spec.expandedBytes)
+            status["available-storage-bytes"] = root.usableSpace
+        }
     }
 
     fun requireTemplate(): File {
@@ -194,6 +218,26 @@ internal class AndeeAndockImageMaterializer(
         const val MARKER_NAME = ".andock-template.json"
         const val TEMPLATE_MANIFEST_PATH =
             "execution/andock/andock-ubuntu-arm64.ext4.manifest.json"
+    }
+}
+
+internal fun andockTemplateHealth(
+    installed: Boolean,
+    preparing: Boolean,
+    stopped: Boolean,
+    failureReason: String,
+): Map<String, Any> {
+    val state = when {
+        stopped -> "unavailable"
+        installed -> "ready"
+        preparing -> "preparing"
+        failureReason == "andock-default-image-not-materialized" -> "missing"
+        else -> "failed"
+    }
+    return mutableMapOf<String, Any>("state" to state, "stage" to "installing").also {
+        if (state == "failed") it["error"] = failureReason.ifBlank {
+            "andock-default-image-materialization-failed"
+        }
     }
 }
 

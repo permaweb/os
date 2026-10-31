@@ -2,7 +2,7 @@
 
 ANDEE_PRELOAD_SIGNER_SEED='PermawebOS AndEE reproducible preloaded-store signer v1'
 ANDEE_PRELOAD_SIGNER_ADDRESS='cbfIwVIoLq4Q2F9dzmgh66z4ri_KT-Re2CGoqH0DKHk'
-ANDEE_ELMDB_VERSION='b90c5aba89c736013dfe7808421fcdba6bfc2cb4'
+ANDEE_ELMDB_VERSION='94f6d305a6c337dabbeb4eb8358c74fc93f146fd'
 
 andee_prepare_elmdb_cargo_lock() {
     local crate lock

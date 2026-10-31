@@ -11,7 +11,7 @@ NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
 REBAR3="$ROOT/scripts/verified-rebar3.sh"
 PRUNE_OTP_APPS="${PRUNE_OTP_APPS:-common_test debugger dialyzer diameter edoc eldap erl_interface et eunit ftp megaco mnesia observer reltool snmp ssh tftp tools}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 4)}"
-EXPECTED_HYPERBEAM_VERSION="ad415bdaaf887fb76c0a8b4f54d91fab3f9fccd8"
+EXPECTED_HYPERBEAM_VERSION="1c13c775b8087ff33bd418a6959f74cbbfbd6bf0"
 EXPECTED_WAMR_VERSION="217ba3b10c41036f0e9727aa93c2a164dba35e5c"
 WAMR_REPOSITORY="https://github.com/bytecodealliance/wasm-micro-runtime.git"
 WAMR_PATCH="$ROOT/scripts/wamr-table64.patch"
@@ -19,7 +19,7 @@ WAMR_PATCH="$ROOT/scripts/wamr-table64.patch"
 if [ -z "$NDK_ROOT" ]; then
     NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
 fi
-TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/$(android_ndk_host_tag)/bin"
 
 require_tool zip
 require_tool python3

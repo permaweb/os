@@ -80,16 +80,7 @@ class AndeeIsolatedExecutionService : Service() {
             require(it.isNotEmpty()) { "resolver configuration cannot be empty" }
         }
         val nativeRoot = applicationInfo.nativeLibraryDir
-        val launcher = File(nativeRoot, PROOT_LAUNCHER)
-        val proot = File(nativeRoot, PROOT_EXECUTABLE)
-        val loader = File(nativeRoot, PROOT_LOADER)
-        require(launcher.isFile && launcher.canExecute()) {
-            "missing packaged Andock launcher"
-        }
-        require(proot.isFile && proot.canExecute()) {
-            "missing packaged PRoot executable"
-        }
-        require(loader.isFile && loader.canExecute()) { "missing packaged PRoot loader" }
+        val (launcher, proot, loader) = requireAndockRuntimeFiles(File(nativeRoot))
 
         val capabilityName = capabilityName("image")
         val capabilityListener = LocalSocket(LocalSocket.SOCKET_SEQPACKET).apply {
@@ -313,9 +304,6 @@ class AndeeIsolatedExecutionService : Service() {
     )
 
     private companion object {
-        const val PROOT_LAUNCHER = "libandee_andock_launcher.so"
-        const val PROOT_EXECUTABLE = "libandee_proot.so"
-        const val PROOT_LOADER = "libandee_proot_loader.so"
         const val CAPABILITY_TIMEOUT_MS = 10_000
         const val IMAGE_CAPABILITY_BYTE = 0x41
         const val MAX_RESOLVER_BYTES = 4 * 1024
@@ -323,4 +311,21 @@ class AndeeIsolatedExecutionService : Service() {
             "umask 022; printf '%s' \"\$ANDOCK_RESOLV_CONF\" > /etc/resolv.conf || exit 125; " +
                 "unset ANDOCK_RESOLV_CONF; exec /bin/bash -lc \"\$1\""
     }
+}
+
+/** The same packaged-runtime validation serves execution and readiness. */
+internal fun requireAndockRuntimeFiles(nativeRoot: File): Triple<File, File, File> {
+    val launcher = File(nativeRoot, "libandee_andock_launcher.so")
+    val proot = File(nativeRoot, "libandee_proot.so")
+    val loader = File(nativeRoot, "libandee_proot_loader.so")
+    require(launcher.isFile && launcher.canExecute()) { "missing packaged Andock launcher" }
+    require(proot.isFile && proot.canExecute()) { "missing packaged PRoot executable" }
+    require(loader.isFile && loader.canExecute()) { "missing packaged PRoot loader" }
+    return Triple(launcher, proot, loader)
+}
+
+internal fun andockExecutionHealth(template: Map<String, Any>, nativeRoot: File): Map<String, Any> {
+    if (template["state"] != "ready") return template
+    return if (runCatching { requireAndockRuntimeFiles(nativeRoot) }.isSuccess) template else
+        template + mapOf("state" to "unavailable", "error" to "execution-runtime-unavailable")
 }

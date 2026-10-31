@@ -206,7 +206,7 @@ internal class AndeeInferenceModels(
             }
             parseProvider(providerId, provider)
         }.also { parsed ->
-            require(parsed.isNotEmpty()) { "no AndEE inference provider is configured" }
+            require(parsed.isNotEmpty()) { "no node inference provider is configured" }
             val networkIds = parsed.flatMap(AndeeInferenceProvider::models)
                 .map(AndeeInferenceModel::modelId)
             require(networkIds.distinct().size == networkIds.size) {

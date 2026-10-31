@@ -1,21 +1,27 @@
 package org.permaweb.andee
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import java.io.File
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 class AndeeService : Service() {
     private var cryptoAgent: AndeeCryptoAgent? = null
     private var executionManager: AndeeExecutionManager? = null
     private var inferenceManager: AndeeInferenceManager? = null
     private var hyperbeamRuntime: HyperbeamRuntime? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private var starterThread: Thread? = null
     @Volatile private var stopping = false
 
@@ -46,6 +52,7 @@ class AndeeService : Service() {
             return START_NOT_STICKY
         }
         stopping = false
+        acquireRuntimeWakeLock()
         startRuntimeIfNeeded()
         return START_STICKY
     }
@@ -96,11 +103,15 @@ class AndeeService : Service() {
                 Log.i(TAG, "AndEE service running")
             } catch (exc: Exception) {
                 Log.e(TAG, "failed to start AndEE runtime", exc)
-                runtime?.close()
-                agent?.close()
-                inference?.close()
-                execution?.close()
-                stopSelf()
+                try {
+                    runtime?.close()
+                    agent?.close()
+                    inference?.close()
+                    execution?.close()
+                } finally {
+                    releaseRuntimeWakeLock()
+                    stopSelf()
+                }
             } finally {
                 starterThread = null
             }
@@ -111,6 +122,7 @@ class AndeeService : Service() {
     }
 
     override fun onDestroy() {
+        stopping = true
         stopRuntime()
         super.onDestroy()
     }
@@ -118,6 +130,7 @@ class AndeeService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.e(TAG, "foreground service timed out: startId=$startId type=$fgsType")
         stopping = true
+        releaseRuntimeWakeLock()
         // Request the stop before onDestroy tears down the native runtime.
         stopForegroundCompat()
         stopSelf()
@@ -125,6 +138,7 @@ class AndeeService : Service() {
 
     private fun terminateProcess(startId: Int) {
         stopping = true
+        releaseRuntimeWakeLock()
         stopForegroundCompat()
         stopSelfResult(startId)
         Thread {
@@ -141,6 +155,8 @@ class AndeeService : Service() {
 
     @Synchronized
     private fun stopRuntime() {
+        // Release even if native teardown blocks or throws.
+        releaseRuntimeWakeLock()
         hyperbeamRuntime?.close()
         hyperbeamRuntime = null
         executionManager?.close()
@@ -152,6 +168,29 @@ class AndeeService : Service() {
         starterThread = null
     }
 
+    @Synchronized
+    @SuppressLint("WakelockTimeout")
+    private fun acquireRuntimeWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        // The user explicitly runs an always-online node. Its foreground-service
+        // lifetime is the bound; an arbitrary timeout would silently disconnect it.
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:runtime")
+            .apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        Log.i(TAG, "runtime wake lock acquired")
+    }
+
+    @Synchronized
+    private fun releaseRuntimeWakeLock() {
+        wakeLock?.let { lock ->
+            if (lock.isHeld) lock.release()
+        }
+        wakeLock = null
+    }
+
     private fun stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= 24) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -159,6 +198,10 @@ class AndeeService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+    }
+
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        if (hyperbeamRuntime?.dumpStartup(writer, args) != true) super.dump(fd, writer, args)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -173,9 +216,13 @@ class AndeeService : Service() {
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_andee)
+            .setSmallIcon(R.drawable.ic_stat_permawebos)
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText("Runtime active")
+            .setContentText("Your node is running. Tap to manage background access.")
+            .setContentIntent(PendingIntent.getActivity(
+                this, 0, Intent(this, OrnamentActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ))
             .setOngoing(true)
             .build()
     }

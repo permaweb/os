@@ -1,27 +1,47 @@
 package org.permaweb.andee
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.util.TypedValue
 import android.view.MotionEvent
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.Toast
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
 import java.net.Inet4Address
-import java.net.InetSocketAddress
 import java.net.NetworkInterface
-import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -34,6 +54,7 @@ import kotlin.math.sin
 
 class OrnamentActivity : Activity() {
     private lateinit var ornamentView: OrnamentView
+    private val backgroundPreferences by lazy { getPreferences(MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +72,17 @@ class OrnamentActivity : Activity() {
             object : OrnamentView.Actions {
                 override fun pickNextBootConfig() = this@OrnamentActivity.pickNextBootConfig()
                 override fun terminate() = this@OrnamentActivity.terminateApp()
+                override fun openNode(url: String) = this@OrnamentActivity.openNode(url)
+                override fun copyNode(url: String) = this@OrnamentActivity.copyNode(url)
+                override fun configure() {
+                    startActivity(Intent(this@OrnamentActivity, ConfiguratorActivity::class.java))
+                }
+                override fun scan() {
+                    startActivity(
+                        Intent(this@OrnamentActivity, SetupImportActivity::class.java)
+                            .setAction(SetupImportActivity.ACTION_SCAN),
+                    )
+                }
             },
         )
         setContentView(ornamentView)
@@ -62,6 +94,14 @@ class OrnamentActivity : Activity() {
         startForegroundService(Intent(this, AndeeService::class.java))
         ornamentView.resumePresentation()
         hideSystemBars()
+        if (!backgroundPreferences.getBoolean("background-setup-reviewed", false)) {
+            if (backgroundAccessAllowed()) {
+                backgroundPreferences.edit().putBoolean("background-setup-reviewed", true).apply()
+                maybeRequestNotifications()
+            } else {
+                showBackgroundAccess()
+            }
+        }
     }
 
     override fun onPause() {
@@ -95,6 +135,10 @@ class OrnamentActivity : Activity() {
     @Deprecated("Deprecated by Activity; used here to avoid adding an AndroidX dependency.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_BACKGROUND_ACCESS) {
+            maybeRequestNotifications()
+            return
+        }
         if (requestCode != REQUEST_BOOT_CONFIG || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
@@ -105,6 +149,60 @@ class OrnamentActivity : Activity() {
         } catch (exc: Exception) {
             Log.e(TAG, "failed to import next boot config", exc)
         }
+    }
+
+    private fun backgroundAccessAllowed(): Boolean =
+        getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+    private fun showBackgroundAccess() {
+        backgroundPreferences.edit().putBoolean("background-setup-reviewed", true).apply()
+        val allowed = backgroundAccessAllowed()
+        AlertDialog.Builder(this)
+            .setTitle(if (allowed) "Background use allowed" else "Keep your node online")
+            .setMessage(
+                "Allow background use so your node and its tunnel can stay available when " +
+                    "the screen is locked. This uses more battery. Keep your phone plugged in " +
+                    "for long sessions.",
+            )
+            .setPositiveButton(if (allowed) "Android settings" else "Allow background use") { _, _ ->
+                requestBackgroundAccess(allowed)
+            }
+            .setNegativeButton(if (allowed) "Done" else "Not now") { _, _ -> maybeRequestNotifications() }
+            .setOnCancelListener { maybeRequestNotifications() }
+            .show()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBackgroundAccess(alreadyAllowed: Boolean) {
+        // Serving the user's HTTP node/tunnel requires an uninterrupted connection;
+        // deferred jobs or FCM cannot implement that core function.
+        val intent = if (alreadyAllowed) {
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        } else {
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        }
+        try {
+            startActivityForResult(intent, REQUEST_BACKGROUND_ACCESS)
+        } catch (_: ActivityNotFoundException) {
+            try {
+                startActivityForResult(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                    REQUEST_BACKGROUND_ACCESS,
+                )
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(this, "Open Android Settings > Battery to allow background use.", Toast.LENGTH_LONG).show()
+                maybeRequestNotifications()
+            }
+        }
+    }
+
+    private fun maybeRequestNotifications() {
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED ||
+            backgroundPreferences.getBoolean("notification-prompted", false)
+        ) return
+        backgroundPreferences.edit().putBoolean("notification-prompted", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
     }
 
     private fun pickNextBootConfig() {
@@ -118,6 +216,27 @@ class OrnamentActivity : Activity() {
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
         }
         startActivityForResult(intent, REQUEST_BOOT_CONFIG)
+    }
+
+    private fun openNode(url: String) {
+        val origin = NodeDiscovery.origin(url) ?: return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(origin)).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            })
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "Install a browser to open your node.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun copyNode(url: String) {
+        val origin = NodeDiscovery.origin(url) ?: return
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("Node URL", origin))
+        // Android 13+ supplies its own clipboard confirmation.
+        if (Build.VERSION.SDK_INT < 33) {
+            Toast.makeText(this, "Node URL copied", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun readPickedText(uri: Uri): String {
@@ -144,19 +263,27 @@ class OrnamentActivity : Activity() {
     companion object {
         private const val TAG = "OrnamentActivity"
         private const val REQUEST_BOOT_CONFIG = 7342
+        private const val REQUEST_BACKGROUND_ACCESS = 7344
+        private const val REQUEST_NOTIFICATIONS = 7343
     }
 }
 
 private class OrnamentView(
     context: android.content.Context,
     private val actions: Actions,
-) : View(context) {
+) : FrameLayout(context) {
     interface Actions {
         fun pickNextBootConfig()
         fun terminate()
+        fun openNode(url: String)
+        fun copyNode(url: String)
+        fun configure()
+        fun scan()
     }
 
     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+    private val splashMark by lazy { BitmapFactory.decodeResource(resources, R.drawable.os_splash_mark) }
+    private val splashMarkPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val nodeStatus = AtomicReference(NodeStatus.booting())
     private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
     private val presentationActive = AtomicBoolean(false)
@@ -165,20 +292,21 @@ private class OrnamentView(
     private var animationFramePending = false
     private var startedAt = System.nanoTime()
     private var cachedQrUrl = ""
-    private var cachedQrRows = QrV2L.rowsFor("http://<node>:8734/")
+    private var cachedQrRows = DiscoveryQr.rowsFor("http://<node>:8734/")
     private var phoneRows: List<String> = emptyList()
     private var qrBitmap: Bitmap? = null
     private var qrBitmapStatus: NodeStatus? = null
     private var qrBitmapPending = false
-    private val configButtonBounds = RectF()
+    private val qrLinkBounds = RectF()
+    private val urlLinkBounds = RectF()
+    private var pressedBounds: RectF? = null
+    private var pressedUrl: String? = null
     private val clipBounds = Rect()
     private val clipBoundsF = RectF()
     private val phoneDirty = Rect()
 
     private var layoutWidth = 0
     private var layoutHeight = 0
-    private var greeterTextSize = 0f
-    private var greeterLineHeight = 0f
     private var greeterMargin = 0f
     private var greeterTopMargin = 0f
     private var greeterBottom = 0f
@@ -205,6 +333,121 @@ private class OrnamentView(
     }
     private val rectPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    // Native controls keep the compact icon buttons reachable by touch, keyboard and TalkBack.
+    private val setupButton = Button(context).apply {
+        typeface = mono
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        isAllCaps = false
+        gravity = Gravity.CENTER
+        minHeight = 0
+        minimumHeight = 0
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(dp(6f).toInt(), 0, dp(6f).toInt(), 0)
+        maxLines = 1
+        setHorizontallyScrolling(false)
+        setAutoSizeTextTypeUniformWithConfiguration(8, 12, 1, TypedValue.COMPLEX_UNIT_SP)
+        compoundDrawablePadding = dp(6f).toInt()
+        setOnClickListener {
+            if (nextBootConfigPending.get()) actions.terminate() else actions.scan()
+        }
+    }
+    private val settingsButton = iconButton(R.drawable.ic_setup_settings, "Node settings") { actions.configure() }
+    private val importButton = iconButton(R.drawable.ic_setup_import, "Import configuration JSON") { actions.pickNextBootConfig() }
+    private val copyUrlButton = iconButton(R.drawable.ic_node_copy, "Copy node URL") {
+        val status = nodeStatus.get()
+        if (status.ready) actions.copyNode(status.url)
+    }.apply {
+        visibility = View.INVISIBLE
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, ColorDrawable(Color.WHITE))
+    }
+    private val controls = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        for (button in listOf(settingsButton, importButton)) {
+            addView(button, LinearLayout.LayoutParams(dp(48f).toInt(), dp(48f).toInt()).apply {
+                if (button === importButton) marginStart = dp(8f).toInt()
+            })
+        }
+    }
+
+    init {
+        setWillNotDraw(false)
+        addView(setupButton, LayoutParams(dp(132f).toInt(), dp(48f).toInt()))
+        addView(controls, LayoutParams(dp(104f).toInt(), dp(48f).toInt()))
+        addView(copyUrlButton, LayoutParams(dp(48f).toInt(), dp(48f).toInt()))
+        updateControls()
+    }
+
+    private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
+        setImageResource(icon)
+        imageTintList = ColorStateList.valueOf(Color.WHITE)
+        setPadding(dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt())
+        background = controlBackground(primary = false)
+        contentDescription = label
+        tooltipText = label
+        setOnClickListener { action() }
+    }
+
+    private fun controlBackground(primary: Boolean, pending: Boolean = false): RippleDrawable {
+        val shape = GradientDrawable().apply {
+            cornerRadius = 0f
+            setColor(if (pending) TERMINATE_ORANGE else if (primary) Color.WHITE else BACKGROUND)
+            if (!primary) setStroke(dp(1f).toInt().coerceAtLeast(1), Color.argb(110, 255, 255, 255))
+        }
+        return RippleDrawable(ColorStateList.valueOf(if (primary) 0x22000000 else 0x33FFFFFF), shape, null)
+    }
+
+    private fun updateControls() {
+        val pending = nextBootConfigPending.get()
+        setupButton.text = if (pending) "APPLY & CLOSE" else "CONFIGURE"
+        setupButton.contentDescription = if (pending) "Apply configuration and close node" else "Configure by scanning a setup code"
+        setupButton.setTextColor(if (pending) Color.WHITE else BACKGROUND)
+        setupButton.background = controlBackground(primary = true, pending = pending)
+        val icon = if (pending) null else context.getDrawable(R.drawable.ic_setup_scan)?.mutate()?.apply {
+            setTint(BACKGROUND)
+            setBounds(0, 0, dp(16f).toInt(), dp(16f).toInt())
+        }
+        setupButton.setCompoundDrawablesRelative(icon, null, null, null)
+        importButton.visibility = if (pending) View.GONE else View.VISIBLE
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        updateQrUrl(nodeStatus.get().url)
+        ensureLayout()
+        val copySize = dp(9f).toInt()
+        val copyTarget = dp(48f).toInt()
+        val copyLeft = qrLinkBounds.right.toInt() - copySize
+        val copyTop = (qrLinkBounds.top - dp(52f)).toInt()
+        textPaint.textSize = dp(9f)
+        val textCenter = qrLinkBounds.top - dp(12f) + (textPaint.fontMetrics.ascent + textPaint.fontMetrics.descent) / 2f
+        val copyPaddingTop = (textCenter - copyTop - copySize / 2f).toInt().coerceIn(0, copyTarget - copySize)
+        // The glyph ends at the QR edge; its invisible target extends right, clear of the URL and QR.
+        copyUrlButton.setPadding(0, copyPaddingTop, copyTarget - copySize, copyTarget - copyPaddingTop - copySize)
+        copyUrlButton.layout(copyLeft, copyTop, copyLeft + copyTarget, copyTop + copyTarget)
+        val x = dp(22f).toInt()
+        val y = height - dp(142f).toInt()
+        setupButton.layout(x, y, x + setupButton.measuredWidth, y + setupButton.measuredHeight)
+        val controlsY = y + setupButton.measuredHeight + dp(8f).toInt()
+        controls.layout(x, controlsY, x + controls.measuredWidth, controlsY + controls.measuredHeight)
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        updateQrUrl(nodeStatus.get().url)
+        val qrWidth = qrModulePixels(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec)) * cachedQrRows.size
+        setupButton.layoutParams.width = qrWidth
+        val labelSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12f, resources.displayMetrics)
+        val labelWidth = setupButton.paint.measureText(setupButton.text.toString()) * labelSize / setupButton.textSize
+        val iconWidth = setupButton.compoundDrawablesRelative[0]?.bounds?.width() ?: 0
+        val contentWidth = labelWidth + iconWidth + if (iconWidth > 0) setupButton.compoundDrawablePadding else 0
+        val padding = ((qrWidth - contentWidth) / 2f).toInt().coerceAtLeast(dp(6f).toInt())
+        setupButton.setPadding(padding, 0, padding, 0)
+        controls.layoutParams.width = dp(if (importButton.visibility == View.GONE) 48f else 104f).toInt()
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
     private val animationTick = object : Runnable {
         override fun run() {
             animationFramePending = false
@@ -217,6 +460,7 @@ private class OrnamentView(
     fun setNextBootConfigPending(pending: Boolean) {
         if (nextBootConfigPending.getAndSet(pending) != pending) {
             qrBitmapStatus = null
+            updateControls()
             invalidate()
         }
     }
@@ -278,8 +522,8 @@ private class OrnamentView(
 
         val status = nodeStatus.get()
         drawBackground(canvas)
-        if (clipBounds.top < greeterBottom) drawGreeter(canvas)
         if (Rect.intersects(clipBounds, phoneDirty)) drawPhone(canvas)
+        if (clipBounds.top < greeterBottom) drawGreeter(canvas)
         if (RectF.intersects(qrDrawBounds, clipBoundsF)) drawQr(canvas, status)
     }
 
@@ -291,11 +535,14 @@ private class OrnamentView(
                 var changed = false
                 if (nodeStatus.get() != status) {
                     nodeStatus.set(status)
+                    copyUrlButton.visibility = if (status.ready) View.VISIBLE else View.INVISIBLE
+                    requestLayout()
                     qrBitmapStatus = null
                     changed = true
                 }
                 if (nextBootConfigPending.get() != pending) {
                     nextBootConfigPending.set(pending)
+                    updateControls()
                     qrBitmapStatus = null
                     changed = true
                 }
@@ -339,60 +586,45 @@ private class OrnamentView(
         layoutHeight = height
         greeterMargin = dp(22f)
         greeterTopMargin = dp(40f)
-        var size = (width / 58f).coerceIn(dp(10f), dp(21f))
-        textPaint.typeface = mono
-        textPaint.textSize = size
-        var maxLine = HYPERBEAM_GREETER.maxOf { textPaint.measureText(it) }
-        val available = width - greeterMargin * 2f
-        if (maxLine > available) {
-            size *= available / maxLine
-            textPaint.textSize = size
-        }
-        greeterTextSize = size
-        greeterLineHeight = size * 1.08f
-        greeterBottom = greeterTopMargin + size + HYPERBEAM_GREETER.size * greeterLineHeight + size * 0.55f
+        greeterBottom = greeterTopMargin + dp(88f)
 
-        val rows = PHONE_ROWS
-        val cols = PHONE_COLS
         val availableHeight = height - greeterBottom
-        val sizeByWidth = width / (cols * 0.42f)
-        val sizeByHeight = availableHeight / (rows * 1.08f) * 1.18f
-        phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f).coerceIn(dp(18f), dp(76f))
-        phonePaint.typeface = mono
+        val sizeByWidth = width / (PHONE_COLS * 0.42f)
+        val sizeByHeight = availableHeight / (PHONE_ROWS * 1.08f) * 1.18f
+        phoneTextSize = (min(sizeByWidth, sizeByHeight) * 0.86f)
+            .coerceIn(dp(18f), dp(76f)) * 1.332f
         phonePaint.textSize = phoneTextSize
         val charWidth = phonePaint.measureText("M")
         phoneLineHeight = phoneTextSize * 1.08f
-        val blockWidth = charWidth * cols
-        phoneX = width * 0.62f - blockWidth * 0.50f
-        phoneTop = greeterBottom + dp(18f)
-        val phonePad = dp(18f)
-        phoneDirty.set(
-            floor(phoneX - phonePad).toInt().coerceAtLeast(0),
-            floor(phoneTop - phonePad).toInt().coerceAtLeast(0),
-            kotlin.math.ceil(phoneX + blockWidth + phonePad).toInt().coerceAtMost(width),
-            kotlin.math.ceil(phoneTop + rows * phoneLineHeight + phonePad).toInt().coerceAtMost(height),
-        )
+        phoneX = width * 0.60f - PHONE_COLS * charWidth / 2f
+        phoneTop = 0f
+        phoneDirty.set(0, floor(phoneTop).toInt(), width, height)
 
         val moduleCount = cachedQrRows.size
-        val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
-        val modulePx = max(3, floor(target / moduleCount).toInt())
+        val modulePx = qrModulePixels(width, height)
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = greeterMargin
-        val qrY = height - qrSize - dp(126f)
-        qrDrawBounds.set(0f, qrY - dp(28f), width.toFloat(), qrY + qrSize + dp(74f))
+        val qrY = height - qrSize - dp(160f)
+
+        qrLinkBounds.set(qrX, qrY, qrX + qrSize, qrY + qrSize)
+        qrDrawBounds.set(0f, qrY - dp(56f), width.toFloat(), qrY + qrSize)
     }
 
     private fun drawGreeter(canvas: Canvas) {
-        var y = greeterTopMargin + greeterTextSize
+        val size = dp(80f)
+        val x = greeterMargin - size * 40f / 1024f
+        val y = greeterTopMargin - size * 40f / 1024f
+        canvas.drawBitmap(splashMark, null, RectF(x, y, x + size, y + size), splashMarkPaint)
 
+        val labelX = greeterMargin + dp(85.25f)
+        val centerY = greeterTopMargin + dp(35.625f)
+        textPaint.typeface = mono
         textPaint.color = Color.WHITE
         textPaint.clearShadowLayer()
-        textPaint.typeface = mono
-        textPaint.textSize = greeterTextSize
-        for (line in HYPERBEAM_GREETER) {
-            canvas.drawText(line, greeterMargin, y, textPaint)
-            y += greeterLineHeight
-        }
+        textPaint.textSize = dp(12f)
+        canvas.drawText("PermawebOS", labelX, centerY - dp(1.5f), textPaint)
+        textPaint.textSize = dp(8f)
+        canvas.drawText("VERSION ${BuildConfig.VERSION_NAME}", labelX, centerY + dp(10.5f), textPaint)
     }
 
     private fun drawPhone(canvas: Canvas) {
@@ -401,10 +633,12 @@ private class OrnamentView(
         phonePaint.textSize = phoneTextSize
         phonePaint.color = Color.WHITE
         phonePaint.setShadowLayer(dp(11f), 0f, 0f, Color.rgb(85, 229, 255))
-
+        val saved = canvas.save()
+        canvas.clipRect(0f, phoneTop, width.toFloat(), height.toFloat())
         for ((index, text) in phoneRows.withIndex()) {
             canvas.drawText(text, phoneX, phoneTop + (index + 1) * phoneLineHeight, phonePaint)
         }
+        canvas.restoreToCount(saved)
         phonePaint.clearShadowLayer()
     }
 
@@ -424,10 +658,10 @@ private class OrnamentView(
         canvas.drawBitmap(bitmap, qrDrawBounds.left, qrDrawBounds.top, null)
     }
 
-    private fun cachedQrBitmap(status: NodeStatus): Bitmap {
-        if (cachedQrUrl != status.url) {
-            cachedQrUrl = status.url
-            cachedQrRows = QrV2L.rowsFor(status.url)
+    private fun updateQrUrl(url: String) {
+        if (cachedQrUrl != url) {
+            cachedQrUrl = url
+            cachedQrRows = DiscoveryQr.rowsFor(url)
             layoutWidth = 0
             layoutHeight = 0
             ensureLayout()
@@ -435,7 +669,10 @@ private class OrnamentView(
             qrBitmap = null
             qrBitmapStatus = null
         }
+    }
 
+    private fun cachedQrBitmap(status: NodeStatus): Bitmap {
+        updateQrUrl(status.url)
         val left = floor(qrDrawBounds.left).toInt()
         val top = floor(qrDrawBounds.top).toInt()
         val bitmapWidth = kotlin.math.ceil(qrDrawBounds.width()).toInt().coerceAtLeast(1)
@@ -470,15 +707,14 @@ private class OrnamentView(
         val margin = dp(22f)
 
         val moduleCount = cachedQrRows.size
-        val target = min(width * 0.34f, height * 0.16f).coerceAtLeast(dp(132f))
-        val modulePx = max(3, floor(target / moduleCount).toInt())
+        val modulePx = qrModulePixels(width, height)
         val qrSize = (modulePx * moduleCount).toFloat()
         val qrX = margin
-        val qrY = height - qrSize - dp(126f)
+        val qrY = height - qrSize - dp(160f)
 
         rectPaint.style = Paint.Style.FILL
         rectPaint.color = Color.WHITE
-        rectPaint.alpha = if (status.ip == null) 188 else 255
+        rectPaint.alpha = if (status.ready) 255 else 188
         canvas.drawRect(qrX, qrY, qrX + qrSize, qrY + qrSize, rectPaint)
 
         rectPaint.alpha = 255
@@ -493,80 +729,70 @@ private class OrnamentView(
             }
         }
 
-        val labelX = qrX + qrSize + dp(18f)
-        val labelWidth = width - labelX - margin
+        val labelWidth = qrSize
+        val labelY = qrY - dp(30f)
         accentPaint.typeface = mono
-        accentPaint.textSize = (width / 42f).coerceIn(dp(10f), dp(18f))
+        accentPaint.textSize = dp(10f)
         accentPaint.color = Color.WHITE
-        val labelY = qrY + accentPaint.textSize
-        val labelText = "NODE URL"
-
         textPaint.typeface = mono
-        textPaint.textSize = (accentPaint.textSize * 0.78f).coerceAtLeast(dp(8f))
-        textPaint.color = Color.argb(235, 238, 251, 255)
+        textPaint.textSize = dp(9f)
+        textPaint.color = Color.argb(225, 238, 251, 255)
         textPaint.clearShadowLayer()
-        val url = fitMiddle(status.url, max(10, (labelWidth / textPaint.measureText("M")).toInt()))
-        val lines = listOf(
-            fitToWidth("LIVE AT: $url", textPaint, labelWidth),
-        )
-        val backingWidth = (
-            listOf(accentPaint.measureText(labelText)) +
-                lines.map { textPaint.measureText(it) }
-        ).maxOrNull()?.coerceAtMost(labelWidth) ?: 0f
-
-        rectPaint.style = Paint.Style.FILL
+        val urlWidth = if (status.ready) labelWidth - dp(15f) else labelWidth
+        val url = fitToWidth(if (status.ready) status.url else "Finding your node…", textPaint, urlWidth)
         rectPaint.color = BACKGROUND
-        canvas.drawRect(
-            labelX - dp(4f),
-            labelY - accentPaint.textSize * 1.25f,
-            labelX + backingWidth + dp(6f),
-            labelY + accentPaint.textSize * 2.25f,
-            rectPaint,
-        )
-        canvas.drawText(labelText, labelX, labelY, accentPaint)
-
-        var textY = labelY + accentPaint.textSize * 1.4f
-        for (line in lines) {
-            canvas.drawText(line, labelX, textY, textPaint)
-            textY += textPaint.textSize * 1.35f
-        }
-        drawConfigButton(canvas, qrX, qrY + qrSize + dp(18f), qrSize)
+        canvas.drawRect(margin - dp(4f), qrY - dp(48f), margin + labelWidth, qrY - dp(4f), rectPaint)
+        canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
+        textPaint.isUnderlineText = status.ready
+        canvas.drawText(url, margin, qrY - dp(12f), textPaint)
+        textPaint.isUnderlineText = false
+        val linkRight = if (status.ready) margin + labelWidth - dp(9f) else margin + labelWidth
+        urlLinkBounds.set(margin - dp(4f), qrY - dp(52f), linkRight, qrY - dp(4f))
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        val inside = configButtonBounds.contains(event.x, event.y)
-        if (event.action == MotionEvent.ACTION_DOWN && inside) return true
-        if (event.action == MotionEvent.ACTION_UP && inside) {
-            if (nextBootConfigPending.get()) {
-                actions.terminate()
-            } else {
-                actions.pickNextBootConfig()
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val status = qrBitmapStatus
+                pressedBounds = when {
+                    status?.ready == true && qrLinkBounds.contains(event.x, event.y) -> qrLinkBounds
+                    status?.ready == true && urlLinkBounds.contains(event.x, event.y) -> urlLinkBounds
+                    else -> null
+                }
+                pressedUrl = if (pressedBounds === qrLinkBounds || pressedBounds === urlLinkBounds) status?.url else null
+                if (pressedBounds != null) return true
             }
-            return true
+            MotionEvent.ACTION_MOVE -> {
+                val bounds = pressedBounds
+                if (bounds != null && !bounds.contains(event.x, event.y)) {
+                    pressedBounds = null
+                    pressedUrl = null
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (pressedBounds?.contains(event.x, event.y) == true) performClick()
+                pressedBounds = null
+                pressedUrl = null
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pressedBounds = null
+                pressedUrl = null
+                return true
+            }
         }
         return super.onTouchEvent(event)
     }
 
-    private fun drawConfigButton(canvas: Canvas, x: Float, y: Float, width: Float) {
-        val terminate = nextBootConfigPending.get()
-        val height = dp(44f)
-        configButtonBounds.set(x, y, x + width, y + height)
-
-        rectPaint.style = Paint.Style.FILL
-        rectPaint.color = if (terminate) TERMINATE_ORANGE else Color.WHITE
-        rectPaint.alpha = 255
-        canvas.drawRect(configButtonBounds, rectPaint)
-
-        textPaint.typeface = mono
-        textPaint.textSize = (width / 18.2f).coerceIn(dp(10f), dp(16f))
-        textPaint.color = if (terminate) Color.WHITE else BACKGROUND
-        textPaint.clearShadowLayer()
-        val label = if (terminate) "TERMINATE" else "SET NEXT BOOT CONFIG"
-        val textWidth = textPaint.measureText(label)
-        val metrics = textPaint.fontMetrics
-        val textX = x + (width - textWidth) / 2f
-        val textY = y + (height - metrics.ascent - metrics.descent) / 2f
-        canvas.drawText(label, textX, textY, textPaint)
+    override fun performClick(): Boolean {
+        super.performClick()
+        val url = pressedUrl
+        if (url != null) {
+            val current = nodeStatus.get()
+            if (current.ready && current.url == url) actions.openNode(url)
+        }
+        return true
     }
 
     private fun renderPhoneGrid(elapsed: Float): Array<CharArray> {
@@ -575,9 +801,9 @@ private class OrnamentView(
         val grid = Array(rows) { CharArray(cols) { ' ' } }
         val yaw = elapsed * 0.82f
         val pitch = -0.10f + sin(elapsed * 0.37f) * 0.05f
-        val scale = 8.15f
+        val scale = 5.0f
         val cx = cols / 2f
-        val cy = rows / 2f + 1.35f
+        val cy = rows / 2f - 1.5f
 
         for ((from, to) in phoneEdges()) {
             val p1 = project(from, yaw, pitch, scale, cx, cy)
@@ -692,6 +918,11 @@ private class OrnamentView(
         for (i in points.indices) add(points[i] to points[(i + 1) % points.size])
     }
 
+    private fun qrModulePixels(w: Int, h: Int): Int {
+        val target = min(w * 0.34f, h * 0.16f).coerceAtLeast(dp(132f))
+        return max(3, floor(target / cachedQrRows.size).toInt())
+    }
+
     private fun fitToWidth(text: String, paint: Paint, maxWidth: Float): String {
         if (paint.measureText(text) <= maxWidth) return text
         val charWidth = paint.measureText("M").coerceAtLeast(1f)
@@ -716,63 +947,13 @@ private class OrnamentView(
         private const val STEADY_POLL_MS = 5_000L
         private const val PHONE_COLS = 36
         private const val PHONE_ROWS = 29
-        private val HYPERBEAM_GREETER = listOf(
-            "\u2588\u2588\u2557  \u2588\u2588\u2557\u2588\u2588\u2557   \u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557",
-            "\u2588\u2588\u2551  \u2588\u2588\u2551\u255a\u2588\u2588\u2557 \u2588\u2588\u2554\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551  \u255a\u2588\u2588\u2554\u255d  \u2588\u2588\u2554\u2550\u2550\u2550\u255d \u2588\u2588\u2554\u2550\u2550\u255d  \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557",
-            "\u2588\u2588\u2551  \u2588\u2588\u2551   \u2588\u2588\u2551   \u2588\u2588\u2551     \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551",
-            "\u255a\u2550\u255d  \u255a\u2550\u255d   \u255a\u2550\u255d   \u255a\u2550\u255d     \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2557   \u2588\u2588\u2588\u2557",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2551",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2554\u2588\u2588\u2588\u2588\u2554\u2588\u2588\u2551",
-            "\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u255d  \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551\u2588\u2588\u2551\u255a\u2588\u2588\u2554\u255d\u2588\u2588\u2551 EAT GLASS,",
-            "\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2551 \u255a\u2550\u255d \u2588\u2588\u2551 BUILD THE",
-            "\u255a\u2550\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u255d     \u255a\u2550\u255d FUTURE.",
-        )
     }
 }
 
 private data class Vec3(val x: Float, val y: Float, val z: Float)
 
-private data class NodeStatus(
-    val ready: Boolean,
-    val ip: String?,
-    val url: String,
-) {
-    companion object {
-        fun booting(): NodeStatus = NodeStatus(
-            ready = false,
-            ip = null,
-            url = "http://<node>:8734/",
-        )
-    }
-}
-
 private object NodeProbe {
-    fun snapshot(): NodeStatus {
-        val ip = lanIpv4()
-        val url = when (ip) {
-            null -> "http://<node>:8734/"
-            else -> "http://$ip:8734/"
-        }
-        return NodeStatus(
-            ready = hyperbeamReady(),
-            ip = ip,
-            url = url,
-        )
-    }
-
-    private fun hyperbeamReady(): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress("127.0.0.1", 8734), 250)
-                true
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
+    fun snapshot(): NodeStatus = NodeDiscovery.snapshot(lanIpv4(), NodeMetadataHttp::read)
 
     private fun lanIpv4(): String? {
         return try {
@@ -798,255 +979,5 @@ private object NodeProbe {
         } catch (_: Exception) {
             null
         }
-    }
-}
-
-private object QrV2L {
-    fun rowsFor(data: String): Array<BooleanArray> {
-        val bytes = data.toByteArray(Charsets.UTF_8)
-        val payload = if (bytes.size <= 32) bytes else "http://node-too-long/".toByteArray(Charsets.UTF_8)
-        val size = 25
-        val modules = Array(size) { BooleanArray(size) }
-        val reserved = Array(size) { BooleanArray(size) }
-
-        drawFinder(modules, reserved, 0, 0)
-        drawFinder(modules, reserved, 0, size - 7)
-        drawFinder(modules, reserved, size - 7, 0)
-        drawAlignment(modules, reserved, 18, 18)
-        drawTiming(modules, reserved, size)
-        put(modules, reserved, 4 * 2 + 9, 8, true, true)
-        reserveFormat(reserved, size)
-
-        val dataCodewords = dataCodewords(payload, 34)
-        val eccCodewords = rsRemainder(dataCodewords, 10)
-        val bits = ArrayList<Int>((dataCodewords.size + eccCodewords.size) * 8)
-        for (codeword in dataCodewords + eccCodewords) {
-            bits.addAll(bitsInt(codeword, 8))
-        }
-        placeBits(modules, reserved, bits, size)
-        applyFormat(modules, size)
-        return addQuietZone(modules, size, 4)
-    }
-
-    private fun dataCodewords(data: ByteArray, target: Int): IntArray {
-        val bits = ArrayList<Int>(target * 8)
-        bits.addAll(listOf(0, 1, 0, 0))
-        bits.addAll(bitsInt(data.size, 8))
-        for (byte in data) bits.addAll(bitsInt(byte.toInt() and 0xff, 8))
-        val maxBits = target * 8
-        repeat(max(0, min(4, maxBits - bits.size))) { bits.add(0) }
-        while (bits.size % 8 != 0) bits.add(0)
-
-        val codewords = ArrayList<Int>(target)
-        var i = 0
-        while (i < bits.size && codewords.size < target) {
-            var value = 0
-            for (j in 0 until 8) value = (value shl 1) or bits[i + j]
-            codewords.add(value)
-            i += 8
-        }
-        var pad = 0xec
-        while (codewords.size < target) {
-            codewords.add(pad)
-            pad = if (pad == 0xec) 0x11 else 0xec
-        }
-        return codewords.toIntArray()
-    }
-
-    private fun bitsInt(value: Int, width: Int): List<Int> {
-        return (width - 1 downTo 0).map { shift -> (value ushr shift) and 1 }
-    }
-
-    private fun rsRemainder(data: IntArray, eccLen: Int): IntArray {
-        val generator = rsGenerator(eccLen)
-        val remainder = IntArray(eccLen)
-        for (byte in data) {
-            val factor = byte xor remainder[0]
-            for (i in 0 until eccLen - 1) {
-                remainder[i] = remainder[i + 1] xor gfMul(factor, generator[i + 1])
-            }
-            remainder[eccLen - 1] = gfMul(factor, generator[eccLen])
-        }
-        return remainder
-    }
-
-    private fun rsGenerator(degree: Int): IntArray {
-        var poly = intArrayOf(1)
-        for (i in 0 until degree) {
-            poly = polyMul(poly, intArrayOf(1, gfPow2(i)))
-        }
-        return poly
-    }
-
-    private fun polyMul(left: IntArray, right: IntArray): IntArray {
-        val out = IntArray(left.size + right.size - 1)
-        for (i in left.indices) {
-            for (j in right.indices) {
-                out[i + j] = out[i + j] xor gfMul(left[i], right[j])
-            }
-        }
-        return out
-    }
-
-    private fun gfPow2(power: Int): Int {
-        var value = 1
-        repeat(power) { value = gfMul(value, 2) }
-        return value
-    }
-
-    private fun gfMul(a0: Int, b0: Int): Int {
-        var a = a0
-        var b = b0
-        var acc = 0
-        while (b != 0) {
-            if ((b and 1) != 0) acc = acc xor a
-            a = if ((a and 0x80) != 0) ((a shl 1) xor 0x11d) and 0xff else (a shl 1) and 0xff
-            b = b ushr 1
-        }
-        return acc
-    }
-
-    private fun drawFinder(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row0: Int,
-        col0: Int,
-    ) {
-        for (r in -1..7) {
-            for (c in -1..7) {
-                val separator = r == -1 || r == 7 || c == -1 || c == 7
-                val dark = !separator &&
-                    (r == 0 || r == 6 || c == 0 || c == 6 || (r in 2..4 && c in 2..4))
-                put(modules, reserved, row0 + r, col0 + c, dark, true)
-            }
-        }
-    }
-
-    private fun drawAlignment(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row0: Int,
-        col0: Int,
-    ) {
-        for (r in -2..2) {
-            for (c in -2..2) {
-                val dark = abs(r) == 2 || abs(c) == 2 || (r == 0 && c == 0)
-                put(modules, reserved, row0 + r, col0 + c, dark, true)
-            }
-        }
-    }
-
-    private fun drawTiming(modules: Array<BooleanArray>, reserved: Array<BooleanArray>, size: Int) {
-        for (i in 8 until size - 8) {
-            val dark = i % 2 == 0
-            put(modules, reserved, 6, i, dark, true)
-            put(modules, reserved, i, 6, dark, true)
-        }
-    }
-
-    private fun reserveFormat(reserved: Array<BooleanArray>, size: Int) {
-        for ((row, col) in formatCoords(size)) {
-            if (row in 0 until size && col in 0 until size) reserved[row][col] = true
-        }
-    }
-
-    private fun placeBits(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        bits: List<Int>,
-        size: Int,
-    ) {
-        var bitIndex = 0
-        var upward = true
-        var col = size - 1
-        while (col > 0) {
-            if (col == 6) col--
-            val rowRange = if (upward) size - 1 downTo 0 else 0 until size
-            for (row in rowRange) {
-                for (c in col downTo col - 1) {
-                    if (!reserved[row][c]) {
-                        val bit = bits.getOrElse(bitIndex) { 0 }
-                        bitIndex++
-                        val mask = (row + c) % 2 == 0
-                        modules[row][c] = (bit == 1) xor mask
-                    }
-                }
-            }
-            upward = !upward
-            col -= 2
-        }
-    }
-
-    private fun applyFormat(modules: Array<BooleanArray>, size: Int) {
-        val bits = IntArray(15) { i -> (0x77c4 ushr i) and 1 }
-        val coords = formatCoords(size)
-        for (i in coords.indices) {
-            val (row, col) = coords[i]
-            modules[row][col] = bits[i % 15] == 1
-        }
-    }
-
-    private fun addQuietZone(modules: Array<BooleanArray>, size: Int, quiet: Int): Array<BooleanArray> {
-        val total = size + quiet * 2
-        val out = Array(total) { BooleanArray(total) }
-        for (r in 0 until total) {
-            for (c in 0 until total) {
-                val innerR = r - quiet
-                val innerC = c - quiet
-                if (innerR in 0 until size && innerC in 0 until size) {
-                    out[r][c] = modules[innerR][innerC]
-                }
-            }
-        }
-        return out
-    }
-
-    private fun put(
-        modules: Array<BooleanArray>,
-        reserved: Array<BooleanArray>,
-        row: Int,
-        col: Int,
-        dark: Boolean,
-        reserve: Boolean,
-    ) {
-        if (row in modules.indices && col in modules[row].indices) {
-            modules[row][col] = dark
-            if (reserve) reserved[row][col] = true
-        }
-    }
-
-    private fun formatCoords(size: Int): List<Pair<Int, Int>> {
-        return listOf(
-            0 to 8,
-            1 to 8,
-            2 to 8,
-            3 to 8,
-            4 to 8,
-            5 to 8,
-            7 to 8,
-            8 to 8,
-            8 to 7,
-            8 to 5,
-            8 to 4,
-            8 to 3,
-            8 to 2,
-            8 to 1,
-            8 to 0,
-            8 to size - 1,
-            8 to size - 2,
-            8 to size - 3,
-            8 to size - 4,
-            8 to size - 5,
-            8 to size - 6,
-            8 to size - 7,
-            8 to size - 8,
-            size - 7 to 8,
-            size - 6 to 8,
-            size - 5 to 8,
-            size - 4 to 8,
-            size - 3 to 8,
-            size - 2 to 8,
-            size - 1 to 8,
-        )
     }
 }

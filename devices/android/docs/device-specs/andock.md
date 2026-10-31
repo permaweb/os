@@ -22,6 +22,34 @@ provides the private `ANDEE_EXECUTION_SOCKET` capability. Selecting the device
 on another node fails closed with status 503; it does not fall back to host
 execution or another backend.
 
+## Toolkit readiness
+
+`GET /~andock@1.0/health` reports the measured toolkit's readiness without
+starting work. `POST /~andock@1.0/prepare` starts its existing preparation job;
+neither action creates a member workspace or runs a command. Other methods on
+`prepare` return 405. The device index includes the same readiness fields.
+
+The response state is `missing`, `preparing`, `ready`, `failed`, or `unavailable`.
+The `stage` distinguishes `downloading` from `installing`. After downloading,
+health may return `missing` with stage `installing`: POST prepare once to start
+native expansion, then continue polling health. Only a verified, installed
+filesystem template is `ready`. Failures remain visible through health until
+an explicit preparation retry.
+
+Readiness also requires the packaged executable runtime used by the isolated
+execution service. A platform without that runtime reports `unavailable` with
+`error=execution-runtime-unavailable` after installation. Image preparation can
+still complete there; it does not prove that guest commands can execute.
+
+When the canonical Arweave index provides a range, download status includes
+`downloaded-bytes`, `total-bytes`, and `last-progress-ms` (the age of the last
+newly received bytes). Overlapping/retried chunks are counted once. These are
+transport progress observations; canonical content verification and native
+image verification still determine readiness. Installation has no download ETA.
+Insufficient installation space reports `error=insufficient-andock-template-storage`
+and `required-storage-bytes` / `available-storage-bytes`. Responses do not expose
+private filesystem paths, configuration, or credentials.
+
 ## Isolation and storage
 
 Each member has one complete persistent writable Ubuntu filesystem image.

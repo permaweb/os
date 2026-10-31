@@ -254,10 +254,19 @@ static void clear_socket_reservations(void)
 		remove_socket_reservation(socket_reservations);
 }
 
+/* MFD_EXEC was added in Linux 6.3.  Older kernels validate the whole flag word
+ * and reject the unknown bit with EINVAL, which on a 6.1 Android kernel fails
+ * every guest exec before it starts.  Retry without it: a pre-6.3 memfd is
+ * already executable, which is precisely why 6.3 introduced MFD_EXEC next to
+ * MFD_NOEXEC_SEAL — to keep the old behaviour available as an explicit opt-in.
+ * On 6.3+ the first call succeeds and the fallback never runs. */
 static int create_memory_file(const char *name, unsigned int flags)
 {
 #ifdef __NR_memfd_create
-	return (int)syscall(__NR_memfd_create, name, flags);
+	int fd = (int)syscall(__NR_memfd_create, name, flags);
+	if (fd < 0 && errno == EINVAL && (flags & MFD_EXEC) != 0)
+		fd = (int)syscall(__NR_memfd_create, name, flags & ~MFD_EXEC);
+	return fd;
 #else
 	(void)name;
 	(void)flags;

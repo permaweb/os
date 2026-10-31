@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 from typing import Any
 
@@ -172,6 +173,13 @@ def main() -> int:
     andock_image = config.get("andock-default-image")
     if not isinstance(andock_image, str) or len(andock_image) != 43:
         fail("andock-default-image must be one native Arweave transaction ID")
+    materializer = ROOT.parents[1] / "devices/android/src/lib_andee_materialization.erl"
+    indexed_image = re.search(
+        r'-define\(ANDOCK_INDEXED_IMAGE, <<"([A-Za-z0-9_-]{43})">>\)',
+        materializer.read_text(),
+    )
+    if not indexed_image or indexed_image.group(1) != andock_image:
+        fail("andock-default-image changed: verify and update its canonical copycat block pair")
     providers = config.get("inference-providers")
     if not isinstance(providers, dict) or list(providers) != ["local-andee"]:
         fail("base config must define only the local-andee inference provider")
