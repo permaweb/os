@@ -10,9 +10,13 @@
 %%% `member' returns only a narrow zone-signed membership proof. `start' is a
 %%% boot hook that auto-joins explicitly configured zones after the HTTP listener
 %%% is available.
+%%% A `template-provider' resolves the policy for each new admission. Admissions
+%%% bind both that provider and its concrete result; running members keep their
+%%% measured configuration until explicitly rebooted and rejoined.
 -module(dev_zone).
 -implements(<<"zone@1.0">>).
--device_libraries([lib_lapee_nonvolatile, lib_permawebos_peer_http]).
+-device_libraries([lib_lapee_nonvolatile, lib_permawebos_peer_http,
+    lib_meta, lib_process]).
 -export([device_info/1, info/3, init/3, status/3, admit/3, join/3, member/3, start/3]).
 
 -include_lib("hb/include/hb.hrl").
@@ -46,7 +50,7 @@ init(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
         ok = assert_zone_initialization_allowed(Name, Opts),
-        Templates = request_templates(Req, Opts),
+        Templates = admission_templates(Req, Opts),
         reject_supplied_secret_material(Req, Opts),
         {_Template, Self} = self_attestation_body(Templates, Opts),
         AES = crypto:strong_rand_bytes(32),
@@ -59,7 +63,8 @@ init(_Base, Req, Opts) ->
             Opts
         ),
         NewOpts =
-            install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts),
+            install_ring_and_storage(
+                Name, Templates, AES, Wallet, Members, Req, Opts),
         hb_http_server:set_opts(NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
@@ -76,7 +81,7 @@ admit(_Base, Req, Opts) ->
     with_result(fun() ->
         Name = required_name(Req, Opts),
         {AES, Wallet, Zone} = require_ring(Name, Opts),
-        Templates = zone_templates(Zone, Opts),
+        Templates = admission_templates(Zone, Opts),
         RingReference = ring_reference(Name, Templates, Wallet, Opts),
         {JoinerURL, PeerAttestation} =
             peer_attestation_from_req(Req, RingReference, Opts),
@@ -97,10 +102,11 @@ admit(_Base, Req, Opts) ->
         ),
         PublicPeerAttestation = hb_private:reset(PeerAttestation),
         NewOpts =
-            install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts),
+            install_ring_and_storage(
+                Name, Templates, AES, Wallet, Members, Zone, Opts),
         hb_http_server:set_opts(NewOpts),
         Definition = commit_unsigned_tree(
-            zone_definition(Name, Templates, Wallet, Members, Opts),
+            zone_definition(Name, Templates, Wallet, Members, Zone, Opts),
             Opts),
         Validity = commit_unsigned_tree(admission_validity(Opts), Opts),
         Admission0 = #{
@@ -149,10 +155,11 @@ join(_Base, Req, Opts) ->
             hb_maps:get(<<"template">>, Admission, #{}, Opts),
             Opts),
         Definition = response_body(hb_maps:get(<<"zone">>, Admission, #{}, Opts), Opts),
-        Templates = zone_templates(Definition, Opts),
         Members = hb_maps:get(<<"members">>, Definition, #{}, Opts),
         {_SelfTemplate, SelfPolicyAttestation} =
             self_attestation_body(MatchedTemplate, Opts),
+        {Templates, PolicySource} =
+            join_policy(Definition, image_template_transition(), Opts),
         NewMembers = add_member_to_members(
             Members,
             SelfURL,
@@ -162,11 +169,86 @@ join(_Base, Req, Opts) ->
         ),
         NewOpts =
             install_ring_and_storage(
-                Name, Templates, AES, Wallet, NewMembers, Opts),
+                Name, Templates, AES, Wallet, NewMembers, PolicySource, Opts),
         hb_http_server:set_opts(NewOpts),
         notify_zone_join(Name, NewOpts),
         status_body(Name, NewOpts)
     end, Opts).
+
+%% @doc An optional publisher-measured resource authorizes a fixed policy's
+%% transition. Neither its authority nor its path comes from operator config.
+image_template_transition() ->
+    case code:priv_dir(hb) of
+        {error, _} -> undefined;
+        Priv ->
+            case file:read_file(filename:join(Priv, "zone-template-transition.etf")) of
+                {error, enoent} -> undefined;
+                {ok, Binary} -> binary_to_term(Binary, [safe]);
+                _ -> invalid_template_transition(<<"image-resource">>)
+            end
+    end.
+
+%% @doc Apply only to the named ring after its admission and local measurement
+%% have been verified. The normal install keeps the same wallet and AES secret.
+join_policy(Definition, undefined, Opts) ->
+    {zone_templates(Definition, Opts), Definition};
+join_policy(Definition, #{<<"authority">> := Authority, <<"request">> := Req}, Opts) ->
+    RingAddress = hb_maps:get(<<"ring-address">>, Definition, undefined, Opts),
+    case hb_maps:get(<<"ring-address">>, Req, undefined, Opts) of
+        RingAddress when is_binary(RingAddress) ->
+            case lib_meta:authorized(Authority, Req, Opts) of
+                {ok, Authorized = #{<<"type">> := <<"zone-template-transition">>}} ->
+                    transition_join_policy(Definition, Authorized, Opts);
+                _ -> invalid_template_transition(<<"authorization">>)
+            end;
+        _ -> {zone_templates(Definition, Opts), Definition}
+    end;
+join_policy(_Definition, _Capsule, _Opts) ->
+    invalid_template_transition(<<"image-resource">>).
+
+%% @doc Bind the provider and its first concrete policy to the signed transition.
+%% Subsequent joins of the provider-backed ring do not replay the transition.
+transition_join_policy(Definition, Req, Opts) ->
+    Name = hb_maps:get(<<"name">>, Definition, undefined, Opts),
+    assert_fields(Req, [
+        {eq, <<"name">>, Name},
+        {eq, <<"ring-address">>,
+            hb_maps:get(<<"ring-address">>, Definition, undefined, Opts)},
+        {field_map, <<"template-provider">>},
+        {field_binary, <<"provider-id">>},
+        {field_binary, <<"from-template-id">>},
+        {field_binary, <<"to-template-id">>}
+    ], fun invalid_template_transition/1, Opts),
+    Provider = hb_message:uncommitted_deep(
+        hb_private:reset(hb_cache:ensure_all_loaded(
+            hb_maps:get(<<"template-provider">>, Req, Opts), Opts)), Opts),
+    ProviderID = stable_uncommitted_id(Provider, Opts),
+    assert_fields(Req, [{eq, <<"provider-id">>, ProviderID}],
+        fun invalid_template_transition/1, Opts),
+    case hb_maps:get(<<"template-provider">>, Definition, undefined, Opts) of
+        undefined ->
+            assert_fields(Req, [{eq, <<"from-template-id">>,
+                hb_maps:get(<<"template-id">>, Definition, undefined, Opts)}],
+                fun invalid_template_transition/1, Opts),
+            Source = set_message_key(Definition, <<"template-provider">>, Provider, Opts),
+            Templates = admission_templates(Source, Opts),
+            assert_fields(Req, [{eq, <<"to-template-id">>,
+                template_id(Name, Templates, Opts)}],
+                fun invalid_template_transition/1, Opts),
+            {Templates, Source};
+        Existing ->
+            case stable_uncommitted_id(
+                hb_cache:ensure_all_loaded(Existing, Opts), Opts) of
+                ProviderID -> {zone_templates(Definition, Opts), Definition};
+                _ -> invalid_template_transition(<<"existing-provider">>)
+            end
+    end.
+
+invalid_template_transition(Field) ->
+    throw({zone_error, #{
+        <<"error">> => <<"template-transition-invalid">>,
+        <<"field">> => Field
+    }}).
 
 start(_Base, Req, Opts) ->
     with_result(fun() ->
@@ -306,7 +388,7 @@ authorization_payload_id(_AuthKey, Payload, Opts) ->
 
 zone_authorization_payload(Zone0, Opts) ->
     Zone = response_body(Zone0, Opts),
-    #{
+    Payload = #{
         <<"type">> => hb_maps:get(<<"type">>, Zone, undefined, Opts),
         <<"version">> => hb_maps:get(<<"version">>, Zone, undefined, Opts),
         <<"name">> => hb_maps:get(<<"name">>, Zone, undefined, Opts),
@@ -319,7 +401,14 @@ zone_authorization_payload(Zone0, Opts) ->
             members_authorization_payload(
                 hb_maps:get(<<"members">>, Zone, #{}, Opts),
                 Opts)
-    }.
+    },
+    case hb_maps:get(<<"template-provider">>, Zone, undefined, Opts) of
+        undefined -> Payload;
+        Provider -> Payload#{
+            <<"template-provider-id">> => stable_uncommitted_id(
+                hb_cache:ensure_all_loaded(Provider, Opts), Opts)
+        }
+    end.
 
 members_authorization_payload(Members0, Opts) ->
     Members = response_body(Members0, Opts),
@@ -681,13 +770,13 @@ update_zone_start_status(ServerID, Status) ->
             ok
     end.
 
-install_ring(Name, Templates0, AES, Wallet, Members, Opts) ->
+install_ring(Name, Templates0, AES, Wallet, Members, Source, Opts) ->
     Templates = normalize_templates(Templates0, Opts),
     ok = ensure_nonempty_template(Templates),
     Identities = hb_opts:get(identities, #{}, Opts),
     Zones = hb_opts:get(<<"zones">>, #{}, Opts),
     PrivZones = hb_opts:get(<<"priv-zones">>, #{}, Opts),
-    Definition = zone_definition(Name, Templates, Wallet, Members, Opts),
+    Definition = zone_definition(Name, Templates, Wallet, Members, Source, Opts),
     Identity = zone_identity(Name),
     (hb_message:uncommitted(Opts, Opts))#{
         <<"zones">> => set_message_key(Zones, Name, Definition, Opts),
@@ -709,9 +798,9 @@ install_ring(Name, Templates0, AES, Wallet, Members, Opts) ->
             )
     }.
 
-install_ring_and_storage(Name, Templates, AES, Wallet, Members, Opts) ->
+install_ring_and_storage(Name, Templates, AES, Wallet, Members, Source, Opts) ->
     Opts1 = install_ring(
-        Name, Templates, AES, Wallet, Members,
+        Name, Templates, AES, Wallet, Members, Source,
         hb_http_server:with_node_committer(Opts)
     ),
     RingAddress = wallet_address(Wallet),
@@ -1080,9 +1169,9 @@ encrypted_store_opened_spec(Expected, Opts) ->
         store_list(hb_opts:get(<<"store">>, [], Opts))
     ).
 
-zone_definition(Name, Templates0, Wallet, Members, Opts) ->
+zone_definition(Name, Templates0, Wallet, Members, Source, Opts) ->
     Templates = normalize_templates(Templates0, Opts),
-    #{
+    Definition = #{
         <<"type">> => <<"zone-definition">>,
         <<"version">> => <<"1.0">>,
         <<"name">> => Name,
@@ -1093,7 +1182,11 @@ zone_definition(Name, Templates0, Wallet, Members, Opts) ->
         <<"template">> => first_template(Templates),
         <<"templates">> => Templates,
         <<"members">> => Members
-    }.
+    },
+    case hb_maps:get(<<"template-provider">>, Source, undefined, Opts) of
+        undefined -> Definition;
+        Provider -> Definition#{<<"template-provider">> => Provider}
+    end.
 
 ring_reference(Name, Templates, Wallet, Opts) ->
     #{
@@ -1187,6 +1280,38 @@ required_zone(Req, Opts) ->
             throw({zone_error, #{
                 <<"error">> => <<"missing-zone">>
             }})
+    end.
+
+%% @doc Resolve one policy snapshot before measuring an admission candidate.
+%% The snapshot, not another provider resolution, is carried through `join'.
+admission_templates(Source, Opts) ->
+    case hb_maps:get(<<"template-provider">>, Source, undefined, Opts) of
+        undefined -> request_templates(Source, Opts);
+        Provider = #{<<"path">> := _} ->
+            case hb_ao:resolve(
+                hb_message:uncommitted_deep(
+                    hb_private:reset(hb_cache:ensure_all_loaded(Provider, Opts)),
+                    Opts),
+                Opts#{<<"cache-control">> => [<<"no-cache">>, <<"no-store">>]}
+            ) of
+                {ok, Result} ->
+                    Templates = normalize_templates(
+                        hb_private:reset(hb_cache:ensure_all_loaded(Result, Opts)),
+                        Opts),
+                    ok = ensure_nonempty_template(Templates),
+                    case lists:all(fun is_map/1, Templates) of
+                        true -> ok;
+                        false -> ensure_nonempty_template(undefined)
+                    end,
+                    lists:foreach(fun ensure_nonempty_template/1, Templates),
+                    Templates;
+                _ ->
+                    throw({zone_error, #{
+                        <<"error">> => <<"template-provider-failed">>
+                    }})
+            end;
+        _ ->
+            throw({zone_error, #{<<"error">> => <<"invalid-template-provider">>}})
     end.
 
 request_templates(Req, Opts) ->
@@ -2232,6 +2357,7 @@ zone_http_identity_install(Identities) ->
                     crypto:strong_rand_bytes(32),
                     Wallet,
                     #{ServerID => #{<<"address">> => ServerID}},
+                    #{},
                     Opts
                 ),
                 hb_http_server:set_opts(NewOpts),
@@ -2394,6 +2520,201 @@ zone_init_allow_policy_test() ->
         assert_zone_initialization_allowed(
             <<"alpha">>,
             #{<<"zone-init-allow">> => 1})).
+
+%% @doc A measured capsule changes only admission policy, not zone credentials.
+template_transition_test() ->
+    Opts = #{<<"store">> => hb_test_utils:test_store()},
+    Root = ar_wallet:new(),
+    Wallet = ar_wallet:new(),
+    Old = #{<<"node">> => #{<<"operator">> => <<"old">>}},
+    New = #{<<"node">> => #{<<"operator">> => <<"new">>}},
+    {ok, PolicyID} = hb_cache:write(#{<<"template">> => New}, Opts),
+    Provider = #{<<"path">> => <<"/~cache@1.0/read/template">>,
+        <<"read">> => PolicyID},
+    Definition = zone_definition(<<"test">>, [Old], Wallet, #{}, #{}, Opts),
+    Req = #{
+        <<"type">> => <<"zone-template-transition">>,
+        <<"name">> => <<"test">>,
+        <<"ring-address">> => wallet_address(Wallet),
+        <<"from-template-id">> => template_id(<<"test">>, [Old], Opts),
+        <<"template-provider">> => Provider,
+        <<"provider-id">> => stable_uncommitted_id(Provider, Opts),
+        <<"to-template-id">> => template_id(<<"test">>, [New], Opts)
+    },
+    Capsule = #{<<"authority">> => wallet_address(Root),
+        <<"request">> => hb_message:commit(Req, Opts#{<<"priv-wallet">> => Root})},
+    ?assertEqual({[Old], Definition}, join_policy(Definition, undefined, Opts)),
+    {[New], Source} = join_policy(Definition, Capsule, Opts),
+    ?assertEqual(Provider, hb_maps:get(<<"template-provider">>, Source, Opts)),
+    AES = crypto:strong_rand_bytes(32),
+    Installed = install_ring(<<"test">>, [New], AES, Wallet, #{}, Source, Opts),
+    {AES, Wallet, Next} = require_ring(<<"test">>, Installed),
+    ?assertEqual(wallet_address(Wallet), hb_maps:get(<<"ring-address">>, Next, Opts)),
+    ?assertEqual({[New], Next}, join_policy(Next, Capsule, Opts)),
+    ?assertThrow({zone_error, #{<<"error">> := <<"zone-already-joined">>}},
+        assert_zone_install_allowed(<<"test">>, Installed)),
+    Later = zone_definition(<<"test">>, [Old], Wallet, #{}, Source, Opts),
+    ?assertEqual({[Old], Later}, join_policy(Later, Capsule, Opts)),
+    Other = Definition#{<<"ring-address">> => <<"other">>},
+    ?assertEqual({[Old], Other}, join_policy(Other, Capsule, Opts)),
+    lists:foreach(
+        fun({Key, Value, Field}) ->
+            Changed = Capsule#{<<"request">> => hb_message:commit(
+                Req#{Key => Value}, Opts#{<<"priv-wallet">> => Root})},
+            ?assertThrow({zone_error, #{<<"field">> := Field}},
+                join_policy(Definition, Changed, Opts))
+        end,
+        [
+            {<<"name">>, <<"other">>, <<"name">>},
+            {<<"from-template-id">>, <<"other">>, <<"from-template-id">>},
+            {<<"provider-id">>, <<"other">>, <<"provider-id">>},
+            {<<"to-template-id">>, <<"other">>, <<"to-template-id">>}
+        ]
+    ),
+    WrongProvider = Next#{<<"template-provider">> => #{<<"path">> => <<"/other">>}},
+    ?assertThrow({zone_error, #{<<"field">> := <<"existing-provider">>}},
+        join_policy(WrongProvider, Capsule, Opts)),
+    Outsider = ar_wallet:new(),
+    Forged = Capsule#{<<"request">> => hb_message:commit(
+        Req, Opts#{<<"priv-wallet">> => Outsider})},
+    ?assertThrow({zone_error, #{<<"field">> := <<"authorization">>}},
+        join_policy(Definition, Forged,
+            Opts#{<<"operator">> => wallet_address(Outsider)})),
+    WrongType = Capsule#{<<"request">> => hb_message:commit(
+        Req#{<<"type">> => <<"node-message">>}, Opts#{<<"priv-wallet">> => Root})},
+    ?assertThrow({zone_error, #{<<"field">> := <<"authorization">>}},
+        join_policy(Definition, WrongType, Opts)),
+    Signed = hb_maps:get(<<"request">>, Capsule, Opts),
+    Tampered = Capsule#{<<"request">> => Signed#{<<"to-template-id">> => <<"other">>}},
+    ?assertThrow({zone_error, #{<<"field">> := <<"authorization">>}},
+        join_policy(Definition, Tampered, Opts)),
+    MissingProvider = #{<<"path">> => <<"/~cache@1.0/read/template">>,
+        <<"read">> => <<"missing">>},
+    Missing = Capsule#{<<"request">> => hb_message:commit(
+        Req#{<<"template-provider">> => MissingProvider,
+            <<"provider-id">> => stable_uncommitted_id(MissingProvider, Opts)},
+        Opts#{<<"priv-wallet">> => Root})},
+    ?assertThrow({zone_error, #{<<"error">> := <<"template-provider-failed">>}},
+        join_policy(Definition, Missing, Opts)),
+    {ok, EmptyID} = hb_cache:write(#{<<"template">> => #{}}, Opts),
+    EmptyProvider = Provider#{<<"read">> => EmptyID},
+    Empty = Capsule#{<<"request">> => hb_message:commit(
+        Req#{<<"template-provider">> => EmptyProvider,
+            <<"provider-id">> => stable_uncommitted_id(EmptyProvider, Opts)},
+        Opts#{<<"priv-wallet">> => Root})},
+    ?assertThrow({zone_error, #{<<"error">> := <<"empty-template">>}},
+        join_policy(Definition, Empty, Opts)).
+
+%% @doc New admissions resolve current policy without mutating a keeper's boot.
+template_provider_rotation_test() ->
+    Opts = #{<<"store">> => hb_test_utils:test_store()},
+    Provider = #{
+        <<"path">> => <<"/~cache@1.0/read/template">>,
+        <<"read">> => <<"zone-template-policy">>
+    },
+    Source = #{<<"template-provider">> => Provider},
+    SetTemplate = fun(Value) ->
+        {ok, ID} = hb_cache:write(#{<<"template">> => Value}, Opts),
+        hb_cache:link(ID, <<"zone-template-policy">>, Opts)
+    end,
+    Old = #{<<"node">> => #{<<"operator">> => <<"old">>}},
+    New = #{<<"node">> => #{<<"operator">> => <<"new">>}},
+    ok = SetTemplate(Old),
+    ?assertEqual([Old], admission_templates(Source, Opts)),
+    {ok, ProviderID} = hb_cache:write(Provider, Opts),
+    ?assertEqual([Old], admission_templates(#{<<"template-provider">> =>
+        {link, <<"ao:", ProviderID/binary>>, #{}}}, Opts)),
+    ?assertEqual([Old], admission_templates(#{<<"template">> => Old}, Opts)),
+    Wallet = ar_wallet:new(),
+    ?assertEqual([Old], admission_templates(#{<<"template-provider">> =>
+        hb_message:commit(Provider, #{<<"priv-wallet">> => Wallet})}, Opts)),
+    Zone = zone_definition(<<"test">>, [Old], Wallet, #{}, Source, Opts),
+    {ok, _} = hb_ao:resolve(Provider, Opts#{<<"cache-control">> => [<<"store">>]}),
+    ok = SetTemplate(New),
+    ?assertEqual([New], admission_templates(Zone, Opts)),
+    ?assertEqual([Old], zone_templates(Zone, Opts)),
+    ?assertMatch({New, New}, matching_template(
+        admission_templates(Zone, Opts), New, <<"joiner">>, Opts)),
+    ?assertThrow(
+        {zone_error, #{<<"error">> := <<"template-mismatch">>}},
+        matching_template(admission_templates(Zone, Opts), Old, <<"joiner">>, Opts)
+    ),
+    Next = zone_definition(<<"test">>, [New], Wallet, #{}, Zone, Opts),
+    ?assertEqual(Provider, hb_maps:get(<<"template-provider">>, Next, Opts)),
+    % A received admission checks its signed snapshot even after an update.
+    ok = SetTemplate(Old),
+    ?assertEqual(ok, assert_zone_definition_consistent(
+        Next, wallet_address(Wallet), Opts)),
+    ?assertEqual([New], zone_templates(Next, Opts)),
+    ok = SetTemplate([Old, New]),
+    ?assertEqual([Old, New], admission_templates(Next, Opts)),
+    ok = SetTemplate(hb_message:commit(New, #{<<"priv-wallet">> => Wallet})),
+    ?assertEqual([New], admission_templates(Next, Opts)),
+    lists:foreach(fun(Value) ->
+        ok = SetTemplate(Value),
+        ?assertThrow({zone_error, #{<<"error">> := <<"empty-template">>}},
+            admission_templates(Next, Opts))
+    end, [[], #{}, [Old, #{}], [Old, 42], [[Old]], #{<<"ao-types">> => <<>>}]).
+
+%% @doc Bind executable provider fields, not only its current result.
+template_provider_authorization_test() ->
+    Wallet = ar_wallet:new(),
+    Opts = #{<<"store">> => hb_test_utils:test_store(), <<"priv-wallet">> => Wallet},
+    Provider = #{<<"path">> => <<"/policy">>, <<"device">> => <<"reference@1.0">>},
+    Zone = zone_definition(<<"test">>, [#{<<"operator">> => <<"owner">>}],
+        Wallet, #{}, #{<<"template-provider">> => Provider}, Opts),
+    Admission = (maps:from_list(
+        [{Key, #{}} || {_AuthKey, Key} <- authorization_id_fields()]
+    ))#{<<"zone">> => Zone},
+    Authorization = admission_authorization(Admission, Wallet, Opts),
+    ?assertEqual(ok, assert_authorization_ids(Authorization, Admission, Opts)),
+    {ok, ID} = hb_cache:write(commit_unsigned_tree(Admission, Opts), Opts),
+    {ok, Loaded} = hb_cache:read(ID, Opts),
+    ?assertEqual(ok, assert_authorization_ids(Authorization, Loaded, Opts)),
+    lists:foreach(fun(Changed) ->
+        ?assertThrow(
+            {zone_error, #{<<"field">> := <<"authorization.zone-id">>}},
+            assert_authorization_ids(Authorization,
+                Admission#{<<"zone">> => Zone#{<<"template-provider">> => Changed}},
+                Opts))
+    end, [Provider#{<<"device">> => <<"message@1.0">>},
+        Provider#{<<"path">> => <<"/other">>},
+        Provider#{<<"body">> => #{<<"path">> => <<"/policy">>}}]),
+    ?assertThrow({zone_error, #{<<"field">> := <<"authorization.zone-id">>}},
+        assert_authorization_ids(Authorization,
+            Admission#{<<"zone">> => maps:remove(<<"template-provider">>, Zone)}, Opts)),
+    Changed = Zone#{<<"templates">> => [#{<<"operator">> => <<"outsider">>}]},
+    ?assertThrow({zone_error, #{<<"field">> := <<"zone.template-id">>}},
+        assert_zone_definition_consistent(Changed, wallet_address(Wallet), Opts)),
+    Rebound = Changed#{<<"template-id">> =>
+        template_id(<<"test">>, zone_templates(Changed, Opts), Opts)},
+    ?assertThrow({zone_error, #{<<"field">> := <<"authorization.zone-id">>}},
+        assert_authorization_ids(Authorization,
+            Admission#{<<"zone">> => Rebound}, Opts)).
+
+%% @doc Provider failures deny initialization through the native HTTP interface.
+template_provider_failure_test_() ->
+    {timeout, 30, fun() ->
+        Opts = #{<<"store">> => hb_test_utils:test_store(),
+            <<"priv-wallet">> => ar_wallet:new()},
+        Node = hb_http_server:start_node(Opts),
+        lists:foreach(fun({Provider, Error}) ->
+            Result = hb_http:post(Node, #{
+                <<"path">> => <<"/~zone@1.0/init">>,
+                <<"name">> => <<"test">>,
+                <<"template-provider">> => Provider,
+                <<"template">> => #{<<"operator">> => <<"fallback-forbidden">>}
+            }, Opts),
+            ?assertMatch({error, #{<<"status">> := 400,
+                <<"body">> := #{<<"error">> := Error}}}, Result),
+            ?assertEqual(#{}, hb_opts:get(zones, #{}, hb_http_server:get_opts()))
+        end, [
+            {#{<<"path">> => <<"/~cache@1.0/read">>, <<"read">> => <<"missing">>},
+                <<"template-provider-failed">>},
+            {<<"/~cache@1.0/read">>, <<"invalid-template-provider">>},
+            {#{}, <<"invalid-template-provider">>}
+        ])
+    end}.
 
 %% @doc Linked admission templates retain strict matching of the device policy.
 linked_measurement_template_test() ->

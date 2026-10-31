@@ -137,6 +137,7 @@ DEFCONFIG_EXTRA_SNIPPETS = $(strip $(DEFCONFIG_EXTRA_SNIPPET) \
     $(if $(filter 1,$(DOCKER)),$(DOCKER_DEFCONFIG_SNIPPET),))
 CAPABILITY_INPUT ?=
 CAPABILITY_INPUT_NAME ?=
+ZONE_TEMPLATE_TRANSITION ?=
 PROD_CMDLINE  = console=tty0 quiet loglevel=0 vt.global_cursor_default=0 \
                 rdinit=/init lapee.mode=prod lapee.wifi=enabled \
                 lapee.splash=$(SPLASH)
@@ -400,7 +401,8 @@ toolchain:
 kernel: buildroot
 
 buildroot:
-	./scripts/build-buildroot.sh
+	LAPEE_ZONE_TEMPLATE_TRANSITION="$(ZONE_TEMPLATE_TRANSITION)" \
+	    ./scripts/build-buildroot.sh
 
 # ------------------------------------------------------------
 # UKI + USB image assembly.

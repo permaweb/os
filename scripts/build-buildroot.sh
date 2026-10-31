@@ -30,6 +30,7 @@ LAPEE_HB_DEVICE_DIR="${LAPEE_HB_DEVICE_DIR:-$LAPEE_ROOT/devices/common}"
 LAPEE_HB_DEVICE_INPUTS=(cargo-locks native src rebar.config rebar.lock)
 LAPEE_LINUX_DEVICE_DIR="${LAPEE_LINUX_DEVICE_DIR:-$LAPEE_ROOT/devices/linux}"
 LAPEE_DOCKER_PROFILE="${LAPEE_DOCKER_PROFILE:-0}"
+ZONE_TEMPLATE_TRANSITION="${LAPEE_ZONE_TEMPLATE_TRANSITION:-}"
 VOLUME="${BUILDROOT_VOLUME:-lapee-buildroot}"
 IMAGE="${BUILD_IMAGE:-lapee-build:local}"
 CONTAINER="${BUILDROOT_CONTAINER:-${VOLUME}-build}"
@@ -71,6 +72,13 @@ esac
 
 if [[ -n "$KERNEL_EXTRA_FRAGMENTS" ]]; then
     read -r -a KERNEL_EXTRA_FRAGMENT_LIST <<< "$KERNEL_EXTRA_FRAGMENTS"
+fi
+if [[ -n "$ZONE_TEMPLATE_TRANSITION" ]]; then
+    [[ -s "$ZONE_TEMPLATE_TRANSITION" && -f "$ZONE_TEMPLATE_TRANSITION" ]] || {
+        echo "missing zone template transition: $ZONE_TEMPLATE_TRANSITION" >&2
+        exit 1
+    }
+    ZONE_TEMPLATE_TRANSITION="$(cd "$(dirname "$ZONE_TEMPLATE_TRANSITION")" && pwd)/$(basename "$ZONE_TEMPLATE_TRANSITION")"
 fi
 if [[ -n "$DEFCONFIG_EXTRA_SNIPPETS" ]]; then
     read -r -a DEFCONFIG_EXTRA_SNIPPET_LIST <<< "$DEFCONFIG_EXTRA_SNIPPETS"
@@ -137,6 +145,15 @@ docker run --rm $DOCKER_PLATFORM \
     -v "$LAPEE_BUILDROOT_EXTERNAL":/src-external:ro \
     $IMAGE bash -c "rm -rf /build/buildroot-external && \
                     cp -r /src-external /build/buildroot-external"
+
+# The transition is public image input, never an editable boot-medium option.
+docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build \
+    $IMAGE rm -f /build/zone-template-transition.etf
+if [[ -n "$ZONE_TEMPLATE_TRANSITION" ]]; then
+    docker run --rm $DOCKER_PLATFORM -v $VOLUME:/build \
+        -v "$ZONE_TEMPLATE_TRANSITION":/zone-template-transition.etf:ro \
+        $IMAGE cp /zone-template-transition.etf /build/zone-template-transition.etf
+fi
 
 # Sync the LapEE-owned HyperBEAM device package into the volume. The
 # HyperBEAM package build consumes this as an external Forge device source
@@ -278,6 +295,9 @@ KERNEL_FRAGMENT_SHA=$(
 HYPERBEAM_RECIPE_SHA=$(
     {
         find "$LAPEE_BUILDROOT_EXTERNAL/package/hyperbeam" -type f
+        if [[ -n "$ZONE_TEMPLATE_TRANSITION" ]]; then
+            printf '%s\n' "$ZONE_TEMPLATE_TRANSITION"
+        fi
         for path in "${LAPEE_HB_DEVICE_INPUTS[@]}"; do
             if [[ -d "$LAPEE_HB_DEVICE_DIR/$path" ]]; then
                 find "$LAPEE_HB_DEVICE_DIR/$path" -type f

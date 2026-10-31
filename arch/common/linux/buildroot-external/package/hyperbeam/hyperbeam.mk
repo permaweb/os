@@ -372,6 +372,11 @@ define HYPERBEAM_INSTALL_TARGET_CMDS
 		$(@D)/scripts/hyper-token-p4.lua \
 		$(TARGET_DIR)/usr/lib/hyperbeam/scripts/
 	for hb_app in $(TARGET_DIR)/usr/lib/hyperbeam/lib/hb-*; do \
+	    rm -f "$$hb_app/priv/zone-template-transition.etf"; \
+	    if [ -f /build/zone-template-transition.etf ]; then \
+	        $(INSTALL) -m 0444 /build/zone-template-transition.etf \
+	            "$$hb_app/priv/zone-template-transition.etf"; \
+	    fi; \
 	    mkdir -p "$$hb_app/priv/lapee-p4"; \
 	    cp -a $(@D)/scripts/hyper-token.lua \
 	        $(@D)/scripts/hyper-token-p4.lua \

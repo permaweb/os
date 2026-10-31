@@ -202,6 +202,53 @@ signed by a node admitted under that zone policy, or the zone's security model
 has been breached. This gives AO applications a compact way to depend on
 transitive, policy-scoped hardware trust.
 
+### Admission template providers
+
+A zone can use a fixed `template` / `templates`, or an executable
+`template-provider` supplied when initializing the zone. For example, with a
+trusted `reference@1.0` device and an owner-signed reference already published:
+
+```json
+{
+  "path": "/~zone@1.0/init",
+  "name": "router-zone",
+  "template-provider": {
+    "path": "/REFERENCE_INIT_ID~reference@1.0/now/template"
+  }
+}
+```
+
+The provider must resolve to a nonempty template map or a list of nonempty
+template maps. Initialization checks the first member against that result.
+For each later admission, the keeper resolves its stored provider again and
+checks the joining member's verified boot measurement against the result.
+The keeper need not match the updated template itself. A join request cannot
+replace the keeper's provider. Missing, invalid, or empty results deny admission;
+there is no fallback to an earlier template.
+
+The signed admission binds the provider and the concrete policy snapshot. The
+joining member verifies that snapshot without resolving the provider again, and
+retains the provider for future admissions. The provider descriptor executes
+without private metadata or its envelope commitments, so transport signatures
+cannot change its behavior. This does not strip signatures from references or
+other messages it fetches. AO result-cache reuse is disabled for this resolution;
+the provider's own discovery and index freshness still
+matter. Choose its authority and update policy as carefully as the zone key.
+
+There is no periodic refresh or hot configuration replacement. To upgrade an
+existing member, boot its intended measured configuration and explicitly rejoin.
+An update restricts future admissions; it does not revoke secrets already held
+by admitted members. Existing fixed-template zones are not automatically migrated
+to provider-backed policy.
+
+For an authorized fixed-template transition, a release builder may provide
+`ZONE_TEMPLATE_TRANSITION=/absolute/path/zone-template-transition.etf` to
+`make kernel`. This public signed capsule and its authority are included in the
+measured image at HyperBEAM's immutable `priv/zone-template-transition.etf`.
+The file is not read from operator configuration or the boot medium. Its contents
+participate in build invalidation; omitting the input produces an image without
+a transition capsule. Never put private keys in this public image input.
+
 ## Quick Start
 
 Most operators should start from a signed release image. Building from source
