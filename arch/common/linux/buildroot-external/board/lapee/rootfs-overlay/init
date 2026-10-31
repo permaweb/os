@@ -16,6 +16,9 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 umask 077
 
+# Leave room for inbound connections and outbound peer pools in the appliance.
+ulimit -n 65536
+
 # Wire init's stdio to /dev/console just for the earliest mount
 # failures. Production closes stdin and goes quiet immediately after
 # devtmpfs provides /dev/null.
