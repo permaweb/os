@@ -7,6 +7,9 @@
 %%% the first local HyperBEAM store. Missing keys from the temporary boot LMDB
 %%% are copied across, then current-boot pseudo-paths are refreshed into the
 %%% persistent store before it can affect HyperBEAM cache reads.
+%%% `lapee-nonvolatile-grow' explicitly grows the mounted ext4 filesystem to
+%%% its backing mapping before opening LMDB. The partition must already be
+%%% enlarged; this operation never shrinks, formats or exports the zone key.
 -module(lib_lapee_nonvolatile).
 
 -export([activate/4, status/1]).
@@ -135,7 +138,8 @@ activate_partition(Name, RingAddress, AES, Label, Partition, Opts) ->
                     {ok, EffectiveLuksFormatted} ->
                         MapperDev = <<"/dev/mapper/", ?DEFAULT_MAPPER/binary>>,
                         case ensure_mounted_filesystem(
-                            MapperDev, ?DEFAULT_MOUNT, EffectiveLuksFormatted) of
+                            MapperDev, ?DEFAULT_MOUNT,
+                            EffectiveLuksFormatted, Opts) of
                             {ok, FsFormatted} ->
                                 Store = persistent_store(?DEFAULT_MOUNT, Opts),
                                 case prepare_persistent_store(Store, Opts) of
@@ -594,20 +598,20 @@ open_luks(Partition, KeyFile) ->
         Error -> Error
     end.
 
-ensure_mounted_filesystem(MapperDev, Mount, LuksFormatted) ->
+ensure_mounted_filesystem(MapperDev, Mount, LuksFormatted, Opts) ->
     case filesystem_type(MapperDev) of
         {ok, <<"ext4">>} ->
-            mount_with_status(MapperDev, Mount, false);
+            mount_with_status(MapperDev, Mount, false, Opts);
         {ok, Other} ->
             {error, #{<<"unexpected-filesystem">> => Other}};
         unknown when LuksFormatted ->
             case make_ext4(MapperDev) of
-                {ok, true} -> mount_with_status(MapperDev, Mount, true);
+                {ok, true} -> mount_with_status(MapperDev, Mount, true, Opts);
                 Error -> Error
             end;
         unknown ->
-            case ensure_mount(MapperDev, Mount) of
-                ok -> {ok, false};
+            case mount_with_status(MapperDev, Mount, false, Opts) of
+                {ok, false} -> {ok, false};
                 {error, Reason} ->
                     {error, #{
                         <<"existing-luks-mount-failed">> =>
@@ -618,10 +622,26 @@ ensure_mounted_filesystem(MapperDev, Mount, LuksFormatted) ->
             {error, Reason}
     end.
 
-mount_with_status(MapperDev, Mount, FsFormatted) ->
+mount_with_status(MapperDev, Mount, FsFormatted, Opts) ->
     case ensure_mount(MapperDev, Mount) of
-        ok -> {ok, FsFormatted};
+        ok ->
+            case grow_filesystem(MapperDev, Opts) of
+                ok -> {ok, FsFormatted};
+                Error -> Error
+            end;
         {error, Reason} -> {error, Reason}
+    end.
+
+%% @doc Grow only an already-mounted filesystem, before the store is opened.
+grow_filesystem(MapperDev, Opts) ->
+    case hb_opts:get(<<"lapee-nonvolatile-grow">>, false, Opts) of
+        false -> ok;
+        true ->
+            case run(<<"resize2fs">>, [MapperDev], ?FORMAT_TIMEOUT_MS) of
+                {ok, _} -> sync_storage();
+                Error -> Error
+            end;
+        _ -> {error, <<"invalid-nonvolatile-grow">>}
     end.
 
 filesystem_type(MapperDev) ->
@@ -1033,6 +1053,15 @@ command_reason(Reason) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+%% @doc Default and disabled activation do not invoke a resize operation.
+grow_filesystem_disabled_test() ->
+    Missing = <<"/nonexistent-nonvolatile-device">>,
+    ?assertEqual(ok, grow_filesystem(Missing, #{})),
+    ?assertEqual(ok, grow_filesystem(Missing,
+        #{<<"lapee-nonvolatile-grow">> => false})),
+    ?assertEqual({error, <<"invalid-nonvolatile-grow">>},
+        grow_filesystem(Missing, #{<<"lapee-nonvolatile-grow">> => invalid})).
 
 mounted_binding_requires_same_zone_and_ring_test() ->
     Status = #{

@@ -105,6 +105,7 @@ BR2_PACKAGE_IPROUTE2=y
 # available.
 BR2_PACKAGE_CRYPTSETUP=y
 BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
 BR2_PACKAGE_PARTED=y
 
 # Broad laptop network + graphics firmware. These are the only non-source
