@@ -132,6 +132,16 @@ def main() -> int:
         fail(INIT_SCRIPT, "measured capabilities must activate before HyperBEAM")
     if "docker" in init_text.lower():
         fail(INIT_SCRIPT, "ordinary init must contain no Docker marker or runtime code")
+    exit_path = init_text.rsplit("if /usr/lib/hyperbeam/bin/hb foreground; then", 1)[-1]
+    shutdown = (
+        'if [ "$LAPEE_DEBUG" != "1" ]; then\n'
+        '    sync\n'
+        '    umount -a -r 2>/dev/null || true\n'
+        '    poweroff -f\n'
+        'fi'
+    )
+    if shutdown not in exit_path:
+        fail(INIT_SCRIPT, "production HyperBEAM exit must sync, unmount and power off")
 
     default_config = LINUX_DEFCONFIG.read_text()
     docker_config = DOCKER_DEFCONFIG.read_text()

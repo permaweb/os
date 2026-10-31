@@ -2177,8 +2177,17 @@ else
     exec >/dev/null 2>&1
 fi
 if /usr/lib/hyperbeam/bin/hb foreground; then
-    halt_boot "HyperBEAM exited normally."
+    _hb_rc=0
 else
     _hb_rc=$?
-    halt_boot "HyperBEAM exited with status $_hb_rc."
 fi
+# Report status only; production runtime output remains private.
+if [ -w /dev/ttyS0 ]; then
+    printf 'permawebos-hb-exit=%s\n' "$_hb_rc" > /dev/ttyS0 2>/dev/null || true
+fi
+if [ "$LAPEE_DEBUG" != "1" ]; then
+    sync
+    umount -a -r 2>/dev/null || true
+    poweroff -f
+fi
+halt_boot "HyperBEAM exited with status $_hb_rc."
