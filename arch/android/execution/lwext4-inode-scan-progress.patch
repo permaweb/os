@@ -1,0 +1,8 @@
+diff --git a/src/ext4_ialloc.c b/src/ext4_ialloc.c
+--- a/src/ext4_ialloc.c
++++ b/src/ext4_ialloc.c
+@@ -302 +302,3 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
+-				continue;
++				/* A stale counter must not retry a full bitmap. */
++				++bgid;
++				continue;

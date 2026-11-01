@@ -47,4 +47,6 @@ prepare_andock_lwext4() {
         "$ROOT/execution/lwext4-data-extents.patch"
     apply_andock_lwext4_patch \
         "$ROOT/execution/lwext4-inline-xattr-remove.patch"
+    apply_andock_lwext4_patch \
+        "$ROOT/execution/lwext4-inode-scan-progress.patch"
 }

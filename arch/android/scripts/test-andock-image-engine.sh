@@ -36,26 +36,42 @@ docker run --rm --platform linux/amd64 \
         debugfs -w -R "write $out/sparse-tail /sparse-tail" \
             "$out/member.ext4"
         debugfs -w -R "punch /sparse-tail 1 1" "$out/member.ext4"
-        cc -std=c11 -O2 -g \
-            -DCONFIG_USE_DEFAULT_CFG=0 \
-            -I execution/lwext4/include \
-            -I "$source/include" \
-            -I execution/proot-overlay/src \
-            -Wall -Wextra -Werror \
-            -Wno-unused-function \
-            -Wno-unused-parameter \
-            -Wno-unused-but-set-variable \
-            -Wno-stringop-truncation \
-            execution/tests/andock_image_engine_test.c \
-            execution/proot-overlay/src/extension/andock_image/andock_image_engine.c \
-            "$source"/src/*.c \
-            -o "$out/andock-image-engine-test"
+        for test_name in andock_image_engine andock_inode_scan; do
+            cc -std=c11 -O2 -g \
+                -DCONFIG_USE_DEFAULT_CFG=0 \
+                -I execution/lwext4/include \
+                -I "$source/include" \
+                -I execution/proot-overlay/src \
+                -Wall -Wextra -Werror \
+                -Wno-unused-function \
+                -Wno-unused-parameter \
+                -Wno-unused-but-set-variable \
+                -Wno-stringop-truncation \
+                "execution/tests/${test_name}_test.c" \
+                execution/proot-overlay/src/extension/andock_image/andock_image_engine.c \
+                "$source"/src/*.c \
+                -o "$out/$(printf %s "$test_name" | tr _ -)-test"
+        done
         cc -std=c11 -O2 -g \
             -I execution/proot-overlay/src \
             -Wall -Wextra -Werror \
             execution/tests/andock_mapping_test.c \
             execution/proot-overlay/src/extension/andock_image/andock_mapping.c \
             -o "$out/andock-mapping-test"
+        for fixture in clean stale-first stale-all; do
+            python3 execution/tests/andock_inode_scan_fixture.py \
+                "$out/inode-$fixture.ext4" "$fixture"
+            case "$fixture" in
+                clean) minimum_inode=1 ;;
+                stale-first) minimum_inode=257 ;;
+                stale-all) minimum_inode=0 ;;
+            esac
+            timeout 10 "$out/andock-inode-scan-test" \
+                "$out/inode-$fixture.ext4" "$minimum_inode" \
+                | tee "$out/inode-$fixture-result.txt"
+            grep -qx ANDOCK_INODE_SCAN_TEST_OK \
+                "$out/inode-$fixture-result.txt"
+        done
         "$out/andock-mapping-test" | tee "$out/mapping-result.txt"
         "$out/andock-image-engine-test" "$out/member.ext4" \
             | tee "$out/result.txt"
