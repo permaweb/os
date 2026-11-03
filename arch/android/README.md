@@ -161,8 +161,11 @@ action stages JSON through the same next-boot store as **Load JSON**. Tap
 **Apply & close**, then reopen AndEE to boot that configuration. The existing
 node keeps running while the form is open. A reviewed publication is selected
 at build time with `-PandeeConfiguratorUrl=https://arweave.net/<manifest>/`;
-loopback URLs are for tethered local review builds only. The default currently
-points to the previous public Configurator, pending the Full profile release.
+loopback URLs are for tethered local review builds only. The default is the
+Configurator's `~reference@1.0`
+(`https://arweave.net/E0qFoi-3mz2eK7Xpscj2TpO_S1_FbQczmvt5xA0SpDk/`, authority
+`kaYP9bJtpqON8Kyy3RbqnqdtDBDUsPTQTNUCvZtKiFI`), so a new Configurator release
+moves the reference instead of requiring a new APK.
 
 **Scan** reads the setup code the PermawebOS extension shows: a loop of QR
 codes carrying one Blockchain Commons UR (`ur:bytes`, the raw DEFLATE of the
